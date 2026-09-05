@@ -84,8 +84,11 @@ proxy:
 
 remotes:
   nas:  { type: webdav, url: 'https://nas.local/dav', user: alice } # 用 config auth nas 保存密码
-  box:  { type: sftp, host: 192.168.0.20, user: work, root: ~/data }   # 默认文件连接 2 + 目录连接 2
+  shell: { type: sftp, host: 192.168.0.20, user: work, root: ~/data }  # 默认文件连接 2 + 目录连接 2
   # SFTP connections / directory_connections 分别控制两个池；packet_size 默认按服务端自动选
+
+  share: { type: smb, host: 192.168.0.30, share: media, user: work, root: /movies }
+  # SMB 不走 HTTP，代理与限流由 daemon 直接注入；password 用 config auth share 保存
 
   archive: { type: s3, endpoint: 'https://s3.example.com', region: us-east-1,
              bucket: backups, prefix: cloudfs, lookup: path, access_key_id: ACCESS_KEY }
@@ -93,6 +96,12 @@ remotes:
 
   dropbox: { type: dropbox, client_id: APP_KEY }
   # 长驻服务导入 refresh_token（及机密 client_secret）；临时测试也可单独导入 access_token
+
+  gdrive: { type: gdrive, client_id: CLIENT_ID }
+  # 可选 drive_id 指定共享云端硬盘；同名子项会让该目录报错，需要先在 Drive 里改名
+
+  work: { type: box, client_id: CLIENT_ID }
+  # Box 每次刷新都会轮换 refresh_token，务必让 config auth 写进安全存储
 
   p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1 } }
 
@@ -285,6 +294,7 @@ VFS 元数据缓存。例如 `cloudfs strm /media/Films --out /srv/emby/Films`�
 | M2 | staging/日志/上传队列、writeback 与 strict、冲突副本、崩溃恢复 | 完成 |
 | M3 | 共享 HTTP 层（代理 + 限流 + 熔断）、WebDAV / OpenList 驱动 | 完成 |
 | M3 | 阿里云盘 / 百度 / 115 / 夸克 / 天翼 / 123 驱动 | 实现与模拟测试已有，真实账号待验收 |
+| M1 | 国外网盘与通用协议：S3 / Dropbox / OneDrive / Google Drive / Box / SFTP / WebDAV / SMB | 全部已接入，真实账号与真实 SMB 服务器待验收 |
 | M4 | MCP 服务：29 个工具、资源列举/读取/订阅、允许列表、只读模式、客户端安装 | 复制准备和上传管理已接入；长期负载及上传/Copy 远端对账仍待补，见 docs/mcp.md |
 | M5 | pin/hydrate、2Q 淘汰、背压、metrics、doctor、status | 主体已实现，内核及大规模验收待补 |
 | M6 | macOS（macFUSE）平台适配、systemd/launchd 用户服务定义 | 实现完成，挂载/重启待真机验证 |
@@ -300,6 +310,9 @@ VFS 元数据缓存。例如 `cloudfs strm /media/Films --out /srv/emby/Films`�
 | `internal/provider/s3` | S3/兼容对象存储（流式 delimiter 列举、Range、multipart 恢复、预签名与服务端 Copy） |
 | `internal/provider/dropbox` | Dropbox API v2（分页与 changes、revision Range、临时链接、可恢复 upload session） |
 | `internal/provider/onedrive` | Microsoft Graph v1.0（stable ID、delta、预认证 Range、可恢复 upload session） |
+| `internal/provider/gdrive` | Google Drive API v3（修订钉住的 Range、changes delta、resumable 上传、同名冲突显式失败） |
+| `internal/provider/box` | Box Content API v2（文件/文件夹双命名空间、SHA-1 分片 commit、409 转新版本） |
+| `internal/provider/smb` | SMB2/3（go-smb2；句柄缓存、暂存改名发布、断链重挂载） |
 | `internal/provider/{aliyun,baidu,pan115,pan123,quark,tianyi}` | 六家国内网盘驱动 |
 | `internal/meta` | SQLite 目录树、TTL、负缓存、delta 游标、pin、trigram 文件名索引 |
 | `internal/cache` | 4 MiB 块缓存、位图、hydrate、2Q 淘汰、四重限额、内容寻址链接 |
@@ -341,4 +354,11 @@ FUSE 测试需要 `/dev/fuse`（Linux 装 `fuse3`，macOS 装 macFUSE）；缺�
 - OneDrive 已通过状态化 Graph/CDN 回放和 VFS 读取/增量刷新，但尚未用个人、组织或 SharePoint
   真实账号验收；CLI 尚无 Microsoft 浏览器 OAuth 向导，详见 [docs/onedrive.md](docs/onedrive.md)。
 - FUSE passthrough 默认关闭：共享 backing 的缓存租约已修复，读写混用和版本切换仍未完成。`CLOUDFS_EXPERIMENTAL_PASSTHROUGH=1` 仅用于隔离验收，不应用于正常写入工作负载；见 [passthrough 状态](docs/fuse-passthrough.md)。
+- Google Drive 已通过状态化 HTTP 回放验收，但尚未用真实账号验证；CLI 无浏览器 OAuth 向导。
+  Drive 允许一个目录里存在同名文件，文件系统不能表示，遇到时该目录会明确报错而不是隐藏其中一个；
+  Google Docs 等 Workspace 文档没有字节流，不会出现在挂载里。详见 [docs/providers.md](docs/providers.md)。
+- Box 已通过状态化 HTTP 回放验收，尚未用真实账号验证；CLI 无浏览器 OAuth 向导。
+  Box 没有目录级变更流，所以目录按 TTL 刷新而不是 delta。
+- SMB **尚未在任何真实服务器上验收**，当前只有内存共享的行为复现测试。
+  SMB 的改名不覆盖已存在的目标，因此发布上传时会先删除目标，中间存在一个"名字暂时不存在"的窗口。
 - macOS 走 macFUSE，需要安装并批准系统扩展；FSKit 后端尚未接入。

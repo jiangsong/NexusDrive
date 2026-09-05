@@ -369,7 +369,7 @@ func configAuth(ctx context.Context, cfg *config.Config, f *flags, c configIO) e
 		} else if r.Type == "pan115" {
 			fields, err = deviceAuthorize115(ctx, cfg, name, r, c)
 		} else {
-			field := map[string]string{"webdav": "pass", "openlist": "pass", "sftp": "password", "quark": "cookie", "tianyi": "password", "pan123": "client_secret", "pan115": "refresh_token", "dropbox": "access_token", "onedrive": "access_token"}[r.Type]
+			field := map[string]string{"webdav": "pass", "openlist": "pass", "sftp": "password", "quark": "cookie", "tianyi": "password", "pan123": "client_secret", "pan115": "refresh_token", "dropbox": "access_token", "onedrive": "access_token", "gdrive": "refresh_token", "box": "refresh_token", "smb": "password"}[r.Type]
 			if field == "" {
 				return errors.New("config auth: use --stdin to import this provider's credential fields, or --check to validate existing settings")
 			}

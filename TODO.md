@@ -400,13 +400,32 @@
 
 ## P1 — 文档承诺了、实现里没有对应代码
 
-### [~] T-02 国外网盘与通用协议：SFTP、S3、Dropbox、OneDrive 已补齐，其余后端仍缺
+### [~] T-02 国外网盘与通用协议：一期后端全部接入，真实账号与真机验收仍缺
 
+- **进展（2026-09-06）**：Google Drive、Box、SMB 三个驱动补齐，`cloudfs providers` 现在
+  列出 aliyun / baidu / box / dropbox / fake / gdrive / onedrive / openlist / pan115 /
+  pan123 / quark / s3 / sftp / smb / tianyi / webdav，一期范围内的后端类型全部有实现。
+  **没有引入 rclone**：三个驱动都按各自官方接口自研，依赖树只增加了 SMB 需要的
+  `github.com/hirochachacha/go-smb2`（MIT）及其 BER 解码依赖。
+  - **gdrive**：`headRevisionId` 作为内容版本，读取直接钉在该修订上，远端并发改写不会把
+    新字节写进旧的块缓存键；修订被清理时先重新核对版本再回退 head。同名子项让目录明确
+    报错而不是静默丢弃，Workspace 文档/快捷方式因为没有字节流而跳过。写入前查同名子项，
+    命中则更新该文件，避免自己制造同名冲突。21 个测试，含状态化 HTTP 回放。
+  - **box**：文件与文件夹是两套编号，provider ID 带类型前缀（`f:` / `d:`），并有专门的
+    回归证明混淆两者会删错东西。分片 commit 必须带整文件 SHA-1，缺哈希直接拒绝开 session；
+    `SinglePutMax` 取在 Box 的 20 MB session 下限上，中间没有传不上去的区间。同名上传由
+    409 的 conflicts id 转为新版本。29 个测试。
+  - **smb**：路径即身份，与 SFTP 同构。关键差异是 go-smb2 的 rename 不覆盖已存在目标，
+    所以发布上传要先 unlink（窗口已在代码与文档中写明），而 `Move` 不做这个 unlink 以免
+    毁掉目标位置的无关文件。读路径带引用计数的句柄缓存，断链只重试一次并强制重新挂载。
+    通过 `ConfigDialer` / `ConfigLimiters` 继承代理与限流（SMB 不走 HTTP，拿不到共享 client）。
+    38 个测试用内存共享复现了"改名不覆盖""非空目录不可删""短读"三条服务端行为。
+  - **仍缺**：三者都没有浏览器 OAuth 向导；gdrive / box 没有真实账号验收；**smb 没有在
+    任何真实 SMB 服务器上跑过**，内存共享测试不等于真机验收。因此 T-02 保持部分完成。
 - **进展（2026-09-02）**：`internal/provider/sftp/` 已实现并注册，通过真实
   SSH 服务器验证（挂载、读写、改名、递归删除、断线重连）。同时补上了
   `internal/net/proxy/dial.go` 的 `Manager.DialContext`，让不走 HTTP 的后端
   也经过同一套规则路由（direct / socks5 / HTTP CONNECT 隧道）。
-- **仍缺**：Google Drive / Box / SMB。
 - **证据**：`go.mod` 无 rclone 依赖；`cmd/cloudfs/main.go` 注册的是
   aliyun / baidu / pan115 / pan123 / quark / tianyi / webdav / sftp / s3 / dropbox / onedrive
   （`internal/provider/webdav/webdav.go:505` 另把 `openlist` 注册为同一实现的别名）。
@@ -1088,7 +1107,7 @@ P3 是**对着竞品**核对出的缺口；两者交错推进，因为前者决�
 
 **阶段 3 — 扩边界**
 
-12. **T-02**（rclone 族的境外网盘；SFTP 已补齐，剩下的工作量最大且显著改变依赖树，建议单独排期并用 build tag 切成可选组件）
+12. ~~**T-02**（境外网盘）~~ —— 2026-09-06 已按各自官方接口自研补齐 gdrive / box / smb，未引入 rclone，剩下的只是真实账号与真机验收（并入 T-13）。
 13. **T-03**（MCP Resources；"agent 可安全读写的云盘"是全品类空白，也是唯一不与
     CloudDrive2 正面拼价格的差异点）
 14. **T-21**（Windows / WinFsp：排期决策，取决于目标用户是 NAS 还是桌面）

@@ -17,6 +17,9 @@
 | `s3` | S3 API（MinIO Go SDK） | 无 | 是（multipart） | 是（copy + delete） | 是（预签名） | 20 / 16 / 8 | official |
 | `dropbox` | Dropbox HTTP API v2 | 无 | 是（upload session） | 是 | 是（4 小时临时链接） | 12 / 12 / 6 | official |
 | `onedrive` | Microsoft Graph v1.0 | SHA-1 校验 | 是（upload session） | 是 | 是（预认证链接，保守 15 分钟） | 12 / 12 / 6 | official |
+| `gdrive` | Google Drive API v3 | 无 | 是（resumable session） | 是 | 否（仅认证请求可读） | 10 / 10 / 4 | official |
+| `box` | Box Content API v2 | 无 | 是（upload session，需整文件 SHA-1） | 是 | 否（302 只对本进程有效） | 8 / 8 / 4 | official |
+| `smb` | SMB2/3（go-smb2） | 无 | 是（按偏移写） | 是 | 否（需本进程会话） | 4096 / 4096 / 2048 | official |
 
 `Tier` 为 `unofficial` 的驱动默认采用更保守的限流，因为接口随时可能变化，且异常调用模式更容易触发封号。
 
@@ -46,6 +49,50 @@ delta 过期会换基线并让目录 freshness 全局失效。预认证下载/up
 320 KiB 对齐、单请求小于 60 MiB，session 可跨重启恢复；服务端移动/改名/删除可用，但没有
 声明同步 ServerCopy。真实 Microsoft/SharePoint 账号和浏览器 OAuth 尚未验收，详见
 [OneDrive 驱动](onedrive.md)。
+
+**Google Drive**：文件 id 直接作为 provider ID，内容版本优先取 `headRevisionId`，
+`ReadRange` 因此可以直接下载 `/files/{id}/revisions/{rev}?alt=media` 把读钉在某个修订上，
+远端并发改写不会把新字节塞进旧的块缓存键。修订被清理时回退到 head，但只在重新确认版本
+未变之后才回退。两处 Drive 语义与文件系统不兼容，驱动显式处理而不是留给上层踩：
+
+- **同名子项**：Drive 允许一个目录里有多个同名文件，元数据层按名字索引子项，无法发布这样
+  的列表。驱动检测到冲突后让该目录失败并在错误里点名冲突的名字，不静默丢弃或改名。用户需
+  要在 Drive 里改掉其中一个。跨页冲突由 `ListStream` 保留的名字集合捕获。
+- **Workspace 文档与快捷方式**：Google Docs/Sheets 等没有字节流，只能导出，且导出前大小
+  未知。`List`/`Changes` 跳过它们，`Stat` 返回 `ErrUnsupported`。
+
+写入路径会先查同名子项：命中就更新该文件（多段或 resumable 都走 `PATCH`），否则创建，避免
+自己制造出上面那种同名冲突。`changes` feed 提供 upsert/delete，页令牌失效换基线。私有内容
+只对带凭据的请求可读，所以 `DownloadURL` 返回 `ErrUnsupported`、`Caps.LinkShareable` 为假。
+浏览器 OAuth 向导和真实账号验收尚未完成。
+
+**Box**：Box 的文件与文件夹是两套独立编号，同一个数字可以既是文件又是文件夹，且端点不同。
+provider ID 因此带类型前缀（`f:12345` / `d:12345`），根是 `d:0`；上层只把它当不透明 ID。
+内容版本取 `file_version.id`，读取带 `version` 参数钉住版本。分片上传由服务端决定 part size，
+`commit` 必须带整文件 SHA-1，所以能力矩阵声明 `HashSHA1`，缺哈希时直接拒绝开 session；
+每个 part 另带自己的 `Digest: sha=`。Box 只接受 20 MB 及以上的 session，20 MB 以下必须走
+单次上传，因此 `SinglePutMax` 正好取在这个分界上，中间没有无法上传的区间。同名上传由 409
+的 `context_info.conflicts` 给出既有 id，转为该文件的新版本而不是创建第二个同名文件。
+commit 返回 202 表示服务端仍在组装，映射为 `ErrTransient` 让上传队列重试（commit 幂等）。
+Box 的事件流是账号级 feed 而非目录 delta，`Caps.Delta` 为假，目录按 TTL 刷新。浏览器 OAuth
+向导和真实账号验收尚未完成。
+
+**SMB**：面向 NAS 与 Windows 共享。与 SFTP 一样没有文件 id、没有内容哈希、没有变更流，
+路径即身份，版本回退到 size+mtime 指纹。一处关键差异塑造了写路径：go-smb2 的 `Rename`
+发送的 `FileRenameInformation` 里 `ReplaceIfExists` 为 0，**改名不会覆盖已存在的目标**。
+所以发布上传时必须先 unlink 目标再改名，中间有一个"名字不存在"的窗口——这是协议在这一层
+暴露的操作所能做到的极限，明确记录而不是用重试掩盖。移动（`Move`）则不做这个 unlink：
+它必须不能悄悄毁掉目标位置上的无关文件，目标已存在时返回 `ErrExists`。
+
+读路径缓存每个路径一个打开句柄：SMB 打开文件是一次完整的 CREATE 往返，按 64 KiB 子块读时
+每次重开会让冷随机读的开销翻三倍。句柄在版本变化、改名、删除、发布上传和连接断开时失效，
+且带引用计数——正在读的句柄不会被另一线程的删除关掉。连接断开后整个会话（连同它上面所有
+句柄）都失效，因此断链只重试一次并强制重新挂载。SMB 不走 HTTP，无法通过共享 HTTP 客户端
+继承代理与限流，daemon 通过 `provider.ConfigDialer` / `ConfigLimiters` 直接注入。
+
+`ServerCopy` 为假：SMB2 有 FSCTL_SRV_COPYCHUNK，但 go-smb2 没有导出它，声明了会让 VFS
+选一条跑不通的路径。**尚未在任何真实 SMB 服务器上验收**：当前测试用内存共享复现了
+"改名不覆盖""非空目录不可删""短读"这三条服务端行为，这不能替代真机验证。
 
 ## 各驱动的具体约束
 
