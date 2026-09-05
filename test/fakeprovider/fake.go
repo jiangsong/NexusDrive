@@ -229,6 +229,11 @@ func (f *Fake) SetFaults(fn func(*Faults)) {
 	f.mu.Unlock()
 }
 
+// ListPageSize keeps cursor handling exercised by every test. It is exported
+// so a test that asserts on call counts can state the paging cost of a
+// directory instead of hard-coding a number that would silently drift.
+const ListPageSize = 2
+
 func (f *Fake) List(ctx context.Context, dirID, cursor string) ([]provider.Entry, string, error) {
 	if err := f.enter(ctx, "List"); err != nil {
 		return nil, "", err
@@ -244,8 +249,7 @@ func (f *Fake) List(ctx context.Context, dirID, cursor string) ([]provider.Entry
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	// Page size 2 keeps cursor handling exercised by every test.
-	const page = 2
+	page := ListPageSize
 	start := 0
 	if cursor != "" {
 		start, _ = strconv.Atoi(cursor)
