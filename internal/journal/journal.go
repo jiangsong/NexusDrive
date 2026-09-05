@@ -349,7 +349,11 @@ CREATE TABLE IF NOT EXISTS upload_resume_history (
 // 9: cancellation revisions and preserved session history for explicit resume.
 // 10: fenced upload cleanup and minimal permanent discard receipts.
 // 11: original metadata, mount and account-generation bindings on uploads.
-const journalSchemaVersion = 11
+// 12: durable intents for server-side copies, whose result an error does not
+//
+//	determine, so an ambiguous answer becomes a question reconciliation asks
+//	the provider rather than a guess.
+const journalSchemaVersion = 12
 
 func (j *Journal) migrate() error {
 	if _, err := j.db.Exec(journalSchema); err != nil {
@@ -370,6 +374,9 @@ func (j *Journal) migrate() error {
 	}
 	if _, err := j.db.Exec(uploadCleanupSchema); err != nil {
 		return fmt.Errorf("journal: migrate upload cleanup: %w", err)
+	}
+	if _, err := j.db.Exec(serverCopySchema); err != nil {
+		return fmt.Errorf("journal: migrate server copy intents: %w", err)
 	}
 	var copyRevision int
 	if err := j.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('copy_jobs') WHERE name='revision'`).Scan(&copyRevision); err != nil {

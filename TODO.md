@@ -301,6 +301,36 @@
 
 ## P0 — 正确性
 
+### [x] T-00g 连续两次重写会退回上一次的内容（2026-09-06）
+
+跑全量测试时 `internal/fusefs` 偶发失败（约 5 次里 1 次），症状是
+`os.WriteFile` 连写两次之后 `stat` 报的是**第一次**的大小。先确认基线也复现——不是
+新改动引入的——然后查到两个各自独立的原因，都是真实的数据回退：
+
+1. **路径式 truncate 会另开一个写句柄。** `Setattr` 拿不到 fh 时会
+   `Open→Truncate→Release`，于是同一个 inode 上出现两份互相竞争的暂存快照：一份是
+   truncate 产生的（空文件），一份是应用写入的内容。两份都会提交、都会上传，**谁后落地
+   谁赢**。新增 `FS.TruncatePath`：优先作用在该 inode 上已经打开的写句柄，没有才回退到
+   开临时句柄。回归：`TestAPathTruncateUsesTheOpenHandleInsteadOfMakingAnother`
+   （断言只产生 1 条上传）与 `TestAPathTruncateWithNoOpenHandleStillApplies`。
+
+2. **上传完成与新提交是两个读-改-写序列，会互相覆盖。** `UploadHooks.OnSuccess` 先
+   `meta.Get` 读节点、再决定写回什么；close(2) 可以在这两步之间提交更新的版本。
+   旧代码无条件 `UpdateByIno`，于是**已被取代的上传把自己的 size / remote id / version
+   写回了一个早已前进的文件**——FUSE 调试轨迹里节点最终是 `size=65536 remote=n2
+   dirty=false`，而 4096 那条上传还排在队列里。改为 `meta.AdoptByIno` 做
+   compare-and-set（`WHERE ino=? AND remote_id=?`，条件是这次上传发布时的身份），
+   条件不成立就只用 `meta.SetRemoteVersion` 记下远端版本——那是下一次上传的冲突检查要比
+   对的东西，但不能把读到的整行旧值一起写回去。回归：
+   `TestACompletingUploadCannotRevertANewerWrite`（通过 `publishFault` 的
+   `upload-result-read` 阶段确定性地插入第二次写）与
+   `TestASupersededUploadOnlyRecordsTheRemoteVersion`。
+
+**验证**：把任一处改回原样，对应回归立刻失败（"the completing upload put the previous
+content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基线在同样的
+命令下约 1/5 失败。这条不需要真实网盘：它完全在本地元数据与队列之间。
+
+
 ### [x] T-00f 目录替换和 delta 删除丢失本地后代（2026-09-05）
 
 - 目录列表合并在同名目录 ID/remote 改变或文件/目录类型互换时，原实现复用
@@ -555,7 +585,30 @@
   - 订阅某路径后，远端 delta 改动与本地 `write_file` 都能收到一次通知，且不重复推送。
   - 资源读取受 `--allow` 白名单约束，越界返回错误而不是内容。
 
-### [~] T-04 Copy 已接入，完整作业恢复与远端对账尚未完成
+### [~] T-04 Copy：服务端复制的远端结果对账已完成，跨端原子性与真实账号仍缺
+
+- **远端结果对账（2026-09-06 完成）**：这是 T-04 里最实质的一条，做完了。
+  服务端复制的请求与答案都过网络，超时/重置/5xx **不能**说明对象是否已创建；
+  provider 成功之后、本地元数据写入之前崩溃是同一个问题。原实现在这两种情况下都只是
+  返回错误——重试可能留下第二份对象，放弃则在账号上留下本地无人知晓的文件。
+
+  1. **journal schema v12 `server_copies`**：发请求前写下持久意图，并对
+     「remote + 目标父对象 + 名字」加唯一约束。同一目的地不允许两个未结清意图，
+     否则哪一个产生了对象永远说不清。
+  2. **只有「动手前就拒绝」才算确定没发生**（`ErrUnsupported`/`ErrNotFound`/
+     `ErrExists`/`ErrAuth`）；其余一律 `ErrCopyUnresolved`，意图保留、目的地占用。
+  3. **`FS.ReconcileServerCopies` 去看**：枚举目标父目录找那个名字。找到是文件→
+     本地没有就收编再结清；找不到→请求没生效，结清并释放目的地；其他情况保留并记录原因。
+  4. **daemon 启动跑一遍**，且每次向某目的地发起新复制前先结清该目的地。
+     对账收编后新的复制直接 `ErrExists`，不会再复制一份。
+  5. **身份围栏**：元数据库身份/挂载/根对象/账号绑定不匹配则不收编也不删除——
+     那是关于另一个账号的证据。
+  6. **未结清的进 `status` 告警**，不是只写日志。
+  9 组回归（含「答案丢失后重试不产生第二个对象」——写的时候第一版确实产生了第二个，
+  测试抓到后才补上「对账收编之后立即返回 ErrExists」这一步）。详见 `docs/copy.md`。
+- **跨端原子不覆盖仍缺**：上面的占用只在本进程 journal 内。本地存在性检查与远端复制
+  仍不是同一事务，绝大多数网盘 API 也不提供条件创建，所以**不能**声称全局无覆盖；
+  能声称的是本进程不会因一次答案丢失而产生重复对象。
 
 - **上传账号绑定补充（journal v11）**：普通写入和复制交接都持久化原元数据库身份、
   挂载前缀、根对象及本地账号绑定。账号绑定由显式授权代次与非密钥账号定位配置组成；

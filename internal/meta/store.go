@@ -715,6 +715,84 @@ const updateNodeSQL = `UPDATE nodes SET size=?, mtime_ns=?, remote=?, remote_id=
 			   hash_type=?, hash=?, fetched_at=?, ttl_s=?, dirty=?
 			 WHERE ino = ?`
 
+// updateNodeIfSQL is updateNodeSQL guarded on the identity the caller believes
+// the node still has.
+const updateNodeIfSQL = updateNodeSQL + ` AND remote_id = ?`
+
+// AdoptByIno writes the node only while its stored remote id is still expect.
+// It reports whether the write applied.
+//
+// An upload completing and a newer write committing are two read-modify-write
+// sequences over the same row, and they interleave: the uploader reads the
+// node, the writer commits a newer version, and the uploader then writes back
+// what it read — putting the previous content's size, id and version back on a
+// file that has moved on. The condition is what makes the loser notice.
+//
+// durable selects the synchronous=FULL transaction PublishByIno uses, so a
+// journal publication barrier may be released after it returns.
+func (s *Store) AdoptByIno(ctx context.Context, n Node, expect string, durable bool) (bool, error) {
+	if durable {
+		// Warm the statement before reserving a connection, as PublishByIno does.
+		if _, err := s.prep(ctx, updateNodeIfSQL); err != nil {
+			return false, err
+		}
+	}
+	if n.FetchedAt.IsZero() {
+		n.FetchedAt = s.now()
+	}
+	dirty := 0
+	if n.Dirty {
+		dirty = 1
+	}
+	run := s.tx
+	if durable {
+		run = s.durableTx
+	}
+	var rows int64
+	err := run(ctx, func(tx *sql.Tx) error {
+		upd, err := s.txStmt(ctx, tx, updateNodeIfSQL)
+		if err != nil {
+			return err
+		}
+		res, err := upd.ExecContext(ctx,
+			n.Size, n.MTime.UnixNano(), n.Remote, n.RemoteID, n.Version, n.RemoteVersion,
+			n.HashType, n.Hash, n.FetchedAt.Unix(), int64(n.TTL.Seconds()), dirty, n.Ino, expect)
+		if err != nil {
+			return fmt.Errorf("meta: adopt node %d: %w", n.Ino, err)
+		}
+		rows, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// SetRemoteVersion records what the provider last had for one node without
+// touching anything else. An upload that has been superseded still has to
+// report the version it moved the remote to — that is what the next upload's
+// conflict check compares against — but it must not carry the rest of the
+// stale row it read along with it.
+func (s *Store) SetRemoteVersion(ctx context.Context, ino uint64, version string) error {
+	var rows int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE nodes SET remote_version=? WHERE ino=?`, version, ino)
+		if err != nil {
+			return fmt.Errorf("meta: set remote version %d: %w", ino, err)
+		}
+		rows, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) updateByIno(ctx context.Context, n Node, durable bool) error {
 	if n.FetchedAt.IsZero() {
 		n.FetchedAt = s.now()

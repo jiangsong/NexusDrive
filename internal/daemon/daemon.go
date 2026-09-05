@@ -264,6 +264,16 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			d.Close()
 			return nil, fmt.Errorf("daemon: local publication recovery: %w", err)
 		}
+		// A server-side copy interrupted between the provider's answer and the
+		// local record leaves a question — does the destination exist? — that
+		// only the provider can answer. Asking now is what keeps a restarted
+		// daemon from either losing the object or making a second one. A
+		// destination that cannot be reached must not stop the mount: the
+		// intent stays and the warning says why.
+		// The failure is not fatal and is not swallowed either: the VFS records
+		// it, and status reports it as an unresolved copy that may exist on the
+		// account.
+		_ = fsys.ReconcileServerCopies(ctx)
 
 		up, err := upload.New(upload.Options{
 			Journal:   j,

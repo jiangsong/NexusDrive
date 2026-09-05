@@ -9,7 +9,6 @@ import (
 	"syscall"
 
 	"cloudfs/internal/config"
-	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 )
 
@@ -74,28 +73,13 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 			if parentID == "" {
 				parentID = dm.RootID
 			}
-			entry, err := copier.Copy(ctx, n.RemoteID, parentID, name)
-			if err == nil {
-				if entry.ID == "" || entry.Kind != provider.KindFile || entry.Size < 0 {
-					return Attr{}, errors.New("vfs: remote copy returned an invalid file; reconcile the destination before retrying")
-				}
-				out := nodeFromEntry(dm.Remote, entry, f.opt.AttrTTL)
-				out.ParentIno, out.Name = parent.Ino, name
-				out, err = f.meta.Insert(ctx, out)
-				if errors.Is(err, meta.ErrExists) {
-					return Attr{}, ErrExists
-				}
-				if err != nil {
-					return Attr{}, fmt.Errorf("vfs: remote copy completed; metadata update failed: %w", err)
-				}
-				f.invalidateFrom(ctx, parent.Ino)
-				f.changedEntry(ctx, parent.Ino, name, false)
-				return f.attrOf(ctx, out), nil
-			}
-			// Unsupported guarantees no copy was performed. Do not fall back
-			// on timeouts/transient failures: the remote may already have acted.
-			if !errors.Is(err, provider.ErrUnsupported) {
-				return Attr{}, mapProviderErr(err)
+			a, err := f.serverCopy(ctx, copier, sm, dm, n, parent, parentID, dst, name)
+			// Unsupported is the one refusal that proves nothing happened, so
+			// it is the one that may fall through to copying the bytes. Every
+			// other failure leaves a question serverCopy has already recorded;
+			// falling back would risk a second object on the account.
+			if err == nil || !errors.Is(err, provider.ErrUnsupported) {
+				return a, err
 			}
 		}
 	}

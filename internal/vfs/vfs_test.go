@@ -36,6 +36,9 @@ type env struct {
 }
 
 type envOpt struct {
+	// wrapProvider replaces the mount's backend with a decorator over the
+	// fake, for tests that need a capability the fake does not have.
+	wrapProvider    func(*fakeprovider.Fake) provider.Provider
 	blockSize       int64
 	subBlockSize    int64
 	mode            config.Mode
@@ -79,13 +82,17 @@ func newEnv(t *testing.T, o envOpt) *env {
 	t.Cleanup(func() { j.Close() })
 
 	fake := fakeprovider.New("ali")
+	var backend provider.Provider = fake
+	if o.wrapProvider != nil {
+		backend = o.wrapProvider(fake)
+	}
 	fs, err := New(Options{
 		Meta: store, Cache: ca, Now: c.now,
 		DefaultDirTTL: o.dirTTL, AttrTTL: time.Minute, NegativeTTL: 5 * time.Second,
 		ReadAheadBlocks: o.readAheadBlocks, PrefetchDepth: o.prefetchDepth,
 		Mounts: []Mount{{
 			Prefix: "/ali", Remote: "ali", RootID: fakeprovider.RootID,
-			Provider: fake, Mode: o.mode, DirTTL: o.dirTTL,
+			Provider: backend, Mode: o.mode, DirTTL: o.dirTTL,
 		}},
 	})
 	if err != nil {
@@ -98,7 +105,7 @@ func newEnv(t *testing.T, o envOpt) *env {
 		Journal: j,
 		Providers: func(remote string) (provider.Provider, bool) {
 			if remote == "ali" {
-				return fake, true
+				return backend, true
 			}
 			return nil, false
 		},

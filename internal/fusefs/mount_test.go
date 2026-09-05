@@ -112,6 +112,7 @@ func newMountWithTimeout(t *testing.T, mode config.Mode, kernelTTL time.Duration
 	m, err := MountFS(MountOptions{
 		Options: Options{FS: fsys, AttrTimeout: kernelTTL, EntryTimeout: kernelTTL, NegativeTimeout: 100 * time.Millisecond},
 		Path:    mountPoint,
+		Debug:   os.Getenv("CLOUDFS_TEST_FUSE_DEBUG") == "1",
 	})
 	if err != nil {
 		cancel()

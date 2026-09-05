@@ -57,7 +57,14 @@ func (f *FS) StopCopies() {
 func (f *FS) CopyWarning() string {
 	f.copyWorkerMu.Lock()
 	defer f.copyWorkerMu.Unlock()
-	return f.copyError
+	switch {
+	case f.copyError != "" && f.serverCopyError != "":
+		return f.copyError + "; " + f.serverCopyError
+	case f.serverCopyError != "":
+		return f.serverCopyError
+	default:
+		return f.copyError
+	}
 }
 
 func (f *FS) resumeCopyJobs(ctx context.Context) {

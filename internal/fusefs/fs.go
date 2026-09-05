@@ -492,16 +492,11 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	if sz, ok := in.GetSize(); ok {
 		f, isFile := fh.(*file)
 		if !isFile {
-			// truncate() without an open handle: open, truncate, close.
-			h, err := n.root.opt.FS.Open(ctx, n.vfsIno(), true)
-			if err != nil {
-				return errno(err)
-			}
-			if err := n.root.opt.FS.Truncate(ctx, h, int64(sz)); err != nil {
-				n.root.opt.FS.Release(ctx, h)
-				return errno(err)
-			}
-			if err := n.root.opt.FS.Release(ctx, h); err != nil {
+			// No descriptor came with the truncate. The VFS applies it to the
+			// write handles already open on this inode rather than opening one
+			// of its own, because a second handle means a second staging file
+			// and two competing snapshots of the same write.
+			if err := n.root.opt.FS.TruncatePath(ctx, n.vfsIno(), int64(sz)); err != nil {
 				return errno(err)
 			}
 		} else if err := n.root.opt.FS.Truncate(ctx, f.handle, int64(sz)); err != nil {

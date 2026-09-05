@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 CloudFS：把国内外网盘挂载为本地目录的单机守护进程，同时通过 MCP 把同一份文件系统暴露给 agent。
-Go 1.27，模块名 `cloudfs`，约 38k 行、28 个包、372 个测试函数。
+Go 1.27，模块名 `cloudfs`，约 95k 行、38 个包目录、1000+ 个测试函数。
 
 ## 工具链与常用命令
 
@@ -73,6 +73,13 @@ cmd/cloudfs ── fusefs (内核) ─┐
   本地写入后会变成待上传标记，用它比对会把自己的连续写误判成他人冲突。
 - **未上传的文件用 `cloudfs-local:` 前缀的假 RemoteID**（`internal/vfs/write.go`），读取走
   cache 里的硬链接。重命名/删除这类文件必须改写或取消 journal 里的待传记录，不能去问服务端。
+- **一个 inode 同时只能有一份暂存快照**。每个写句柄自带一个 staging 文件，所以路径式
+  truncate 绝不能自己开句柄——那会让同一次重写产生两条上传，谁后落地谁赢。走
+  `FS.TruncatePath`：优先作用在已打开的写句柄上，没有才回退。
+- **上传完成回写节点必须是 compare-and-set**（`meta.AdoptByIno`，条件是本次上传发布时的
+  `remote_id`）。`OnSuccess` 先读节点再写回，而 close(2) 可以插在中间提交更新的版本；
+  无条件 `UpdateByIno` 会让已被取代的上传把旧的 size/id/version 写回去。条件不成立时
+  只能用 `meta.SetRemoteVersion` 记远端版本，不能把读到的整行旧值写回。
 - 一致性模式 `writeback`（默认，日志提交即返回）/ `strict`（远端上传完成才返回）/ `readonly`
   （`EROFS`）按挂载子树配置，判断都在 vfs。
 - 没有引入 rclone 依赖（会拉入数百个包）；国外网盘按同一 `Provider` 接口自研，共享层已就位。
@@ -80,9 +87,10 @@ cmd/cloudfs ── fusefs (内核) ─┐
 ## 驱动现状与 `UNVERIFIED` 约定
 
 已注册类型：`webdav`、`openlist`（同一驱动）、`aliyun`、`baidu`、`pan115`、`pan123`、
-`quark`、`tianyi`、`sftp`，外加测试用的 `fake`。
+`quark`、`tianyi`、`sftp`、`s3`、`dropbox`、`onedrive`、`gdrive`、`box`、`smb`，
+外加测试用的 `fake`。
 
-国内驱动的部分 API 细节尚未在真实账号上验证，代码里用 `UNVERIFIED:` 注释标注（当前 55 处），
+国内驱动的部分 API 细节尚未在真实账号上验证，代码里用 `UNVERIFIED:` 注释标注（当前 51 处），
 每处都写清楚要验证什么。**改这些地方时保留或更新标注，验证通过才删除**。`Caps.Tier` 为
 `unofficial` 的驱动（quark）默认限流更保守，风控信号映射为 `provider.ErrRiskControl` 以触发
 熔断而不是重试进封号。各驱动的具体约束见 `docs/providers.md`。

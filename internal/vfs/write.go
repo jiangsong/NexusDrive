@@ -198,12 +198,76 @@ func (f *FS) Write(ctx context.Context, h *Handle, p []byte, off int64) (int, er
 }
 
 // Truncate resizes an open write handle.
+// TruncatePath applies a truncate that arrived without a file handle of its
+// own — truncate(2) by path, and the O_TRUNC the kernel performs when it has
+// no descriptor to attach it to.
+//
+// It applies to the write handles already open on the inode when there are
+// any. Each write handle owns a private staging file, so a truncate that made
+// a handle of its own would commit a second, competing snapshot of the same
+// inode: two uploads, and whichever landed last would win. For a rewrite that
+// is a coin toss between the new content and the empty file the truncate
+// produced, and the file's size after close(2) was decided by which commit
+// happened to run second.
+func (f *FS) TruncatePath(ctx context.Context, ino uint64, size int64) error {
+	applied := 0
+	for _, h := range f.writeHandles(ino) {
+		ok, err := f.truncateHandle(ctx, h, size)
+		if err != nil {
+			return err
+		}
+		if ok {
+			applied++
+		}
+	}
+	if applied > 0 {
+		return nil
+	}
+	h, err := f.Open(ctx, ino, true)
+	if err != nil {
+		return err
+	}
+	if _, err := f.truncateHandle(ctx, h, size); err != nil {
+		f.Release(ctx, h)
+		return err
+	}
+	return f.Release(ctx, h)
+}
+
+// writeHandles snapshots the open write handles for one inode.
+func (f *FS) writeHandles(ino uint64) []*Handle {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*Handle
+	for _, h := range f.handles {
+		if h.Ino == ino && h.writer != nil {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 func (f *FS) Truncate(ctx context.Context, h *Handle, size int64) error {
+	applied, err := f.truncateHandle(ctx, h, size)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return ErrReadOnly
+	}
+	return nil
+}
+
+// truncateHandle reports whether the handle could take the truncate. A handle
+// closed between being listed and being used is not an error: the caller falls
+// back to a handle of its own.
+func (f *FS) truncateHandle(ctx context.Context, h *Handle, size int64) (bool, error) {
 	h.mu.Lock()
 	w := h.writer
+	closed := h.closed
 	h.mu.Unlock()
-	if w == nil {
-		return ErrReadOnly
+	if w == nil || closed {
+		return false, nil
 	}
 	// Truncating to nothing does not need the old content, and this is the
 	// path every rewrite takes: the kernel turns O_TRUNC into a truncate,
@@ -211,15 +275,15 @@ func (f *FS) Truncate(ctx context.Context, h *Handle, size int64) error {
 	// about to be discarded.
 	st, err := f.ensureStagingSeeded(ctx, h, w, size > 0)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := st.Truncate(size); err != nil {
-		return err
+		return false, err
 	}
 	h.mu.Lock()
 	w.dirty = true
 	h.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 func (w *writeState) readAt(buf []byte, off int64) (int, error) {
@@ -934,6 +998,12 @@ func (f *FS) UploadHooks() upload.Hooks {
 			if err != nil {
 				return err
 			}
+			// Everything below decides what to write from the row just read. A
+			// newer write can commit in between, which is what the seam lets a
+			// test place deterministically.
+			if err := f.publishFaultAt("upload-result-read"); err != nil {
+				return err
+			}
 			if r.ConflictName != "" {
 				// The data landed beside the remote file under a conflict
 				// name. Release the local-only cache entry and mark the parent
@@ -959,8 +1029,11 @@ func (f *FS) UploadHooks() upload.Hooks {
 				// file claims to have started from, and leaving it stale
 				// makes our own write look like someone else's change and
 				// land as a conflict copy.
-				n.RemoteVersion = r.Entry.Version
-				if err := f.meta.UpdateByIno(ctx, n); err != nil && !errors.Is(err, meta.ErrNotFound) {
+				// Only the remote version, and only that column: the rest of
+				// the row was read before the newer commit landed, and writing
+				// it back would put the superseded content's size and identity
+				// on a file that has moved past it.
+				if err := f.meta.SetRemoteVersion(ctx, n.Ino, r.Entry.Version); err != nil && !errors.Is(err, meta.ErrNotFound) {
 					return err
 				}
 				f.cache.Pin(cache.FileKey{Remote: n.Remote, RemoteID: localRemoteID(u.ID),
@@ -998,11 +1071,27 @@ func (f *FS) UploadHooks() upload.Hooks {
 			// By inode: a rename since the upload was queued must not turn
 			// this into an insert under the old name. Gone means deleted
 			// while uploading; the tombstone path handles the remote copy.
-			if err := f.meta.UpdateByIno(ctx, n); err != nil {
-				if errors.Is(err, meta.ErrNotFound) {
-					return nil
-				}
+			//
+			// Conditional on the identity this upload was published under: the
+			// check above read the node, and a newer write can commit between
+			// that read and this write. Without the condition the completing
+			// upload puts its own — now superseded — size, id and version back
+			// on the file, which is how two consecutive rewrites could end up
+			// reporting the first one's content.
+			adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() == journal.DurabilityPower)
+			if err != nil {
 				return err
+			}
+			if !adopted {
+				// Either the node is gone, or it moved on while we were
+				// looking. Both are the "already superseded" case: record what
+				// the remote now holds and leave the tree alone.
+				if err := f.meta.SetRemoteVersion(ctx, n.Ino, r.Entry.Version); err != nil && !errors.Is(err, meta.ErrNotFound) {
+					return err
+				}
+				f.cache.Pin(cache.FileKey{Remote: n.Remote, RemoteID: localRemoteID(u.ID),
+					Version: localVersion(u.ID)}, false)
+				return nil
 			}
 			// The node now points at the remote file. Everything a reader
 			// needs under the new key had to be in place before this line;

@@ -107,9 +107,13 @@ type FS struct {
 	copyWG              sync.WaitGroup
 	copyClosed          bool
 	copyError           string
-	copyWake            chan struct{}
-	copyRunsMu          sync.Mutex
-	copyRuns            map[string]context.CancelFunc
+	// serverCopyError reports a server-side copy whose result is still
+	// unknown. It is kept apart from copyError so a preparation failure and an
+	// unresolved copy cannot overwrite each other's explanation.
+	serverCopyError string
+	copyWake        chan struct{}
+	copyRunsMu      sync.Mutex
+	copyRuns        map[string]context.CancelFunc
 	// commitFault, when set by a test, fails a commit after its blob and
 	// journal row are in, the way a busy metadata store does.
 	commitFault func() error
