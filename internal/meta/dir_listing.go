@@ -27,6 +27,8 @@ type DirListing struct {
 	parent                    Node
 	identity                  string
 	generation                int64
+	staleGeneration           int64
+	publishedStale            bool
 	closed, committed, failed bool
 }
 
@@ -58,8 +60,11 @@ func (s *Store) BeginDirListing(ctx context.Context, expected Node) (*DirListing
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM store_identity`).Scan(&l.identity); err != nil {
 			return err
 		}
-		return tx.QueryRowContext(ctx, `INSERT INTO directory_refresh_generation(ino,generation) VALUES(?,1)
-ON CONFLICT(ino) DO UPDATE SET generation=generation+1 RETURNING generation`, dir).Scan(&l.generation)
+		// The hard counter advances so that a listing started earlier is
+		// fenced by this one; the soft counter is only observed.
+		return tx.QueryRowContext(ctx, `INSERT INTO directory_refresh_generation(ino,generation,stale_generation) VALUES(?,1,0)
+ON CONFLICT(ino) DO UPDATE SET generation=generation+1
+RETURNING generation, stale_generation`, dir).Scan(&l.generation, &l.staleGeneration)
 	})
 	if err != nil {
 		<-s.listingSlots
@@ -255,13 +260,21 @@ func (l *DirListing) Commit(ctx context.Context, childTTL time.Duration, protect
 	if !current.IsDir() || current.Remote != l.parent.Remote || current.RemoteID != l.parent.RemoteID {
 		return ErrListingChanged
 	}
-	var generation int64
-	if err := tx.QueryRowContext(ctx, `SELECT generation FROM directory_refresh_generation WHERE ino=?`, current.Ino).Scan(&generation); err != nil {
+	var generation, staleGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT generation, stale_generation FROM directory_refresh_generation WHERE ino=?`,
+		current.Ino).Scan(&generation, &staleGeneration); err != nil {
 		return err
 	}
 	if generation != l.generation {
 		return ErrListingChanged
 	}
+	// Something marked this directory stale while the snapshot was being
+	// collected, but nothing removed a name from it. The snapshot is still a
+	// truthful listing, so it is published — and left incomplete, so the next
+	// reader goes back to the backend for whatever the mark was about.
+	// Refusing here instead is what made a library scan racing the first
+	// change-feed backlog fail on directory after directory.
+	stale := staleGeneration != l.staleGeneration
 	now := l.s.now()
 	if err := l.mergeStaged(ctx, tx, now, childTTL, protect); err != nil {
 		return err
@@ -272,17 +285,31 @@ func (l *DirListing) Commit(ctx context.Context, childTTL time.Duration, protect
 	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET fetched_at=?,ttl_s=? WHERE parent_ino=? AND ino!=? AND dirty=0`, now.Unix(), int64(childTTL.Seconds()), current.Ino, RootIno); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO dir_state(ino,complete,listed_at,cursor,dirty) VALUES(?,1,?,'',0)
-ON CONFLICT(ino) DO UPDATE SET complete=1,listed_at=excluded.listed_at,cursor='',dirty=0`, current.Ino, now.Unix()); err != nil {
+	complete, dirty := 1, 0
+	if stale {
+		complete, dirty = 0, 1
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO dir_state(ino,complete,listed_at,cursor,dirty) VALUES(?,?,?,'',?)
+ON CONFLICT(ino) DO UPDATE SET complete=excluded.complete,listed_at=excluded.listed_at,cursor='',dirty=excluded.dirty`,
+		current.Ino, complete, now.Unix(), dirty); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	l.committed = true
+	l.committed, l.publishedStale = true, stale
 	// The negative cache itself is bounded. Clearing the parent avoids
 	// materializing every added name just to invalidate negative lookups.
 	return l.s.ClearAbsent(ctx, current.Ino)
+}
+
+// PublishedStale reports whether Commit published this snapshot but left the
+// directory incomplete because it was marked stale while being collected. The
+// entries are usable; the directory just is not cacheable as a whole.
+func (l *DirListing) PublishedStale() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.publishedStale
 }
 
 func (l *DirListing) mergeStaged(ctx context.Context, tx *sql.Tx, now time.Time, childTTL time.Duration, protect func(Node) bool) error {

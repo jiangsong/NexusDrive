@@ -367,6 +367,7 @@ func (s *Store) ByRemoteID(ctx context.Context, remote, remoteID string) (Node, 
 // Aliases returns all cached views of a remote identity. One remote can be
 // mounted at several prefixes, so retention cannot use ByRemoteID's first hit.
 func (s *Store) Aliases(ctx context.Context, remote, remoteID string) ([]Node, error) {
+	s.queries.Add(1)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes WHERE remote = ? AND remote_id = ?`, remote, remoteID)
 	if err != nil {
 		return nil, err
@@ -1157,9 +1158,13 @@ func (s *Store) Rename(ctx context.Context, ino, newParent uint64, newName strin
 }
 
 // Invalidate marks a directory listing stale so the next readdir refetches.
+// It is the soft fence: it says the directory is out of date, not that a name
+// under it was removed, so a listing already in flight may still publish what
+// it saw — it will simply leave the directory incomplete. Callers that remove
+// a name go through Remove or Rename, which fence for real.
 func (s *Store) Invalidate(ctx context.Context, dir uint64) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		if err := fenceDirListingTx(ctx, tx, dir); err != nil {
+		if err := markDirStaleTx(ctx, tx, dir); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`UPDATE dir_state SET complete = 0, dirty = 1 WHERE ino = ?`, dir)
@@ -1182,7 +1187,10 @@ func (s *Store) InvalidateAll(ctx context.Context) error {
 		if _, err := tx.Exec(`UPDATE dir_state SET complete = 0, dirty = 1`); err != nil {
 			return fmt.Errorf("meta: invalidate all: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE directory_refresh_generation SET generation=generation+1`); err != nil {
+		// Soft: nothing was removed, so a listing in flight may still
+		// publish; it stays incomplete and the next reader goes to the
+		// backend, which is exactly what dropping the cache asked for.
+		if _, err := tx.ExecContext(ctx, `UPDATE directory_refresh_generation SET stale_generation=stale_generation+1`); err != nil {
 			return err
 		}
 		return nil

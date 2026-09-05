@@ -72,5 +72,15 @@ func TestADeltaPollNeverMakesADirectoryLookShort(t *testing.T) {
 		t.Fatalf("%d listings answered with the wrong contents while the delta poller ran; first: %v",
 			len(wrong), wrong[:limit])
 	}
-	t.Logf("%d listings were refused while a change batch was being applied; none answered wrongly", refused)
+	// A change batch that only adds entries we have never listed marks the
+	// directory stale; it does not remove a name from it, so an older snapshot
+	// is still truthful and is published rather than refused. Before that
+	// distinction existed this loop refused listings by the dozen — 72 in the
+	// first run of this test — and every one of them was a reader told it
+	// could not read a directory that was fine. A refusal here now means a
+	// hard fence fired, and this workload renames and removes nothing.
+	if refused != 0 {
+		t.Fatalf("%d listings were refused while a change batch was being applied, want none:"+
+			" only a removed or moved name should refuse a listing", refused)
+	}
 }

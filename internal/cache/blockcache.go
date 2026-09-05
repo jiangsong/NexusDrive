@@ -1400,6 +1400,38 @@ func (c *Cache) Stats() Stats {
 }
 
 // Keys lists the cached file keys, sorted, for diagnostics.
+// UserPinnedKeys returns the keys that currently carry the persistent pin,
+// in a stable order. Reconciliation works from this rather than from the whole
+// cache: after a tree change, only something that was pinned can have stopped
+// being pinned, and walking every cached object to find that out costs a
+// metadata query per object on a path that every rename takes.
+func (c *Cache) UserPinnedKeys() []FileKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []FileKey{}
+	for _, fs := range c.files {
+		if fs.userPinned && fs.key.RemoteID != "" {
+			out = append(out, fs.key)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// Known reports whether the cache already has a record for k. Restoring a pin
+// consults it so that a rule covering a thousand files that have never been
+// read does not create a thousand cache records for content nobody fetched;
+// those are pinned when their first block is admitted instead.
+func (c *Cache) Known(k FileKey) bool {
+	if k.RemoteID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.files[k.hash()]
+	return ok
+}
+
 func (c *Cache) Keys() []FileKey {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -301,7 +301,7 @@
 
 ## P0 — 正确性
 
-### [~] T-00h delta 批量与并发目录列举：不再给错答案，仍会拒绝（2026-09-06）
+### [~] T-00h delta 批量与并发目录列举：软围栏不再拒绝，远端内容变更仍会（2026-09-06）
 
 `-race` 下跑全量时发现：1000 部影片的媒体库扫描偶尔只找到 998 部，**没有报错**——
 丢的总是相邻的一对（如 `Film 0947`/`Film 0948`），事后再读那两个目录又是完整的。
@@ -322,10 +322,30 @@
   `TestADeltaPollNeverMakesADirectoryLookShort` 在 1ms 轮询风暴下断言
   **列举可以失败，但绝不能少给条目**——被拒绝的调用方会重试或报错，拿到少一半条目的
   调用方无从知道。实测 720 次列举中 8 次被拒、0 次答错。
-- **仍开放**：在 1000 目录规模上，扫描与 delta 积压相撞时仍可能有目录被拒绝；生产的
-  轮询间隔是 60 秒，撞上的窗口很窄，但不为零。彻底的做法是让一次列举与一批 delta
-  在同一目录上互斥（而不是事后用代次否决），这需要改动 `directory_refresh_generation`
-  的语义，不适合在没有真实网盘验证的情况下动。
+- **围栏拆成硬／软两个计数器（当日第二轮，这条的主体修复）**：把上面那个"仍开放"往下挖了
+  一层，发现根因不是"需要互斥"，而是**一个计数器承担了两件语义不同的事**。
+  - `generation`（硬）：目录下有名字被删除／移动，或目录对象被替换。更早的快照里还有那个
+    名字，发布就是复活它——必须拒绝。
+  - `stale_generation`（软）：只是"这个目录过期了"。delta 提到一个我们从没列举过的条目
+    （`internal/vfs/refresh.go:235` 的 `store.Invalidate`），或上传落地时后端没描述结果
+    （`internal/vfs/write.go` 三处）。**没有名字被移除**，快照仍然真实。
+  全仓库只有 4 处调 `Store.Invalidate`，**全部是软语义**——其中 write.go:1169 那处前面已经
+  有 `meta.Remove` 自己打过硬围栏了。软围栏命中时现在**照常发布快照，但把
+  `dir_state.complete` 留在 0**：调用方拿到它要的目录内容，陈旧标记也没丢，下次读重新列举。
+  1000 影片扫描撞上首批 delta 积压时的被拒次数 **72 →（加重试）8 → 0**。
+  回归：`internal/meta/listing_fence_test.go` 的
+  `TestDirListingPublishesThroughAStaleMarkButStaysIncomplete`（把 `Invalidate` 改回
+  `fenceDirListingTx` 立刻失败）；`internal/vfs/refresh_listing_race_test.go` 由"允许被拒"
+  收紧为**断言零拒绝**。schema v9 → v10（`ALTER TABLE ... ADD COLUMN stale_generation`）。
+
+- **仍开放：远端内容变更仍走硬围栏。** `ApplyRemoteNode` 在 `next != nil` 的纯属性更新上
+  也推硬围栏——父目录的名字集合没变（顶部的守卫已经禁止这条路径改名字或换父目录），
+  却会拒掉并发的父目录列举。改软是对的方向，但代价是"列举不会覆盖 delta 刚写的属性"
+  从 meta 自身的保证退化成**依赖调用方传的 `protect` 谓词**：VFS 传了
+  （`internal/vfs/vfs.go:738`，`fetched_at >= 列举开始时刻`），`protect == nil` 的调用方没有。
+  要做就得把这条提升为 meta 层的无条件不变量，那会改动一批现有列举语义（一批 meta 测试
+  依赖"列举可以更新同一秒内 upsert 的节点"）。**没有真实网盘验证不动**，生产轮询 60 秒，
+  窗口本来就窄。写在这里而不是悄悄改掉。
 - **顺带**：媒体库成本断言改为在 `NoBackground` 下测量——后台的 delta 轮询与预取本身
   也会产生 provider 调用，把它们算进"遍历的成本"是在量错东西。
 
@@ -1292,7 +1312,23 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 - **[x] 在线缓存管理**：CLI pin/unpin/warm/cache stats/gc/pins 使用同一 daemon；MCP 增加 unpin；控制端点拒绝浏览器来源和请求重放。离线调用先检查存储所有权，不启动上传或后台刷新。
 - **[~] 完整文件预算与 GC**：已实现统一计量、硬链接去重、完整文件淘汰、用户态打开租约、临时副本预留及重启临时文件回收。并发淘汰后的后台写入不再重新发布旧块，未清理的在途副本继续计量；passthrough 多句柄生命周期与真机验收仍未完成。
 - **[x] 日志写入空间准入**：daemon 将 staging 写入/扩容接到共享预留器，并发缓存/日志不能重复使用同一份准入空间；空间检查失败拒绝写入，底层 ENOSPC 保留到 FUSE。覆盖写按字节保守申请，缩小已有 staging 不受阻；部分失败写入同步更新实际长度/哈希。此机制不是文件系统硬配额，不能约束其他进程的写入。
-- **[ ] 大规模 pin 性能和真机验证**：规则恢复/改名目前遍历缓存 key 并查本地元数据，需在大缓存、多别名场景测量；macOS/Linux 内核挂载仍待环境验收。详细行为见 `docs/cache-management.md`。
+- **[~] 大规模 pin 性能**：已测量并修掉。**方向反了**——`reconcilePinsLocked` 原先遍历
+  `cache.Keys()`，对每个缓存对象查一次 `meta.Aliases` 问"你在哪、被 pin 了吗"，代价随缓存
+  大小线性增长。而它由 `dropPaths()` 调用，也就是**每次改名、每次删除都跑一遍**，还带 5 秒
+  预算：缓存攒大之后，一次与 pin 毫不相干的改名会花光预算，用户看到
+  "pin retention could not be reconciled"。
+  改为反过来问"规则覆盖了什么"：新增 `meta.SubtreeRefs`（每条规则一次向下递归 CTE，
+  只取文件的 remote/remote_id/version）与 `cache.UserPinnedKeys()`（只枚举当前被 pin 的键，
+  纯内存），取消 pin 只需检查当前被 pin 的那些。规则路径解析只走本地元数据
+  （`pinRuleNodeLocked`），断网也能恢复 pin。`cache.Known()` 保证"规则覆盖但从没读过"的
+  内容不会在这里凭空建缓存记录——那仍由首次入块时的 `protectPinned` 负责。
+  实测（`internal/vfs/pin_scale_test.go`）：缓存里 2000 个无关文件时，一次改名后的对账
+  **2002 次元数据查询 → 4 次**，0.67s → 0.05s。回归即失败：把遍历改回缓存立刻超预算。
+  行为不变由既有的 `TestRenameDoesNotMovePathPin`、`TestPinAliasesAreAdditive`、
+  `TestOverlappingPinsAndTemporaryWriteProtection`、`TestPinSurvivesRestartWithoutNetwork...`
+  守住，另加 `TestReconcileFollowsContentMovedIntoAndOutOfAPinnedDirectory` 双向验证。
+  顺带：`meta.Aliases` 此前不计入 `QueryStats`，所以这条成本在计数器里是隐形的，已补上。
+- **[ ] pin 的真机验收**：macOS/Linux 内核挂载仍待环境验收。详细行为见 `docs/cache-management.md`。
 
 ### 原阶段计划（需结合以上进展使用）
 

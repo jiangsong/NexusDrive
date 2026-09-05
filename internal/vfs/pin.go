@@ -69,15 +69,86 @@ func (f *FS) pathPinned(p string) bool {
 
 // reconcilePinsLocked also releases obsolete identities and paths after a
 // rename, replacement or unpin. Temporary upload pins are never touched.
+//
+// It asks what the rules cover, rather than asking of every cached object
+// where it lives. The two answer the same question, but the second costs a
+// metadata query per cached object — and dropPaths calls this after every
+// rename and every removal, under a five-second budget. On a cache that had
+// been filling for a while, an unrelated rename would spend that budget and
+// leave the user with "pin retention could not be reconciled" for a pin that
+// was never in question.
 func (f *FS) reconcilePinsLocked(ctx context.Context) error {
-	for _, key := range f.cache.Keys() {
-		keep, err := f.keyPinnedLocked(ctx, key)
-		if err != nil {
-			return err
+	desired, err := f.pinnedKeysLocked(ctx)
+	if err != nil {
+		return err
+	}
+	// Only something that is pinned can have stopped being pinned.
+	for _, key := range f.cache.UserPinnedKeys() {
+		if !desired[key] {
+			f.cache.SetUserPin(key, false)
 		}
-		f.cache.SetUserPin(key, keep)
+	}
+	for key := range desired {
+		// Content that has never been fetched is pinned when its first block
+		// is admitted (protectPinned), not by creating a record for it here.
+		if f.cache.Known(key) {
+			f.cache.SetUserPin(key, true)
+		}
 	}
 	return nil
+}
+
+// pinnedKeysLocked is every cache identity the current rules retain.
+func (f *FS) pinnedKeysLocked(ctx context.Context) (map[cache.FileKey]bool, error) {
+	if len(f.pins) == 0 {
+		return nil, nil
+	}
+	desired := map[cache.FileKey]bool{}
+	for _, pin := range f.pins {
+		n, ok, err := f.pinRuleNodeLocked(ctx, pin.Path)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// A rule whose path is not in the local tree retains nothing. It
+			// is kept as a rule: the path may come back, and the content is
+			// not deleted either way.
+			continue
+		}
+		err = f.meta.SubtreeRefs(ctx, n.Ino, pin.Recursive, func(r meta.RemoteRef) error {
+			desired[cache.FileKey{Remote: r.Remote, RemoteID: r.RemoteID, Version: r.Version}] = true
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return desired, nil
+}
+
+// pinRuleNodeLocked resolves a rule's path from local metadata only. Restoring
+// pins must work with no network at all — that is most of the point of having
+// pinned the content — and this also runs on the rename path, where a provider
+// round trip per rule would be paid by an unrelated operation.
+func (f *FS) pinRuleNodeLocked(ctx context.Context, p string) (meta.Node, bool, error) {
+	n, err := f.meta.Get(ctx, meta.RootIno)
+	if err != nil {
+		return meta.Node{}, false, err
+	}
+	for _, name := range strings.Split(strings.Trim(p, "/"), "/") {
+		if name == "" {
+			continue
+		}
+		child, err := f.meta.Lookup(ctx, n.Ino, name)
+		if errors.Is(err, meta.ErrNotFound) {
+			return meta.Node{}, false, nil
+		}
+		if err != nil {
+			return meta.Node{}, false, err
+		}
+		n = child
+	}
+	return n, true, nil
 }
 
 func (f *FS) keyPinnedLocked(ctx context.Context, key cache.FileKey) (bool, error) {

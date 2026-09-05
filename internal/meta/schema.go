@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -127,4 +127,9 @@ END;`,
 CREATE TRIGGER nodes_refresh_delete AFTER DELETE ON nodes BEGIN
   DELETE FROM directory_refresh_generation WHERE ino=old.ino;
 END;`,
+	// v9 -> v10: separate "a name here was removed or moved" from "this
+	// directory is stale". Only the first has to refuse an older listing;
+	// see listing_fence.go for why conflating them refused listings that
+	// were perfectly safe to publish.
+	`ALTER TABLE directory_refresh_generation ADD COLUMN stale_generation INTEGER NOT NULL DEFAULT 0;`,
 }
