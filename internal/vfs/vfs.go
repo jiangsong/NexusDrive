@@ -88,14 +88,17 @@ type Options struct {
 
 // FS is the filesystem core.
 type FS struct {
-	changeMu            sync.Mutex
-	changeWatchers      map[chan Change]struct{}
-	hasChangeWatchers   atomic.Bool
-	changesClosed       bool
-	copyPublishMu       sync.RWMutex       // read-open admission also excludes destructive cleanup
-	uploadCleanupFault  func(string) error // durable intent / metadata / cache boundaries
-	readStartedFault    func()             // test boundary after retaining an active read
-	uploadResumeFault   func()             // test boundary after checksum verification
+	changeMu           sync.Mutex
+	changeWatchers     map[chan Change]struct{}
+	hasChangeWatchers  atomic.Bool
+	changesClosed      bool
+	copyPublishMu      sync.RWMutex       // read-open admission also excludes destructive cleanup
+	uploadCleanupFault func(string) error // durable intent / metadata / cache boundaries
+	// publishFault is the same kind of seam at the boundaries of publishing
+	// an upload's result. Production leaves it nil.
+	publishFault        func(string) error
+	readStartedFault    func() // test boundary after retaining an active read
+	uploadResumeFault   func() // test boundary after checksum verification
 	copyCheckpointFault func(journal.CopyJob) error
 	copyBindFault       func() error
 	copyCleanupFault    func() error // after durable cleanup intent, before unlink

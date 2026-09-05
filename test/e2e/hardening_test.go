@@ -381,3 +381,135 @@ func TestRandomReadsThroughTheKernelStayWithinBudget(t *testing.T) {
 	}
 	t.Logf("%d random 4 KiB reads fetched %d bytes (%d per read)", reads, got, got/reads)
 }
+
+// TestReadsStraddlingUploadCompletionStayLocal is the acceptance for T-00b,
+// the EIO seen once at the instant an upload completed.
+//
+// The window is narrow: the node has already switched to the remote id and
+// version while the staged blob is still registered in the cache under the
+// local key. A read arriving there misses under the new key and goes to the
+// backend for content this process just uploaded — which is where the EIO came
+// from, and which is observable here as a download that should never happen.
+// The fix registers the blob under the new key before the node moves
+// (UploadHooks.OnSuccess calls cache.LinkFile ahead of meta.UpdateByIno).
+//
+// Writers go through the real mount so the write path is the kernel's. Readers
+// call the VFS directly: the kernel would serve most of these from its own
+// page cache and never reach the code under test.
+//
+// Reverting the ordering in write.go makes this fail with a non-zero download
+// count, which is what makes the assertion worth keeping.
+func TestReadsStraddlingUploadCompletionStayLocal(t *testing.T) {
+	s := newStack(t, "writeback")
+	fastFake(s)
+	// A little backend latency spreads the completions out instead of letting
+	// them all land before the readers get going.
+	s.fake.SetFaults(func(f *fakeprovider.Faults) { f.Latency = 2 * time.Millisecond })
+
+	dir := filepath.Join(s.dir, "straddle")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("straddle"), 512)
+	before := s.fake.Calls("ReadRange")
+
+	var mu sync.Mutex
+	published := make([]string, 0, 1000)
+	var failures atomic.Int64
+	var first atomic.Value
+	note := func(what string) {
+		failures.Add(1)
+		first.CompareAndSwap(nil, what)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var readers sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		readers.Add(1)
+		go func(seed int64) {
+			defer readers.Done()
+			rnd := rand.New(rand.NewSource(seed))
+			for ctx.Err() == nil {
+				// Read from the newest handful rather than uniformly: those
+				// are the files whose uploads are committing right now, and
+				// the window under test is only open while one commits.
+				mu.Lock()
+				n := len(published)
+				p := ""
+				if n > 0 {
+					window := 16
+					if window > n {
+						window = n
+					}
+					p = published[n-1-rnd.Intn(window)]
+				}
+				mu.Unlock()
+				if p == "" {
+					time.Sleep(time.Millisecond)
+					continue
+				}
+				got, err := s.d.FS.ReadFileRange(ctx, p, 0, int64(len(payload)))
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					note("read " + p + ": " + err.Error())
+					continue
+				}
+				if !bytes.Equal(got, payload) {
+					note("content mismatch on " + p)
+				}
+			}
+		}(int64(r) + 1)
+	}
+
+	const iters = 1000
+	for i := 0; i < iters; i++ {
+		src := filepath.Join(dir, fmt.Sprintf("tmp-%04d", i))
+		dst := filepath.Join(dir, fmt.Sprintf("file-%04d", i))
+		if err := os.WriteFile(src, payload, 0o644); err != nil {
+			cancel()
+			readers.Wait()
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			cancel()
+			readers.Wait()
+			t.Fatalf("rename %d: %v", i, err)
+		}
+		mu.Lock()
+		published = append(published, fmt.Sprintf("/straddle/file-%04d", i))
+		mu.Unlock()
+	}
+
+	// The readers keep going while the queue drains: that is the window.
+	st := waitDrain(t, s.d.Journal, 3*time.Minute)
+	cancel()
+	readers.Wait()
+	if st.Dead != 0 {
+		t.Fatalf("%d uploads dead-lettered", st.Dead)
+	}
+	if n := failures.Load(); n != 0 {
+		t.Fatalf("%d reads failed across upload completion; first: %v", n, first.Load())
+	}
+	if downloads := s.fake.Calls("ReadRange") - before; downloads != 0 {
+		t.Fatalf("%d reads went to the backend for content this process uploaded; "+
+			"the blob must be registered under the remote key before the node moves", downloads)
+	}
+
+	// Every file must still read back through the kernel now that each node
+	// carries its remote identity, which is the state a later mount starts from.
+	for i := 0; i < iters; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("file-%04d", i))
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("post-drain read %d: %v", i, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("post-drain content mismatch on %s", p)
+		}
+	}
+	if downloads := s.fake.Calls("ReadRange") - before; downloads != 0 {
+		t.Fatalf("%d downloads after the drain; every byte was already cached locally", downloads)
+	}
+}

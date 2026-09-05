@@ -897,6 +897,15 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 
 // UploadHooks builds the callbacks the uploader needs so a completed upload
 // updates the tree and seeds the read cache from the local blob.
+// publishFaultAt is a test seam at the boundaries of publishing an upload's
+// result, matching uploadCleanupFault. Production leaves the hook nil.
+func (f *FS) publishFaultAt(phase string) error {
+	if f.publishFault != nil {
+		return f.publishFault(phase)
+	}
+	return nil
+}
+
 func (f *FS) UploadHooks() upload.Hooks {
 	return upload.Hooks{
 		Authorize: f.validateUploadBinding,
@@ -993,6 +1002,12 @@ func (f *FS) UploadHooks() upload.Hooks {
 				if errors.Is(err, meta.ErrNotFound) {
 					return nil
 				}
+				return err
+			}
+			// The node now points at the remote file. Everything a reader
+			// needs under the new key had to be in place before this line;
+			// the seam is where a test observes that from the outside.
+			if err := f.publishFaultAt("remote-identity"); err != nil {
 				return err
 			}
 			if IsLocalOnly(localKey.RemoteID) {

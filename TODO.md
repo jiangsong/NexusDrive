@@ -359,9 +359,22 @@
 - **验收**：写入→改名→立刻删除，排空队列后后端不存在该文件；chaos 用例覆盖
   "删除发生在 UploadPart 与 CompleteUpload 之间"。
 
-### [~] T-00b 上传完成瞬间读取偶发 EIO
+### [x] T-00b 上传完成瞬间读取偶发 EIO（2026-09-06）
 
-- **2026-09-05 核对**：当前 `UploadHooks.OnSuccess` 已先 `cache.LinkFile` 再 `meta.UpdateByIno`，并有旧读句柄跨上传完成的回归测试。以下为历史问题记录，1000 次真实挂载压力验收仍待补。
+- **2026-09-06 完成**：验收补齐，且先证明了这个窗口确实存在而不是靠推测。
+  - **确定性回归**：`internal/vfs/publish_ordering_test.go` 的
+    `TestBlobIsCachedUnderTheRemoteKeyBeforeTheNodeMoves`。在 `meta.UpdateByIno` 之后加了一个
+    发布缝（`publishFault`，与既有 `uploadCleanupFault` 同形，生产为 nil），测试在这一点整读该
+    文件并断言 provider 下载次数为 0。把 `cache.LinkFile` 挪到这个缝之后，测试立刻报
+    「1 backend reads while publishing」——**这是先复现后修复的证据，不是事后补的空断言**。
+  - **压力验收**：`test/e2e/hardening_test.go` 的
+    `TestReadsStraddlingUploadCompletionStayLocal`。真实 FUSE 挂载上 1000 次
+    写→改名，4 个读者持续读最近发布的文件，全程零失败、零后端下载，排空后再整轮读回。
+  - **实测到的边界**：自然时序下这个窗口小于 1 毫秒。把它人为放宽 2 ms 并回退修复后，
+    1000 次里也只命中 1 次，所以**压力测试单独不足以捕获这个顺序回归**，确定性回归才是。
+    这一点写在这里，免得以后有人以为压力测试能替代它。
+
+- **2026-09-05 核对**：当前 `UploadHooks.OnSuccess` 已先 `cache.LinkFile` 再 `meta.UpdateByIno`，并有旧读句柄跨上传完成的回归测试。以下为历史问题记录。
 
 - **证据**：全量测试中 `TestMutationsSurviveAnInterruptedRequest` 出现过一次
   「改名后立刻读取 → input/output error」，单独重跑 5 次不复现。时序上处于
