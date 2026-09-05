@@ -613,10 +613,55 @@ func (f *FS) dirListing(ctx context.Context, ino uint64, force, want bool) ([]me
 	}
 
 	refreshed, err := f.dirFlight.Do(ino, func() (*directoryRefresh, error) {
-		if err := f.fetchDir(ctx, m, ino, dirNode, st.Complete); err != nil {
-			return nil, err
+		// A delta arriving mid-listing bumps this directory's refresh
+		// generation, and the fence then refuses to publish the listing that
+		// started earlier. That refusal is right — the view is stale — but it
+		// is not the reader's answer: a caller asked what is in this
+		// directory, and "someone else refreshed it while I looked" is a
+		// reason to look again, not to fail. Without the retry a scan of a
+		// large tree loses whichever directories a delta poll happened to
+		// land on: they come back empty or erroring, and correct a moment
+		// later, which is the worst shape a wrong answer can take.
+		var err error
+		for attempt := 0; attempt < listingRetries; attempt++ {
+			node := dirNode
+			if attempt > 0 {
+				// Re-read: the fence may have fired because the directory
+				// itself was replaced, and the next attempt must target what
+				// is there now.
+				fresh, getErr := f.meta.Get(ctx, ino)
+				if getErr != nil {
+					return nil, getErr
+				}
+				if !fresh.IsDir() {
+					return nil, ErrNotDir
+				}
+				node = fresh
+			}
+			err = f.fetchDir(ctx, m, ino, node, st.Complete)
+			if err == nil {
+				return &directoryRefresh{}, nil
+			}
+			if !errors.Is(err, meta.ErrListingChanged) || ctx.Err() != nil {
+				return nil, err
+			}
+			// Deliberately not short-circuiting on "the directory is complete
+			// now": a complete flag can predate this request, and treating it
+			// as this caller's answer hands back a listing nobody checked —
+			// which is how an empty directory reads as a real one.
+			//
+			// Retrying immediately loses again: what supersedes the listing is
+			// a batch of changes being applied, and it bumps this directory
+			// more than once while it runs. Standing back briefly is what lets
+			// the batch finish, and it is bounded so a directory under a
+			// constant stream of changes still answers instead of spinning.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(listingBackoff << attempt):
+			}
 		}
-		return &directoryRefresh{}, nil
+		return nil, err
 	})
 	if err != nil {
 		// Serve a stale listing rather than failing when we have one.
@@ -634,6 +679,17 @@ func (f *FS) dirListing(ctx context.Context, ino uint64, force, want bool) ([]me
 	}
 	return refreshed.children(ctx, f.meta, ino)
 }
+
+// listingRetries bounds how many times a listing is re-run after a concurrent
+// refresh superseded it. A steady stream of deltas for one directory would
+// otherwise let a reader retry indefinitely; after this many attempts the
+// caller gets the stale-but-complete listing, or the error.
+const listingRetries = 5
+
+// listingBackoff is the first pause between attempts; it doubles each time,
+// so five attempts stand back for at most about a quarter of a second in
+// total before the caller is told the directory could not be read.
+const listingBackoff = 5 * time.Millisecond
 
 // fetchDir lists ino from the provider and applies the listing. wasComplete
 // says whether a listing was already cached, which decides whether the kernel

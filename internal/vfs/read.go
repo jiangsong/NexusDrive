@@ -194,6 +194,25 @@ func (f *FS) Read(ctx context.Context, h *Handle, buf []byte, off int64) (int, e
 	return f.readCached(ctx, h, buf, off)
 }
 
+// errLocalOnlyGone marks a read of a file that exists only as a committed
+// local blob whose cache entry is no longer under the handle's key. It is
+// almost always the upload landing underneath the reader, which is
+// recoverable; anything else is a lost blob and stays an error.
+var errLocalOnlyGone = errors.New("vfs: local-only cache entry is gone")
+
+// adoptRemoteIdentity re-reads the node and, if the upload has landed, moves
+// the handle onto the remote identity the bytes now live under.
+func (f *FS) adoptRemoteIdentity(ctx context.Context, h *Handle) (meta.Node, bool) {
+	fresh, err := f.meta.Get(ctx, h.Ino)
+	if err != nil || IsLocalOnly(fresh.RemoteID) || fresh.RemoteID == "" {
+		return meta.Node{}, false
+	}
+	h.mu.Lock()
+	h.Node = fresh
+	h.mu.Unlock()
+	return fresh, true
+}
+
 func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (int, error) {
 	// Stop detached work for the previous sequential run before waiting on
 	// the new range. Doing this after the read would let the stale prefetches
@@ -209,16 +228,8 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 	key := h.fileKey()
 	if IsLocalOnly(key.RemoteID) {
 		if _, known := f.cache.Present(key); known == 0 {
-			// The upload landed and released the local-only entry, but
-			// this handle still carries the identity from before. Take the
-			// node's current identity: the same bytes now sit under the
-			// remote key, or come from the backend.
-			if fresh, err := f.meta.Get(ctx, h.Ino); err == nil && !IsLocalOnly(fresh.RemoteID) && fresh.RemoteID != "" {
-				h.mu.Lock()
-				h.Node = fresh
-				h.mu.Unlock()
-				key = h.fileKey()
-				size = fresh.Size
+			if adopted, ok := f.adoptRemoteIdentity(ctx, h); ok {
+				key, size = h.fileKey(), adopted.Size
 				if off >= size {
 					return 0, io.EOF
 				}
@@ -253,6 +264,24 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 				}
 			}
 			if err != nil {
+				// The entry can also be released between the check above and
+				// this read: the upload completes, the node moves to the
+				// remote identity and the local-only entry is forgotten while
+				// this loop is in it. Retrying under the node's current
+				// identity is the same recovery, applied where it actually
+				// fails rather than only where it is convenient to look.
+				if total == 0 && IsLocalOnly(key.RemoteID) && errors.Is(err, errLocalOnlyGone) {
+					if adopted, ok := f.adoptRemoteIdentity(ctx, h); ok {
+						key, size = h.fileKey(), adopted.Size
+						if off >= size {
+							return 0, io.EOF
+						}
+						if off+int64(len(buf)) > size {
+							buf = buf[:size-off]
+						}
+						continue
+					}
+				}
 				if total > 0 {
 					return total, nil
 				}
@@ -379,7 +408,7 @@ func (f *FS) readSubBlock(ctx context.Context, h *Handle, key cache.FileKey, idx
 // fetchSub pulls one aligned range of a block from the backend.
 func (f *FS) fetchSub(ctx context.Context, h *Handle, key cache.FileKey, idx, subOff, subLen int64) ([]byte, error) {
 	if IsLocalOnly(h.Node.RemoteID) {
-		return nil, fmt.Errorf("vfs: local-only file %q is missing from the cache", h.Node.Name)
+		return nil, fmt.Errorf("%w: %q", errLocalOnlyGone, h.Node.Name)
 	}
 	// Not pooled: this buffer is handed to every waiter on the flight and
 	// then to the cache, so there is no point at which it is known to have
@@ -481,10 +510,13 @@ func (f *FS) fetchBlock(ctx context.Context, h *Handle, key cache.FileKey, idx i
 		return nil, io.EOF
 	}
 	if IsLocalOnly(h.Node.RemoteID) {
-		// The file exists only as the committed blob behind the cache. A miss
-		// here means the cache entry was lost, which is a bug worth surfacing
-		// rather than a provider request for an id the remote never had.
-		return nil, fmt.Errorf("vfs: local-only file %q is missing from the cache", h.Node.Name)
+		// The file exists only as the committed blob behind the cache. The
+		// caller retries once under the node's current identity, because the
+		// usual cause is the upload landing underneath this read; if the node
+		// is still local-only the entry really is lost, and that surfaces
+		// rather than becoming a provider request for an id the remote never
+		// had.
+		return nil, fmt.Errorf("%w: %q", errLocalOnlyGone, h.Node.Name)
 	}
 	// Not pooled: the cache keeps this buffer as the block's in-memory
 	// copy while readers copy out of it, so it has no safe moment to be

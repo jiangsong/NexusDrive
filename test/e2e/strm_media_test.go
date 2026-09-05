@@ -22,7 +22,7 @@ import (
 // the way a scraper expects — one directory per title — and a read-only WebDAV
 // endpoint over it. No FUSE mount: a media server reaching CloudFS this way is
 // the case that does not need one.
-func mediaLibrary(t *testing.T, films int, dirTTL time.Duration) (*daemon.Daemon, *fakeprovider.Fake, *webdavsrv.Running, map[string]string) {
+func mediaLibrary(t *testing.T, films int, dirTTL time.Duration, background bool) (*daemon.Daemon, *fakeprovider.Fake, *webdavsrv.Running, map[string]string) {
 	t.Helper()
 	base := t.TempDir()
 	cfg := config.Default()
@@ -44,7 +44,7 @@ func mediaLibrary(t *testing.T, films int, dirTTL time.Duration) (*daemon.Daemon
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	d, err := daemon.Open(ctx, daemon.Options{Config: &cfg, Version: "strm-e2e"})
+	d, err := daemon.Open(ctx, daemon.Options{Config: &cfg, Version: "strm-e2e", NoBackground: !background})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,10 @@ func TestSTRMGenerationOverAThousandFilmsHasABoundedBackendCost(t *testing.T) {
 		t.Skip("1000-film library scan")
 	}
 	const films = 1000
-	_, fake, running, _ := mediaLibrary(t, films, 24*time.Hour)
+	// The cost of the scan is measured without the daemon's background work:
+	// the delta poller and the prefetcher make provider calls of their own, and
+	// counting those as the walk's cost measures the wrong thing.
+	d, fake, running, _ := mediaLibrary(t, films, 24*time.Hour, false)
 	out := t.TempDir()
 	client := &http.Client{Timeout: 60 * time.Second}
 	generate := func(prune bool) strmgen.Stats {
@@ -103,7 +106,25 @@ func TestSTRMGenerationOverAThousandFilmsHasABoundedBackendCost(t *testing.T) {
 	stats := generate(false)
 	cold := fake.TotalCalls() - before
 	if stats.Media != films || stats.Written != films {
-		t.Fatalf("generated %d media entries and wrote %d, want %d of each", stats.Media, stats.Written, films)
+		ctx := context.Background()
+		titles, derr := d.FS.ReadDirPath(ctx, "/Films")
+		short := []string{}
+		for _, title := range titles {
+			kids, err := d.FS.ReadDirPath(ctx, "/Films/"+title.Name)
+			if err != nil || len(kids) != 2 {
+				short = append(short, fmt.Sprintf("%s:%d/%v", title.Name, len(kids), err))
+			}
+		}
+		missing := []string{}
+		for i := 0; i < films; i++ {
+			title := fmt.Sprintf("Film %04d (20%02d)", i, i%20+10)
+			if _, err := os.Stat(filepath.Join(out, title, title+".strm")); err != nil {
+				missing = append(missing, title)
+			}
+		}
+		t.Fatalf("generated %d media entries and wrote %d, want %d; stats=%+v; VFS lists %d titles (%v);"+
+			" short dirs: %v; .strm missing: %v",
+			stats.Media, stats.Written, films, stats, len(titles), derr, short, missing)
 	}
 
 	// The bound is one enumeration of the tree and nothing more: each directory
@@ -162,7 +183,7 @@ func TestSTRMGenerationOverAThousandFilmsHasABoundedBackendCost(t *testing.T) {
 // output must survive. Deleting those would be the kind of damage that is only
 // noticed later.
 func TestSTRMPruneRemovesOnlyWhatItGenerated(t *testing.T) {
-	d, fake, running, titleDirs := mediaLibrary(t, 3, 24*time.Hour)
+	d, fake, running, titleDirs := mediaLibrary(t, 3, 24*time.Hour, false)
 	out := t.TempDir()
 	client := &http.Client{Timeout: 30 * time.Second}
 	generate := func(prune bool) strmgen.Stats {
