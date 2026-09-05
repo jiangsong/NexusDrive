@@ -85,6 +85,36 @@ tombstone 的完整本地发布。首次操作只接受该上传仍是原 inode 
 此流程不调用 provider，不证明或撤销任何远端结果。在线/离线管理入口与重放
 防护已有测试；首次历史版本清理、长期故障/真实环境与完整历史保留仍需继续完善。
 
+## 上传成功之后的回收（2026-09-06）
+
+暂存 blob 与读缓存是**同一个 inode 的两个硬链接**：`OnSuccess` 先把它装进缓存
+（`cache.LinkFile`），再由 uploader 调 `Journal.Succeed`。此前 `Succeed` 只把行改成
+`done`，队列自己那条链接从不释放，于是：
+
+- 缓存可以淘汰自己那条链接，**字节却永远回收不掉**——journal 仍然指着这个对象；
+- `Recover` 的存活集合是"表里所有行"，`done` 行也算，所以重启也不会清；
+- 净效果是**用户写过的每一个文件都在 `<journal>/objects/` 留一份完整副本，直到重装**。
+  三次上传后 `ls -l` 看到的就是 `links=2`。
+
+现在 `Succeed` 在同一个事务里把 `blob_path` 清空并记 `done_at`，事务提交后再
+`removeBlobIfUnreferenced`（内容寻址去重时另一条待传行仍引用则不删，死信的
+payload 也不动——那正是 `uploads retry` 要重发的东西）。清空与删除之间崩溃只会留下
+一个没有任何行指向的对象，而那恰好是 `Recover` 负责清掉的情况。
+
+终态行本身有界：保留最近 `doneHistory`（200）条且完成时间在 `doneRetention`（5 分钟）
+以内的不动，两个条件都越过才回收。留着是因为 `strict` 模式的写入方要靠轮询这一行
+看到上传完成；年龄下限意味着要把行从等待者脚下抽走，它得先卡住好几分钟。
+journal schema v12 → v13（新增 `done_at`，升级前完成的行为 0，一律保留）。
+
+服务端不能做的复制走同一条路径：payload 暂存在 `copies/`，`SubmitCopy` 把它交给上传行，
+因此上传成功时一并释放，而不是等到下次重启的 `copyRetention` 才清。批量复制不再需要
+双倍磁盘直到守护进程重启。
+
+回归：`internal/vfs/upload_reclaim_test.go`（三次成功上传后对象目录必须为空，
+且回读零后端请求——证明缓存那条链接还在；另一条断言完成的复制不留 payload，
+回退修复后报 "left 1 payloads staged"）、`internal/journal/succeed_reclaim_test.go`
+（共享内容、死信 payload、终态历史上下界）。
+
 MCP 的 `discard_upload` 也调用同一 VFS 协调器，并要求 `confirm=true`。它只向没有
 `--allow` 路径限制的服务开放：元数据删除后失败会留下无虚拟路径的 purging 意图，
 若首次允许受限服务操作，后续就无法再次证明相同路径权限。受限 MCP 仍可在当前

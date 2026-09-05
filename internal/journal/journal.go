@@ -283,6 +283,10 @@ func (j *Journal) StagingDir() string { return filepath.Join(j.dir, "staging") }
 // ObjectsDir holds committed blobs awaiting upload.
 func (j *Journal) ObjectsDir() string { return filepath.Join(j.dir, "objects") }
 
+// CopiesDir holds the payload of a copy the backend could not do server-side,
+// until the upload it is handed to finishes.
+func (j *Journal) CopiesDir() string { return filepath.Join(j.dir, "copies") }
+
 const journalSchema = `
 CREATE TABLE IF NOT EXISTS uploads (
   id               TEXT PRIMARY KEY,
@@ -305,7 +309,8 @@ CREATE TABLE IF NOT EXISTS uploads (
   meta_identity    TEXT NOT NULL DEFAULT '',
   mount_prefix     TEXT NOT NULL DEFAULT '',
   mount_root_id    TEXT NOT NULL DEFAULT '',
-  account_binding  TEXT NOT NULL DEFAULT ''
+  account_binding  TEXT NOT NULL DEFAULT '',
+  done_at          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS uploads_state ON uploads(state, next_retry_at);
 
@@ -353,7 +358,7 @@ CREATE TABLE IF NOT EXISTS upload_resume_history (
 //
 //	determine, so an ambiguous answer becomes a question reconciliation asks
 //	the provider rather than a guess.
-const journalSchemaVersion = 12
+const journalSchemaVersion = 13
 
 func (j *Journal) migrate() error {
 	if _, err := j.db.Exec(journalSchema); err != nil {
@@ -427,6 +432,10 @@ func (j *Journal) migrate() error {
 			"mount_prefix TEXT NOT NULL DEFAULT ''",
 			"mount_root_id TEXT NOT NULL DEFAULT ''",
 			"account_binding TEXT NOT NULL DEFAULT ''",
+			// v13: when an upload finished, so completed rows can be reclaimed.
+			// Rows completed before the upgrade have 0 and are kept: their age
+			// is unknown, and keeping a row costs almost nothing.
+			"done_at INTEGER NOT NULL DEFAULT 0",
 		} {
 			if _, err := j.db.Exec(`ALTER TABLE uploads ADD COLUMN ` + column); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("journal: migrate upload binding: %w", err)
@@ -828,21 +837,71 @@ func (j *Journal) Parts(ctx context.Context, id string) ([]Part, error) {
 	return out, rows.Err()
 }
 
-// Succeed marks an upload done and removes its parts. The blob stays on disk;
-// the caller adopts it into the read cache first.
+// doneHistory and doneRetention bound what a finished upload leaves behind.
+// A completed row is kept so that a strict-mode writer waiting on the upload
+// can observe it finishing, and so recent history is inspectable; beyond that
+// it is only a row nobody reads. Both bounds have to hold before one is
+// reclaimed: the age floor means a waiter would have to be stalled for minutes
+// before its row could be taken out from under it.
+const (
+	doneHistory   = 200
+	doneRetention = 5 * time.Minute
+)
+
+// Succeed marks an upload done, removes its parts and releases the queue's
+// hold on the blob.
+//
+// The blob is a hard link shared with the read cache, which the caller
+// installs before calling this (see the upload hooks in the VFS). Keeping the
+// queue's link meant the bytes of every file ever uploaded stayed on disk for
+// the life of the installation: the cache could evict its own link and never
+// reclaim anything, because the journal still named the object. The content is
+// on the backend and in the cache by now; the queue has no further use for it.
+//
+// The row's blob_path is cleared in the same transaction that marks it done,
+// so a crash between the two leaves an object no row names — which is exactly
+// what Recover reclaims.
 func (j *Journal) Succeed(ctx context.Context, id string) error {
-	return j.tx(ctx, func(tx *sql.Tx) error {
+	var blob string
+	err := j.tx(ctx, func(tx *sql.Tx) error {
 		if err := guardNotCancelled(tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE uploads SET state = ?, last_error = '' WHERE id = ?`, string(StateDone), id); err != nil {
+		if err := tx.QueryRow(`SELECT blob_path FROM uploads WHERE id = ?`, id).Scan(&blob); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("journal: succeed: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE uploads SET state = ?, last_error = '', blob_path = '', done_at = ? WHERE id = ?`,
+			string(StateDone), unixMilli(j.now()), id); err != nil {
 			return fmt.Errorf("journal: succeed: %w", err)
 		}
 		if _, err := tx.Exec(`DELETE FROM upload_parts WHERE upload_id = ?`, id); err != nil {
 			return fmt.Errorf("journal: succeed: %w", err)
 		}
-		return nil
+		return pruneDoneTx(tx, unixMilli(j.now().Add(-doneRetention)))
 	})
+	if err != nil {
+		return err
+	}
+	// Another row can still be sharing this content — two writes of the same
+	// bytes deduplicate onto one object — so this only unlinks when nothing
+	// else names it.
+	j.removeBlobIfUnreferenced(ctx, blob)
+	return nil
+}
+
+// pruneDoneTx reclaims completed rows past both bounds. Done rows carry no
+// blob and no parts, so this is a row delete and nothing else.
+func pruneDoneTx(tx *sql.Tx, before int64) error {
+	_, err := tx.Exec(`DELETE FROM uploads WHERE state = ? AND done_at > 0 AND done_at < ?
+AND id NOT IN (SELECT id FROM uploads WHERE state = ? AND done_at > 0 ORDER BY done_at DESC, id DESC LIMIT ?)`,
+		string(StateDone), before, string(StateDone), doneHistory)
+	if err != nil {
+		return fmt.Errorf("journal: prune completed uploads: %w", err)
+	}
+	return nil
 }
 
 // Retry reschedules an upload after a failure.
