@@ -1,0 +1,29 @@
+# Minimal container configuration. Add remotes and layouts before using the
+# filesystem tools; an empty layout is still useful for an MCP transport smoke
+# test. Keep this directory writable when providers rotate credentials.
+secrets:
+  backend: file
+  dir: /config/secrets
+
+cache:
+  dir: /var/lib/cloudfs
+  max_size: 50GiB
+  min_free: 1GiB
+  block_size: 4MiB
+  sub_block_size: 16KiB
+
+journal:
+  durability: power
+
+remotes: {}
+mounts: []
+
+mcp:
+  http: 0.0.0.0:8765
+  allow: [/]
+  read_only: true
+
+# The HTTP control API intentionally cannot bind outside container loopback.
+# Use the MCP tools or `docker compose exec cloudfs-mcp cloudfs status`.
+control:
+  socket: /var/lib/cloudfs/control.sock

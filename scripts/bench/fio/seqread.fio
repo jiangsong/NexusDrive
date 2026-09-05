@@ -1,0 +1,10 @@
+[global]
+directory=${DIR}
+ioengine=psync
+direct=0
+group_reporting=1
+time_based=0
+[seqread-1m]
+rw=read
+bs=1M
+filename=big.bin

@@ -1,0 +1,11 @@
+[global]
+directory=${DIR}
+ioengine=psync
+direct=0
+group_reporting=1
+[seqwrite-64m]
+rw=write
+bs=1M
+size=64M
+filename=scratch/fio-seqwrite.bin
+end_fsync=0

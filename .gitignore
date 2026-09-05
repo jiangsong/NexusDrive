@@ -1,0 +1,20 @@
+# Build and test output.
+/cloudfs
+/dist/
+*.out
+*.prof
+*.test
+/coverage.*
+
+# Local runtime state and credentials. Examples under deploy/ remain tracked.
+/config.yaml
+/secrets/
+*.db
+*.db-shm
+*.db-wal
+*.sock
+
+# Editors and operating systems.
+.DS_Store
+.idea/
+.vscode/

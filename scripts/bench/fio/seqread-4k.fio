@@ -1,0 +1,9 @@
+[global]
+directory=${DIR}
+ioengine=psync
+direct=0
+group_reporting=1
+[seqread-4k]
+rw=read
+bs=4k
+filename=big-quarter.bin

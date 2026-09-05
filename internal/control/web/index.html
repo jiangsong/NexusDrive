@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CloudFS 状态</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background: #0a0d12; color: #e8edf5 }
+    * { box-sizing: border-box }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 15% 0, #18324a 0, transparent 36rem), #0a0d12 }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 64px }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 28px }
+    h1 { margin: 0; font-size: clamp(30px, 6vw, 56px); letter-spacing: -.045em }
+    .eyebrow, .muted { color: #91a0b5 }
+    .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: 12px; margin-bottom: 8px }
+    #health { display: flex; align-items: center; gap: 8px; font-weight: 650 }
+    #health::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #f4b942; box-shadow: 0 0 14px currentColor }
+    #health.ok::before { background: #45d483 }
+    #health.bad::before { background: #ff6470 }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px }
+    .card { padding: 20px; border: 1px solid #253142; border-radius: 16px; background: rgb(14 20 29 / 82%); box-shadow: 0 18px 50px rgb(0 0 0 / 20%) }
+    .label { color: #91a0b5; font-size: 13px; margin-bottom: 9px }
+    .value { font-size: 28px; font-weight: 720; letter-spacing: -.03em }
+    .detail { margin-top: 7px; color: #b9c3d1; font-size: 13px; line-height: 1.5 }
+    h2 { margin: 32px 0 13px; font-size: 18px }
+    table { width: 100%; border-collapse: collapse; overflow: hidden }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid #253142; font-size: 14px }
+    th { color: #91a0b5; font-weight: 550 }
+    .panel { border: 1px solid #253142; border-radius: 16px; overflow: hidden; background: rgb(14 20 29 / 82%) }
+    button { border: 1px solid #40536d; border-radius: 8px; padding: 6px 10px; margin: 2px 6px 2px 0; color: #e8edf5; background: #172231; cursor: pointer }
+    button:hover { border-color: #6f94bd; background: #203247 }
+    button.danger { color: #ffb8bd; border-color: #7c3d46 }
+    #upload-action { min-height: 1.5em; margin: 10px 2px; color: #b9c3d1; font-size: 13px }
+    #warnings { margin: 0; padding: 14px 18px 14px 36px; color: #ffd17a }
+    footer { margin-top: 28px; color: #718096; font-size: 12px }
+    @media (max-width: 620px) { header { align-items: start; flex-direction: column } th:nth-child(3), td:nth-child(3) { display: none } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><div class="eyebrow">local control plane</div><h1>CloudFS</h1></div>
+    <div id="health">正在读取状态</div>
+  </header>
+  <section class="grid" aria-label="核心状态">
+    <article class="card"><div class="label">缓存</div><div class="value" id="cache">—</div><div class="detail" id="cache-detail">—</div></article>
+    <article class="card"><div class="label">上传队列</div><div class="value" id="uploads">—</div><div class="detail" id="upload-detail">—</div></article>
+    <article class="card"><div class="label">元数据</div><div class="value" id="meta">—</div><div class="detail" id="meta-detail">—</div></article>
+    <article class="card"><div class="label">运行时间</div><div class="value" id="uptime">—</div><div class="detail" id="version">—</div></article>
+  </section>
+  <h2>需要处理的上传</h2>
+  <div class="panel"><table><thead><tr><th>文件</th><th>Remote</th><th>状态</th><th>错误</th><th>操作</th></tr></thead><tbody id="upload-rows"></tbody></table></div>
+  <div id="upload-action" role="status" aria-live="polite"></div>
+  <h2>挂载与远端</h2>
+  <div class="panel"><table><thead><tr><th>路径</th><th>Remote</th><th>模式</th></tr></thead><tbody id="mounts"></tbody></table></div>
+  <h2>请求与熔断</h2>
+  <div class="panel"><table><thead><tr><th>Remote</th><th>调用</th><th>读 / 写</th><th>状态</th></tr></thead><tbody id="remotes"></tbody></table></div>
+  <h2>代理出口</h2>
+  <div class="panel"><table><thead><tr><th>出口</th><th>延迟</th><th>状态</th></tr></thead><tbody id="proxies"></tbody></table></div>
+  <section id="warning-section" hidden><h2>警告</h2><div class="panel"><ul id="warnings"></ul></div></section>
+  <footer>只读页面 · 数据来自 /status · 每 5 秒刷新</footer>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
+  function text(id, value) { $(id).textContent = value; }
+  function button(label, action, danger) { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; if (danger) b.className = 'danger'; b.addEventListener('click', action); return b; }
+  async function mutateUpload(action, id, confirmed) {
+    text('upload-action', `正在执行 ${action}…`);
+    try {
+      const body = {id}; if (confirmed) body.confirm = true;
+      const response = await fetch(`/uploads/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CloudFS-Control': '1'}, body: JSON.stringify(body)});
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      text('upload-action', `${id}：${action} 已接受`); await refresh();
+    } catch (error) { text('upload-action', `${id}：${error.message}`); }
+  }
+  async function loadUploads() {
+    const rows = $('upload-rows'); rows.replaceChildren();
+    try {
+      const response = await fetch('/uploads?limit=50', {cache: 'no-store'}); if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      for (const upload of (payload.uploads || [])) {
+        const tr = document.createElement('tr');
+        for (const value of [upload.name, upload.remote, upload.state, upload.last_error || '—']) { const td = document.createElement('td'); td.textContent = value || '—'; tr.append(td); }
+        const actions = document.createElement('td');
+        if (upload.state === 'dead') actions.append(button('重试', () => mutateUpload('retry', upload.id, false)), button('停止', () => mutateUpload('cancel', upload.id, false)));
+        if (upload.state === 'pending' || upload.state === 'uploading') actions.append(button('停止', () => mutateUpload('cancel', upload.id, false)));
+        if (upload.state === 'cancelled') {
+          actions.append(button('确认恢复', () => { if (window.confirm('恢复可能在远端产生重复文件或覆盖。确认已核对目标后继续？')) mutateUpload('resume', upload.id, true); }));
+          actions.append(button('永久丢弃本地版本', () => { if (window.prompt(`此操作不删除远端数据，但会永久丢弃本地保留版本。请输入上传 ID 确认：\n${upload.id}`) === upload.id) mutateUpload('drop', upload.id, true); }, true));
+        }
+        if (!actions.children.length) actions.textContent = '等待状态稳定';
+        tr.append(actions); rows.append(tr);
+      }
+      if (!rows.children.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 5; td.className = 'muted'; td.textContent = '当前没有活动、死信或已取消上传'; tr.append(td); rows.append(tr); }
+    } catch (error) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 5; td.textContent = `上传列表不可用：${error.message}`; tr.append(td); rows.append(tr); }
+  }
+  function render(s) {
+    const cache = s.cache || {}, uploads = s.uploads || {}, meta = s.meta || {};
+    text('cache', cache.bytes_human || '0 B');
+    text('cache-detail', `命中 ${Math.round((cache.hit_ratio || 0) * 100)}% · ${num(cache.blocks)} 块 · ${num(cache.evictions)} 次淘汰`);
+    const active = (uploads.pending || 0) + (uploads.uploading || 0);
+    text('uploads', num(active));
+    text('upload-detail', `等待 ${num(uploads.pending)} · 传输 ${num(uploads.uploading)} · 死信 ${num(uploads.dead)}`);
+    text('meta', num(meta.nodes));
+    text('meta-detail', `${num(meta.dirs)} 目录 · ${num(meta.complete_dirs)} 已完整缓存`);
+    text('uptime', s.uptime || '刚刚启动');
+    text('version', `版本 ${s.version || 'unknown'} · durability ${s.durability || 'unknown'}`);
+    const rows = $('mounts'); rows.replaceChildren();
+    for (const m of (s.mounts || [])) {
+      const tr = document.createElement('tr');
+      for (const value of [m.prefix, m.remote, m.mode]) { const td = document.createElement('td'); td.textContent = value || '—'; tr.append(td); }
+      rows.append(tr);
+    }
+    if (!rows.children.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 3; td.className = 'muted'; td.textContent = '没有已配置的挂载'; tr.append(td); rows.append(tr); }
+    const remoteRows = $('remotes'); remoteRows.replaceChildren();
+    for (const remote of (s.remotes || [])) {
+      const tr = document.createElement('tr');
+      const values = [remote.remote, num(remote.calls_total), `${num(remote.read_bytes)} / ${num(remote.write_bytes)}`, remote.breaker_open ? `熔断至 ${remote.breaker_until || '稍后'}` : '可用'];
+      for (const value of values) { const td = document.createElement('td'); td.textContent = value || '—'; tr.append(td); }
+      remoteRows.append(tr);
+    }
+    if (!remoteRows.children.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 4; td.className = 'muted'; td.textContent = '没有远端调用数据'; tr.append(td); remoteRows.append(tr); }
+    const proxyRows = $('proxies'); proxyRows.replaceChildren();
+    for (const proxy of (s.proxies || [])) {
+      const tr = document.createElement('tr');
+      for (const value of [proxy.name, proxy.latency_ms ? `${proxy.latency_ms} ms` : '—', proxy.healthy ? '健康' : (proxy.error || '不可用')]) { const td = document.createElement('td'); td.textContent = value || '—'; tr.append(td); }
+      proxyRows.append(tr);
+    }
+    if (!proxyRows.children.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 3; td.className = 'muted'; td.textContent = '使用直连或尚无探测数据'; tr.append(td); proxyRows.append(tr); }
+    const warnings = $('warnings'); warnings.replaceChildren();
+    for (const warning of (s.warnings || [])) { const li = document.createElement('li'); li.textContent = warning; warnings.append(li); }
+    $('warning-section').hidden = !warnings.children.length;
+    const health = $('health'); health.className = (uploads.dead || 0) > 0 ? 'bad' : 'ok'; health.textContent = (uploads.dead || 0) > 0 ? '需要处理' : '运行正常';
+  }
+  async function refresh() {
+    try { const response = await fetch('/status', {cache: 'no-store'}); if (!response.ok) throw new Error(`HTTP ${response.status}`); render(await response.json()); await loadUploads(); }
+    catch (error) { const health = $('health'); health.className = 'bad'; health.textContent = `状态不可用：${error.message}`; }
+  }
+  refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

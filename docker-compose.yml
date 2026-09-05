@@ -1,0 +1,63 @@
+name: cloudfs
+
+services:
+  cloudfs-mcp:
+    profiles: [mcp]
+    build:
+      context: .
+      args:
+        VERSION: ${CLOUDFS_VERSION:-dev}
+    image: ${CLOUDFS_IMAGE:-cloudfs:local}
+    user: ${CLOUDFS_UID:-1000}:${CLOUDFS_GID:-1000}
+    command: [mcp, --http, 0.0.0.0:8765]
+    environment:
+      # cloudfs itself refuses this non-loopback listener when the value is empty.
+      CLOUDFS_MCP_TOKEN: ${CLOUDFS_MCP_TOKEN:-}
+      CLOUDFS_WEBDAV_TOKEN: ${CLOUDFS_WEBDAV_TOKEN:-}
+    volumes:
+      - type: bind
+        source: ${CLOUDFS_CONFIG_DIR:-./deploy}
+        target: /config
+      - type: bind
+        source: ${CLOUDFS_CACHE_DIR:-./cloudfs-cache}
+        target: /var/lib/cloudfs
+    ports:
+      - 127.0.0.1:${CLOUDFS_MCP_PORT:-8765}:8765
+      - ${CLOUDFS_WEBDAV_HOST:-127.0.0.1}:${CLOUDFS_WEBDAV_PORT:-8080}:8080
+    restart: unless-stopped
+
+  # Linux only. Start this profile instead of cloudfs-mcp; both processes must
+  # never own the same journal. The elevated settings are limited to FUSE and
+  # are intentionally visible here rather than hidden in an entrypoint.
+  cloudfs-mount:
+    profiles: [fuse]
+    build:
+      context: .
+      args:
+        VERSION: ${CLOUDFS_VERSION:-dev}
+    image: ${CLOUDFS_IMAGE:-cloudfs:local}
+    user: ${CLOUDFS_UID:-1000}:${CLOUDFS_GID:-1000}
+    command: [mount, /mnt/cloud, --config, /config/config.yaml, --foreground]
+    environment:
+      CLOUDFS_WEBDAV_TOKEN: ${CLOUDFS_WEBDAV_TOKEN:-}
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - type: bind
+        source: ${CLOUDFS_CONFIG_DIR:-./deploy}
+        target: /config
+      - type: bind
+        source: ${CLOUDFS_CACHE_DIR:-./cloudfs-cache}
+        target: /var/lib/cloudfs
+      - type: bind
+        source: ${CLOUDFS_MOUNT_DIR:-./mnt}
+        target: /mnt/cloud
+        bind:
+          propagation: rshared
+    restart: unless-stopped
+    ports:
+      - ${CLOUDFS_WEBDAV_HOST:-127.0.0.1}:${CLOUDFS_WEBDAV_PORT:-8080}:8080

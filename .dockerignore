@@ -1,0 +1,9 @@
+.git
+.github
+dist
+cloudfs
+*.out
+*.prof
+*.test
+docs/perf-raw*
+docs/perf-report.html

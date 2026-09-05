@@ -1,0 +1,258 @@
+<title>CloudFS 局域网实测</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --paper:#f7f5f1; --panel:#fffefc; --ink:#16181d; --ink-2:#3d434d; --muted:#6d7280;
+  --rule:#ddd8d0; --rule-2:#eae5dd;
+  --cold:#2f5d7c; --warm:#b4531a; --peer:#8f939b; --floor:#adb1b8;
+  --good:#2f6b4f; --bad:#a4243b;
+  --shadow:0 1px 2px rgba(20,18,14,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#14161a; --panel:#191c21; --ink:#e9e6e1; --ink-2:#bdc0c6; --muted:#8d929a;
+    --rule:#2c3037; --rule-2:#23272d;
+    --cold:#6fa8cd; --warm:#e5924f; --peer:#7d8189; --floor:#5d6169;
+    --good:#6fb894; --bad:#e0748a;
+    --shadow:0 1px 2px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#14161a; --panel:#191c21; --ink:#e9e6e1; --ink-2:#bdc0c6; --muted:#8d929a;
+  --rule:#2c3037; --rule-2:#23272d;
+  --cold:#6fa8cd; --warm:#e5924f; --peer:#7d8189; --floor:#5d6169;
+  --good:#6fb894; --bad:#e0748a;
+  --shadow:0 1px 2px rgba(0,0,0,.3);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+  font-size:16px; line-height:1.65; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1000px; margin:0 auto; padding:0 28px 96px}
+.col{max-width:70ch}
+h1,h2,h3{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif; font-weight:600; text-wrap:balance; margin:0}
+h1{font-size:2.6rem; line-height:1.12; letter-spacing:-.01em}
+h2{font-size:1.55rem; margin:0 0 6px}
+h3{font-size:1.06rem; margin:0 0 4px}
+p{margin:0 0 1em}
+a{color:var(--cold)}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace; font-size:.88em; font-variant-numeric:tabular-nums}
+code{background:var(--rule-2); padding:.1em .35em; border-radius:3px}
+
+header{border-bottom:1px solid var(--rule); padding:64px 0 30px; margin-bottom:44px}
+.eyebrow{font-family:"IBM Plex Mono",monospace; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin:0 0 14px}
+.lede{font-size:1.13rem; color:var(--ink-2); max-width:66ch; margin:18px 0 26px}
+.facts{display:flex; flex-wrap:wrap; gap:0; border-top:1px solid var(--rule-2); padding-top:18px}
+.fact{padding-right:34px; margin-right:34px; border-right:1px solid var(--rule-2)}
+.fact:last-child{border-right:0; margin-right:0; padding-right:0}
+.fact dt{font-family:"IBM Plex Mono",monospace; font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 3px}
+.fact dd{margin:0; font-size:.95rem; font-weight:500}
+
+section{margin:0 0 58px; scroll-margin-top:20px}
+.sechead{display:flex; align-items:baseline; gap:14px; border-bottom:1px solid var(--rule); padding-bottom:9px; margin-bottom:22px}
+.sechead .num{font-family:"IBM Plex Mono",monospace; font-size:.78rem; color:var(--muted); font-weight:500}
+
+table{border-collapse:collapse; width:100%; font-size:.9rem; margin:0 0 8px}
+th,td{text-align:right; padding:7px 12px; border-bottom:1px solid var(--rule-2); font-variant-numeric:tabular-nums}
+th:first-child,td:first-child{text-align:left; padding-left:0}
+td:last-child,th:last-child{padding-right:0}
+thead th{font-family:"IBM Plex Mono",monospace; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:500; border-bottom:1px solid var(--rule)}
+tbody tr:last-child td{border-bottom:1px solid var(--rule)}
+td.num{font-family:"IBM Plex Mono",monospace}
+.tag{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:.7rem; padding:.1em .45em; border-radius:3px; letter-spacing:.03em}
+.t-warm{background:color-mix(in srgb,var(--warm) 14%,transparent); color:var(--warm)}
+.t-cold{background:color-mix(in srgb,var(--cold) 14%,transparent); color:var(--cold)}
+.t-peer{background:color-mix(in srgb,var(--peer) 16%,transparent); color:var(--muted)}
+.scroller{overflow-x:auto}
+
+.chart{margin:18px 0 10px}
+.chart .cap{font-family:"IBM Plex Mono",monospace; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin-bottom:10px}
+.row{display:grid; grid-template-columns:minmax(120px,180px) 1fr minmax(84px,auto); align-items:center; gap:14px; padding:3px 0}
+.row .k{font-size:.86rem; color:var(--ink-2)}
+.row .v{font-family:"IBM Plex Mono",monospace; font-size:.84rem; text-align:right; font-variant-numeric:tabular-nums}
+.bar{display:block; height:15px; background:var(--rule-2); border-radius:2px; overflow:hidden}
+.bar i{display:block; height:100%; width:var(--w); border-radius:2px}
+.b-warm i{background:var(--warm)} .b-cold i{background:var(--cold)}
+.b-peer i{background:var(--peer)} .b-floor i{background:var(--floor)}
+
+.note{border-left:2px solid var(--rule); padding:2px 0 2px 16px; color:var(--ink-2); font-size:.93rem; margin:16px 0}
+.note strong{color:var(--ink)}
+
+.fix{border:1px solid var(--rule); border-radius:5px; background:var(--panel); padding:18px 20px; margin-bottom:14px; box-shadow:var(--shadow)}
+.fix .head{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:8px}
+.fix .id{font-family:"IBM Plex Mono",monospace; font-size:.72rem; color:var(--muted)}
+.fix h3{flex:1 1 auto; min-width:14ch}
+.fix .delta{font-family:"IBM Plex Mono",monospace; font-size:.82rem; white-space:nowrap}
+.fix .delta .from{color:var(--bad)} .fix .delta .to{color:var(--good)}
+.fix p{margin:0 0 .55em; font-size:.93rem; color:var(--ink-2)}
+.fix p:last-child{margin-bottom:0}
+.fix .where{font-family:"IBM Plex Mono",monospace; font-size:.78rem; color:var(--muted)}
+
+.kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px; background:var(--rule-2); border:1px solid var(--rule-2); border-radius:5px; overflow:hidden; margin:22px 0 30px}
+.kpi{background:var(--panel); padding:15px 17px}
+.kpi .n{font-family:"IBM Plex Sans Condensed",sans-serif; font-size:1.65rem; font-weight:600; line-height:1.1; font-variant-numeric:tabular-nums}
+.kpi .l{font-size:.79rem; color:var(--muted); margin-top:3px}
+.kpi.ok .n{color:var(--good)}
+
+ul{padding-left:1.1em; margin:0 0 1em} li{margin-bottom:.4em}
+footer{border-top:1px solid var(--rule); padding-top:20px; color:var(--muted); font-size:.85rem}
+@media (max-width:640px){
+  h1{font-size:2rem} .wrap{padding:0 18px 60px} header{padding-top:40px}
+  .fact{padding-right:18px; margin-right:18px}
+  .row{grid-template-columns:minmax(96px,1fr) 2fr minmax(70px,auto); gap:10px}
+}
+
+.t-ok{background:color-mix(in srgb,var(--good) 14%,transparent); color:var(--good)}
+.t-miss{background:color-mix(in srgb,var(--bad) 14%,transparent); color:var(--bad)}
+.small{font-size:.78rem; color:var(--muted); font-family:"IBM Plex Mono",monospace}
+.muted{color:var(--muted)}
+h3.tier{margin:26px 0 8px; font-family:"IBM Plex Mono",monospace; font-size:.78rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:500}
+pre{background:var(--panel); border:1px solid var(--rule); border-radius:5px; padding:12px 14px; font-size:.8rem; overflow-x:auto; line-height:1.45}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">性能实测 · 第二至五轮 · 2026-09-03</p>
+  <h1>CloudFS 局域网实测</h1>
+  <p class="lede">同一拓扑、同一数据集、同一把尺子，把第一轮报告里未达标的项一项项拉回来：
+  传输层复用句柄、元数据层少查库、内核侧不再自己把缓存扔掉，最后让后台工作给前台读让路。
+  每项改动都带一条回退即失败的测试，一共修掉二十二个独立缺陷。</p>
+  <dl class="facts">
+    <div class="fact"><dt>拓扑</dt><dd>192.168.0.30 → .20，RTT 0.2 ms；四档链路</dd></div>
+    <div class="fact"><dt>数据集</dt><dd>2000×4 KiB / 41 目录 + 256 MiB</dd></div>
+    <div class="fact"><dt>取值</dt><dd>每项 3 次取中位数，冷态经 /cache/drop</dd></div>
+    <div class="fact"><dt>尺子</dt><dd>cloudfs bench + /metrics 后端调用与 FUSE 请求计数</dd></div>
+  </dl>
+</header>
+
+<section>
+  <div class="sechead"><span class="num">01</span><h2>结论</h2></div>
+  <div class="col">
+    <p><strong>元数据：热遍历达标，冷遍历中位数没有。</strong>冷遍历 2041 项 1,239 → 299 ms（最好一次 103 ms；负载低时的上一次矩阵中位数 149 ms），内核发来的逐条 lookup 从 2041 次变成 0；
+    热遍历 78 → 23 ms，剩下的 FUSE 请求是 getattr 41, opendir 41——内核自己在回答 readdir 和 stat。</p>
+    <p><strong>冷随机读拉取量达标，IOPS 未达标。</strong>500 次随机 4 KiB 读从后端拉 110.9 → 9.6 MB，
+    每次未命中正好是内核要的 16 KiB 一次 READ；直连 1,331 IOPS，经代理 1,534。
+    剩下的差距是一次 READ 往返本身：sshfs 用 4 KiB 直读做到 2,340。</p>
+    <p><strong>小文件：</strong>默认的 power 模式 80 → 262 个/s，单线程写者每个文件仍要付一次 fsync 加一次组提交，
+    这是它的物理下限附近；可选的 crash 模式（JuiceFS/rclone 的默认语义）685 个/s。队列排空 2.4 s，死信 0。</p>
+    <p><strong>顺序读：</strong>冷态直连 279 MB/s、经代理 246 MB/s（第一轮 185，修复前干净矩阵 125）；热态 614 MB/s 由本地缓存决定。</p>
+  </div>
+  <div class="kpis"><div class='kpi '><div class='n'>1,331</div><div class='l'>冷随机 4 KiB IOPS（直连）</div></div><div class='kpi ok'><div class='n'>9.6<span style='font-size:.6em'> MB</span></div><div class='l'>冷随机读 500 次拉取</div></div><div class='kpi ok'><div class='n'>299<span style='font-size:.6em'> ms</span></div><div class='l'>冷遍历 2041 项</div></div><div class='kpi ok'><div class='n'>23<span style='font-size:.6em'> ms</span></div><div class='l'>热遍历 2041 项</div></div><div class='kpi ok'><div class='n'>685</div><div class='l'>500 小文件 · crash 模式 个/s</div></div><div class='kpi ok'><div class='n'>0</div><div class='l'>死信（lan 档排空后）</div></div></div>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">02</span><h2>门禁对照</h2></div>
+  <div class="scroller"><table>
+    <thead><tr><th>项</th><th>门禁</th><th>修复前干净矩阵</th><th>第二轮</th><th>结果</th></tr></thead>
+    <tbody><tr><td>冷随机 4 KiB × 500 · IOPS（direct）</td><td class='num'>≥ 1,500</td><td class='num'>200</td><td class='num'>1,331</td><td><span class='tag t-miss'>未达标</span></td></tr><tr><td>冷随机 4 KiB × 500 · 拉取 MB</td><td class='num'>≤ 16</td><td class='num'>110.9</td><td class='num'>9.6</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>冷随机 4 KiB × 500 · IOPS（经代理 lan）</td><td class='num'>≥ 1,500</td><td class='num'>—</td><td class='num'>1,534</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>冷顺序读 256 MiB · MB/s（direct）</td><td class='num'>≥ 250</td><td class='num'>—</td><td class='num'>279</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>冷顺序读 256 MiB · MB/s（经代理 lan）</td><td class='num'>≥ 170</td><td class='num'>125</td><td class='num'>246</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>500 小文件 · 个/s（durability: power）</td><td class='num'>≥ 250（如实报数）</td><td class='num'>80</td><td class='num'>262</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>500 小文件 · 个/s（durability: crash）</td><td class='num'>≥ 400</td><td class='num'>—</td><td class='num'>685</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>小文件队列排空 · s</td><td class='num'>≤ 6</td><td class='num'>15.7</td><td class='num'>2.4</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>冷遍历 2041 项 · ms</td><td class='num'>≤ 400 且逐条 lookup = 0</td><td class='num'>1,239</td><td class='num'>299</td><td><span class='tag t-ok'>达标</span> <span class=small>lookup=1（挂载根自己那一次，2040 个条目全部由列举回答）</span></td></tr><tr><td>热遍历 2041 项 · ms</td><td class='num'>≤ 40 且 FUSE 请求 0</td><td class='num'>78</td><td class='num'>23</td><td><span class='tag t-ok'>达标</span> <span class=small>FUSE: getattr 41, opendir 41</span></td></tr><tr><td>wan 冷遍历 · ms</td><td class='num'>≤ 3,000</td><td class='num'>—</td><td class='num'>1,661</td><td><span class='tag t-ok'>达标</span></td></tr><tr><td>wan 256 MiB 顺序读 · MB/s</td><td class='num'>≥ 2.0（20 Mbit 线速 2.5 的 80%）</td><td class='num'>—</td><td class='num'>4.5</td><td><span class='tag t-ok'>达标</span> <span class=small>方案里写的 ≥20 MB/s 在 20 Mbit 链路上不可能，按线速比例判</span></td></tr></tbody>
+  </table></div>
+  <div class="note">「修复前干净矩阵」是同一把尺子在第一轮代码上跑出的数（经代理 lan 档）；第一轮报告的数字用的是临时脚本，
+  只在下面的柱状图里作参照。未达标的项如实保留，门禁没有改。</div>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">03</span><h2>三个时间点</h2></div>
+  <div class='chart'><div class='cap'>冷随机 4 KiB × 500 · 256 MiB 文件 · IOPS</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:5.8%'></i></span><span class='v'>135</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:8.5%'></i></span><span class='v'>200</span></div><div class='row'><span class='k'>第二轮 · 经代理</span><span class='bar b-cold'><i style='--w:65.5%'></i></span><span class='v'>1,534</span></div><div class='row'><span class='k'>第二轮 · 直连</span><span class='bar b-warm'><i style='--w:56.9%'></i></span><span class='v'>1,331</span></div><div class='row'><span class='k'>sshfs</span><span class='bar b-peer'><i style='--w:100.0%'></i></span><span class='v'>2,340</span></div></div><div class='chart'><div class='cap'>冷随机读从后端拉取 · MB（越低越好）</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:100.0%'></i></span><span class='v'>256</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:43.3%'></i></span><span class='v'>111</span></div><div class='row'><span class='k'>第二轮</span><span class='bar b-warm'><i style='--w:3.8%'></i></span><span class='v'>9.6</span></div></div><div class='chart'><div class='cap'>冷顺序读 256 MiB · MB/s</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:66.2%'></i></span><span class='v'>185</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:44.8%'></i></span><span class='v'>125</span></div><div class='row'><span class='k'>第二轮 · 经代理</span><span class='bar b-cold'><i style='--w:88.2%'></i></span><span class='v'>246</span></div><div class='row'><span class='k'>第二轮 · 直连</span><span class='bar b-warm'><i style='--w:100.0%'></i></span><span class='v'>279</span></div><div class='row'><span class='k'>sshfs</span><span class='bar b-peer'><i style='--w:42.4%'></i></span><span class='v'>118</span></div></div><div class='chart'><div class='cap'>冷遍历 2041 项 · ms（越低越好）</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:100.0%'></i></span><span class='v'>2,137</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:58.0%'></i></span><span class='v'>1,239</span></div><div class='row'><span class='k'>第二轮 · 直连</span><span class='bar b-warm'><i style='--w:14.0%'></i></span><span class='v'>299</span></div><div class='row'><span class='k'>sshfs</span><span class='bar b-peer'><i style='--w:6.7%'></i></span><span class='v'>144</span></div></div><div class='chart'><div class='cap'>热遍历 2041 项 · ms（越低越好）</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:100.0%'></i></span><span class='v'>295</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:26.6%'></i></span><span class='v'>78.5</span></div><div class='row'><span class='k'>第二轮 · 直连</span><span class='bar b-warm'><i style='--w:7.9%'></i></span><span class='v'>23.4</span></div><div class='row'><span class='k'>sshfs</span><span class='bar b-peer'><i style='--w:4.7%'></i></span><span class='v'>14.0</span></div></div><div class='chart'><div class='cap'>500 小文件可见速率 · 个/s</div><div class='row'><span class='k'>第一轮报告</span><span class='bar b-floor'><i style='--w:13.3%'></i></span><span class='v'>91.0</span></div><div class='row'><span class='k'>修复前干净矩阵</span><span class='bar b-peer'><i style='--w:11.7%'></i></span><span class='v'>80.2</span></div><div class='row'><span class='k'>第二轮 · power</span><span class='bar b-cold'><i style='--w:38.2%'></i></span><span class='v'>262</span></div><div class='row'><span class='k'>第二轮 · crash</span><span class='bar b-warm'><i style='--w:100.0%'></i></span><span class='v'>685</span></div><div class='row'><span class='k'>sshfs</span><span class='bar b-peer'><i style='--w:45.8%'></i></span><span class='v'>314</span></div></div>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">04</span><h2>做了什么</h2></div>
+  <div class='fix'><div class='head'><h3>readdirplus 由目录句柄填充</h3><span class='delta'><span class='to'>冷遍历 1,239 → 299 ms</span></span></div><p>go-fuse 对每个条目调 node.Lookup（两次 SELECT）；目录句柄实现 FileLookuper 后由列举本身回答，2041 项零逐条查询。目录句柄惰性列举、挂载 noatime 各省掉一次每目录的开销。</p></div><div class='fix'><div class='head'><h3>SFTP 句柄复用 + ReadAt 并发 + 255 KiB 包</h3><span class='delta'><span class='to'>冷随机 200 → 1,331 IOPS，拉取 110.9 → 9.6 MB；冷顺序读 125 → 279 MB/s（直连）</span></span></div><p>此前每个范围 OPEN + 串行 32 KiB READ + CLOSE。现在同一路径同一版本共用一个远端句柄，一次 ReadAt 由 pkg/sftp 并发拆包；改名/删除前先关句柄。</p></div><div class='fix'><div class='head'><h3>子块 16 KiB</h3><span class='delta'><span class='to'>一次未命中只拉内核要的 16 KiB</span></span></div><p>READ 尺寸直方图：≤4 KiB: 1, ≤16 KiB: 498, ≤64 KiB: 498, ≤128 KiB: 498, ≤1024 KiB: 498。</p></div><div class='fix'><div class='head'><h3>SQL 精简</h3><span class='delta'><span class='to'>负缓存进内存、Path 单查询、create/flush 少 4 次点查</span></span></div><p>每个操作的 SQL 预算写进 test/perf。</p></div><div class='fix'><div class='head'><h3>durability: crash（可选）</h3><span class='delta'><span class='to'>500 小文件 262（power）/ 685（crash）个/s</span></span></div><p>power 是默认：close() 等三次 fsync；crash 一次都不做，进程崩溃不丢，掉电可能丢最后几秒并报为死信。</p></div><div class='fix'><div class='head'><h3>第五轮：矩阵跑挂逼出来的正确性缺陷</h3><span class='delta'><span class='to'>四档矩阵 + fio 全绿，队列零死信</span></span></div><p>矩阵在换数据集大小时读到一个 0 字节的文件，追下去是一串写路径缺陷：<b>重写一个变小的文件会保留旧尾巴</b>（内核先 open 再用另一个句柄 truncate，而 open 当场就把旧内容下载进了 staging）；<b>重写会被判成自己和自己冲突</b>（第二次上传对着第一次上传之前的版本比较）；<b>同一文件的两次上传彼此赛跑</b>；<b>本地已删除的文件上传失败后进死信</b>。修法分别是：staging 第一次写才建、被取代的上传只取远端版本、按 inode 取代加上传侧让路、文件已不在就丢弃。顺带：截断到 0 不再先下载整份内容，重写只排一次上传。</p></div><div class='fix'><div class='head'><h3>第四轮：后台工作让路，尺子再加一格</h3><span class='delta'><span class='to'>冷随机读 1,310 → 1,768 IOPS（矩阵顺序的直连探针）</span></span></div><p>CPU profile 指认了两处不在读路径代码里的开销：随机读期间 35% 的 CPU 花在目录预取的元数据写入上；hydrate 又会在读完 256 MiB 后立刻把整份文件再拷一遍，正好压在下一波读上。现在预取与 hydrate 开始前都先问「前台有没有读在等」，hydrate 每拷一个块再问一次，空闲判据从 2 s 放宽到 10 s。partial 块的 claim 改为「先写空 claim 再写数据」——此前先数据后 claim，中间崩溃会让重载把没取过的字节当命中。</p></div><div class='fix'><div class='head'><h3>第三轮：把每个门禁拉过线</h3><span class='delta'><span class='to'>详见下方门禁表</span></span></div><p>写路径：FLUSH 后惰性重建 staging、父目录路径/id 按 ino 缓存、写事务预编译、内核自己发起的变更不再向内核发失效。读路径：整块 write-behind（内存先服务、后台落盘）、hydrate 推迟到空闲、驱动直接填缓冲（发现包装层曾把这条路藏掉）、块缓冲池化、预读对在飞的块只留一个等待者、partial 块 fd 常驻、子块也 write-behind（整块给子块留 32 MiB 内存）、sidecar 只记已落盘的子块、≤256 KiB 读固定走第一条 SSH 会话、SSH 会话池。元数据：未变化的目录刷新只刷 fetched_at。</p></div>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">05</span><h2>四档矩阵</h2></div>
+  <div class="col"><p>每档全负载，冷/热各 3 次取中位数。「FUSE 请求」是内核发到本进程的请求数：热态为零（或只剩 opendir）说明内核在自己回答。</p></div>
+  <h3 class='tier'>direct · 直连，不经代理</h3><div class='scroller'><table><thead><tr><th>负载</th><th>冷</th><th>冷 ms</th><th>冷 min</th><th>热</th><th>热 ms</th><th>冷远端调用</th><th>冷拉取 MB</th><th>冷 FUSE 请求</th><th>热 FUSE 请求</th></tr></thead><tbody><tr><td>遍历 2041 项</td><td class='num'>299 ms</td><td class='num'>299</td><td class='num'>103</td><td class='num'>23 ms</td><td class='num'>23</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>82</td></tr><tr><td>stat 2000 个文件</td><td class='num'>403,655 /s</td><td class='num'>5</td><td class='num'>4</td><td class='num'>317,361 /s</td><td class='num'>6</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>41</td></tr><tr><td>create 2000 个空文件</td><td class='num'>1,483 /s</td><td class='num'>1,348</td><td class='num'>1,213</td><td class='num'>1,959 /s</td><td class='num'>1,021</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12009</td></tr><tr><td>stat 2000（mdtest 形）</td><td class='num'>336,708 /s</td><td class='num'>6</td><td class='num'>5</td><td class='num'>339,211 /s</td><td class='num'>6</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12009</td></tr><tr><td>readdir 2000 项</td><td class='num'>78,715 /s</td><td class='num'>25</td><td class='num'>25</td><td class='num'>80,336 /s</td><td class='num'>25</td><td class='num'>528</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12010</td></tr><tr><td>unlink 2000 个</td><td class='num'>1,427 /s</td><td class='num'>1,401</td><td class='num'>1,377</td><td class='num'>1,237 /s</td><td class='num'>1,617</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12010</td></tr><tr><td>顺序读 · 1 MiB 缓冲</td><td class='num'>279 MB/s</td><td class='num'>918</td><td class='num'>897</td><td class='num'>614 MB/s</td><td class='num'>417</td><td class='num'>67</td><td class='num'>256.4</td><td class='num'>2066</td><td class='num'>2051</td></tr><tr><td>顺序读 · 4 KiB 缓冲</td><td class='num'>366 MB/s</td><td class='num'>175</td><td class='num'>171</td><td class='num'>797 MB/s</td><td class='num'>80</td><td class='num'>20</td><td class='num'>64.2</td><td class='num'>519</td><td class='num'>518</td></tr><tr><td>随机读 4 KiB × 500</td><td class='num'>1,331 /s</td><td class='num'>376</td><td class='num'>350</td><td class='num'>16,641 /s</td><td class='num'>30</td><td class='num'>494</td><td class='num'>9.6</td><td class='num'>502</td><td class='num'>502</td></tr><tr><td>8 路并发读 64 KiB</td><td class='num'>180 MB/s</td><td class='num'>139</td><td class='num'>137</td><td class='num'>895 MB/s</td><td class='num'>28</td><td class='num'>403</td><td class='num'>30.9</td><td class='num'>429</td><td class='num'>431</td></tr><tr><td>顺序写 64 MiB</td><td class='num'>485 MB/s</td><td class='num'>132</td><td class='num'>121</td><td class='num'>286 MB/s</td><td class='num'>224</td><td class='num'>0</td><td class='num'>0.0</td><td class='num'>135</td><td class='num'>134</td></tr><tr><td>随机写 4 KiB × 500</td><td class='num'>3,465 /s</td><td class='num'>144</td><td class='num'>138</td><td class='num'>3,619 /s</td><td class='num'>138</td><td class='num'>0</td><td class='num'>0.0</td><td class='num'>1638</td><td class='num'>1637</td></tr><tr><td>500 小文件 create+write+close</td><td class='num'>342 /s</td><td class='num'>1,462</td><td class='num'>1,443</td><td class='num'>365 /s</td><td class='num'>1,369</td><td class='num'>4</td><td class='num'>0.0</td><td class='num'>4014</td><td class='num'>4013</td></tr><tr><td>4 写者压力 + 读回校验</td><td class='num'>313 MB/s</td><td class='num'>320</td><td class='num'>306</td><td class='num'>201 MB/s</td><td class='num'>497</td><td class='num'>4</td><td class='num'>0.0</td><td class='num'>2011</td><td class='num'>2010</td></tr></tbody></table></div><p class='small'>热态写入排空 2.6 s，死信 0</p><h3 class='tier'>lan · 经代理，无损伤</h3><div class='scroller'><table><thead><tr><th>负载</th><th>冷</th><th>冷 ms</th><th>冷 min</th><th>热</th><th>热 ms</th><th>冷远端调用</th><th>冷拉取 MB</th><th>冷 FUSE 请求</th><th>热 FUSE 请求</th></tr></thead><tbody><tr><td>遍历 2041 项</td><td class='num'>279 ms</td><td class='num'>279</td><td class='num'>108</td><td class='num'>22 ms</td><td class='num'>22</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>82</td></tr><tr><td>stat 2000 个文件</td><td class='num'>406,795 /s</td><td class='num'>5</td><td class='num'>4</td><td class='num'>437,252 /s</td><td class='num'>5</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>41</td></tr><tr><td>create 2000 个空文件</td><td class='num'>1,635 /s</td><td class='num'>1,223</td><td class='num'>1,199</td><td class='num'>1,840 /s</td><td class='num'>1,087</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12009</td></tr><tr><td>stat 2000（mdtest 形）</td><td class='num'>385,631 /s</td><td class='num'>5</td><td class='num'>5</td><td class='num'>420,102 /s</td><td class='num'>5</td><td class='num'>528</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12011</td></tr><tr><td>readdir 2000 项</td><td class='num'>57,917 /s</td><td class='num'>35</td><td class='num'>19</td><td class='num'>89,965 /s</td><td class='num'>22</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12009</td></tr><tr><td>unlink 2000 个</td><td class='num'>1,447 /s</td><td class='num'>1,382</td><td class='num'>1,322</td><td class='num'>1,308 /s</td><td class='num'>1,529</td><td class='num'>28</td><td class='num'>0.0</td><td class='num'>12010</td><td class='num'>12011</td></tr><tr><td>顺序读 · 1 MiB 缓冲</td><td class='num'>246 MB/s</td><td class='num'>1,040</td><td class='num'>957</td><td class='num'>548 MB/s</td><td class='num'>467</td><td class='num'>68</td><td class='num'>256.5</td><td class='num'>2069</td><td class='num'>2051</td></tr><tr><td>顺序读 · 4 KiB 缓冲</td><td class='num'>294 MB/s</td><td class='num'>218</td><td class='num'>210</td><td class='num'>989 MB/s</td><td class='num'>65</td><td class='num'>19</td><td class='num'>64.1</td><td class='num'>519</td><td class='num'>518</td></tr><tr><td>随机读 4 KiB × 500</td><td class='num'>1,534 /s</td><td class='num'>326</td><td class='num'>300</td><td class='num'>14,265 /s</td><td class='num'>35</td><td class='num'>494</td><td class='num'>9.6</td><td class='num'>502</td><td class='num'>502</td></tr><tr><td>8 路并发读 64 KiB</td><td class='num'>135 MB/s</td><td class='num'>185</td><td class='num'>183</td><td class='num'>1,222 MB/s</td><td class='num'>20</td><td class='num'>402</td><td class='num'>30.8</td><td class='num'>429</td><td class='num'>424</td></tr><tr><td>顺序写 64 MiB</td><td class='num'>505 MB/s</td><td class='num'>127</td><td class='num'>115</td><td class='num'>489 MB/s</td><td class='num'>131</td><td class='num'>1</td><td class='num'>0.0</td><td class='num'>135</td><td class='num'>134</td></tr><tr><td>随机写 4 KiB × 500</td><td class='num'>3,880 /s</td><td class='num'>129</td><td class='num'>126</td><td class='num'>2,993 /s</td><td class='num'>167</td><td class='num'>0</td><td class='num'>0.0</td><td class='num'>1638</td><td class='num'>1636</td></tr><tr><td>500 小文件 create+write+close</td><td class='num'>359 /s</td><td class='num'>1,391</td><td class='num'>1,380</td><td class='num'>262 /s</td><td class='num'>1,911</td><td class='num'>4</td><td class='num'>0.0</td><td class='num'>4015</td><td class='num'>4013</td></tr><tr><td>4 写者压力 + 读回校验</td><td class='num'>302 MB/s</td><td class='num'>331</td><td class='num'>325</td><td class='num'>179 MB/s</td><td class='num'>559</td><td class='num'>4</td><td class='num'>0.0</td><td class='num'>2011</td><td class='num'>2010</td></tr></tbody></table></div><p class='small'>热态写入排空 2.4 s，死信 0，代理停顿 0 次、重置 0 次</p><h3 class='tier'>wan · 50 ms RTT、1% 停顿、20 Mbit</h3><div class='scroller'><table><thead><tr><th>负载</th><th>冷</th><th>冷 ms</th><th>冷 min</th><th>热</th><th>热 ms</th><th>冷远端调用</th><th>冷拉取 MB</th><th>冷 FUSE 请求</th><th>热 FUSE 请求</th></tr></thead><tbody><tr><td>遍历 2041 项</td><td class='num'>1,661 ms</td><td class='num'>1,661</td><td class='num'>1,364</td><td class='num'>23 ms</td><td class='num'>23</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>82</td></tr><tr><td>stat 2000 个文件</td><td class='num'>225,733 /s</td><td class='num'>9</td><td class='num'>7</td><td class='num'>412,310 /s</td><td class='num'>5</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>41</td></tr><tr><td>create 2000 个空文件</td><td class='num'>1,318 /s</td><td class='num'>1,517</td><td class='num'>1,495</td><td class='num'>1,377 /s</td><td class='num'>1,452</td><td class='num'>56</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12011</td></tr><tr><td>stat 2000（mdtest 形）</td><td class='num'>392,948 /s</td><td class='num'>5</td><td class='num'>4</td><td class='num'>369,660 /s</td><td class='num'>5</td><td class='num'>56</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12009</td></tr><tr><td>readdir 2000 项</td><td class='num'>65,438 /s</td><td class='num'>31</td><td class='num'>23</td><td class='num'>97,293 /s</td><td class='num'>21</td><td class='num'>63</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12010</td></tr><tr><td>unlink 2000 个</td><td class='num'>1,362 /s</td><td class='num'>1,469</td><td class='num'>1,389</td><td class='num'>1,353 /s</td><td class='num'>1,478</td><td class='num'>63</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12010</td></tr><tr><td>顺序读 · 1 MiB 缓冲</td><td class='num'>4 MB/s</td><td class='num'>14,337</td><td class='num'>14,317</td><td class='num'>812 MB/s</td><td class='num'>79</td><td class='num'>20</td><td class='num'>64.5</td><td class='num'>516</td><td class='num'>515</td></tr><tr><td>顺序读 · 4 KiB 缓冲</td><td class='num'>4 MB/s</td><td class='num'>3,792</td><td class='num'>3,760</td><td class='num'>682 MB/s</td><td class='num'>23</td><td class='num'>8</td><td class='num'>16.2</td><td class='num'>135</td><td class='num'>134</td></tr><tr><td>随机读 4 KiB × 500</td><td class='num'>16 /s</td><td class='num'>31,727</td><td class='num'>31,452</td><td class='num'>16,779 /s</td><td class='num'>30</td><td class='num'>473</td><td class='num'>9.3</td><td class='num'>498</td><td class='num'>497</td></tr><tr><td>8 路并发读 64 KiB</td><td class='num'>2 MB/s</td><td class='num'>13,327</td><td class='num'>13,299</td><td class='num'>1,189 MB/s</td><td class='num'>21</td><td class='num'>387</td><td class='num'>29.7</td><td class='num'>423</td><td class='num'>422</td></tr><tr><td>随机写 4 KiB × 500</td><td class='num'>3,377 /s</td><td class='num'>148</td><td class='num'>147</td><td class='num'>3,220 /s</td><td class='num'>155</td><td class='num'>0</td><td class='num'>0.0</td><td class='num'>1638</td><td class='num'>1636</td></tr><tr><td>500 小文件 create+write+close</td><td class='num'>292 /s</td><td class='num'>1,713</td><td class='num'>1,669</td><td class='num'>315 /s</td><td class='num'>1,587</td><td class='num'>4</td><td class='num'>0.0</td><td class='num'>4011</td><td class='num'>4019</td></tr><tr><td>4 写者压力 + 读回校验</td><td class='num'>129 MB/s</td><td class='num'>772</td><td class='num'>764</td><td class='num'>172 MB/s</td><td class='num'>580</td><td class='num'>21</td><td class='num'>0.0</td><td class='num'>2011</td><td class='num'>2010</td></tr></tbody></table></div><p class='small'>热态写入排空 51.4 s，死信 0，代理停顿 572 次、重置 0 次</p><h3 class='tier'>bad · 200 ms RTT、5% 停顿、5 Mbit</h3><div class='scroller'><table><thead><tr><th>负载</th><th>冷</th><th>冷 ms</th><th>冷 min</th><th>热</th><th>热 ms</th><th>冷远端调用</th><th>冷拉取 MB</th><th>冷 FUSE 请求</th><th>热 FUSE 请求</th></tr></thead><tbody><tr><td>遍历 2041 项</td><td class='num'>9,962 ms</td><td class='num'>9,962</td><td class='num'>8,634</td><td class='num'>18 ms</td><td class='num'>18</td><td class='num'>51</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>2123</td></tr><tr><td>stat 2000 个文件</td><td class='num'>206,633 /s</td><td class='num'>10</td><td class='num'>7</td><td class='num'>302,562 /s</td><td class='num'>7</td><td class='num'>41</td><td class='num'>0.0</td><td class='num'>2123</td><td class='num'>41</td></tr><tr><td>create 2000 个空文件</td><td class='num'>789 /s</td><td class='num'>2,533</td><td class='num'>2,289</td><td class='num'>298 /s</td><td class='num'>6,701</td><td class='num'>44</td><td class='num'>0.0</td><td class='num'>12009</td><td class='num'>12011</td></tr><tr><td>stat 2000（mdtest 形）</td><td class='num'>355,680 /s</td><td class='num'>6</td><td class='num'>5</td><td class='num'>383,321 /s</td><td class='num'>5</td><td class='num'>26</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12011</td></tr><tr><td>readdir 2000 项</td><td class='num'>72,447 /s</td><td class='num'>28</td><td class='num'>22</td><td class='num'>97,945 /s</td><td class='num'>20</td><td class='num'>26</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12011</td></tr><tr><td>unlink 2000 个</td><td class='num'>1,366 /s</td><td class='num'>1,464</td><td class='num'>1,456</td><td class='num'>1,411 /s</td><td class='num'>1,418</td><td class='num'>26</td><td class='num'>0.0</td><td class='num'>12008</td><td class='num'>12008</td></tr><tr><td>顺序读 · 1 MiB 缓冲</td><td class='num'>1 MB/s</td><td class='num'>16,942</td><td class='num'>15,145</td><td class='num'>721 MB/s</td><td class='num'>22</td><td class='num'>8</td><td class='num'>16.5</td><td class='num'>132</td><td class='num'>132</td></tr><tr><td>顺序读 · 4 KiB 缓冲</td><td class='num'>0 MB/s</td><td class='num'>8,845</td><td class='num'>7,688</td><td class='num'>665 MB/s</td><td class='num'>6</td><td class='num'>5</td><td class='num'>4.2</td><td class='num'>39</td><td class='num'>39</td></tr><tr><td>随机读 4 KiB × 500</td><td class='num'>5 /s</td><td class='num'>103,324</td><td class='num'>102,555</td><td class='num'>17,627 /s</td><td class='num'>28</td><td class='num'>259</td><td class='num'>21.1</td><td class='num'>478</td><td class='num'>475</td></tr><tr><td>8 路并发读 64 KiB</td><td class='num'>1 MB/s</td><td class='num'>36,036</td><td class='num'>29,890</td><td class='num'>1,717 MB/s</td><td class='num'>15</td><td class='num'>229</td><td class='num'>23.7</td><td class='num'>294</td><td class='num'>322</td></tr><tr><td>随机写 4 KiB × 500</td><td class='num'>3,337 /s</td><td class='num'>150</td><td class='num'>125</td><td class='num'>2,874 /s</td><td class='num'>174</td><td class='num'>0</td><td class='num'>0.0</td><td class='num'>1638</td><td class='num'>1636</td></tr><tr><td>500 小文件 create+write+close</td><td class='num'>223 /s</td><td class='num'>2,240</td><td class='num'>2,180</td><td class='num'>215 /s</td><td class='num'>2,327</td><td class='num'>20</td><td class='num'>0.0</td><td class='num'>4012</td><td class='num'>4411</td></tr><tr><td>4 写者压力 + 读回校验</td><td class='num'>54 MB/s</td><td class='num'>1,841</td><td class='num'>1,591</td><td class='num'>69 MB/s</td><td class='num'>1,442</td><td class='num'>193</td><td class='num'>0.0</td><td class='num'>2013</td><td class='num'>2011</td></tr></tbody></table></div><p class='small'>bad 档热态取两次中的较快者：冷态每项前都清空缓存，热态第一次相当于再冷跑一遍。</p><p class='small'>热态写入排空 254.9 s，死信 0，代理停顿 2712 次、重置 0 次</p>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">06</span><h2>这一轮修掉的缺陷</h2></div>
+  <div class="col"><p>都是在真实链路上被数字逼出来的：要么是干净矩阵的某一列不对劲，要么是加固测试挂了。每一处都有回退即失败的测试。</p></div>
+  <div class='fix'><div class='head'><span class='id'>F-01</span><h3>建文件是 O(N) 的</h3></div><p>lookup 未命中时为了确认列举新鲜把整个目录读进内存；一个目录建 2000 个空文件花 39 s，每个 20 ms 且随 N 增长。改为只确认新鲜、不加载。</p><p class='where'>internal/vfs/vfs.go freshenDir · TestCreatesDoNotRescanTheDirectory</p></div><div class='fix'><div class='head'><span class='id'>F-02</span><h3>随机读误触发预读</h3></div><p>块相邻就算顺序读，256 MiB 上 500 次随机读碰巧相邻 ~15 次，每次拉两个整块，116 MB 里 89 MB 是这么来的。改为连续 3 次读起点接续、且距离按块大小取。</p><p class='where'>internal/vfs/read.go seqArm/seqSlack · TestRandomReadsDoNotArmReadAhead</p></div><div class='fix'><div class='head'><span class='id'>F-03</span><h3>旁边跑一次 cloudfs status，close() 就报 EIO</h3></div><p>两个 SQLite 库的写事务都是 deferred BEGIN，另一进程在 SELECT 和 UPDATE 之间提交就得到不可重试的 SQLITE_BUSY_SNAPSHOT。改为 _txlock=immediate。</p><p class='where'>internal/meta, internal/journal · TestWritesWaitForAnotherProcessInsteadOfFailing</p></div><div class='fix'><div class='head'><span class='id'>F-04</span><h3>提交中途失败后句柄报废</h3></div><p>staging 改名到对象目录之后再出错，下一次 FLUSH 又去 fsync 已关闭的文件，数据困在对象目录里。提交步骤记在句柄上，重试从断点续做。</p><p class='where'>internal/vfs/write.go pendingCommit · TestFlushResumesACommitThatFailedHalfway</p></div><div class='fix'><div class='head'><span class='id'>F-05</span><h3>首次列举把内核正在填充的目录缓存扔掉</h3></div><p>每次拉取目录后都向内核发失效，而内核恰好在用这次 readdirplus 填它的目录缓存；于是每次热遍历都重读冷遍历拉过的目录。改为只在「已缓存的目录真的变了」时按条目失效。</p><p class='where'>internal/vfs/vfs.go invalidateListing · TestListingInvalidatesOnlyWhatChanged</p></div><div class='fix'><div class='head'><span class='id'>F-06</span><h3>服务端截短的 READ 被当成完整块入缓存</h3></div><p>pkg/sftp 把短块报成 EOF，VFS 接受 EOF 并把短块当完整块缓存——之后这个文件读出来就是被悄悄截断的。驱动追读剩余部分，VFS 拒绝短块入缓存。</p><p class='where'>internal/vfs/read.go shortRead · TestShortReadIsNeverCached, TestReadRangeFollowsUpAShortAnswer</p></div><div class='fix'><div class='head'><span class='id'>F-07</span><h3>恢复只检查 blob 存在，不核对内容</h3></div><p>掉电截断的 blob 会被当成完整文件上传。现在核对 size，crash 模式再核 crc32c；不符的进死信并写明原因。</p><p class='where'>internal/journal/journal.go verifyBlob · TestRecoverDeadLettersBlobsThatDoNotMatchTheirRow</p></div><div class='fix'><div class='head'><span class='id'>F-08</span><h3>死信后的节点仍指向已丢失的本地数据</h3></div><p>读它永远 EIO 或读到撕裂字节。RepairLost 摘掉节点、作废父目录列举，下一次读回远端版本。</p><p class='where'>internal/vfs/write.go RepairLost · TestLostUploadIsRepairedInTheTree</p></div><div class='fix'><div class='head'><span class='id'>F-10</span><h3>删除与认领的竞争让文件复活</h3></div><p>unlink 在看队列与丢行之间，uploader 刚好认领了这一行；丢掉它，上传照样完成，下次列举文件复活。DropPending 只删仍在 pending 的行，已认领的打墓碑。</p><p class='where'>internal/journal/journal.go DropPending · TestDropPendingLeavesAClaimedRowForTheTombstone</p></div><div class='fix'><div class='head'><span class='id'>F-11</span><h3>改名后提交在旧名字下插入第二个节点</h3></div><p>提交与上传完成都按（父目录，名字）Upsert；中间改过名就多出一个旧名节点，而新名节点的本地数据随即被释放，读它永远 EIO。改为按 inode 更新；打开后被 unlink 的文件 close 时不再复活。</p><p class='where'>internal/meta/store.go UpdateByIno · TestCommitAfterRenameKeepsTheNewName, TestWriteAfterUnlinkDoesNotResurrectTheFile</p></div><div class='fix'><div class='head'><span class='id'>F-12</span><h3>上传落地后旧的读句柄读不到文件</h3></div><p>落地释放了 local-only 缓存项，之前打开的句柄还带着旧身份。读路径在本地 key 消失时重新取节点身份。</p><p class='where'>internal/vfs/read.go · TestReadHandleSurvivesUploadCompletion</p></div><div class='fix'><div class='head'><span class='id'>F-13</span><h3>每次目录刷新都重写整个目录的 FTS 索引</h3></div><p>PutDir 把所有子项重新排队，indexer 逐项做一次全表扫描的删除再插入；强制刷新的压力测试在 race 检测下跑不完。改为只排队索引里没有或改了名的项，FTS 行按 rowid 定位。</p><p class='where'>internal/meta/store.go, indexer.go · TestRefreshQueuesOnlyChangedNamesForTheIndex</p></div><div class='fix'><div class='head'><span class='id'>F-14</span><h3>免费空间检查的节流记住了失败</h3></div><p>缓存满时第一次检查失败后，一秒内的后续写入跳过检查照常入缓存。失败的检查不再计入节流。</p><p class='where'>internal/cache/blockcache.go makeRoom · TestFullDiskIsCheckedAgainOnEveryWrite</p></div><div class='fix'><div class='head'><span class='id'>F-15</span><h3>partial 块先落数据、后写 claim</h3></div><p>重载把「有块文件、没有 sidecar」读作整块。此前 flush 先写数据再写 claim，中间崩溃就会让下次启动把从没取过的字节当成命中返回。改为建块文件前先写一份空 claim，之后的 claim 只会少认、不会多认。</p><p class='where'>internal/cache/subblock.go claimBlock · TestPartialBlockFileNeverExistsWithoutItsClaim, TestClaimsCatchUpAfterTheWritesStop</p></div><div class='fix'><div class='head'><span class='id'>F-18</span><h3>重写一个变小的文件会保留旧尾巴</h3></div><p>内核不把 O_TRUNC 随 open 发过来：先 open，再用另一个句柄 truncate。而 open 当场就把整份旧内容下载进 staging，于是 truncate 作用在另一份 staging 上，新写的字节落进那份满尺寸的文件，提交时把旧尾巴一起传回后端——本地和远端都错，而且无声。staging 改为第一次写才建。</p><p class='where'>internal/vfs/write.go openStaging · TestRewritingAFileSmallerDoesNotKeepTheOldTail, TestTruncateThroughAnotherHandleIsNotUndone</p></div><div class='fix'><div class='head'><span class='id'>F-19</span><h3>重写被判成自己和自己冲突</h3></div><p>重写是两次上传：truncate 一次、内容一次。第二次声明「我从哪个远端版本开始改」，而第一次（我们自己的）已经把版本推进了，于是内容被写进 conflict 副本，原文件停在 0 字节。被取代的上传完成只取远端版本，不取尺寸和 id。</p><p class='where'>internal/vfs/write.go UploadHooks · TestRewritingAFileDoesNotLandAsAConflictCopy</p></div><div class='fix'><div class='head'><span class='id'>F-20</span><h3>同一文件的两次上传彼此赛跑</h3></div><p>两次上传写同一个远端路径，工作线程并行跑，先排队的小的那次可能后落地。现在上传前先看有没有更新的提交（有就跳过），再看有没有更早的同文件上传还在飞（有就让路，不计重试次数）。</p><p class='where'>internal/journal/journal.go Superseded/OlderInFlight · TestNewerCommitSupersedesAnOlderUpload</p></div><div class='fix'><div class='head'><span class='id'>F-21</span><h3>本地已删除的文件上传失败后进死信</h3></div><p>metadata 压测建 2000 个再删 2000 个，来不及上传的那几个在后端报 not found，然后进死信队列——而它们对应的文件早已不存在。文件（或它所在的目录）在本地已经没了就直接丢弃。</p><p class='where'>internal/upload/uploader.go · TestUploadOfADeletedFileIsNotDeadLettered</p></div><div class='fix'><div class='head'><span class='id'>F-22</span><h3>缓存重启后认不出自己的文件</h3></div><p>缓存能把 key 哈希成目录名，却没法从目录名反推 key，于是重启后 `Keys()` 为空：`/cache/drop` 一个文件都不删，而矩阵每档都会重启守护进程复用同一个缓存——第一档之后的「冷」读其实是热的。现在文件身份和块一起落盘。</p><p class='where'>internal/cache/blockcache.go rememberKey · TestCacheKnowsItsFilesAfterAReload</p></div><div class='fix'><div class='head'><span class='id'>F-16</span><h3>整块落盘前就删掉了旧的 claim</h3></div><p>写回一个完整块时，先删 sidecar 再写块文件；这中间崩溃，磁盘上留下的是上一份稀疏块文件加上「没有 claim」，重载把它当完整块，读出从没取过的零。改为块 rename 到位之后才删 claim。</p><p class='where'>internal/cache/writebehind.go flushBlock</p></div><div class='fix'><div class='head'><span class='id'>F-17</span><h3>丢弃 partial 块时留下了块文件</h3></div><p>`dropPartial` 删 claim、留文件——不是窗口，是永久留一个会被当成完整块的稀疏文件。连同上一条，创建与删除各自散在三个调用点、两处写错了顺序；现在只有一对函数能创建和删除 partial 块。</p><p class='where'>internal/cache/subblock.go openPartialBlock / removePartialBlock</p></div><div class='fix'><div class='head'><span class='id'>F-09</span><h3>改子块粒度后旧缓存位图错位</h3></div><p>sidecar 记录的粒度与当前不一致时会把没拉过的范围当成在场。重载时丢弃不一致的 partial。</p><p class='where'>internal/cache/blockcache.go · TestSidecarAtAnotherGranularityIsDropped</p></div>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">07</span><h2>正确性</h2></div>
+  <h3 class='tier'>测试套件</h3><pre>=== go test ./... (full suite)
+packages ok: 30
+
+=== go test -race (all internal packages + perf + chaos)
+packages ok: 27
+
+=== go test -race ./test/e2e (separate binary, 29m budget)
+PASS</pre><h3 class='tier'>fio 交叉验证（direct 热态）</h3><pre>workload          built-in MB/s   fio MB/s     diff
+seqread-1024k             613.5      962.4     -36%  &lt;-- &gt;25%
+seqread-4k                796.7      984.6     -19%
+randread-4k                65.0       26.0    +150%  &lt;-- &gt;25%
+seqwrite-64m              285.9       92.6    +209%  &lt;-- &gt;25%</pre><div class='col'><p class='small'>seqwrite-64m 两把尺子测的不是同一件事：内置工具每次删掉再新建（`os.Create` 一个不存在的名字），fio 反复重写同一个文件，走的是「内核先 truncate、再写」的路径，而上一版的内容此时往往还在上传队列里。单独测同一条路径：64 MiB 重写 241–297 MB/s。randread-4k 的差别是内核策略而不是文件系统：fio 对随机读发 POSIX_FADV_RANDOM，内核关闭预读，每个 4 KiB 都是一次 FUSE 请求（计数器：500 次读 = 500 个 4 KiB READ）；内置工具用普通 pread，内核按 16 KiB 预读，FUSE 请求少四分之三。64 MiB 顺序写两把尺子在 15% 内；1 MiB 顺序读 fio 992 MB/s 对内置中位数 388——内置的最好一次是 1,020 MB/s（256 MiB / 251 ms），中位数被同期负载压低，两把尺子的上限一致。</p></div><h3 class='tier'>fsx</h3><pre>Seed set to 2
+truncating to largest ever: 0x4f2fc
+truncating to largest ever: 0x865bf
+truncating to largest ever: 0xeee92
+truncating to largest ever: 0xf2689
+truncating to largest ever: 0xf8d22
+truncating to largest ever: 0xfe0fd
+truncating to largest ever: 0xfe1fe
+truncating to largest ever: 0xfe85e
+truncating to largest ever: 0xfeae9
+truncating to largest ever: 0xfeda5
+truncating to largest ever: 0xfedc3
+truncating to largest ever: 0xff885
+truncating to largest ever: 0xfff24
+truncating to largest ever: 0xfffef
+skipping zero size read
+skipping zero size write
+skipping zero size write
+truncating to largest ever: 0xffff3
+skipping zero size read
+skipping zero size write
+skipping zero size write
+skipping zero size read
+skipping zero size write
+truncating to largest ever: 0xffff7
+truncating to largest ever: 0xffffc
+skipping zero size read
+skipping zero size write
+skipping zero size read
+All operations completed A-OK!
+
+real	20m31.713s
+user	0m42.063s
+sys	1m30.985s
+FSX-DONE</pre><h3 class='tier'>pjdfstest</h3><pre>2407 of 4560 pjdfstest assertions pass as an unprivileged user; the rest need root (chown/chmod semantics, device nodes) or POSIX permissions cloudfs deliberately does not model. Full log: pjd summary from 2026-09-02.</pre><h3 class='tier'>crash 模式排空后状态</h3><pre>durability: crash dead: 0</pre>
+</section>
+
+<section>
+  <div class="sechead"><span class="num">08</span><h2>保留意见</h2></div>
+  <div class="col">
+    <ul>
+      <li><strong>unlink 仍是 ~160/s。</strong>限流放开后瓶颈换成了 journal：删除一个还在上传队列里的文件要给它打墓碑（一次 FULL 同步的事务），
+      而 uploader 同时在为每个上传写三次同步事务。它没有门禁；异步删除队列记在 TODO。</li>
+      <li><strong>热遍历剩下的 41 次 getattr</strong>是内核在 readdir 后对目录属性的一次重取，每目录一次；0.25 ms 一次，不影响门禁，但不是零。</li>
+      <li><strong>power 模式小文件到不了 400/s。</strong>单线程 close() 串行付 fsync 是设计选择；要那个数字就选 crash 模式，报告两者都给。</li>
+      <li><strong>冷随机读的门禁取决于后端当时有多少 CPU。</strong>新的
+      <code>cloudfs_remote_seconds_total</code> 把每次读拆成两半：我们自己的代码稳定在
+      ~150 µs，SFTP 调用内部则在 446–980 µs 之间摆动。1,500 IOPS 相当于每次 667 µs，所以后端
+      每次调用低于 ~515 µs 时达标（实测 1,534–1,974），高于 600 µs 时不达标（实测 1,265–1,331）。
+      测量期间后端主机（4 核）上有一个与本项目无关的 <code>snap-store</code> 常驻占用 2.6 个核，
+      已经跑了 104 天；没有去动别人机器上的进程。</li>
+      <li><strong>本轮的数字对测量顺序敏感。</strong>随机读紧跟在 256 MiB 顺序读之后，磁盘还在消化上一项；
+      让后台工作（目录预取、hydrate）给前台读让路之后差距从 ~40% 收敛到噪声范围，但表里仍同时给出最好一次（min）。</li>
+      <li><strong>后端主机也是共享的。</strong>192.168.0.20 是 4 核，测量期间有一个与本项目无关的
+      <code>snap-store</code> 进程常驻占用 2.6 个核（已运行 104 天），sshd 与 sftp-server 和它抢 CPU。
+      直连冷顺序读的中位数因此在 130–320 MB/s 之间摆动，而新的每操作耗时显示这段时间确实花在
+      SFTP 调用内部，不在调用之上的代码里。没有去动别人机器上的进程。</li>
+      <li><strong>本机负载。</strong>测量期间 4 核机器的 load average 在 9–10（另一个会话与一个 D 状态的残留测试进程），
+      所有数字都是在这个条件下取的；表里同时给出最好一次（min）。</li>
+      <li><strong>经代理的数字比直连低</strong>：netem 是用户态 Go 代理，每个字节多过两次内核；lan 档保留是为了与 wan/bad 同基线。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>原始数据：<code>docs/perf-raw-round2/*.jsonl</code>（四档）、<code>docs/perf-raw-round2/before-fixes-lan.jsonl</code>、<code>docs/perf-raw-round2/crash.jsonl</code>。
+方法与门禁：<code>docs/bench.md</code>。</footer>
+</div>

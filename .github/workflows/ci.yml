@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - if: runner.os == 'Linux'
+        run: make format-check
+      - run: go vet ./...
+      - run: go test -race ./... -count=1 -timeout 300s
+      - run: CGO_ENABLED=0 go build -buildvcs=false -trimpath ./cmd/cloudfs
+
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build --build-arg VERSION=ci -t cloudfs:ci .
+      - run: docker run --rm cloudfs:ci version
+      - name: Doctor reports missing or available FUSE without crashing
+        run: docker run --rm cloudfs:ci doctor --json || test $? -eq 1

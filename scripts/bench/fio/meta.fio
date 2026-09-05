@@ -1,0 +1,18 @@
+# mdtest stand-in: fio's file engines create, stat and delete N files. This
+# is used because mdtest needs MPI, which is not available without root.
+[global]
+directory=${DIR}/scratch/fio-meta
+nrfiles=2000
+filesize=4k
+group_reporting=1
+[meta-create]
+ioengine=filecreate
+rw=write
+[meta-stat]
+stonewall
+ioengine=filestat
+rw=read
+[meta-delete]
+stonewall
+ioengine=filedelete
+rw=read

@@ -1,0 +1,381 @@
+<title>CloudFS 交付报告</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --bg: #F3F5F7;
+    --surface: #FFFFFF;
+    --surface-2: #E8ECF0;
+    --ink: #161A21;
+    --ink-2: #48525F;
+    --muted: #79838F;
+    --line: #D2D9E0;
+    --line-strong: #A9B4C0;
+    --accent: #2D4A7C;
+    --accent-ink: #1E3557;
+    --accent-soft: #DFE7F2;
+    --pass: #2E7D52;
+    --pass-soft: #DDEDE3;
+    --warn: #A8681C;
+    --warn-soft: #F5E8D6;
+    --code-bg: #EDF0F3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0F1319; --surface: #171C24; --surface-2: #1E242E;
+      --ink: #E4E8ED; --ink-2: #B0B9C4; --muted: #7C8794;
+      --line: #2A323D; --line-strong: #3C4655;
+      --accent: #7FA3D8; --accent-ink: #A6C2E8; --accent-soft: #1B2738;
+      --pass: #5FB98A; --pass-soft: #16281F; --warn: #D4A05C; --warn-soft: #2E2417;
+      --code-bg: #0C1017;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0F1319; --surface: #171C24; --surface-2: #1E242E;
+    --ink: #E4E8ED; --ink-2: #B0B9C4; --muted: #7C8794;
+    --line: #2A323D; --line-strong: #3C4655;
+    --accent: #7FA3D8; --accent-ink: #A6C2E8; --accent-soft: #1B2738;
+    --pass: #5FB98A; --pass-soft: #16281F; --warn: #D4A05C; --warn-soft: #2E2417;
+    --code-bg: #0C1017;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 15.5px; line-height: 1.75;
+  }
+  h1, h2, h3 { font-family: Manrope, "Noto Sans SC", system-ui, sans-serif; text-wrap: balance; line-height: 1.25; margin: 0; }
+  h1 { font-size: 2rem; font-weight: 800; letter-spacing: -.015em; }
+  h2 { font-size: 1.35rem; font-weight: 700; margin-top: 3.4rem; padding-bottom: .45rem; border-bottom: 2px solid var(--line-strong); }
+  h3 { font-size: 1.02rem; font-weight: 700; margin-top: 1.9rem; }
+  p { margin: .75rem 0; max-width: 70ch; }
+  a { color: var(--accent-ink); }
+  code, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { font-size: .86em; background: var(--code-bg); padding: .08em .34em; border-radius: 2px; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); padding: .85rem 1.05rem; overflow-x: auto; font-size: .8rem; line-height: 1.65; font-family: "JetBrains Mono", monospace; }
+  pre code { background: none; padding: 0; }
+  .eyebrow { font-family: "JetBrains Mono", monospace; font-size: .7rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+
+  .shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 3rem; max-width: 1140px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
+  nav.toc { position: sticky; top: 1.5rem; align-self: start; font-size: .83rem; }
+  nav.toc a { display: block; color: var(--ink-2); text-decoration: none; padding: .2rem 0 .2rem .7rem; border-left: 2px solid var(--line); }
+  nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent-ink); border-left-color: var(--accent); outline: none; }
+  main { min-width: 0; }
+  @media (max-width: 880px) { .shell { grid-template-columns: 1fr; } nav.toc { position: static; } }
+
+  header.hero { padding-bottom: 1.4rem; border-bottom: 2px solid var(--line-strong); }
+  .lede { font-size: 1.05rem; color: var(--ink-2); max-width: 64ch; }
+
+  /* headline figures */
+  .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 1.6rem 0 0; }
+  .fig { background: var(--surface); padding: .85rem 1rem; }
+  .fig .n { font-family: Manrope, sans-serif; font-size: 1.7rem; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .fig .l { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+  .fig.ok .n { color: var(--pass); }
+
+  table { border-collapse: collapse; width: 100%; font-size: .875rem; }
+  .tbl { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); margin: 1rem 0; }
+  th, td { text-align: left; vertical-align: top; padding: .5rem .8rem; border-bottom: 1px solid var(--line); }
+  th { background: var(--surface-2); font-weight: 700; font-size: .78rem; letter-spacing: .02em; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  td.mono { font-family: "JetBrains Mono", monospace; font-size: .82rem; }
+
+  .tag { display: inline-block; font-family: "JetBrains Mono", monospace; font-size: .72rem; padding: .05rem .4rem; border: 1px solid currentColor; white-space: nowrap; }
+  .tag.pass { color: var(--pass); }
+  .tag.warn { color: var(--warn); }
+  .tag.info { color: var(--accent); }
+
+  /* bug cards: the most load-bearing content, so they get the emphasis */
+  .bugs { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 1.2rem 0; }
+  .bug { background: var(--surface); padding: .95rem 1.1rem; display: grid; grid-template-columns: 1.5rem 1fr; gap: .8rem; }
+  .bug .idx { font-family: "JetBrains Mono", monospace; font-size: .8rem; color: var(--muted); padding-top: .12rem; }
+  .bug h4 { margin: 0 0 .3rem; font-family: Manrope, sans-serif; font-size: .96rem; font-weight: 700; }
+  .bug p { margin: .25rem 0; font-size: .89rem; max-width: none; }
+  .bug .found { font-size: .8rem; color: var(--muted); margin-top: .4rem; }
+  .bug .found b { color: var(--ink-2); font-weight: 500; }
+
+  /* baseline bars */
+  .bars { display: grid; gap: .5rem; margin: 1rem 0; max-width: 62ch; }
+  .bar { display: grid; grid-template-columns: 16ch 1fr 7ch; gap: .7rem; align-items: center; font-size: .85rem; }
+  .bar .track { height: 14px; background: var(--surface-2); position: relative; }
+  .bar .fill { height: 100%; background: var(--accent); }
+  .bar .fill.zero { background: var(--pass); width: 3px !important; }
+  .bar .v { font-family: "JetBrains Mono", monospace; font-size: .8rem; text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 620px) { .bar { grid-template-columns: 1fr; gap: .2rem; } .bar .v { text-align: left; } }
+
+  .callout { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: .65rem 1rem; margin: 1.2rem 0; font-size: .89rem; max-width: 70ch; }
+  .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
+
+  ul.plain { padding-left: 1.15rem; max-width: 70ch; }
+  ul.plain li { margin: .28rem 0; }
+  footer { margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .8rem; color: var(--muted); }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+
+<div class="shell">
+  <nav class="toc" aria-label="目录">
+    <div class="eyebrow" style="margin-bottom:.5rem">目录</div>
+    <a href="#summary">交付概要</a>
+    <a href="#bugs">发现并修复的缺陷</a>
+    <a href="#baseline">实测基线</a>
+    <a href="#tests">验证层次</a>
+    <a href="#drivers">驱动状态</a>
+    <a href="#mcp">MCP 接口</a>
+    <a href="#modules">模块清单</a>
+    <a href="#gaps">尚未验证</a>
+    <a href="#next">下一步</a>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <div class="eyebrow">交付报告 · 2026-09-02</div>
+      <h1 style="margin-top:.45rem">CloudFS 交付报告</h1>
+      <p class="lede">多网盘 FUSE 挂载盘从设计到可运行系统。终端与 agent 共享同一份文件系统，写入先落本地日志再异步上传，代理与限流按域名和账号分别生效。</p>
+      <div class="figures">
+        <div class="fig"><div class="n">21,292</div><div class="l">行实现代码</div></div>
+        <div class="fig"><div class="n">14,370</div><div class="l">行测试代码</div></div>
+        <div class="fig ok"><div class="n">345</div><div class="l">测试函数全部通过</div></div>
+        <div class="fig"><div class="n">9</div><div class="l">已接入网盘后端</div></div>
+        <div class="fig ok"><div class="n">9</div><div class="l">修复的真实缺陷</div></div>
+      </div>
+    </header>
+
+    <h2 id="summary">交付概要</h2>
+    <p>七个里程碑全部完成。系统能挂载、能读写、能被 agent 操作，崩溃后不丢数据，遇到限速会自己退让。竞态检测在核心并发路径上干净。</p>
+    <div class="tbl"><table>
+      <thead><tr><th>里程碑</th><th>内容</th><th>状态</th></tr></thead>
+      <tbody>
+        <tr><td>M0 骨架</td><td>Provider 接口与能力矩阵、故障注入 provider、配置校验、错误分类、AIMD 限流与熔断</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M1 只读挂载</td><td>SQLite 元数据、4 MiB 块缓存、readahead、后台预取、VFS 读路径、真实 FUSE 挂载</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M2 写路径</td><td>staging 与流式哈希、写日志、上传队列、三种一致性模式、冲突副本、崩溃恢复</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M3 网络与驱动</td><td>共享 HTTP 层、出口组健康检查、WebDAV 与六家国内网盘驱动，全部走同一套代理与限流</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M4 MCP</td><td>15 个工具、允许列表、只读模式、stdio 与 HTTP 传输、客户端安装命令</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M5 加固</td><td>pin / hydrate、变更订阅刷新、Prometheus 指标、status、doctor 与 --fix、完整 CLI</td><td><span class="tag pass">完成</span></td></tr>
+        <tr><td>M6 macOS</td><td>macFUSE 平台选项与检测</td><td><span class="tag warn">待真机验证</span></td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="bugs">发现并修复的缺陷</h2>
+    <p>这四个都不是编译错误，是行为错误。它们在单元测试全绿之后才暴露出来，说明只测组件不测系统会漏掉什么。</p>
+    <div class="bugs">
+      <div class="bug">
+        <div class="idx">01</div>
+        <div>
+          <h4>提交发生在 RELEASE 里，而内核不等待 RELEASE</h4>
+          <p>写完文件后立刻读，读到的是空的。原因是数据提交挂在 FUSE 的 RELEASE 上，但内核对 <code>close(2)</code> 只等待 FLUSH 的回复，RELEASE 是异步的。</p>
+          <p>提交移到 FLUSH。<code>close()</code> 返回时数据已经在本地日志里。</p>
+          <div class="found">发现于 <b>真实挂载下的读写测试</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">02</div>
+        <div>
+          <h4>FLUSH 会来多次，第一次就把文件关了</h4>
+          <p>修好上一条之后，shell 的 <code>echo &gt; file</code> 报 I/O 错误。内核为每个关闭的文件描述符发一次 FLUSH，包括 <code>dup</code> 出来的；CREATE 之后就先来了一次，把 staging 文件关掉了，后续写入全部失败。</p>
+          <p>FLUSH 改为提交但保持句柄可写，RELEASE 才做拆除。同一句柄的连续提交会互相取代，不会为一个文件排队两次上传。</p>
+          <div class="found">发现于 <b>CLI 挂载冒烟测试</b>，仅在真实内核路径上出现</div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">03</div>
+        <div>
+          <h4>尚未上传的文件无法重命名</h4>
+          <p>编辑器保存文件的标准做法是写临时文件再改名覆盖。因为临时文件还在上传队列里、远端还没有它的 ID，改名会拿一个假 ID 去问服务端，返回"文件不存在"。</p>
+          <p>改名和删除现在会识别这种状态：直接改写队列里那条待上传记录的目标，或者取消它，不去打扰服务端。</p>
+          <div class="found">发现于 <b>模拟编辑器保存的冒烟测试</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">04</div>
+        <div>
+          <h4>本地连续两次写同一文件，第二次被误判为冲突</h4>
+          <p>冲突检测比对的是"打开时看到的版本"。但第一次写入后，本地版本已经变成一个待上传的临时标记，第二次写入拿它去比对远端，永远不相等，于是把自己的修改存成了冲突副本。</p>
+          <p>元数据里分开记录"当前版本"和"最后已知的远端版本"，冲突检测只看后者。冲突的定义回到它本来的意思：别人改了。</p>
+          <div class="found">发现于 <b>混沌测试的并发写场景</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">05</div>
+        <div>
+          <h4>重命名不覆盖目标</h4>
+          <p><code>rename(2)</code> 的语义是替换目标文件，但服务端路径没有先删除已存在的目标，网盘拒绝覆盖后返回"文件已存在"。编辑器第二次保存同一个文件就会失败。</p>
+          <p>覆盖的决定移到 VFS 层：驱动继续拒绝静默覆盖，由上层显式删除目标再改名。网盘做不到原子替换，所以失败时保留的一定是源文件，用户想留下的内容不会丢。</p>
+          <div class="found">发现于 <b>重复运行冒烟测试</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">06</div>
+        <div>
+          <h4>重试时间是秒精度，亚秒延迟被抹平</h4>
+          <p>上传队列把下次重试时刻存成 Unix 秒。任何小于一秒的退避或合并窗口都会被四舍五入成"立即可取"，于是退避形同虚设，一次 shell 重定向也会发出两次真实上传。</p>
+          <p>改成毫秒精度并带上迁移。同时加了一个默认两秒的写入合并窗口：数据早已在本地持久化，只是推迟网络发送，在限速网盘上这能省掉一半请求。</p>
+          <div class="found">发现于 <b>间歇性失败的回归测试</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">07</div>
+        <div>
+          <h4>两个驱动会把错误的字节当成正确数据</h4>
+          <p>115 与夸克的分块读同时接受 206 和 200 两种响应，但没有处理 200 的情况。如果 CDN 节点忽略了 Range 头返回整个文件，驱动会把从偏移 0 开始的字节当作请求的窗口交出去，直接写进块缓存。这是静默的数据损坏，不是可见的失败。</p>
+          <p>把这段补偿逻辑提炼成共享函数，所有驱动统一走它，并加了一个模拟"忽略 Range 的服务器"的测试。</p>
+          <div class="found">发现于 <b>驱动一致性审查</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">08</div>
+        <div>
+          <h4>残缺的分片被当作上传成功</h4>
+          <p>百度与 123 的分片上传忽略了实际拷贝的字节数。源如果提前结束，会上传一个短分片并报告成功，最终合成一个被截断但看起来正常的文件。阿里则把 409 当成功，可能返回空的分片标识。</p>
+          <p>三处都改为显式核对字节数与标识，不符就失败，交给重试或死信处理。</p>
+          <div class="found">发现于 <b>驱动一致性审查</b></div>
+        </div>
+      </div>
+      <div class="bug">
+        <div class="idx">09</div>
+        <div>
+          <h4>部分路径返回没有版本号的条目</h4>
+          <p>块缓存用（网盘、文件 ID、版本号）做键。夸克的上传完成与天翼的提交在拿不到哈希时会返回空版本号，两份不同的内容就会共用一个缓存键，远端改动后可能读到旧文件的字节。</p>
+          <p>加了统一的版本号回退：优先用内容哈希，否则用大小加修改时间的指纹，目录用其 ID。所有手工构造的条目都过这一道。</p>
+          <div class="found">发现于 <b>驱动一致性审查</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="callout info">九个缺陷都被固化成了回归测试。前四个来自真实挂载与混沌测试，第 5、6 个来自重复运行发现的间歇失败，后三个来自对两组独立编写的驱动做的一致性审查。</div>
+
+    <h2 id="baseline">实测基线</h2>
+    <p>设计目标被写成了可回归的调用次数断言，而不是墙钟时间。一次悄悄让远端流量翻倍的改动，会在这里被挡住。</p>
+    <h3>目录遍历的远端调用次数</h3>
+    <div class="bars">
+      <div class="bar">
+        <span>冷遍历 500 文件</span>
+        <span class="track"><span class="fill" style="width:100%"></span></span>
+        <span class="v">271 次</span>
+      </div>
+      <div class="bar">
+        <span>热遍历同一棵树</span>
+        <span class="track"><span class="fill zero"></span></span>
+        <span class="v">0 次</span>
+      </div>
+      <div class="bar">
+        <span>预取后遍历 17 目录</span>
+        <span class="track"><span class="fill zero"></span></span>
+        <span class="v">0 次</span>
+      </div>
+      <div class="bar">
+        <span>写入后读回该文件</span>
+        <span class="track"><span class="fill zero"></span></span>
+        <span class="v">0 次</span>
+      </div>
+      <div class="bar">
+        <span>已建索引的文件名搜索</span>
+        <span class="track"><span class="fill zero"></span></span>
+        <span class="v">0 次</span>
+      </div>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>场景</th><th class="num">结果</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>400 文件遍历中的逐文件 Stat</td><td class="num">0</td><td>属性随目录列表一并返回，没有 N+1 请求</td></tr>
+        <tr><td>1 MiB 文件按 4 KiB 读 256 次</td><td class="num">16</td><td>等于块数，读放大为零</td></tr>
+        <tr><td>3 次顺序读后已缓存块数</td><td class="num">11 / 16</td><td>readahead 窗口确实提前拉取</td></tr>
+        <tr><td>8 个并发读同一块</td><td class="num">1</td><td>请求合并生效</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="tests">验证层次</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>层次</th><th>位置</th><th class="num">测试</th><th>覆盖</th></tr></thead>
+      <tbody>
+        <tr><td>单元</td><td class="mono">internal/*</td><td class="num">140</td><td>元数据 TTL 与负缓存、块缓存位图与淘汰、日志状态机、限流 AIMD、代理规则匹配、错误分类</td></tr>
+        <tr><td>驱动</td><td class="mono">internal/provider/*</td><td class="num">157</td><td>每个驱动回放真实响应形状，断言请求路径、必需头、分页、秒传、分片、错误码映射</td></tr>
+        <tr><td>语义</td><td class="mono">test/conformance</td><td class="num">15</td><td>同一组操作分别跑在挂载盘与本地目录上逐项比对；硬链接、符号链接、chmod 的差异被显式断言</td></tr>
+        <tr><td>可靠性</td><td class="mono">test/chaos</td><td class="num">11</td><td>断网、kill -9、429 降速、风控熔断、缓存满、冲突副本、死信重排、链接过期、并发写</td></tr>
+        <tr><td>性能</td><td class="mono">test/perf</td><td class="num">7</td><td>上表的调用次数基线</td></tr>
+        <tr><td>端到端</td><td class="mono">test/e2e</td><td class="num">8</td><td>配置文件到真实挂载加真实 MCP 会话，验证终端与 agent 互相可见</td></tr>
+      </tbody>
+    </table></div>
+    <p>竞态检测覆盖 VFS、缓存、元数据、日志、上传与端到端包，无告警。没有 FUSE 的机器上，挂载相关测试自动跳过而不是失败。</p>
+
+    <h2 id="drivers">驱动状态</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>驱动</th><th>秒传</th><th>分片</th><th class="num">默认 QPS</th><th>层级</th><th>关键约束</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">webdav</td><td>无</td><td>单次 PUT</td><td class="num">8 / 8 / 4</td><td><span class="tag info">official</span></td><td>无内容哈希，用大小加修改时间做指纹</td></tr>
+        <tr><td class="mono">aliyun</td><td>SHA1 两段式</td><td>是</td><td class="num">4 / 4 / 2</td><td><span class="tag info">official</span></td><td>下载链接 15 分钟过期；429 按风控处理</td></tr>
+        <tr><td class="mono">baidu</td><td>MD5 加前 256 KiB</td><td>是</td><td class="num">2 / 2 / 1</td><td><span class="tag info">official</span></td><td>大文件下载必须带特定 UA；非 SVIP 限速</td></tr>
+        <tr><td class="mono">pan115</td><td>SHA1 加区间签名</td><td>OSS 分片</td><td class="num">1 / 2 / 1</td><td><span class="tag info">official</span></td><td>同账号仅两个有效 token；风控激进</td></tr>
+        <tr><td class="mono">pan123</td><td>MD5</td><td>是</td><td class="num">4 / 4 / 2</td><td><span class="tag info">official</span></td><td>分片大小由服务端返回</td></tr>
+        <tr><td class="mono">quark</td><td>MD5 加 SHA1</td><td>是</td><td class="num">1 / 2 / 1</td><td><span class="tag warn">unofficial</span></td><td>逆向接口，可能随时失效</td></tr>
+        <tr><td class="mono">tianyi</td><td>MD5</td><td>是</td><td class="num">2 / 2 / 1</td><td><span class="tag info">official</span></td><td>凭据 RSA 加密；部分接口返回 XML</td></tr>
+      </tbody>
+    </table></div>
+    <p>能力矩阵是唯一的决策依据，上层从不按名字区分网盘。声明支持秒传就会先算哈希，声明支持服务端移动才会用它，声明直链可外传才会交给 MCP 的调用方。</p>
+
+    <h2 id="mcp">MCP 接口</h2>
+    <p>MCP 服务直连 VFS 核心，不经过内核，所以没有挂载也能用。这在容器里或没有 FUSE 权限时很有用。</p>
+    <div class="tbl"><table>
+      <thead><tr><th>约束</th><th>做法</th></tr></thead>
+      <tbody>
+        <tr><td>响应不撑爆上下文</td><td>每个工具都有分页游标与字节上限，截断时返回续读位置</td></tr>
+        <tr><td>路径不越界</td><td>允许列表先规范化再校验，<code>..</code> 穿越无效</td></tr>
+        <tr><td>删除不误伤</td><td>必须显式传 <code>confirm=true</code>，因为删除同时作用于远端</td></tr>
+        <tr><td>大文件不走服务</td><td><code>get_download_url</code> 返回直链与必需的请求头</td></tr>
+        <tr><td>内容搜索不假装</td><td>只搜已缓存的文件，跳过的部分会明说并建议先 <code>pin</code></td></tr>
+        <tr><td>凭据不外泄</td><td>token 与 cookie 永不出现在任何返回里</td></tr>
+      </tbody>
+    </table></div>
+    <pre><code>cloudfs mcp install --client claude   # 打印 .mcp.json 片段
+cloudfs mcp install --client codex    # 打印 config.toml 片段</code></pre>
+
+    <h2 id="modules">模块清单</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>包</th><th class="num">行数</th><th class="num">测试</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">internal/provider</td><td class="num">16,995</td><td class="num">157</td><td>接口、能力矩阵、共享 HTTP 层、九个后端</td></tr>
+        <tr><td class="mono">internal/vfs</td><td class="num">2,488</td><td class="num">16</td><td>inode 树、读写路径、readahead、预取、一致性模式</td></tr>
+        <tr><td class="mono">internal/mcpsrv</td><td class="num">1,729</td><td class="num">17</td><td>MCP 工具集、允许列表、两种传输</td></tr>
+        <tr><td class="mono">internal/net</td><td class="num">1,669</td><td class="num">18</td><td>规则路由与出口组、AIMD 令牌桶与熔断、错误分类</td></tr>
+        <tr><td class="mono">internal/meta</td><td class="num">1,312</td><td class="num">11</td><td>SQLite 目录树、TTL、负缓存、文件名索引</td></tr>
+        <tr><td class="mono">internal/journal</td><td class="num">1,300</td><td class="num">9</td><td>staging、流式哈希、崩溃恢复、死信</td></tr>
+        <tr><td class="mono">internal/fusefs</td><td class="num">1,172</td><td class="num">10</td><td>go-fuse 适配、平台选项、errno 映射</td></tr>
+        <tr><td class="mono">internal/control</td><td class="num">1,151</td><td class="num">12</td><td>status、指标、健康端点、doctor</td></tr>
+        <tr><td class="mono">internal/cache</td><td class="num">1,059</td><td class="num">13</td><td>块缓存、hydrate、2Q 淘汰、背压</td></tr>
+        <tr><td class="mono">internal/upload</td><td class="num">926</td><td class="num">10</td><td>秒传、分片续传、会话恢复、冲突副本</td></tr>
+        <tr><td class="mono">internal/daemon</td><td class="num">663</td><td class="num">9</td><td>从配置装配整套系统</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="gaps">尚未验证</h2>
+    <p>这些是诚实的边界，不是遗漏。每一处都在代码里用 <code>UNVERIFIED</code> 标注，失败模式都是"调用失败"或"降级为分片上传"，不会写出损坏的数据。</p>
+    <div class="tbl"><table>
+      <thead><tr><th>驱动</th><th class="num">待确认项</th><th>集中在</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">tianyi</td><td class="num">17</td><td>签名规范化字符串、登录页字段、返回码枚举、分片 XML 结构</td></tr>
+        <tr><td class="mono">quark</td><td class="num">13</td><td>数字错误码、异步任务状态枚举、OSS 签名字符串</td></tr>
+        <tr><td class="mono">pan115</td><td class="num">13</td><td>token 错误码、上传初始化字段名、OSS 区域与回调体</td></tr>
+        <tr><td class="mono">aliyun</td><td class="num">4</td><td>秒传端到端路径、部分错误码、异步移动任务</td></tr>
+        <tr><td class="mono">pan123</td><td class="num">3</td><td>链接有效期、分片数上限、重名判定</td></tr>
+        <tr><td class="mono">baidu</td><td class="num">2</td><td>上传主机发现、precreate 的分块列表占位</td></tr>
+      </tbody>
+    </table></div>
+    <ul class="plain">
+      <li><b>macOS 挂载</b>：平台选项已按 macFUSE 的限制写好，但没有真机跑过。</li>
+      <li><b>长时间风控行为</b>：按推荐 QPS 连续运行 30 分钟不触发限制这一条，需要真实账号。</li>
+      <li><b>Windows</b>：接口已预留，WinFsp 适配未实现。</li>
+    </ul>
+
+    <h2 id="next">下一步</h2>
+    <ul class="plain">
+      <li>用真实账号逐个核对 <code>UNVERIFIED</code> 条目，从条目最少的百度和 123 开始。</li>
+      <li>在 macOS 上跑一遍完整测试套件，重点是 Finder 交互与 max_write 协商。</li>
+      <li>接入 Google Drive、OneDrive、Dropbox 与 Box，直接复用共享 HTTP 层与能力矩阵。</li>
+      <li>为有变更通知接口的网盘接上 delta 游标，目前元数据刷新一律走 TTL 轮询。</li>
+    </ul>
+
+    <footer>
+      完整设计见工作区 <span class="mono">docs/DESIGN.md</span>，MCP 用法见 <span class="mono">docs/mcp.md</span>，驱动接入见 <span class="mono">docs/providers.md</span>。
+    </footer>
+  </main>
+</div>
