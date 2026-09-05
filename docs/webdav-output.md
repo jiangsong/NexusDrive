@@ -62,10 +62,38 @@ Compose 已映射容器 8080 到宿主 `CLOUDFS_WEBDAV_HOST:CLOUDFS_WEBDAV_PORT`
 `CLOUDFS_WEBDAV_TOKEN`；将 `CLOUDFS_WEBDAV_HOST` 改为 `0.0.0.0` 前先准备 TLS/VPN 和宿主
 防火墙。MCP-only 模式无需 `/dev/fuse` 即可同时提供 WebDAV。
 
+## 可写模式
+
+默认只读。`webdav.writable: true` 打开 PUT / DELETE / MKCOL / MOVE / COPY /
+PROPPATCH / LOCK / UNLOCK，OPTIONS 随之公布这些方法并声明 `DAV: 1, 2`（class 2 是
+锁，只在真的提供 LOCK 时才声明——让客户端看到 2 却在 LOCK 上吃 405 比没声明更糟）。
+写入走的是 FUSE 用的同一条 VFS 路径：PUT 落到 journal 暂存、关闭句柄时提交、上传队列
+异步送到网盘，一致性模式仍由挂载子树的配置决定，只读挂载上的 PUT 被拒绝。
+
+几处不是照抄 `golang.org/x/net/webdav` 默认行为的地方，都是为了不给出错误的答案：
+
+- **COPY 由驱动或本地缓存完成，不经过本进程搬字节。** DAV 库的 COPY 实现是打开源、
+  打开目标、逐字节复制；在网盘上这意味着完整下载再完整上传，而 `vfs.Copy` 本来就能
+  用服务端 copy 或用已缓存的 blob 直接秒传。所以 COPY 被拦下来交给 `vfs.Copy`。
+  目录 COPY 明确返回 403 并说明原因：`vfs.Copy` 是文件原语，在适配层里递归遍历目录
+  等于把逻辑下沉到了错误的一层。
+- **PUT 不返回 ETag。** DAV 库在写入提交之前就向文件要 ETag，此时节点上的版本描述的
+  还是旧内容。返回一个和下一次 GET 对不上的校验符比不返回更糟，所以这里删掉它。
+- **只读挂载上的写返回 403 而不是 404/405。** DAV 库把 OpenFile 的任何失败都压成 404、
+  把 RemoveAll 的任何失败都压成 405，于是一个能被列出来的目录里的文件会报「不存在」。
+  适配层记录「因策略被拒」并在响应写出时改正状态码，处理器本身不变，锁的执行不受影响。
+- **MOVE 的目标越界返回 403，跨主机返回 502**，而不是 DAV 库的 404：出问题的是目标，
+  不是源。
+- **导出根不可删除、不可改名**：它在这个命名空间里没有父目录，删掉它等于端掉整棵导出树。
+
+XML 体（PROPFIND / PROPPATCH / LOCK）限制在 64 KiB；PUT 的体是文件本身，不受此限。
+
 ## 尚未验收
 
 - Emby、Jellyfin、Infuse 等真实客户端的兼容性和大文件长播；
 - 非回环 TLS reverse proxy、NAS Docker 与断线重连；
-- 写入、锁、MOVE/COPY、配额和上传异步语义；
+- 真实客户端下的写入、锁与配额行为：可写模式有完整的单元与端到端回归，但没有 Finder、
+  Explorer、rclone 或媒体客户端实际写入过；上传是异步的，PUT 返回 201 只表示已提交到
+  本地日志（writeback）或已上传完成（strict），由挂载子树的一致性模式决定。
 - STRM 已可通过 `cloudfs strm` 生成；其真实扫描/播放兼容性，以及 redirect 链接在媒体
   客户端中的过期/重试行为仍未验收，见 `strm.md`。

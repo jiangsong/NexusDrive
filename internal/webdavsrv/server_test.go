@@ -69,6 +69,13 @@ func (f *fakeBackend) Release(context.Context, *vfs.Handle) error {
 	return nil
 }
 
+func (f *fakeBackend) HandleAttr(_ context.Context, h *vfs.Handle) vfs.Attr {
+	if h == nil {
+		return vfs.Attr{}
+	}
+	return vfs.Attr{Ino: h.Ino, Name: "movie.txt", Size: int64(len(f.body))}
+}
+
 func (f *fakeBackend) DownloadURL(_ context.Context, p string) (provider.Link, error) {
 	f.record(p)
 	return f.link, f.linkErr
@@ -193,7 +200,7 @@ func TestWebDAVNonLoopbackRequiresToken(t *testing.T) {
 }
 
 func TestWebDAVRootMappingCannotEscape(t *testing.T) {
-	f := &readOnlyFS{backend: &fakeBackend{}, root: "/share"}
+	f := &davFS{backend: &fakeBackend{}, root: "/share"}
 	for _, name := range []string{"/", "/../", "/../../outside", "//movie.txt"} {
 		got, err := f.resolve(name)
 		if err != nil || (got != "/share" && !strings.HasPrefix(got, "/share/")) {

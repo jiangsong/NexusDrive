@@ -175,14 +175,19 @@ type Control struct {
 	UI      bool   `yaml:"ui"`
 }
 
-// WebDAV exposes one VFS subtree through a read-only WebDAV endpoint. Token
-// material is intentionally not part of YAML; the server reads it from the
+// WebDAV exposes one VFS subtree through a WebDAV endpoint. Token material is
+// intentionally not part of YAML; the server reads it from the
 // CLOUDFS_WEBDAV_TOKEN environment variable when enabled.
+//
+// Writable defaults to false. An endpoint that can delete a subtree is a
+// different exposure from one that can only read it, so enabling the mutating
+// verbs is a decision the configuration has to state.
 type WebDAV struct {
 	HTTP     string `yaml:"http"`
 	Prefix   string `yaml:"prefix"`
 	Root     string `yaml:"root"`
 	Strategy string `yaml:"strategy"`
+	Writable bool   `yaml:"writable"`
 }
 
 type Config struct {

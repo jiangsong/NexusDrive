@@ -121,10 +121,11 @@ control:
   ui: true               # 同一回环端口的只读状态页；设 false 可关闭
 
 webdav:
-  http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动只读 WebDAV
+  http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动 WebDAV
   prefix: /dav
   root: /media           # 只暴露这一棵 VFS 子树
   strategy: proxy        # proxy | redirect | auto
+  writable: false        # 默认只读；true 才开放 PUT/DELETE/MKCOL/MOVE/COPY/LOCK
 ```
 
 ### 凭据与控制面

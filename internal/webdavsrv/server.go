@@ -1,6 +1,11 @@
-// Package webdavsrv exposes a read-only VFS subtree over WebDAV. It is an
-// adapter over the same VFS used by FUSE and MCP; it never resolves providers
-// or cache files directly.
+// Package webdavsrv exposes one VFS subtree over WebDAV. It is an adapter over
+// the same VFS used by FUSE and MCP; it never resolves providers or cache
+// files directly.
+//
+// The endpoint is read-only unless the configuration says otherwise. Writing
+// is opt-in because a DAV endpoint that can delete a subtree is a different
+// exposure than one that can only read it, and the difference should be a
+// decision rather than a default.
 package webdavsrv
 
 import (
@@ -22,14 +27,29 @@ import (
 	"golang.org/x/net/webdav"
 )
 
-// Backend is the narrow VFS surface required by the WebDAV adapter.
+// Backend is the narrow VFS surface a read-only WebDAV endpoint requires.
 type Backend interface {
 	StatPath(context.Context, string) (vfs.Attr, error)
 	ReadDirPath(context.Context, string) ([]vfs.Attr, error)
 	Open(context.Context, uint64, bool) (*vfs.Handle, error)
 	Read(context.Context, *vfs.Handle, []byte, int64) (int, error)
 	Release(context.Context, *vfs.Handle) error
+	HandleAttr(context.Context, *vfs.Handle) vfs.Attr
 	DownloadURL(context.Context, string) (provider.Link, error)
+}
+
+// WriteBackend adds what a writable endpoint needs. *vfs.FS satisfies it; a
+// read-only endpoint never holds one, so the write paths cannot be reached
+// even if a method somehow got past the gate.
+type WriteBackend interface {
+	Backend
+	Create(ctx context.Context, parent uint64, name string) (*vfs.Handle, error)
+	Write(ctx context.Context, h *vfs.Handle, p []byte, off int64) (int, error)
+	Truncate(ctx context.Context, h *vfs.Handle, size int64) error
+	Mkdir(ctx context.Context, parent uint64, name string) (vfs.Attr, error)
+	Remove(ctx context.Context, parent uint64, name string, recursive bool) error
+	Rename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) error
+	Copy(ctx context.Context, src, dst string) (vfs.Attr, error)
 }
 
 type Options struct {
@@ -39,6 +59,10 @@ type Options struct {
 	Root     string
 	Token    string
 	Strategy string
+	// Writable turns on the mutating verbs. It requires FS to implement
+	// WriteBackend; Start refuses rather than serving a half-writable
+	// endpoint that fails at the first PUT.
+	Writable bool
 }
 
 type Running struct {
@@ -99,13 +123,25 @@ func Start(ctx context.Context, opt Options) (*Running, error) {
 		return nil, fmt.Errorf("webdav: refusing to serve %s without a CLOUDFS_WEBDAV_TOKEN of at least 16 bytes", opt.Addr)
 	}
 
-	files := &readOnlyFS{backend: opt.FS, root: opt.Root}
+	files := &davFS{backend: opt.FS, root: opt.Root}
+	if opt.Writable {
+		writer, ok := opt.FS.(WriteBackend)
+		if !ok {
+			return nil, errors.New("webdav: this VFS cannot serve a writable endpoint")
+		}
+		files.writer = writer
+	}
 	dav := &webdav.Handler{
 		Prefix:     opt.Prefix,
 		FileSystem: files,
 		LockSystem: webdav.NewMemLS(),
 	}
-	var handler http.Handler = readOnlyMethods(directDownloads(dav, files, opt.Prefix, opt.Strategy))
+	var handler http.Handler = methodGate(
+		correctWriteStatus(
+			checkMoveDestination(
+				serverSideCopy(directDownloads(dav, files, opt.Prefix, opt.Strategy), files, opt.Prefix),
+				opt.Prefix)),
+		opt.Writable)
 	if opt.Token != "" {
 		handler = requireToken(handler, opt.Token)
 	}
@@ -134,7 +170,7 @@ func Start(ctx context.Context, opt Options) (*Running, error) {
 	return r, nil
 }
 
-func directDownloads(next http.Handler, files *readOnlyFS, prefix, strategy string) http.Handler {
+func directDownloads(next http.Handler, files *davFS, prefix, strategy string) http.Handler {
 	if strategy == "proxy" {
 		return next
 	}
@@ -174,14 +210,30 @@ func safeRedirect(raw string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil
 }
 
-func readOnlyMethods(next http.Handler) http.Handler {
+// readMethods and writeMethods are what OPTIONS advertises and what the gate
+// lets through. A verb absent from both is refused whatever the handler
+// underneath would have done with it.
+const (
+	readMethods  = "OPTIONS, GET, HEAD, PROPFIND"
+	writeMethods = readMethods + ", PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH, LOCK, UNLOCK"
+)
+
+func methodGate(next http.Handler, writable bool) http.Handler {
+	allow := readMethods
+	// Class 2 is the locking class. It is only claimed when LOCK is actually
+	// served, because a client that sees "2" and gets 405 on LOCK is worse off
+	// than one that never tried.
+	davClass := "1"
+	if writable {
+		allow, davClass = writeMethods, "1, 2"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead:
 			next.ServeHTTP(w, r)
 		case http.MethodOptions:
-			w.Header().Set("Allow", "OPTIONS, GET, HEAD, PROPFIND")
-			w.Header().Set("DAV", "1")
+			w.Header().Set("Allow", allow)
+			w.Header().Set("DAV", davClass)
 			w.Header().Set("MS-Author-Via", "DAV")
 			w.WriteHeader(http.StatusOK)
 		case "PROPFIND":
@@ -191,11 +243,26 @@ func readOnlyMethods(next http.Handler) http.Handler {
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 			next.ServeHTTP(w, r)
+		case http.MethodPut, http.MethodDelete, "MKCOL", "MOVE", "COPY", "PROPPATCH", "LOCK", "UNLOCK":
+			if !writable {
+				refuse(w, allow, "read-only WebDAV endpoint")
+				return
+			}
+			// A PUT body is the file and is streamed; the XML bodies are not,
+			// and an unbounded one would be read into memory by the handler.
+			if r.Method != http.MethodPut {
+				r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			}
+			next.ServeHTTP(w, r)
 		default:
-			w.Header().Set("Allow", "GET, HEAD, OPTIONS, PROPFIND")
-			http.Error(w, "read-only WebDAV endpoint", http.StatusMethodNotAllowed)
+			refuse(w, allow, "unsupported WebDAV method")
 		}
 	})
+}
+
+func refuse(w http.ResponseWriter, allow, reason string) {
+	w.Header().Set("Allow", allow)
+	http.Error(w, reason, http.StatusMethodNotAllowed)
 }
 
 func canonicalPrefix(p string) bool {

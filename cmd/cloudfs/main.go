@@ -483,7 +483,13 @@ func cmdMount(ctx context.Context, args []string) error {
 			return err
 		}
 		defer running.Close()
-		fmt.Printf("  webdav on http://%s%s (root %s, read-only %s)\n", cfg.WebDAV.HTTP, cfg.WebDAV.Prefix, cfg.WebDAV.Root, cfg.WebDAV.Strategy)
+		// Say which it is: an endpoint that accepts DELETE is worth naming.
+		access := "read-only"
+		if cfg.WebDAV.Writable {
+			access = "writable"
+		}
+		fmt.Printf("  webdav on http://%s%s (root %s, %s, %s)\n",
+			cfg.WebDAV.HTTP, cfg.WebDAV.Prefix, cfg.WebDAV.Root, access, cfg.WebDAV.Strategy)
 	}
 	// MCP over HTTP, when configured.
 	if addr := cfg.MCP.HTTP; addr != "" {
@@ -609,6 +615,7 @@ func startWebDAV(ctx context.Context, d *daemon.Daemon, cfg *config.Config) (*we
 	return webdavsrv.Start(ctx, webdavsrv.Options{
 		FS: d.FS, Addr: cfg.WebDAV.HTTP, Prefix: cfg.WebDAV.Prefix, Root: cfg.WebDAV.Root,
 		Token: os.Getenv("CLOUDFS_WEBDAV_TOKEN"), Strategy: cfg.WebDAV.Strategy,
+		Writable: cfg.WebDAV.Writable,
 	})
 }
 

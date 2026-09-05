@@ -984,7 +984,7 @@ GHCR 发布仍需外部环境验收。Homebrew/NAS 包必须等 T-16 的仓库�
 
 ---
 
-### [~] T-19 WebDAV / 直链输出
+### [~] T-19 WebDAV / 直链输出：可写模式已补齐，真实客户端待验收
 
 - **证据**：`internal/provider/webdav` 是**客户端**；全仓库非驱动代码 `grep PROPFIND` 零命中。
   对外只有两个面：FUSE 挂载，和 MCP（`internal/mcpsrv/http.go` 是 MCP 传输，不是文件服务）。
@@ -1007,6 +1007,26 @@ GHCR 发布仍需外部环境验收。Homebrew/NAS 包必须等 T-16 的仓库�
     ——用 `test/perf` 的调用计数方式断言，不是靠肉眼看。
   - `redirect` 策略下，provider 要求特定 UA 时（百度 >20 MB）自动降级为 `proxy` 而不是给出 403 的链接。
   - 只读模式下所有写方法返回 403，白名单外路径返回 404 而不是 403（不泄露存在性）。
+
+**可写模式补充（2026-09-06）**：`webdav.writable`（默认 false）打开 PUT / DELETE /
+MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK，OPTIONS 公布对应方法并在真的提供锁时
+才声明 `DAV: 1, 2`。写入复用 FUSE 的同一条 VFS 路径（Create/Write/Truncate/Release，
+提交在 Release），只读挂载上的写被拒绝。四处刻意偏离 `x/net/webdav` 默认行为，都是为了
+不给错误答案，且每条都有回归：
+
+1. **COPY 交给 `vfs.Copy`**，不让 DAV 库下载再上传——那正是 §3.4 的跨盘秒传要避免的。
+   目录 COPY 明确 403（`vfs.Copy` 是文件原语，递归不该写在适配层）。单测断言
+   `copies==1 && streamed==0`；e2e 断言复制一个已缓存文件产生 0 次后端下载。
+2. **PUT 不返回 ETag**：DAV 库在提交前就取 ETag，拿到的是旧内容的校验符。回归断言
+   PUT 响应无 ETag、提交后的 GET 有 ETag。
+3. **只读挂载上的写返回 403**：DAV 库把 OpenFile 的任何错误压成 404、RemoveAll 的任何
+   错误压成 405。适配层记录「因策略被拒」并在写响应头时改正，处理器与锁执行不变。
+4. **MOVE 目标越界 403、跨主机 502**，而非 404：出问题的是目标不是源。
+
+导出根不可删/不可改名（它在该命名空间里没有父目录）。XML 体限 64 KiB，PUT 体不受此限。
+新增 21 个单测 + 1 个不挂 FUSE 的端到端（PUT→队列→网盘→读回、MKCOL、MOVE、COPY、
+递归 DELETE）。**仍缺**：Finder / Explorer / rclone / cadaver / 媒体客户端的真实写入
+验收，配额与大文件长写，以及 TLS 反代下的行为。因此 T-19 保持部分完成。
 
 **当前实现（2026-09-05）**：新增 `internal/webdavsrv`，把单一规范 VFS 子树投影为 DAV
 根目录；PROPFIND Depth 0/1、GET/HEAD、Range、条件 ETag 全部经 VFS 的 Stat/ReadDir/Open/
