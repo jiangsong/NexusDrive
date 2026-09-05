@@ -58,7 +58,19 @@
   <h2>代理出口</h2>
   <div class="panel"><table><thead><tr><th>出口</th><th>延迟</th><th>状态</th></tr></thead><tbody id="proxies"></tbody></table></div>
   <section id="warning-section" hidden><h2>警告</h2><div class="panel"><ul id="warnings"></ul></div></section>
-  <footer>只读页面 · 数据来自 /status · 每 5 秒刷新</footer>
+  <h2>添加网盘账号</h2>
+  <div class="panel" id="account-panel">
+    <p class="muted" id="account-note">正在读取可用的后端类型…</p>
+    <div id="account-form" hidden>
+      <p><label>名称 <input id="account-name" size="16" autocomplete="off" spellcheck="false"></label>
+         <label>类型 <select id="account-type"></select></label></p>
+      <div id="account-fields"></div>
+      <p><label>挂载到（可选） <input id="account-mount" size="24" autocomplete="off" spellcheck="false" placeholder="/mnt/cloud"></label></p>
+      <p><button type="button" id="account-add">添加</button> <span id="account-result" class="muted"></span></p>
+      <p class="muted" id="account-credentials"></p>
+    </div>
+  </div>
+  <footer>状态只读 · 数据来自 /status · 每 5 秒刷新 · 凭据只在终端用 config auth 设置</footer>
 </main>
 <script>
   const $ = id => document.getElementById(id);
@@ -133,10 +145,65 @@
     $('warning-section').hidden = !warnings.children.length;
     const health = $('health'); health.className = (uploads.dead || 0) > 0 ? 'bad' : 'ok'; health.textContent = (uploads.dead || 0) > 0 ? '需要处理' : '运行正常';
   }
+  // Adding an account writes the public settings only. Credentials never pass
+  // through this page: the server refuses them, and the reply says which
+  // command to run instead. A browser form on a loopback port is the widest
+  // attack surface in this system and the worst place for a drive's password.
+  let accountTypes = [];
+  function renderAccountFields() {
+    const chosen = accountTypes.find(t => t.type === $('account-type').value);
+    const host = $('account-fields'); host.replaceChildren();
+    $('account-credentials').textContent = chosen && chosen.credentials ? `随后 config auth 会要：${chosen.credentials}` : '';
+    for (const field of (chosen ? chosen.fields : [])) {
+      const p = document.createElement('p'), label = document.createElement('label');
+      const input = document.createElement('input');
+      input.id = `account-field-${field.name}`; input.size = 28; input.autocomplete = 'off'; input.spellcheck = false;
+      if (field.default) input.placeholder = field.default; else if (field.example) input.placeholder = field.example;
+      label.textContent = `${field.prompt}${field.required ? ' *' : ''} `;
+      label.append(input); p.append(label); host.append(p);
+    }
+  }
+  async function loadAccounts() {
+    try {
+      const response = await fetch('/accounts', {cache: 'no-store'});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      accountTypes = data.types || [];
+      if (!data.configurable) { text('account-note', '此守护进程没有配置文件，无法添加账号'); return; }
+      text('account-note', `写入 ${data.config_path}；凭据不经过网页，添加后按提示在终端执行 config auth`);
+      const select = $('account-type'); select.replaceChildren();
+      for (const entry of accountTypes) { const option = document.createElement('option'); option.value = entry.type; option.textContent = entry.type; select.append(option); }
+      $('account-form').hidden = false;
+      renderAccountFields();
+    } catch (error) { text('account-note', `无法读取后端类型：${error.message}`); }
+  }
+  async function addAccount() {
+    const name = $('account-name').value.trim();
+    const type = $('account-type').value;
+    const chosen = accountTypes.find(t => t.type === type);
+    const fields = {};
+    for (const field of (chosen ? chosen.fields : [])) {
+      const value = $(`account-field-${field.name}`).value.trim();
+      if (value) fields[field.name] = value;
+    }
+    const body = {name, type, fields};
+    const mount = $('account-mount').value.trim(); if (mount) body.mount = mount;
+    text('account-result', '正在添加…');
+    try {
+      const response = await fetch('/accounts', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CloudFS-Control': '1'}, body: JSON.stringify(body)});
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      const out = await response.json();
+      text('account-result', `已添加 ${out.name}；接着执行：${out.next_command}`);
+      await loadAccounts();
+    } catch (error) { text('account-result', error.message); }
+  }
   async function refresh() {
     try { const response = await fetch('/status', {cache: 'no-store'}); if (!response.ok) throw new Error(`HTTP ${response.status}`); render(await response.json()); await loadUploads(); }
     catch (error) { const health = $('health'); health.className = 'bad'; health.textContent = `状态不可用：${error.message}`; }
   }
+  $('account-type').addEventListener('change', renderAccountFields);
+  $('account-add').addEventListener('click', addAccount);
+  loadAccounts();
   refresh(); setInterval(refresh, 5000);
 </script>
 </body>

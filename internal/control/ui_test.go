@@ -23,7 +23,7 @@ func TestStatusUIIsExplicitAndReadOnly(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(body, "fetch('/status'") {
 		t.Fatalf("enabled UI status/body = %d %q", rr.Code, rr.Body.String())
 	}
-	for _, route := range []string{"/uploads?limit=50", "uploads/${action}"} {
+	for _, route := range []string{"/uploads?limit=50", "uploads/${action}", "'/accounts'"} {
 		if !strings.Contains(body, route) {
 			t.Errorf("UI does not use existing route %q", route)
 		}

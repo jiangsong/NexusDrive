@@ -340,6 +340,7 @@ func (d *Daemon) Collector() *control.Collector {
 		cancelUpload = d.Uploader.Cancel
 	}
 	return &control.Collector{
+		Config:  d.Config,
 		Version: d.version, Started: d.started,
 		FS: d.FS, Journal: d.Journal, Cache: d.Cache,
 		Proxy: d.Proxy, Limiters: d.Limiters, Remotes: remotes,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cloudfs/internal/cache"
+	"cloudfs/internal/config"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
@@ -128,6 +129,10 @@ type RemoteStatus struct {
 
 // Collector gathers status from the running components.
 type Collector struct {
+	// Config, when set, is the configuration this daemon was started from.
+	// The accounts endpoint needs its path to add a remote; nothing else here
+	// reads it, and no credential is ever served from it.
+	Config   *config.Config
 	Version  string
 	Started  time.Time
 	FS       *vfs.FS

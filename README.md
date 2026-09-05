@@ -118,7 +118,8 @@ mcp:
 
 control:
   metrics: 127.0.0.1:9101
-  ui: true               # 同一回环端口的只读状态页；设 false 可关闭
+  ui: true               # 同一回环端口的状态页；设 false 可关闭
+                         # 页面可以添加网盘账号（公开字段），但凭据只能用 config auth 设置
 
 webdav:
   http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动 WebDAV

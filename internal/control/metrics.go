@@ -37,6 +37,7 @@ func NewServer(c *Collector) *Server {
 	s.mux.HandleFunc("/copy", s.copyFile)
 	s.mux.HandleFunc("/copies", s.copies)
 	s.mux.HandleFunc("/copies/", s.mutateCopy)
+	s.mux.HandleFunc("/accounts", s.accounts)
 	return s
 }
 

@@ -1024,7 +1024,7 @@ CloudFS 在"不出事"这一条上**已经明显强于所有竞品**（三维 AI
 
 ---
 
-### [~] T-17 图形控制面
+### [~] T-17 图形控制面：Web 加账号已补齐（凭据仍只走终端），真机视觉验收待补
 
 - **证据**：`internal/control/metrics.go:24-27` 只注册了 `/healthz` `/readyz` `/status`
   `/metrics` 四个 JSON/文本端点；全仓库 `grep 'http.FileServer\|embed.FS'` 零命中，
@@ -1045,6 +1045,26 @@ CloudFS 在"不出事"这一条上**已经明显强于所有竞品**（三维 AI
   - 页面数据全部来自现有 `/status`，没有为 UI 新增绕过 VFS 的数据通路。
   - 非回环绑定且未配 token 时拒绝启动，与 MCP HTTP 行为一致。
   - 关闭 UI（配置项）后，`/status` `/metrics` 行为完全不变。
+
+**Web 加账号（2026-09-06）**：新增 `GET/POST /accounts` 与页面上的表单，`config add`
+不再是加一个网盘的唯一入口。
+
+- 表单字段来自各驱动声明的 `provider.Fields`（与 CLI 向导同一来源），页面里没有按网盘
+  名写死的表单。
+- **凭据不经过这个 API**，这是刻意的边界：POST 里出现任何 `config.IsSecretField` 的键
+  一律 400，并告诉调用方去执行 `cloudfs config auth <name>`；响应不回显被拒绝的值，
+  配置文件也不会被写入任何东西。网盘凭据是系统里最敏感的值，为省一条命令把它放进
+  回环上的浏览器表单——攻击面最大的地方——不划算；而且真正重要的授权流程（浏览器
+  OAuth、手机扫码）本来就由终端驱动。回归里逐个尝试 7 种凭据键并检查配置文件未被写。
+- 复用既有的 `privateRequest`：跨站表单（无 `X-CloudFS-Control`）、跨源 fetch、
+  DNS rebinding 的 Host 全部 403，均有回归。
+- 名称/字段名/值都有窄校验（名称只允许字母数字与 `-_`，拒绝结构性键 `type`/`proxy`/
+  `qps`/`upload_workers` 与 `_` 前缀，拒绝含换行的值——否则就是往 YAML 里注入）。
+  声明为必填的字段缺失即拒绝。
+- 另有回归断言**页面上没有 password 类型的输入框、也不出现任何凭据字段名**：服务端会
+  拒绝，但一个问你要密码的表单已经教会用户把密码往浏览器里敲了。
+- 无配置文件的守护进程（MCP-only 容器）如实报告 `configurable: false`，POST 返回 409。
+- **仍缺**：真实浏览器的截图级验收；Web 侧不做也不打算做凭据输入与 OAuth 回调。
 
 **当前实现（2026-09-05）**：`control.ui` 默认开启，在既有 `control.metrics` 回环监听的
 `/` 提供内嵌只读状态页；设为 false 后根路由恢复 404，`/status`、`/metrics` 和 Unix
