@@ -877,15 +877,19 @@ func cmdFind(ctx context.Context, args []string) error {
 			limit = n
 		}
 	}
-	results, err := d.FS.Meta().Search(ctx, query, limit)
+	report, err := d.FS.Meta().SearchReport(ctx, query, nil, limit)
 	if err != nil {
 		return err
 	}
-	for _, r := range results {
+	for _, r := range report.Results {
 		fmt.Println(r.Path)
 	}
-	if len(results) == 0 {
+	if len(report.Results) == 0 {
 		fmt.Fprintln(os.Stderr, "no matches in the local index; run 'cloudfs warm' to list more of the tree first")
+	}
+	if !report.Complete {
+		// Saying nothing here would present a partial answer as the whole one.
+		fmt.Fprintln(os.Stderr, "the index stopped at its work budget; there may be more matches — narrow the query or use --limit")
 	}
 	return nil
 }

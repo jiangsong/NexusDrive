@@ -944,12 +944,19 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	if in.Content != "" {
 		candidateLimit = limit * 4
 	}
-	results, err := s.opt.FS.Meta().SearchWithin(ctx, in.Query, roots, candidateLimit)
+	report, err := s.opt.FS.Meta().SearchReport(ctx, in.Query, roots, candidateLimit)
 	if err != nil {
 		r, _ := fail(err)
 		return r, searchOutput{}, nil
 	}
+	results := report.Results
 	var out searchOutput
+	if !report.Complete {
+		// The index stopped at its work budget, so "no more hits" would be a
+		// claim this call cannot make.
+		out.Truncated = true
+		out.Note = "the index stopped at its work budget; narrow the query or search within a subtree"
+	}
 	if in.Content != "" && len(results) == candidateLimit {
 		out.Truncated = true
 		out.Note = "content search reached its metadata candidate budget; narrow the path or query"
