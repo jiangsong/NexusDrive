@@ -14,7 +14,18 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-func init() { provider.Register("s3", Factory) }
+func init() {
+	provider.Register("s3", Factory)
+
+	provider.RegisterFields("s3", []provider.Field{
+		{Name: "endpoint", Prompt: "Endpoint URL, blank for AWS", Example: "https://s3.example.com"},
+		{Name: "region", Prompt: "Region", Default: "us-east-1"},
+		{Name: "bucket", Prompt: "Bucket", Required: true},
+		{Name: "prefix", Prompt: "Key prefix to confine this remote to"},
+		{Name: "access_key_id", Prompt: "Access key ID, blank for an anonymous bucket"},
+	}, provider.Credentials{Fields: []string{"secret_access_key", "session_token"},
+		Note: "the secret access key (and a session token if the credentials are temporary)"})
+}
 
 // Factory builds an S3/S3-compatible provider. Credentials are resolved from
 // the project's secret store before this function is called.

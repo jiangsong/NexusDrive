@@ -132,4 +132,15 @@ func expandHome(p string) string {
 	return filepath.Join(home, strings.TrimPrefix(p, "~/"))
 }
 
-func init() { provider.Register("sftp", Factory) }
+func init() {
+	provider.Register("sftp", Factory)
+
+	provider.RegisterFields("sftp", []provider.Field{
+		{Name: "host", Prompt: "SSH host", Required: true, Example: "192.168.0.20"},
+		{Name: "port", Prompt: "SSH port", Default: "22"},
+		{Name: "user", Prompt: "SSH user, blank for the current OS user"},
+		{Name: "root", Prompt: "Directory to expose", Default: "."},
+		{Name: "key_file", Prompt: "Private key file, blank to use the agent or a password"},
+	}, provider.Credentials{Fields: []string{"password", "key_passphrase"},
+		Note: "a password, or the passphrase of the key file"})
+}

@@ -1036,4 +1036,10 @@ func (p *Provider) SetTransport(client any) {
 
 func init() {
 	provider.Register("pan123", Factory)
+	provider.RegisterFields("pan123", []provider.Field{
+		{Name: "client_id", Prompt: "开放平台 clientID"},
+		{Name: "root_id", Prompt: "作为根的目录 id", Default: "0"},
+	}, provider.Credentials{Fields: []string{"client_secret", "access_token"},
+		Note: "开放平台的 clientSecret"})
+
 }

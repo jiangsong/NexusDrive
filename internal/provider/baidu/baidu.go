@@ -1309,4 +1309,10 @@ func (p *Provider) SetTransport(client any) {
 
 func init() {
 	provider.Register("baidu", Factory)
+	provider.RegisterFields("baidu", []provider.Field{
+		{Name: "client_id", Prompt: "开放平台 AppKey"},
+		{Name: "root_id", Prompt: "作为根的目录", Default: "/"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret", "access_token"},
+		Note: "config auth 会打开浏览器完成授权"})
+
 }

@@ -180,12 +180,18 @@ cloudfs uploads flush --timeout 30m        # 等待延迟重试和正在上传�
 二维码；其他账号可隐藏输入或通过 stdin 导入。授权与系统 keyring 的真实账号验收仍待完成。
 
 ```sh
-cloudfs config add nas --type webdav --url https://nas.local/dav --user alice
+cloudfs config add nas                  # 终端下会逐项询问：先选后端类型，再问该驱动需要的字段
+cloudfs config add nas --type webdav --url https://nas.local/dav --user alice   # 或者全部用参数给
 cloudfs config auth nas                 # 隐藏输入密码，保存后检查一次根目录
 cloudfs config list                     # 不输出凭据值
 cloudfs config auth nas --migrate       # 将已有明文凭据迁移到安全存储，不联网
 cloudfs config auth nas --check         # 检查已有凭据
 ```
+
+`config add` 在终端下是交互式的：问题来自各驱动自己声明的字段（`provider.RegisterFields`），
+不是 CLI 里按网盘名写死的一张表——那张表会在驱动改动时立刻过时，新驱动也进不去。已经用参数
+或 `--set` 给过的字段不会再问一遍。**不在终端时行为完全不变**：不会有任何提问，缺少必填字段
+直接报出缺哪几个，脚本不会卡在一个没人回答的问题上。
 
 以上 `add` 示例用于尚未配置的账号，不会覆盖已有同名配置。浏览器授权需要开放平台的
 `client_id` / `client_secret`，默认回调为 `http://127.0.0.1:53682/callback`，需在应用侧允许。

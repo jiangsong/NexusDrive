@@ -8,7 +8,14 @@ import (
 	"cloudfs/internal/provider/httpx"
 )
 
-func init() { provider.Register("box", Factory) }
+func init() {
+	provider.Register("box", Factory)
+
+	provider.RegisterFields("box", []provider.Field{
+		{Name: "client_id", Prompt: "Box app client ID"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret"},
+		Note: "a refresh token and client secret; Box rotates the refresh token on every use"})
+}
 
 // Factory builds a Box provider from its `remotes.<name>` config block.
 func Factory(name string, cfg map[string]any) (provider.Provider, error) {

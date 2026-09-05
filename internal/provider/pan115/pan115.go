@@ -221,7 +221,14 @@ func (p *Pan115) SetTransport(client any) {
 	}
 }
 
-func init() { provider.Register("pan115", New) }
+func init() {
+	provider.Register("pan115", New)
+	provider.RegisterFields("pan115", []provider.Field{
+		{Name: "client_id", Prompt: "115 开放平台 AppID"},
+		{Name: "root_id", Prompt: "作为根的目录 id", Default: "0"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "access_token", "client_secret"},
+		Note: "config auth 会用扫码授权取得"})
+}
 
 // Name returns the remote's configured name.
 func (p *Pan115) Name() string { return p.name }

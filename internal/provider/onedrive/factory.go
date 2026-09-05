@@ -9,7 +9,16 @@ import (
 	"cloudfs/internal/provider/httpx"
 )
 
-func init() { provider.Register("onedrive", Factory) }
+func init() {
+	provider.Register("onedrive", Factory)
+
+	provider.RegisterFields("onedrive", []provider.Field{
+		{Name: "client_id", Prompt: "Application (client) ID"},
+		{Name: "tenant", Prompt: "Directory (tenant) ID", Default: "common"},
+		{Name: "drive_id", Prompt: "Drive ID, blank for the signed-in user's drive"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "access_token", "client_secret"},
+		Note: "a refresh token from the Microsoft Entra app registration"})
+}
 
 func Factory(name string, cfg map[string]any) (provider.Provider, error) {
 	get := func(key string) string {

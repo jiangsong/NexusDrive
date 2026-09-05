@@ -11,7 +11,19 @@ import (
 	"cloudfs/internal/provider"
 )
 
-func init() { provider.Register("smb", Factory) }
+func init() {
+	provider.Register("smb", Factory)
+
+	provider.RegisterFields("smb", []provider.Field{
+		{Name: "host", Prompt: "SMB server", Required: true, Example: "192.168.0.30"},
+		{Name: "port", Prompt: "Port", Default: "445"},
+		{Name: "share", Prompt: "Share name", Required: true},
+		{Name: "user", Prompt: "User", Required: true},
+		{Name: "domain", Prompt: "Domain or workgroup"},
+		{Name: "root", Prompt: "Directory inside the share to expose"},
+	}, provider.Credentials{Fields: []string{"password", "ntlm_hash"},
+		Note: "the account password, or its NTLM hash"})
+}
 
 // Factory builds an SMB provider from its `remotes.<name>` config block.
 //

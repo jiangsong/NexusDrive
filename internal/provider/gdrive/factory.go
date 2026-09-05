@@ -9,7 +9,15 @@ import (
 	"cloudfs/internal/provider/httpx"
 )
 
-func init() { provider.Register("gdrive", Factory) }
+func init() {
+	provider.Register("gdrive", Factory)
+
+	provider.RegisterFields("gdrive", []provider.Field{
+		{Name: "client_id", Prompt: "OAuth client ID"},
+		{Name: "drive_id", Prompt: "Shared drive ID, blank for My Drive"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret", "access_token"},
+		Note: "a refresh token and client secret from the Google Cloud console"})
+}
 
 // Factory builds a Drive provider from its `remotes.<name>` config block.
 func Factory(name string, cfg map[string]any) (provider.Provider, error) {

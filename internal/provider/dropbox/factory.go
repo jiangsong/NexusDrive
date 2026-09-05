@@ -9,7 +9,14 @@ import (
 	"cloudfs/internal/provider/httpx"
 )
 
-func init() { provider.Register("dropbox", Factory) }
+func init() {
+	provider.Register("dropbox", Factory)
+
+	provider.RegisterFields("dropbox", []provider.Field{
+		{Name: "client_id", Prompt: "App key"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "access_token", "client_secret"},
+		Note: "a refresh token from the Dropbox app console; an access token alone expires in hours"})
+}
 
 func Factory(name string, cfg map[string]any) (provider.Provider, error) {
 	get := func(key string) string {

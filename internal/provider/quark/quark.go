@@ -306,6 +306,11 @@ func (q *Quark) SetTransport(client any) {
 }
 
 func init() {
+	provider.RegisterFields("quark", []provider.Field{
+		{Name: "root_id", Prompt: "作为根的目录 id", Default: "0"},
+		{Name: "user_agent", Prompt: "请求 User-Agent，留空用内置值"},
+	}, provider.Credentials{Fields: []string{"cookie"},
+		Note: "浏览器登录后的 cookie；这是非官方接口，限流更保守"})
 	provider.Register("quark", func(name string, cfg map[string]any) (provider.Provider, error) {
 		return New(name, cfg)
 	})

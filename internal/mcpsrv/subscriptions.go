@@ -45,13 +45,30 @@ type resourceSubscriptions struct {
 	done           chan struct{}
 	wake           chan struct{}
 	wg             sync.WaitGroup
+
+	// deliveries carries URIs from the coalescing loop to the sender. The SDK
+	// broadcasts a resource update to its subscribers one after another, under
+	// a ten-second deadline of its own, so a client whose transport has stalled
+	// holds that call. Doing it inline would stop this server noticing further
+	// changes at all for as long as that lasts — one stuck reader freezing
+	// every other client's view of the tree. Handing the send to a separate
+	// goroutine keeps change intake and coalescing running regardless.
+	deliveries chan string
+	// queued names the URIs already handed to the sender, so a slow send does
+	// not accumulate duplicates of the same notification behind it.
+	queued map[string]bool
 }
+
+// deliveryQueue bounds what can be waiting on a stalled client. Overflow is
+// not a loss: the watch stays dirty and the next tick offers it again.
+const deliveryQueue = 256
 
 func (r *resourceSubscriptions) init(server *Server) {
 	r.server = server
 	r.sessions = make(map[*mcp.ServerSession]map[string]*resourceWatch)
 	r.streams = make(map[*subscriptionToken]struct{})
 	r.done, r.wake = make(chan struct{}), make(chan struct{}, 1)
+	r.deliveries, r.queued = make(chan string, deliveryQueue), make(map[string]bool)
 }
 
 func subscriptionError(message string) error {
@@ -113,8 +130,9 @@ func (r *resourceSubscriptions) reserve(token *subscriptionToken, uris []string)
 	if !r.running {
 		changes, cancel := r.server.opt.FS.WatchChanges()
 		r.unwatch, r.running = cancel, true
-		r.wg.Add(1)
+		r.wg.Add(2)
 		go r.run(changes)
+		go r.deliver()
 	}
 	for uri, p := range paths {
 		watches[uri] = &resourceWatch{path: p, token: token}
@@ -335,15 +353,40 @@ func (r *resourceSubscriptions) run(changes <-chan vfs.Change) {
 					}
 				}
 			}
-			r.mu.Unlock()
 			for uri := range uris {
+				if r.queued[uri] {
+					continue
+				}
 				select {
+				case r.deliveries <- uri:
+					r.queued[uri] = true
 				case <-r.done:
+					r.mu.Unlock()
 					return
 				default:
+					// The sender is behind. The watch is still dirty, so the
+					// next tick offers this URI again; nothing is dropped.
 				}
-				_ = r.server.mcp.ResourceUpdated(context.Background(), &mcp.ResourceUpdatedNotificationParams{URI: uri})
 			}
+			r.mu.Unlock()
+		}
+	}
+}
+
+// deliver sends the coalesced notifications. It is deliberately the only
+// goroutine that calls into the SDK's broadcast, so the cost of a stalled
+// client is bounded to the delivery queue rather than to change detection.
+func (r *resourceSubscriptions) deliver() {
+	defer r.wg.Done()
+	for {
+		select {
+		case <-r.done:
+			return
+		case uri := <-r.deliveries:
+			_ = r.server.mcp.ResourceUpdated(context.Background(), &mcp.ResourceUpdatedNotificationParams{URI: uri})
+			r.mu.Lock()
+			delete(r.queued, uri)
+			r.mu.Unlock()
 		}
 	}
 }

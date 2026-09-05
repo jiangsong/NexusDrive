@@ -314,6 +314,10 @@ func (t *Tianyi) SetTransport(client any) {
 }
 
 func init() {
+	provider.RegisterFields("tianyi", []provider.Field{
+		{Name: "username", Prompt: "天翼云盘账号（手机号）"},
+		{Name: "root_id", Prompt: "作为根的目录 id", Default: "-11"},
+	}, provider.Credentials{Fields: []string{"password"}, Note: "账号密码"})
 	provider.Register("tianyi", func(name string, cfg map[string]any) (provider.Provider, error) {
 		t, err := New(name, cfg)
 		if err != nil {

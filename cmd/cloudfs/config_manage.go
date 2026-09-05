@@ -107,7 +107,7 @@ func runConfig(ctx context.Context, args []string, c configIO) error {
 	}
 	path := f.str("config", defaultConfigPath())
 	if action == "add" {
-		return configAdd(path, f, sets, c.Out)
+		return configAdd(path, f, sets, c)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -119,7 +119,9 @@ func runConfig(ctx context.Context, args []string, c configIO) error {
 	return configAuth(ctx, cfg, f, c)
 }
 
-func configAdd(path string, f *flags, sets map[string]string, out io.Writer) error {
+func configAdd(path string, f *flags, sets map[string]string, c configIO) error {
+	out := c.Out
+	in, interactive := interactiveInput(c)
 	typ := f.str("type", "")
 	known := false
 	for _, t := range provider.Types() {
@@ -128,7 +130,14 @@ func configAdd(path string, f *flags, sets map[string]string, out io.Writer) err
 		}
 	}
 	if !known {
-		return fmt.Errorf("config add: --type must name a registered provider (see cloudfs providers)")
+		if typ != "" || !interactive {
+			return fmt.Errorf("config add: --type must name a registered provider (see cloudfs providers)")
+		}
+		chosen, err := chooseType(in, out)
+		if err != nil {
+			return err
+		}
+		typ = chosen
 	}
 	r := config.Remote{Type: typ, Proxy: f.str("proxy", ""), Extra: map[string]any{}}
 	stringFields := map[string]bool{}
@@ -137,6 +146,19 @@ func configAdd(path string, f *flags, sets map[string]string, out io.Writer) err
 			sets[strings.ReplaceAll(key, "-", "_")] = value
 			stringFields[strings.ReplaceAll(key, "-", "_")] = true
 		}
+	}
+	// Whatever the driver says it needs and the flags did not provide is asked
+	// for; with no terminal, the same list is reported instead.
+	if interactive {
+		if err := collectFields(in, out, typ, sets); err != nil {
+			return err
+		}
+		for key := range sets {
+			stringFields[key] = true
+		}
+	} else if missing := missingRequired(typ, sets); len(missing) > 0 {
+		return fmt.Errorf("config add: %s needs %s; pass them with --set or run this from a terminal",
+			typ, strings.Join(missing, ", "))
 	}
 	for key, value := range sets {
 		if config.IsSecretField(key) || strings.HasPrefix(key, "_") || key == "type" || key == "proxy" || key == "qps" || key == "upload_workers" {
@@ -168,6 +190,9 @@ func configAdd(path string, f *flags, sets map[string]string, out io.Writer) err
 		return err
 	}
 	fmt.Fprintf(out, "added remote %q (%s); run cloudfs config auth %s --config %q\n", f.arg(1), typ, f.arg(1), path)
+	if hint := credentialHint(typ); hint != "" {
+		fmt.Fprintf(out, "  it will ask for %s\n", hint)
+	}
 	return nil
 }
 

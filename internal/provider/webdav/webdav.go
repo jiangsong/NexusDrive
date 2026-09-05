@@ -487,6 +487,15 @@ func (p *Provider) SetTransport(client any) {
 func init() {
 	provider.Register("webdav", Factory)
 	provider.Register("openlist", Factory)
+
+	provider.RegisterFields("webdav", []provider.Field{
+		{Name: "url", Prompt: "WebDAV collection URL", Required: true, Example: "https://nas.local/dav"},
+		{Name: "user", Prompt: "Username"},
+	}, provider.Credentials{Fields: []string{"pass"}, Note: "the account's password"})
+	provider.RegisterFields("openlist", []provider.Field{
+		{Name: "url", Prompt: "OpenList WebDAV URL", Required: true, Example: "http://openlist.local:5244/dav"},
+		{Name: "user", Prompt: "Username"},
+	}, provider.Credentials{Fields: []string{"pass"}, Note: "the account's password"})
 }
 
 // ParseTime parses a WebDAV timestamp, exported for driver tests.

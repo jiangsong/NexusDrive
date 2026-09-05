@@ -1223,4 +1223,11 @@ func (p *Provider) SetTransport(client any) {
 
 func init() {
 	provider.Register("aliyun", Factory)
+	provider.RegisterFields("aliyun", []provider.Field{
+		{Name: "client_id", Prompt: "开放平台 client id / AppId"},
+		{Name: "drive_id", Prompt: "网盘 drive id，留空则登录后自动取得"},
+		{Name: "root_id", Prompt: "作为根的目录 id", Default: "root"},
+	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret", "access_token"},
+		Note: "config auth 会打开浏览器完成授权"})
+
 }
