@@ -73,6 +73,13 @@ func contentTypeFor(p string) string {
 const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 func (s *Server) statusUI(w http.ResponseWriter, r *http.Request) {
+	// The app shell is static and carries no credential-shaped content, but it
+	// still must not answer a DNS-rebound Host or a cross-site fetch: those are
+	// exactly what privateRequest turns away for every other route. A top-level
+	// navigation (Sec-Fetch-Site: none, no Origin) from a loopback Host passes.
+	if !privateRequest(w, r) {
+		return
+	}
 	a, ok := s.assets[r.URL.Path]
 	if !ok {
 		http.NotFound(w, r)

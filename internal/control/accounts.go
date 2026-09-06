@@ -1,7 +1,6 @@
 package control
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -143,8 +142,7 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in AddAccountRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+	if !decodeMutation(w, r, &in) {
 		return
 	}
 	remote, err := buildAccount(in)

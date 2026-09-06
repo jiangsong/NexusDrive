@@ -7,10 +7,18 @@ import (
 	"testing"
 )
 
+// uiReq builds a request the UI guard accepts: a loopback Host, as a real
+// browser on this machine sends. Tests that assert the guard set their own.
+func uiReq(method, path string) *http.Request {
+	r := httptest.NewRequest(method, path, nil)
+	r.Host = "127.0.0.1:9101"
+	return r
+}
+
 func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 	plain := NewServer(&Collector{}).Handler()
 	rr := httptest.NewRecorder()
-	plain.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	plain.ServeHTTP(rr, uiReq(http.MethodGet, "/"))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("disabled UI at / = %d", rr.Code)
 	}
@@ -19,7 +27,7 @@ func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 	srv.EnableUI()
 
 	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, "/"))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `src="/ui/app.js"`) {
 		t.Fatalf("index = %d %q", rr.Code, rr.Body.String())
 	}
@@ -46,22 +54,22 @@ func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 		{"/ui/screens/main.js", "text/javascript; charset=utf-8"},
 	} {
 		rr = httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, tc.path))
 		if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != tc.contentType || rr.Header().Get("ETag") == "" {
 			t.Errorf("%s = %d type=%q etag=%q", tc.path, rr.Code, rr.Header().Get("Content-Type"), rr.Header().Get("ETag"))
 		}
 	}
 	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ui/not-an-asset.js", nil))
+	srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, "/ui/not-an-asset.js"))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("unknown asset = %d", rr.Code)
 	}
 
 	// A conditional request revalidates against the ETag.
 	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ui/app.css", nil))
+	srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, "/ui/app.css"))
 	etag := rr.Header().Get("ETag")
-	req := httptest.NewRequest(http.MethodGet, "/ui/app.css", nil)
+	req := uiReq(http.MethodGet, "/ui/app.css")
 	req.Header.Set("If-None-Match", etag)
 	rr = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
@@ -69,11 +77,54 @@ func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 		t.Fatalf("If-None-Match = %d, want 304", rr.Code)
 	}
 
-	// POST to an asset is refused; the app is read-only static.
+	// POST to an asset is refused; the app is read-only static. With the
+	// control header it clears the guard and meets statusUI's own 405; without
+	// it the guard refuses it first (covered by the rebound/cross-site test).
+	req = uiReq(http.MethodPost, "/")
+	req.Header.Set("X-CloudFS-Control", "1")
 	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/", nil))
+	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST / = %d", rr.Code)
+	}
+}
+
+// TestWebAppRefusesReboundHostAndCrossSite: the app shell is static, but it is
+// still behind the same loopback + same-origin guard as every other route, so a
+// DNS-rebound Host or a cross-site fetch cannot read it. This closes the gap the
+// route-guard enumeration test could not see, because the UI is mounted outside
+// the routes() table.
+func TestWebAppRefusesReboundHostAndCrossSite(t *testing.T) {
+	srv := NewServer(&Collector{Version: "ui-test"})
+	srv.EnableUI()
+
+	// A rebound Host.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "attacker.example"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("rebound Host at / = %d, want 403", rr.Code)
+	}
+
+	// A cross-site fetch (loopback Host but a foreign Origin).
+	req = httptest.NewRequest(http.MethodGet, "/ui/app.js", nil)
+	req.Host = "127.0.0.1:9101"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-site asset fetch = %d, want 403", rr.Code)
+	}
+
+	// A top-level navigation from a loopback Host still works (no Origin,
+	// Sec-Fetch-Site: none).
+	req = uiReq(http.MethodGet, "/")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("loopback navigation = %d, want 200", rr.Code)
 	}
 }
 
@@ -87,7 +138,7 @@ func TestWebAppNeverAsksForACredential(t *testing.T) {
 	var all strings.Builder
 	for path := range srv.assets {
 		rr := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, path))
 		all.Write(rr.Body.Bytes())
 	}
 	blob := all.String()
@@ -109,7 +160,7 @@ func TestWebAppKeepsExistingDataRoutes(t *testing.T) {
 	srv := NewServer(&Collector{Version: "ui-test"})
 	srv.EnableUI()
 	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/status", nil))
+	srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, "/status"))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"version": "ui-test"`) {
 		t.Fatalf("status route changed: %d", rr.Code)
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -176,7 +177,12 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 	if startErr != nil {
 		cancel()
 		s.authReg.remove(id)
-		http.Error(w, startErr.Error(), http.StatusBadGateway)
+		// The setup error can name a local secrets-file path or proxy
+		// internals (it comes from reading credentials / building the proxy
+		// before any URL is shown). Keep it server-side; the async path is
+		// already generic, and this one must be too.
+		log.Printf("control: authorization start for %q failed: %v", name, startErr)
+		http.Error(w, "could not start authorization; check the account settings and the daemon log", http.StatusBadGateway)
 		return
 	}
 	if rtype == "pan115" {

@@ -264,7 +264,13 @@ func (s *Server) fsPreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+int64(len(data))-1, a.Size))
+	if len(data) == 0 {
+		// An empty read (zero-length file, or offset at/after EOF) has no byte
+		// range to name; "bytes 0--1/0" is not something a client can parse.
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", a.Size))
+	} else {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+int64(len(data))-1, a.Size))
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	_, _ = w.Write(data)
 }

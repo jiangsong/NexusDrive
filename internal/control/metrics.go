@@ -188,7 +188,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if os.Getenv("CLOUDFS_PPROF") == "1" && loopbackAddr(addr) {
 		s.enablePprof()
 	}
-	s.srv = &http.Server{Addr: addr, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second}
+	s.srv = &http.Server{Addr: addr, Handler: s.drainingGuard(s.mux), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
