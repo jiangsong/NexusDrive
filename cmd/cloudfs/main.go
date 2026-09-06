@@ -110,6 +110,8 @@ func main() {
 		err = runCopies(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
+	case "ui", "open":
+		err = cmdUI(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -140,6 +142,7 @@ Agents
                             generate media .strm files through WebDAV; --prune removes verified stale outputs
 
 Inspection
+  ui [--print]              open the dashboard in a browser (needs control.metrics)
   status [--json]           show cache, upload queue, proxy and remote state
   doctor [--fix] [--json]   diagnose the environment and the local state
   cache stats | gc | pins   inspect or trim the block cache; list pin rules
@@ -474,7 +477,7 @@ func cmdMount(ctx context.Context, args []string) error {
 		if cfg.Control.Metrics != "" {
 			fmt.Printf("  metrics on http://%s/metrics\n", cfg.Control.Metrics)
 			if cfg.Control.UI {
-				fmt.Printf("  dashboard on http://%s/\n", cfg.Control.Metrics)
+				fmt.Printf("  dashboard on http://%s/  (or run: cloudfs ui)\n", cfg.Control.Metrics)
 			}
 		}
 	}

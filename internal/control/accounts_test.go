@@ -251,28 +251,6 @@ func TestAccountsWithoutAConfigFileSaysSo(t *testing.T) {
 // TestTheAccountFormNeverAsksForACredential: the page must not grow a
 // password box. The server would refuse it, but a form that asks for one has
 // already taught the user to type it into a browser.
-func TestTheAccountFormNeverAsksForACredential(t *testing.T) {
-	srv := NewServer(&Collector{Version: "ui"})
-	srv.EnableUI()
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
-	page := rr.Body.String()
-	if !strings.Contains(page, "'/accounts'") {
-		t.Fatal("the page does not offer to add an account")
-	}
-	if strings.Contains(page, `type="password"`) || strings.Contains(page, "type='password'") {
-		t.Fatal("the page has a password field; credentials belong in config auth")
-	}
-	for _, secret := range []string{"refresh_token", "client_secret", "secret_access_key", "ntlm_hash"} {
-		if strings.Contains(page, secret) {
-			t.Fatalf("the page names the credential field %q", secret)
-		}
-	}
-	// It must point at the command that does collect them.
-	if !strings.Contains(page, "config auth") {
-		t.Fatal("the page never tells the user where credentials go")
-	}
-}
 
 // writeConfigLine appends a remote of the given type to the server's config
 // file and reloads the server's view, for tests that need one that is not

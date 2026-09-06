@@ -23,6 +23,7 @@ type Server struct {
 	srv       *http.Server
 	auth      *AuthStarter
 	authReg   *authRegistry
+	assets    map[string]asset
 }
 
 // NewServer builds the control HTTP server.
@@ -90,10 +91,16 @@ func (s *Server) routes() []route {
 	}
 }
 
-// EnableUI mounts the embedded status page. It must be called before the
-// server starts; reads use /status and upload actions use the existing control
-// endpoints, so the page adds no alternate privileged data path.
-func (s *Server) EnableUI() { s.mux.HandleFunc("/", s.statusUI) }
+// EnableUI mounts the embedded web app. It must be called before the server
+// starts. The app is a set of static assets under one origin that call the
+// same control endpoints anything else does, so it adds no alternate
+// privileged data path. Every path but "/" and the embedded assets is a 404,
+// which is the contract the mux and its tests already keep.
+func (s *Server) EnableUI() {
+	s.assets = buildAssets()
+	s.mux.HandleFunc("/", s.statusUI)
+	s.mux.HandleFunc("/ui/", s.statusUI)
+}
 
 // enablePprof mounts the profiling handlers. It is called only from
 // ListenAndServe, and only for a loopback address: the decision needs the

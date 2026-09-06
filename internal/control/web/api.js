@@ -1,0 +1,65 @@
+// The one HTTP client. Every mutation carries X-CloudFS-Control: 1, which a
+// cross-site form cannot set; a non-2xx becomes an ApiError whose message is
+// the server's own text. Errors bubble to the toast host unless a caller
+// catches them for inline display.
+export class ApiError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+async function request(method, path, body) {
+  const headers = {};
+  let payload;
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
+  }
+  if (method !== 'GET') headers['X-CloudFS-Control'] = '1';
+  const resp = await fetch(path, { method, headers, body: payload, cache: 'no-store' });
+  if (!resp.ok) {
+    const text = (await resp.text()).trim();
+    throw new ApiError(resp.status, text || `HTTP ${resp.status}`);
+  }
+  const type = resp.headers.get('Content-Type') || '';
+  if (type.includes('application/json')) return resp.json();
+  return resp.text();
+}
+
+export const api = {
+  get: (p) => request('GET', p),
+  post: (p, b) => request('POST', p, b),
+  patch: (p, b) => request('PATCH', p, b),
+  put: (p, b) => request('PUT', p, b),
+  del: (p) => request('DELETE', p),
+};
+
+// events subscribes to the /events SSE stream, with exponential backoff
+// reconnect and a polling fallback for a viewer whose WebView drops SSE. The
+// caller gets change and status events; it does not have to know which
+// transport delivered them.
+export function events({ onStatus, onChange }) {
+  let es, timer, backoff = 1000, stopped = false, pollTimer;
+  const startPoll = () => {
+    if (pollTimer) return;
+    const tick = async () => {
+      try { onStatus && onStatus(await api.get('/status')); } catch (_) {}
+    };
+    tick();
+    pollTimer = setInterval(tick, 5000);
+  };
+  const stopPoll = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+  const connect = () => {
+    if (stopped) return;
+    try { es = new EventSource('/events'); }
+    catch (_) { startPoll(); return; }
+    es.addEventListener('open', () => { backoff = 1000; stopPoll(); });
+    es.addEventListener('status', (e) => { try { onStatus && onStatus(JSON.parse(e.data)); } catch (_) {} });
+    es.addEventListener('change', (e) => { try { onChange && onChange(JSON.parse(e.data)); } catch (_) {} });
+    es.addEventListener('error', () => {
+      es.close();
+      startPoll();
+      if (!stopped) timer = setTimeout(connect, Math.min(backoff *= 2, 30000));
+    });
+  };
+  connect();
+  return () => { stopped = true; if (es) es.close(); if (timer) clearTimeout(timer); stopPoll(); };
+}

@@ -270,11 +270,15 @@ config add|auth|list      账号管理、授权、凭据导入与迁移
 `service uninstall` 先停止 supervisor，检查并清除残留 FUSE 挂载，再删除定义；
 不会删除配置、cache、journal 或普通挂载目录。移动二进制或配置后应重新 install。
 
-配置了 `control.metrics` 后可打开 `http://127.0.0.1:9101/` 查看状态页；缓存、
-上传队列、挂载、远端调用/熔断、代理和警告都来自既有 `/status` JSON。`control.ui: false`
-只关闭 `/` 页面，不改变 `/status`、`/metrics` 或 Unix socket。control TCP 仍只接受回环地址。
-上传操作复用已有 control API：死信可重试，活动任务可停止；恢复会提示远端重放风险，
-永久丢弃要求再次输入完整 upload ID，且明确不删除远端数据。浏览器请求仍须同源和携带
+配置了 `control.metrics` 后，`cloudfs ui` 会在浏览器打开 `http://127.0.0.1:9101/` 的桌面式
+控制台（`--print` 只打印 URL）。它是一套嵌进二进制的多文件 Web 应用（ES modules + 一个
+设计令牌 CSS，不引入 Node，`go build` 仍是唯一构建），涵盖：连接优先的主窗口与文件浏览、
+传输队列、缓存与固定、代理出口、诊断与服务。所有操作走既有和新增的 control 端点
+（`/fs/*`、`/search`、`/doctor/*`、`/events` SSE、`/accounts/*`、`/proxy/*`、`/mounts`）。
+CSP 收紧为 `script-src 'self'; style-src 'self'`，页面资源按内容哈希带 ETag 版本化。
+**凭据永不经过界面**：授权在终端用 `cloudfs config auth` 完成（境外 OAuth/扫码可由守护
+进程代跑，秘密值不进浏览器）。`control.ui: false` 只关闭 `/` 与 `/ui/`，不改变 `/status`、
+`/metrics` 或 Unix socket。control TCP 仍只接受回环地址。浏览器请求须同源并携带
 `X-CloudFS-Control`，跨站 Origin、DNS rebinding Host 与简单表单请求会被拒绝。
 
 配置 `webdav.http` 后，同一个 owner 进程会把 `webdav.root` 作为只读 DAV 根目录输出。

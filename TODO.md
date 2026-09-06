@@ -1336,7 +1336,19 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   URL 或二维码内容字符串，B 类（密码/cookie/外部 token）拒绝并指向 `config auth`。失败一律
   报 generic，不带 provider 原文。回归 `auth_test.go`：断言呈现的是 URL/QR、响应体永不含 token、
   双飞 409、取消、终态脱敏。
+- **[x] 阶段 A 前端 + A11 `cloudfs ui`**：多文件 ES modules（`internal/control/web/`：
+  `index.html`、`app.css` 设计令牌、`store.js`/`api.js`/`router.js`/`i18n.js`/`icons.js`/`ui.js`
+  + `screens/{main,transfers,storage,proxy,diagnostics}.js`），`embed.FS` + 白名单静态处理器，
+  CSP 收紧到 `script-src 'self'; style-src 'self'`（去 unsafe-inline），每资产按内容哈希带 ETag、
+  `If-None-Match` 回 304。字体走显式 CJK 栈 + `font-size-adjust` + `tabular-nums`，控件
+  `appearance:none` 手绘、统一滚动条与 `:focus-visible`——三平台同一份字节。SSE + 5s 轮询兜底；
+  删除/丢弃走输入标识才启用的确认 sheet（焦点陷阱 + Esc）。`cloudfs ui [--print]` 用 `FetchStatus`
+  确认守护进程在线再开浏览器（darwin `open` / windows `rundll32` / 其它 `xdg-open`）。
+  回归重写 `ui_test.go`：多文件资产/类型/ETag/304、CSP 收紧、未知路径 404、**全资产字节里
+  无 password 输入、无凭据字段名、指向 `config auth`**。README 与用法表已更新。
 - **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
+- **[ ] 阶段 B** 桌面壳 `cmd/cloudfs-desktop`（webview_go）
+- **[ ] 阶段 C** Windows（C1 仅编译先行，C2 WinFsp）
 
 ### [ ] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）
 

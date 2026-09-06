@@ -1,0 +1,142 @@
+/* Design tokens and base, lifted from the desktop mockups. The same bytes
+   render on WebKitGTK, WKWebView and WebView2 and any evergreen browser, so
+   the only source of cross-OS drift is font metrics — which is why the font
+   stack names the known-good CJK faces explicitly rather than trusting
+   system-ui to resolve one, and why numeric columns use tabular figures. */
+:root {
+  --bg: #0a0d12;
+  --panel: #0e141d;
+  --sidebar: #0c1119;
+  --border: #253142;
+  --hairline: #18222f;
+  --text: #e8edf5;
+  --muted: #91a0b5;
+  --detail: #b9c3d1;
+  --dim: #718096;
+  --dimmer: #4a5b70;
+  --btn-bg: #172231;
+  --btn-border: #40536d;
+  --accent-border: #6f94bd;
+  --accent-bg: #203247;
+  --accent-text: #8fb6e4;
+  --ok: #45d483;
+  --warn: #f4b942;
+  --bad: #ff6470;
+  --warn-text: #ffd17a;
+  --danger-text: #ffb8bd;
+  --danger-border: #7c3d46;
+  --danger-bg: #16100f;
+  --radius: 16px;
+  --radius-sm: 8px;
+  color-scheme: dark;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+               "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+  font-size-adjust: 0.5;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+}
+:focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
+* { scrollbar-color: var(--btn-border) var(--panel); scrollbar-width: thin; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--panel); }
+::-webkit-scrollbar-thumb { background: var(--btn-border); border-radius: 6px; border: 3px solid var(--panel); }
+.tnums { font-variant-numeric: tabular-nums; }
+
+/* Shell layout */
+.app { display: flex; flex-direction: column; height: 100%; }
+.titlebar {
+  height: 44px; flex-shrink: 0; border-bottom: 1px solid var(--border);
+  background: #0e141d; display: flex; align-items: center; gap: 14px; padding: 0 16px;
+}
+.titlebar .brand { font-weight: 650; letter-spacing: -.02em; }
+.titlebar .grow { flex-grow: 1; }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #121a25; font-size: 12px; color: var(--detail);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--dimmer); }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+
+.body { flex-grow: 1; display: flex; min-height: 0; }
+.nav {
+  width: 72px; flex-shrink: 0; border-right: 1px solid var(--border);
+  background: var(--sidebar); display: flex; flex-direction: column; align-items: center;
+  gap: 4px; padding: 12px 0;
+}
+.nav a {
+  width: 52px; height: 52px; border-radius: 12px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 3px; color: var(--muted);
+  text-decoration: none; font-size: 10px; border: 1px solid transparent;
+}
+.nav a:hover { background: #131c28; color: var(--detail); }
+.nav a.active { background: #1a2735; border-color: #2f4257; color: var(--text); }
+.nav a svg { width: 20px; height: 20px; }
+
+.content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Panels, tables, controls reused across screens */
+.panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); overflow: hidden; }
+.pad { padding: 20px; }
+.muted { color: var(--muted); }
+.detail { color: var(--detail); }
+.dim { color: var(--dim); }
+h2.section { margin: 24px 0 12px; font-size: 18px; }
+.eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: .16em; font-size: 11px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--hairline); font-size: 14px; }
+thead th { color: var(--muted); font-weight: 550; font-size: 13px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
+tbody tr:hover { background: #121a25; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+button, .btn {
+  display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px;
+  border: 1px solid var(--btn-border); border-radius: var(--radius-sm);
+  background: var(--btn-bg); font-size: 13px; cursor: pointer;
+}
+button:hover, .btn:hover { border-color: var(--accent-border); background: #203247; }
+button.primary { border-color: var(--accent-border); background: var(--accent-bg); font-weight: 600; }
+button.danger { color: var(--danger-text); border-color: var(--danger-border); background: transparent; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+input[type=text], input[type=search], select {
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #121a25; width: 100%;
+}
+input::placeholder { color: var(--dim); }
+
+.progress { height: 6px; border-radius: 3px; background: #1b2635; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--ok); }
+.progress.warn > span { background: var(--warn); }
+
+/* Toasts */
+.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
+.toast {
+  padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: #121a25; color: var(--detail); font-size: 13px; max-width: 380px; box-shadow: 0 12px 40px rgb(0 0 0 / 40%);
+}
+.toast.bad { border-color: var(--danger-border); color: var(--danger-text); }
+
+/* Dialogs / sheets */
+.scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 55%); display: flex; align-items: center; justify-content: center; z-index: 40; }
+.sheet { width: min(560px, calc(100% - 32px)); border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; }
+.sheet.danger { border-color: var(--danger-border); background: var(--danger-bg); }
+.sheet h3 { margin: 0 0 12px; }
+.row { display: flex; gap: 9px; }
+.grow { flex-grow: 1; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+[hidden] { display: none !important; }
