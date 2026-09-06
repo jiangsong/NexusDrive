@@ -1,4 +1,4 @@
-package main
+package service
 
 import (
 	"bytes"
@@ -14,11 +14,11 @@ import (
 	"cloudfs/internal/config"
 )
 
-func serviceTestConfig(mount string) *config.Config {
+func testConfig(mount string) *config.Config {
 	return &config.Config{Mounts: []config.Mount{{Path: mount}}}
 }
 
-func TestServiceDefinitionsQuoteArgumentsAndRestartOnFailure(t *testing.T) {
+func TestDefinitionsQuoteArgumentsAndRestartOnFailure(t *testing.T) {
 	systemd := renderSystemdUnit("/opt/cloud fs/%bin", "/tmp/config $one.yaml", "/mnt/cloud \"one\"")
 	for _, want := range []string{
 		"After=network-online.target",
@@ -48,36 +48,39 @@ func TestServiceDefinitionsQuoteArgumentsAndRestartOnFailure(t *testing.T) {
 	}
 }
 
-func TestManageServiceLinuxInstallAndUninstall(t *testing.T) {
+func TestLinuxInstallAndUninstall(t *testing.T) {
 	root := t.TempDir()
 	mount := filepath.Join(root, "mount")
 	if err := os.Mkdir(mount, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var events []string
-	rt := serviceRuntime{
-		goos: "linux", configDir: filepath.Join(root, "config"), home: root,
-		executable: filepath.Join(root, "cloud fs"), out: new(bytes.Buffer),
-		run: func(name string, args ...string) ([]byte, error) {
+	rt := Runtime{
+		GOOS: "linux", ConfigDir: filepath.Join(root, "config"), Home: root,
+		Executable: filepath.Join(root, "cloud fs"), Out: new(bytes.Buffer),
+		Run: func(name string, args ...string) ([]byte, error) {
 			events = append(events, name+" "+strings.Join(args, " "))
 			return nil, nil
 		},
-		mounted: func(string) (bool, error) { return false, nil },
-		unmount: func(string) error {
+		Mounted: func(string) (bool, error) { return false, nil },
+		Unmount: func(string) error {
 			events = append(events, "unmount")
 			return nil
 		},
 	}
 	configPath := filepath.Join(root, "config file.yaml")
-	if err := manageService("install", serviceTestConfig(mount), configPath, rt); err != nil {
+	if installed, err := rt.Installed(); err != nil || installed {
+		t.Fatalf("Installed before install = %v %v", installed, err)
+	}
+	if err := rt.Install(testConfig(mount), configPath); err != nil {
 		t.Fatal(err)
 	}
-	file, _ := serviceFile(rt)
+	file, _ := rt.File()
 	body, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), rt.executable) || !strings.Contains(string(body), configPath) {
+	if !strings.Contains(string(body), rt.Executable) || !strings.Contains(string(body), configPath) {
 		t.Fatalf("installed unit: %s", body)
 	}
 	if info, err := os.Stat(file); err != nil || info.Mode().Perm() != 0o644 {
@@ -86,61 +89,67 @@ func TestManageServiceLinuxInstallAndUninstall(t *testing.T) {
 	if len(events) != 2 || !strings.Contains(events[0], "daemon-reload") || !strings.Contains(events[1], "enable --now") {
 		t.Fatalf("install commands: %v", events)
 	}
+	if installed, err := rt.Installed(); err != nil || !installed {
+		t.Fatalf("Installed after install = %v %v", installed, err)
+	}
 
 	events = nil
-	rt.mounted = func(path string) (bool, error) {
+	rt.Mounted = func(path string) (bool, error) {
 		if path != mount {
 			t.Fatalf("mount check=%q", path)
 		}
 		return true, nil
 	}
-	if err := manageService("uninstall", serviceTestConfig(mount), configPath, rt); err != nil {
+	if err := rt.Uninstall(testConfig(mount), configPath); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unit remains: %v", err)
 	}
+	// The order is the invariant: stop the service, detach the mount, then
+	// remove the file. A supervisor must never be able to relaunch onto a
+	// mount point that was just pulled out.
 	if len(events) != 3 || !strings.Contains(events[0], "disable --now") || events[1] != "unmount" || !strings.Contains(events[2], "daemon-reload") {
 		t.Fatalf("uninstall order: %v", events)
 	}
 }
 
-func TestManageServiceLaunchdAndStatus(t *testing.T) {
+func TestLaunchdAndStatus(t *testing.T) {
 	root := t.TempDir()
 	var events []string
 	var out bytes.Buffer
-	rt := serviceRuntime{
-		goos: "darwin", home: root, configDir: filepath.Join(root, "config"),
-		executable: filepath.Join(root, "cloudfs"), uid: 501, out: &out,
-		run: func(name string, args ...string) ([]byte, error) {
+	rt := Runtime{
+		GOOS: "darwin", Home: root, ConfigDir: filepath.Join(root, "config"),
+		Executable: filepath.Join(root, "cloudfs"), UID: 501, Out: &out,
+		Run: func(name string, args ...string) ([]byte, error) {
 			events = append(events, name+" "+strings.Join(args, " "))
 			if len(args) > 0 && args[0] == "print" {
 				return []byte("state = running\n"), nil
 			}
 			return nil, nil
 		},
-		mounted: func(string) (bool, error) { return false, nil },
+		Mounted: func(string) (bool, error) { return false, nil },
 	}
-	cfg := serviceTestConfig(filepath.Join(root, "mount"))
-	if err := manageService("install", cfg, filepath.Join(root, "config.yaml"), rt); err != nil {
+	cfg := testConfig(filepath.Join(root, "mount"))
+	if err := rt.Install(cfg, filepath.Join(root, "config.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	file, _ := serviceFile(rt)
-	if len(events) != 2 || !strings.Contains(events[0], "bootout gui/501/"+serviceLabel) ||
+	file, _ := rt.File()
+	if len(events) != 2 || !strings.Contains(events[0], "bootout gui/501/"+Label) ||
 		!strings.Contains(events[1], "bootstrap gui/501 "+file) {
 		t.Fatalf("launch install: %v", events)
 	}
 	events, out = nil, bytes.Buffer{}
-	rt.out = &out
-	if err := manageService("status", nil, "", rt); err != nil {
+	rt.Out = &out
+	if err := rt.Status(); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "state = running") || len(events) != 1 ||
-		!strings.Contains(events[0], "print gui/501/"+serviceLabel) {
+		!strings.Contains(events[0], "print gui/501/"+Label) {
 		t.Fatalf("status output=%q events=%v", out.String(), events)
 	}
 	events = nil
-	if err := manageService("uninstall", cfg, filepath.Join(root, "config.yaml"), rt); err != nil {
+	if err := rt.Uninstall(cfg, filepath.Join(root, "config.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
@@ -148,26 +157,36 @@ func TestManageServiceLaunchdAndStatus(t *testing.T) {
 	}
 }
 
-func TestServiceManagerFailureKeepsInstalledDefinition(t *testing.T) {
+func TestManagerFailureKeepsInstalledDefinition(t *testing.T) {
 	root := t.TempDir()
-	rt := serviceRuntime{
-		goos: "linux", configDir: root, home: root, executable: "/bin/cloudfs",
-		run: func(name string, args ...string) ([]byte, error) {
+	rt := Runtime{
+		GOOS: "linux", ConfigDir: root, Home: root, Executable: "/bin/cloudfs",
+		Run: func(name string, args ...string) ([]byte, error) {
 			return []byte("manager unavailable"), fmt.Errorf("exit 1")
 		},
-		mounted: func(string) (bool, error) { return false, nil },
+		Mounted: func(string) (bool, error) { return false, nil },
 	}
-	err := manageService("install", serviceTestConfig(filepath.Join(root, "mount")), filepath.Join(root, "config.yaml"), rt)
+	err := rt.Install(testConfig(filepath.Join(root, "mount")), filepath.Join(root, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "manager unavailable") {
 		t.Fatalf("manager failure=%v", err)
 	}
-	file, _ := serviceFile(rt)
+	file, _ := rt.File()
 	if _, err := os.Stat(file); err != nil {
 		t.Fatalf("recoverable definition missing: %v", err)
 	}
 }
 
-func TestServiceDefinitionPassesNativeParser(t *testing.T) {
+func TestUnsupportedPlatform(t *testing.T) {
+	rt := Runtime{GOOS: "plan9", Run: func(string, ...string) ([]byte, error) { return nil, nil }}
+	if ok, why := rt.Supported(); ok || why == "" {
+		t.Fatalf("Supported on plan9 = %v %q", ok, why)
+	}
+	if err := rt.Install(testConfig("/mnt/x"), "/tmp/c.yaml"); err == nil {
+		t.Fatal("install on an unsupported platform was accepted")
+	}
+}
+
+func TestDefinitionPassesNativeParser(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
 		bin, err := exec.LookPath("plutil")

@@ -1,5 +1,5 @@
 #!/bin/bash
 # Local wrapper: this machine has no system Go; the toolchain lives in the session scratchpad.
-SP=/tmp/claude-1000/-home-work-workspace-fs/2e1b8a92-077c-42f9-9ded-d2ac36d25c42/scratchpad
-export PATH=$SP/gotool/go/bin:$PATH GOMODCACHE=$SP/gomod GOCACHE=$SP/gocache
+SP=/tmp/claude-1000/-home-nava-lefs-fs/9db62e1c-e6fe-4228-859a-035c8b6098e3/scratchpad
+export PATH=$SP/gotool/go/bin:$PATH GOMODCACHE=$SP/gomod GOCACHE=$SP/gocache GOPROXY=${GOPROXY:-https://goproxy.cn,direct}
 exec "$SP/gotool/go/bin/$(basename ${GOBIN_NAME:-go})" "$@"

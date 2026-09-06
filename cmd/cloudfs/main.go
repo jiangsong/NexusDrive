@@ -30,6 +30,7 @@ import (
 	"cloudfs/internal/mcpsrv"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/provider"
+	"cloudfs/internal/service"
 	"cloudfs/internal/strmgen"
 	"cloudfs/internal/webdavsrv"
 
@@ -523,7 +524,11 @@ func cmdUmount(args []string) error {
 	}
 	// fusermount/umount is the reliable way to detach a mount this process
 	// does not own.
-	return unmountPath(path)
+	if err := service.Unmount(path); err != nil {
+		return err
+	}
+	fmt.Printf("unmounted %s\n", path)
+	return nil
 }
 
 func cmdMCP(ctx context.Context, args []string) error {
