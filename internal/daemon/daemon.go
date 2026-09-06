@@ -5,9 +5,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"cloudfs/internal/net/retry"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/provider/httpx"
+	"cloudfs/internal/service"
 	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 )
@@ -364,7 +367,72 @@ func (d *Daemon) Collector() *control.Collector {
 		FreeSpace:     cache.FreeSpace,
 		// The runner without a FUSE probe: the mounting process, which knows
 		// the kernel, replaces it with d.Doctor(fusefs.Supported).
-		Doctor: d.Doctor(nil),
+		Doctor:  d.Doctor(nil),
+		Service: d.serviceControl(),
+	}
+}
+
+// serviceControl adapts internal/service to the control plane, so the settings
+// page can install or remove the mount supervisor without a terminal. It is nil
+// unless this daemon was started from a config file with a mount: the unit runs
+// `cloudfs mount` against exactly that file. The daemon may install and
+// uninstall as well as report status — a person who reached the dashboard has
+// already shown they can reach the machine.
+func (d *Daemon) serviceControl() *control.ServiceControl {
+	if d.Config == nil || d.Config.SourcePath == "" || len(d.Config.Mounts) == 0 {
+		return nil
+	}
+	configPath := d.Config.SourcePath
+	newRuntime := func(out io.Writer) (service.Runtime, error) {
+		rt, err := service.Real()
+		if err != nil {
+			return service.Runtime{}, err
+		}
+		if out != nil {
+			rt.Out = out
+		}
+		return rt, nil
+	}
+	return &control.ServiceControl{
+		Supported: func() (bool, string) {
+			rt, err := service.Real()
+			if err != nil {
+				return false, err.Error()
+			}
+			return rt.Supported()
+		},
+		Installed: func() (bool, error) {
+			rt, err := service.Real()
+			if err != nil {
+				return false, err
+			}
+			return rt.Installed()
+		},
+		Status: func() (string, error) {
+			var buf bytes.Buffer
+			rt, err := newRuntime(&buf)
+			if err != nil {
+				return "", err
+			}
+			if err := rt.Status(); err != nil {
+				return "", err
+			}
+			return buf.String(), nil
+		},
+		Install: func() error {
+			rt, err := newRuntime(io.Discard)
+			if err != nil {
+				return err
+			}
+			return rt.Install(d.Config, configPath)
+		},
+		Uninstall: func() error {
+			rt, err := newRuntime(io.Discard)
+			if err != nil {
+				return err
+			}
+			return rt.Uninstall(d.Config, configPath)
+		},
 	}
 }
 

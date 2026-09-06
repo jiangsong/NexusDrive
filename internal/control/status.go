@@ -176,7 +176,13 @@ type Collector struct {
 	// runner `cloudfs doctor` uses, on the live daemon's own stores — which
 	// is the only place it can run while this process owns the journal.
 	Doctor *Doctor
-	Now    func() time.Time
+	// Lifecycle, when set, lets the control plane restart this process. nil in
+	// a process that has nothing to restart (an offline management command).
+	Lifecycle *Lifecycle
+	// Service, when set, installs and removes the per-user mount supervisor.
+	// nil when this daemon does not offer service management.
+	Service *ServiceControl
+	Now     func() time.Time
 }
 
 // Collect builds a Status snapshot.

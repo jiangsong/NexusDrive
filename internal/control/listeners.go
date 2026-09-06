@@ -73,7 +73,7 @@ func (s *Server) Start(ctx context.Context, socket, tcp string) (_ *Running, err
 		s.enablePprof()
 	}
 	for _, l := range r.listeners {
-		srv := &http.Server{Handler: s.mux, ReadHeaderTimeout: 5 * time.Second}
+		srv := &http.Server{Handler: s.drainingGuard(s.mux), ReadHeaderTimeout: 5 * time.Second}
 		r.servers = append(r.servers, srv)
 		go srv.Serve(l)
 	}

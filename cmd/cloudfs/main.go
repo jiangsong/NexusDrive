@@ -59,6 +59,10 @@ import (
 // baseline instead of reporting an empty version.
 var version = "0.1.0"
 
+// errRestart signals from cmdMount up to main that the control plane asked for
+// a restart. main runs it after cmdMount's defers have released everything.
+var errRestart = errors.New("cloudfs: restart requested")
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -118,6 +122,14 @@ func main() {
 	default:
 		usage()
 		err = fmt.Errorf("unknown command %q", os.Args[1])
+	}
+	if errors.Is(err, errRestart) {
+		stop() // stop catching signals before we hand the process over
+		if xerr := reexecSelf(); xerr != nil {
+			fmt.Fprintln(os.Stderr, "cloudfs: restart:", xerr)
+			os.Exit(1)
+		}
+		os.Exit(0) // reached only where reexec spawns a child rather than execing
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cloudfs:", err)
@@ -413,6 +425,10 @@ func cmdMount(ctx context.Context, args []string) error {
 	}
 	defer d.Close()
 
+	// A control-plane restart signals here; the wait below acts on it once the
+	// mount is up. Buffered and non-blocking so the HTTP handler never blocks.
+	restart := make(chan struct{}, 1)
+
 	mountPath := f.arg(0)
 	if mountPath == "" {
 		mountPath = cfg.Mounts[0].Path
@@ -463,6 +479,12 @@ func cmdMount(ctx context.Context, args []string) error {
 			return control.FuseStatus{Ops: st.Ops, ReadBytes: st.ReadBytes, ReadSizes: st.ReadSizes}
 		}
 		col.Doctor = d.Doctor(fusefs.Supported)
+		col.Lifecycle = &control.Lifecycle{Restart: func() {
+			select {
+			case restart <- struct{}{}:
+			default:
+			}
+		}}
 		srv := control.NewServer(col)
 		if cfg.Control.UI {
 			srv.EnableUI()
@@ -507,12 +529,28 @@ func cmdMount(ctx context.Context, args []string) error {
 	}
 
 	fmt.Println("press ctrl-c to unmount")
-	<-ctx.Done()
-	fmt.Println("\nunmounting…")
+	restarting := false
+	select {
+	case <-ctx.Done():
+	case <-restart:
+		restarting = true
+		fmt.Println("\nrestart requested")
+	}
+	if !restarting {
+		fmt.Println("\nunmounting…")
+	} else {
+		fmt.Println("detaching mount for restart…")
+	}
 	if err := m.Unmount(); err != nil {
 		return err
 	}
 	unmounted = true
+	if restarting {
+		// Return up to main, which re-execs after every deferred close in this
+		// function has run — the journal lock and the listeners are released
+		// before the successor starts, so the two never coexist.
+		return errRestart
+	}
 	return nil
 }
 

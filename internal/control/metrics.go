@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,10 @@ type Server struct {
 	auth      *AuthStarter
 	authReg   *authRegistry
 	assets    map[string]asset
+	// draining is set true once a restart is accepted; while it is set, the
+	// guard turns away every mutation so nothing changes state the imminent
+	// teardown is about to drop.
+	draining atomic.Bool
 }
 
 // NewServer builds the control HTTP server.
@@ -88,6 +93,10 @@ func (s *Server) routes() []route {
 		{pattern: "/proxy/check", handler: s.proxyCheck},
 		{pattern: "/proxy/config", handler: s.proxyConfig},
 		{pattern: "/mounts", handler: s.mounts},
+		{pattern: "/daemon/restart", handler: s.daemonRestart},
+		{pattern: "/service/status", handler: s.service},
+		{pattern: "/service/install", handler: s.service},
+		{pattern: "/service/uninstall", handler: s.service},
 	}
 }
 
@@ -157,7 +166,19 @@ func (s *Server) dropCaches(w http.ResponseWriter, r *http.Request) {
 }
 
 // Handler exposes the mux for tests and embedding.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.drainingGuard(s.mux) }
+
+// drainingGuard turns away mutations once a restart has been accepted. Reads
+// still answer, so the UI can show that the daemon is on its way down.
+func (s *Server) drainingGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.draining.Load() && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "the daemon is restarting", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // ListenAndServe starts the server on addr until ctx ends.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
