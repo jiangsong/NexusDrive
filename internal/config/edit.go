@@ -11,7 +11,6 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,15 +24,11 @@ func editConfig(path string, create bool, edit func(*yaml.Node, *Config) error) 
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	fd, err := unix.Open(path+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	f, err := openLockedFile(path + ".lock")
 	if err != nil {
 		return err
 	}
-	f := os.NewFile(uintptr(fd), path+".lock")
 	defer f.Close()
-	if err = unix.Flock(fd, unix.LOCK_EX); err != nil {
-		return err
-	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) && create {
 		b = []byte("remotes: {}\nmounts: []\n")

@@ -1,5 +1,17 @@
 # 分发、容器与发布
 
+
+## Windows
+
+从 Linux runner 交叉编译（`GOOS=windows GOARCH=amd64`，`CGO_ENABLED=0`），产出
+`cloudfs_<ver>_windows_amd64.exe`：一个**不含 FUSE 挂载**的静态二进制。它能做 config、
+doctor、mcp、webdav 输出、账号管理——除挂载外的一切；`doctor` 如实报告本平台不支持挂载，
+`cloudfs mount` 返回清晰错误而不是崩溃。这与 MCP-only 容器同一种"能力缩减、明说"的取法。
+
+内核挂载需要单独的 **WinFsp 构建**（`-tags winfsp`，cgo，运行时依赖已安装的 WinFsp 驱动），
+它是另一个产物、另一条构建线，需要 Windows 或 cgo 交叉工具链，且只能在有 Windows 真机时验收。
+本机无 Windows，C2 适配代码与验收清单见 `docs/ui-plan.md` 阶段 C2。
+
 ## 本地构建
 
 `make build VERSION=0.1.0` 生成无 CGO 的当前平台二进制。`make check` 运行格式、vet

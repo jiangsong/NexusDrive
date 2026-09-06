@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package fusefs adapts the VFS to the kernel through go-fuse. It is a thin
 // translation layer: inode identity, attribute and entry timeouts, readdirplus
 // and errno mapping live here; every decision about caching, consistency and

@@ -27,6 +27,22 @@ jobs:
       - run: go test -race ./... -count=1 -timeout 300s
       - run: CGO_ENABLED=0 go build -buildvcs=false -trimpath ./cmd/cloudfs
 
+  cross:
+    name: Windows cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # The Windows static binary (no FUSE mount) must keep building from a
+      # Linux runner; no Windows runner is needed for this. The WinFsp mount
+      # build (-tags winfsp, cgo) is verified separately when hardware exists.
+      - run: GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath ./cmd/cloudfs
+      - name: our packages vet clean for Windows
+        run: GOOS=windows GOARCH=amd64 go vet ./internal/config/... ./internal/journal/... ./internal/control/... ./internal/vfs/... ./internal/fusefs/... ./cmd/cloudfs/...
+
   container:
     name: Container build
     runs-on: ubuntu-latest

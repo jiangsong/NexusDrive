@@ -20,7 +20,6 @@ import (
 	"cloudfs/internal/daemon"
 	"cloudfs/internal/provider"
 	qrcode "github.com/skip2/go-qrcode"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
@@ -297,36 +296,44 @@ func (c configIO) secret(ctx context.Context, label string) (string, error) {
 	}
 	defer func() { term.Restore(fd, state); fmt.Fprintln(c.Err) }()
 	fmt.Fprintf(c.Err, "%s (hidden): ", label)
+	// A goroutine reads raw bytes; the loop selects between them and the
+	// context, so a cancel returns promptly and the read path is portable
+	// (no platform-specific poll). The reader is abandoned on cancel — the
+	// terminal is restored by the deferred Restore, and the process is
+	// exiting the credential prompt either way.
+	type readByte struct {
+		b   byte
+		err error
+	}
+	bytes := make(chan readByte)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				bytes <- readByte{b: buf[0]}
+			}
+			if err != nil {
+				bytes <- readByte{err: err}
+				return
+			}
+		}
+	}()
 	var b []byte
-	one := make([]byte, 1)
 	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
+		var rb readByte
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case rb = <-bytes:
 		}
-		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		n, err := unix.Poll(fds, 100)
-		if errors.Is(err, unix.EINTR) {
-			continue
+		if rb.err != nil {
+			if rb.err == io.EOF {
+				return "", io.EOF
+			}
+			return "", rb.err
 		}
-		if err != nil {
-			return "", err
-		}
-		if n == 0 {
-			continue
-		}
-		if fds[0].Revents&unix.POLLIN == 0 {
-			return "", io.EOF
-		}
-		n, err = unix.Read(fd, one)
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		if n == 0 {
-			return "", io.EOF
-		}
+		one := [1]byte{rb.b}
 		switch one[0] {
 		case '\r', '\n':
 			return string(b), nil

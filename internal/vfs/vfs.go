@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"cloudfs/internal/cache"
@@ -1076,7 +1075,7 @@ func (f *FS) DropCaches(ctx context.Context) (int, error) {
 	f.dropPaths()
 	// A cold start is also a quiet disk: what the previous run wrote behind
 	// is flushed now, not under the next measurement.
-	defer syscall.Sync()
+	defer syncDisks()
 	dropped := 0
 	for _, k := range f.cache.Keys() {
 		if IsLocalOnly(k.RemoteID) || f.cache.IsPinned(k) {

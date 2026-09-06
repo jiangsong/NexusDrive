@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/zalando/go-keyring"
-	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,11 +78,10 @@ func (s *SecretStore) Get(ref string) (string, error) {
 		}
 		return v, nil
 	case "secretfile":
-		fd, err := unix.Open(s.file(key), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		f, err := openNoFollow(s.file(key))
 		if err != nil {
 			return "", fmt.Errorf("config: credential %s unavailable; run cloudfs config auth: %w", key, err)
 		}
-		f := os.NewFile(uintptr(fd), s.file(key))
 		defer f.Close()
 		st, err := f.Stat()
 		if err != nil {
@@ -207,15 +205,11 @@ func UpdateRemoteFields(path, name string, fields map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	fd, err := unix.Open(path+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	f, err := openLockedFile(path + ".lock")
 	if err != nil {
 		return err
 	}
-	f := os.NewFile(uintptr(fd), path+".lock")
 	defer f.Close()
-	if err = unix.Flock(fd, unix.LOCK_EX); err != nil {
-		return err
-	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err

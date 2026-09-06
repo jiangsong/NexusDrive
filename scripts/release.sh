@@ -25,6 +25,11 @@ build_one() {
     target_os=$1
     target_arch=$2
     output="$release_dir/cloudfs_${release_version}_${target_os}_${target_arch}"
+    # The Windows static binary does everything except mount a FUSE filesystem;
+    # a kernel mount needs the separate WinFsp build (-tags winfsp, cgo).
+    if [ "$target_os" = "windows" ]; then
+        output="${output}.exe"
+    fi
     echo "building $target_os/$target_arch"
     CGO_ENABLED=0 GOOS=$target_os GOARCH=$target_arch go build \
         -buildvcs=false \
@@ -37,6 +42,7 @@ build_one linux amd64
 build_one linux arm64
 build_one darwin amd64
 build_one darwin arm64
+build_one windows amd64
 
 (
     cd "$release_dir"

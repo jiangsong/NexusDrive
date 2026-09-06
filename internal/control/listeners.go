@@ -8,12 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // Running owns the bound endpoints and their lifetime. Binding happens before
@@ -55,43 +52,12 @@ func (s *Server) Start(ctx context.Context, socket, tcp string) (_ *Running, err
 		}
 	}()
 	if socket != "" {
-		if err = os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
-			return nil, err
-		}
-		fd, e := unix.Open(socket+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
-		if e != nil {
-			return nil, fmt.Errorf("control: socket lock: %w", e)
-		}
-		r.lock = os.NewFile(uintptr(fd), socket+".lock")
-		if e = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); e != nil {
-			return nil, fmt.Errorf("control: socket %s already owned: %w", socket, e)
-		}
-		if st, e := os.Lstat(socket); e == nil {
-			if st.Mode()&os.ModeSocket == 0 {
-				return nil, fmt.Errorf("control: refusing to replace non-socket %s", socket)
-			}
-			conn, e := net.DialTimeout("unix", socket, 200*time.Millisecond)
-			if e == nil {
-				conn.Close()
-				return nil, fmt.Errorf("control: socket %s is active", socket)
-			}
-			if !errors.Is(e, syscall.ECONNREFUSED) && !errors.Is(e, os.ErrNotExist) {
-				return nil, e
-			}
-			if e = os.Remove(socket); e != nil {
-				return nil, e
-			}
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return nil, e
-		}
-		l, e := net.Listen("unix", socket)
+		lock, l, e := bindControlSocket(socket)
 		if e != nil {
 			return nil, e
 		}
+		r.lock = lock
 		r.listeners = append(r.listeners, l)
-		if e = os.Chmod(socket, 0600); e != nil {
-			return nil, e
-		}
 	}
 	if tcp != "" {
 		if !loopbackAddr(tcp) {

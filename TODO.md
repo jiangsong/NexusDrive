@@ -1348,7 +1348,21 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   无 password 输入、无凭据字段名、指向 `config auth`**。README 与用法表已更新。
 - **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
 - **[ ] 阶段 B** 桌面壳 `cmd/cloudfs-desktop`（webview_go）
-- **[ ] 阶段 C** Windows（C1 仅编译先行，C2 WinFsp）
+- **[x] 阶段 C1 Windows 仅编译**：`GOOS=windows go build ./...` 现在干净，产出无 mount 的静态
+  `cloudfs.exe`（config/doctor/mcp/webdav/账号管理全可用，`Supported()` 如实报告不支持挂载）。
+  拆分：`journal/lock_{unix,windows}.go`（flock ↔ `LockFileEx`+`LOCKFILE_FAIL_IMMEDIATELY`）、
+  `config/filelock_{unix,windows}.go`（三处 `unix.Open`+`Flock`+`O_NOFOLLOW` 收敛成一对原语，
+  Windows 无 O_NOFOLLOW 已注释承认）、`vfs/sync_{unix,windows}.go`（`syscall.Sync` → 无操作）、
+  `control/listeners_{unix,windows}.go`（Unix socket 绑定，Windows 走 TCP 回环并明确报错）、
+  `config_manage.go` 的隐藏输入 `unix.Poll` 循环重构为 goroutine + channel + select（去平台化）、
+  `internal/fusefs` 依赖 go-fuse 的 5 个文件加 `!windows` 标签 + `fusefs/windows.go` 桩
+  （MountFS/Supported/VerifyMountable/Mount 等全套，一律"此构建不支持挂载"）。
+  CI 加 `cross` job：Linux runner 上 `GOOS=windows` build + vet 我方包；`release.sh` 加
+  windows/amd64（`.exe` 后缀）。native 全量 + `-race` 仍绿。
+  **C2 WinFsp 适配（cgo，`-tags winfsp`）与真机验收仍开放**，见 `docs/ui-plan.md` 阶段 C2。
+- **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
+- **[ ] 阶段 B** 桌面壳 `cmd/cloudfs-desktop`（webview_go）
+- **[ ] 阶段 C2** WinFsp 挂载适配 `internal/winfs`（cgo，需 Windows 真机验收）
 
 ### [ ] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）
 

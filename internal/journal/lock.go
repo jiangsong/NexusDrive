@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // lockName is the file whose advisory lock marks the process that owns the
@@ -29,7 +28,7 @@ func acquireOwnership(dir string) (*os.File, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("journal: open lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFileExclusive(f); err != nil {
 		// Someone else owns it. Keep the handle closed and carry on read-only.
 		f.Close()
 		return nil, false, nil
@@ -42,6 +41,6 @@ func releaseOwnership(f *os.File) {
 	if f == nil {
 		return
 	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	unlockFile(f)
 	f.Close()
 }
