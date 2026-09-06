@@ -11,6 +11,21 @@ export function el(tag, attrs = {}, ...children) {
     else if (v === true) node.setAttribute(k, '');
     else if (v !== false && v != null) node.setAttribute(k, v);
   }
+  return append(node, children);
+}
+
+// fill replaces a node's children the way el() adds them: a child that is null
+// or false is a row the caller decided not to render, so it is skipped. The DOM
+// method behind this, replaceChildren, stringifies instead — a conditional row
+// that evaluates to null lands in the panel as the word "null". Every screen
+// fills through here for that reason. el() appends without clearing, because
+// clearing would also throw away what the `html` attribute just set.
+export function fill(node, ...children) {
+  node.replaceChildren();
+  return append(node, children);
+}
+
+function append(node, children) {
   for (const c of children.flat()) {
     if (c == null || c === false) continue;
     node.append(c.nodeType ? c : document.createTextNode(String(c)));

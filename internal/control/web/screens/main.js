@@ -1,5 +1,5 @@
 import { api } from '/ui/api.js';
-import { el, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
+import { el, fill, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { openAddDrive } from '/ui/add_drive.js';
 import { onFsChange } from '/ui/app.js';
@@ -75,7 +75,7 @@ export function renderMain(host) {
     try {
       const a = await api.get('/accounts');
       state.config = a;
-      sidebar.replaceChildren(
+      fill(sidebar,
         el('div', { class: 'eyebrow', style: 'padding:18px 16px 10px' }, t('nav.connections')),
         el('div', { style: 'flex-grow:1;padding:0 8px;overflow:auto' },
           (a.remotes || []).map((r) => {
@@ -101,7 +101,7 @@ export function renderMain(host) {
   }
 
   async function load() {
-    crumb.replaceChildren(iconEl('folder'),
+    fill(crumb, iconEl('folder'),
       ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
         const p = '/' + all.slice(0, i + 1).join('/');
         return [el('span', { class: 'dim' }, iconEl('chevron')), el('a', { href: 'javascript:void 0', style: 'color:var(--detail);text-decoration:none', onclick: () => { cwd = p; load(); } }, seg)];
@@ -109,7 +109,7 @@ export function renderMain(host) {
     if (cwd === '/') crumb.append(el('span', { class: 'detail' }, ' /'));
     try {
       const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500');
-      rows.replaceChildren(...(page.entries || []).map((e) => {
+      fill(rows, ...(page.entries || []).map((e) => {
         const tr = el('tr', { onclick: () => select(e, tr) },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' },
             el('span', { style: 'color:' + (e.is_dir ? 'var(--accent-text)' : 'var(--muted)') }, iconEl(e.is_dir ? 'folder' : 'file')), e.name)),
@@ -119,8 +119,8 @@ export function renderMain(host) {
         if (e.is_dir) tr.addEventListener('dblclick', () => { cwd = e.path; load(); });
         return tr;
       }));
-      if (!(page.entries || []).length) rows.replaceChildren(el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
-    } catch (e) { rows.replaceChildren(el('tr', {}, el('td', { colspan: '4' }, e.message))); }
+      if (!(page.entries || []).length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
+    } catch (e) { fill(rows, el('tr', {}, el('td', { colspan: '4' }, e.message))); }
   }
 
   function select(entry, tr) {
@@ -131,9 +131,9 @@ export function renderMain(host) {
   }
 
   function renderInspector() {
-    if (!selected) { inspector.replaceChildren(el('div', { class: 'eyebrow' }, '详情'), el('p', { class: 'dim' }, '选择一个文件')); return; }
+    if (!selected) { fill(inspector, el('div', { class: 'eyebrow' }, '详情'), el('p', { class: 'dim' }, '选择一个文件')); return; }
     const e = selected;
-    inspector.replaceChildren(
+    fill(inspector,
       el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, '详情'),
       el('div', { style: 'font-weight:620;overflow-wrap:anywhere' }, e.name),
       el('div', { class: 'dim', style: 'font-size:12px;margin-bottom:16px' }, e.is_dir ? '目录' : bytes(e.size)),
@@ -181,7 +181,7 @@ export function renderMain(host) {
       if (!q) { load(); return; }
       try {
         const r = await api.get('/search?q=' + encodeURIComponent(q) + '&path=' + encodeURIComponent(cwd) + '&limit=100');
-        rows.replaceChildren(...(r.results || []).map((hit) => el('tr', { onclick: () => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load(); } },
+        fill(rows, ...(r.results || []).map((hit) => el('tr', { onclick: () => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load(); } },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' }, iconEl('file'), hit.name)),
           el('td', { class: 'num dim' }, ''), el('td', { class: 'detail', style: 'padding-left:20px' }, hit.path), el('td', {}))));
         if (!r.complete) toast('可能还有更多结果');

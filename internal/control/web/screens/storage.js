@@ -1,5 +1,5 @@
 import { api } from '/ui/api.js';
-import { el, bytes, toast } from '/ui/ui.js';
+import { el, fill, bytes, toast } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { get } from '/ui/store.js';
 
@@ -16,7 +16,7 @@ export function renderStorage(host) {
 
   function refreshCards() {
     const c = (get().status || {}).cache || {};
-    cards.replaceChildren(
+    fill(cards,
       card(t('storage.used'), c.bytes_human || '0 B', c.max_bytes ? `上限 ${bytes(c.max_bytes)}` : '无上限'),
       card(t('storage.hit'), Math.round((c.hit_ratio || 0) * 100) + '%', `${(c.hits || 0).toLocaleString()} 读`),
       card('最近淘汰', String(c.evictions || 0), '固定与打开中的不参与'),
@@ -26,14 +26,14 @@ export function renderStorage(host) {
   async function loadPins() {
     try {
       const r = await api.get('/cache/pins');
-      pinRows.replaceChildren(...(r.pins || []).map((p) => el('tr', {},
+      fill(pinRows, ...(r.pins || []).map((p) => el('tr', {},
         el('td', {}, p.path),
         el('td', { class: 'detail' }, p.recursive ? '递归' : '单个文件'),
         el('td', { class: 'muted' }, p.configured ? '配置' : '界面'),
         el('td', { style: 'text-align:right' }, p.configured ? el('span', { class: 'dimmer' }, '改配置') :
           el('button', { style: 'padding:6px 12px', onclick: () => unpin(p) }, t('action.unpin'))))));
-      if (!(r.pins || []).length) pinRows.replaceChildren(el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
-    } catch (e) { pinRows.replaceChildren(el('tr', {}, el('td', { colspan: '4' }, e.message))); }
+      if (!(r.pins || []).length) fill(pinRows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
+    } catch (e) { fill(pinRows, el('tr', {}, el('td', { colspan: '4' }, e.message))); }
   }
   async function unpin(p) {
     try { await api.post('/cache/unpin', { path: p.path }); toast('已取消固定'); loadPins(); } catch (e) { toast(e.message, 'bad'); }

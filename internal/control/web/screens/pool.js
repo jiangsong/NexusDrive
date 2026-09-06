@@ -4,7 +4,7 @@
 // CLI uses; configuration edits say "restart required" because that is
 // what they are.
 import { api } from '/ui/api.js';
-import { el, bytes, toast, confirmDelete } from '/ui/ui.js';
+import { el, fill, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { openAddDrive } from '/ui/add_drive.js';
 
@@ -100,14 +100,14 @@ export function renderPool(host) {
     const rows = el('tbody', {}, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('loading'))));
     api.get('/pool/divergences').then((r) => {
       const list = (r.divergences || []).filter((d) => d.pool === p.name);
-      if (!list.length) { rows.replaceChildren(el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('pool.div.none')))); return; }
-      rows.replaceChildren(...list.map((d) => el('tr', {},
+      if (!list.length) { fill(rows, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('pool.div.none')))); return; }
+      fill(rows, ...list.map((d) => el('tr', {},
         el('td', {}, d.path), el('td', {}, d.member), el('td', {}, d.kind), el('td', { class: 'detail' }, d.detail),
         el('td', { style: 'text-align:right;white-space:nowrap' },
           el('button', { style: 'padding:6px 10px', onclick: () => act('/pool/divergences', { pool: p.name, path: d.path, member: d.member, kind: d.kind, action: 'relist' }, () => t('pool.div.relisted')) }, t('pool.div.relist')),
           ' ',
           el('button', { style: 'padding:6px 10px', onclick: () => act('/pool/divergences', { pool: p.name, path: d.path, member: d.member, kind: d.kind, action: 'clear' }, () => t('pool.div.cleared')) }, t('pool.div.clear'))))));
-    }).catch((e) => rows.replaceChildren(el('tr', {}, el('td', { colspan: '5' }, e.message))));
+    }).catch((e) => fill(rows, el('tr', {}, el('td', { colspan: '5' }, e.message))));
     return el('div', { style: 'padding:0 20px 20px' }, el('div', { class: 'eyebrow', style: 'margin-bottom:12px' }, t('pool.div.title')),
       el('div', { class: 'panel', style: 'overflow:auto' }, el('table', {}, el('thead', {}, el('tr', {},
         el('th', {}, t('pool.div.path')), el('th', {}, t('pool.col.member')), el('th', {}, t('pool.div.kind')), el('th', {}, t('pool.div.detail')), el('th', {}, ''))), rows)));
@@ -142,9 +142,9 @@ export function renderPool(host) {
     try {
       const res = await api.get('/pool/status');
       try { const m = await api.get('/mounts'); res.mount = (m.mounts && m.mounts[0] && m.mounts[0].path) || ''; } catch (_) { res.mount = ''; }
-      if (!res.pools || !res.pools.length) { body.replaceChildren(createForm(res)); return; }
-      body.replaceChildren(...res.pools.map((p) => poolSection(p, res)));
-    } catch (e) { body.replaceChildren(el('div', { class: 'pad' }, e.message)); }
+      if (!res.pools || !res.pools.length) { fill(body, createForm(res)); return; }
+      fill(body, ...res.pools.map((p) => poolSection(p, res)));
+    } catch (e) { fill(body, el('div', { class: 'pad' }, e.message)); }
   }
 
   host.append(body);

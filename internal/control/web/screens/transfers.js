@@ -1,5 +1,5 @@
 import { api } from '/ui/api.js';
-import { el, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
+import { el, fill, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { subscribe, get } from '/ui/store.js';
 
@@ -12,13 +12,13 @@ export function renderTransfers(host) {
   async function load() {
     try {
       const r = await api.get('/uploads?limit=100');
-      rows.replaceChildren(...(r.uploads || []).map(uploadRow));
-      if (!(r.uploads || []).length) rows.replaceChildren(el('tr', {}, el('td', { colspan: '5', class: 'dim' }, '当前没有活动、死信或已停止的上传')));
-    } catch (e) { rows.replaceChildren(el('tr', {}, el('td', { colspan: '5' }, e.message))); }
+      fill(rows, ...(r.uploads || []).map(uploadRow));
+      if (!(r.uploads || []).length) fill(rows, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, '当前没有活动、死信或已停止的上传')));
+    } catch (e) { fill(rows, el('tr', {}, el('td', { colspan: '5' }, e.message))); }
     const s = get().status;
     if (s && s.uploads) {
       const u = s.uploads;
-      summary.replaceChildren(
+      fill(summary,
         stat('待传数据', bytes(u.queued_bytes), `${(u.pending || 0) + (u.uploading || 0)} 个任务`),
         stat('死信持有', bytes(u.retained_bytes), '重试要用，不会自动清', 'var(--danger-text)'),
         stat('已完成', String(u.done || 0), '最近保留 200 条'));

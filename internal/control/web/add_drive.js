@@ -5,7 +5,7 @@
 // command where the secret cannot travel through a browser. It never renders a
 // field for a password, cookie or token: that boundary is the whole point.
 import { api, ApiError } from '/ui/api.js';
-import { el, toast } from '/ui/ui.js';
+import { el, fill, toast } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 
 export async function openAddDrive(opts = {}) {
@@ -58,7 +58,7 @@ export async function openAddDrive(opts = {}) {
 
     function refreshType() {
       const tp = types.find((x) => x.type === typeSel.value) || types[0];
-      fieldsHost.replaceChildren(...(tp.fields || []).map((f) => {
+      fill(fieldsHost, ...(tp.fields || []).map((f) => {
         const inp = el('input', { type: 'text', 'data-field': f.name, autocomplete: 'off', spellcheck: 'false',
           placeholder: f.example || f.default || '' });
         if (f.default) inp.value = f.default;
@@ -83,7 +83,7 @@ export async function openAddDrive(opts = {}) {
     mountWrap.append(mountChk, el('span', {}, t('add.mount')), prefixInput);
     poolWrap.append(poolChk, el('span', {}, t('add.pool')), poolSel);
 
-    body.replaceChildren(
+    fill(body,
       el('h3', {}, t('add.title')),
       el('div', { style: 'display:grid;gap:12px' },
         labeled(t('add.type'), typeSel),
@@ -144,7 +144,7 @@ export async function openAddDrive(opts = {}) {
     const restart = el('button', { class: 'danger', onclick: doRestart }, t('add.restart'));
     const finish = el('button', { class: 'primary', onclick: () => { close(); } }, t('add.finish'));
     parts.push(el('div', { class: 'row', style: 'margin-top:14px;justify-content:flex-end' }, restart, finish));
-    body.replaceChildren(...parts);
+    fill(body, ...parts);
   }
 
   async function pollAuth(name, session, statusEl) {

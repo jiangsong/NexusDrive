@@ -1,5 +1,5 @@
 import { api } from '/ui/api.js';
-import { el, iconEl, toast, confirmDelete } from '/ui/ui.js';
+import { el, fill, iconEl, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 
 // Diagnostics: the same checks `cloudfs doctor` prints, and the fixes it can
@@ -12,11 +12,11 @@ export function renderDiagnostics(host) {
   async function run() {
     try {
       const r = await api.post('/doctor/run', {});
-      counts.replaceChildren(
+      fill(counts,
         el('span', { style: 'color:var(--ok)' }, el('span', { class: 'dot ok' }), ' 正常 ' + (r.ok || 0)),
         el('span', { style: 'color:var(--warn-text)' }, el('span', { class: 'dot warn' }), ' 提醒 ' + (r.warn || 0)),
         el('span', { style: 'color:var(--danger-text)' }, el('span', { class: 'dot bad' }), ' 需处理 ' + (r.fail || 0)));
-      list.replaceChildren(...(r.checks || []).map(checkRow));
+      fill(list, ...(r.checks || []).map(checkRow));
     } catch (e) { toast(e.message, 'bad'); }
   }
   function checkRow(c) {
@@ -43,11 +43,11 @@ export function renderDiagnostics(host) {
   async function loadService() {
     let st;
     try { st = await api.get('/service/status'); }
-    catch (e) { svcPanel.replaceChildren(el('div', { class: 'detail' }, e.message)); return; }
+    catch (e) { fill(svcPanel, el('div', { class: 'detail' }, e.message)); return; }
     const rows = [el('div', { class: 'eyebrow' }, t('diag.service'))];
     if (!st.supported) {
       rows.push(el('div', { class: 'detail', style: 'margin-top:6px' }, st.reason || t('diag.service.unsupported')));
-      svcPanel.replaceChildren(...rows); return;
+      fill(svcPanel, ...rows); return;
     }
     const state = el('div', { style: 'display:flex;align-items:center;gap:9px;margin-top:8px' },
       el('span', { class: 'dot ' + (st.installed ? 'ok' : '') }),
@@ -57,7 +57,7 @@ export function renderDiagnostics(host) {
       : el('button', { class: 'primary', onclick: installService }, t('diag.service.install'));
     rows.push(el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:16px' }, state, action));
     rows.push(el('div', { class: 'dim', style: 'font-size:12px;margin-top:8px' }, t('diag.service.hint')));
-    svcPanel.replaceChildren(...rows);
+    fill(svcPanel, ...rows);
   }
   async function installService() {
     try { await api.post('/service/install', {}); toast(t('diag.service.installed')); loadService(); }

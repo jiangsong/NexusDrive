@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -59,6 +60,42 @@ func TestIconsAreSizedAndDefined(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestScreensDoNotStringifyASkippedChild: the screens build rows with
+// conditional children (`cond ? row : null`). node.replaceChildren stringifies
+// a null child into the text "null" instead of skipping it, so a row that was
+// deliberately not rendered shows up in the panel as the word null — twice over
+// where two rows are skipped. ui.js owns the one call that is allowed, wrapped
+// in fill(); every screen goes through that.
+func TestScreensDoNotStringifyASkippedChild(t *testing.T) {
+	err := fs.WalkDir(webFS, "web", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".js") || path == "web/ui.js" {
+			return err
+		}
+		if bytes.Contains(mustAsset(t, path), []byte(".replaceChildren(")) {
+			t.Errorf("%s calls replaceChildren directly; use fill() so a null child is skipped, not printed", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The wrapper itself skips null and false, the way el() does.
+	ui := string(mustAsset(t, "web/ui.js"))
+	if !strings.Contains(ui, "export function fill(") || !strings.Contains(ui, "if (c == null || c === false) continue;") {
+		t.Error("ui.js must export fill() and skip null/false children")
+	}
+	// el() builds a fresh node and must only append to it. Clearing there would
+	// also throw away what the `html` attribute set a few lines earlier, which
+	// is every icon in the app.
+	body := ui[strings.Index(ui, "export function el("):]
+	if end := strings.Index(body, "\n}"); end > 0 {
+		body = body[:end]
+	}
+	if strings.Contains(body, "replaceChildren") || strings.Contains(body, "fill(") {
+		t.Error("el() must append its children, not clear the node it just filled from the html attribute")
 	}
 }
 

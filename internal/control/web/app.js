@@ -1,7 +1,7 @@
 import { get, set, subscribe } from '/ui/store.js';
 import { events } from '/ui/api.js';
 import { start as startRouter, currentTag, navItems } from '/ui/router.js';
-import { el, iconEl } from '/ui/ui.js';
+import { el, fill, iconEl } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { renderMain } from '/ui/screens/main.js';
 import { renderPool } from '/ui/screens/pool.js';
@@ -60,7 +60,7 @@ function render() {
   const status = get().status;
   if (disposeScreen) { disposeScreen(); disposeScreen = null; }
   titlebarEl = titlebar(status);
-  app.replaceChildren(
+  fill(app,
     titlebarEl,
     el('div', { class: 'body' },
       nav(tag),
