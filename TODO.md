@@ -1077,7 +1077,10 @@ CloudFS 在"不出事"这一条上**已经明显强于所有竞品**（三维 AI
 
 ---
 
-### [~] T-17 图形控制面：Web 加账号已补齐（凭据仍只走终端），真机视觉验收待补
+### [x] T-17 图形控制面：完整 Web 应用已交付（8 屏全操作，凭据仍只走终端），真机视觉验收待补
+
+> 2026-09-06：从只读状态页扩为覆盖所有 CLI 操作的桌面式 Web 应用 + 可选原生壳，详见 T-24/T-25。
+> 以下为最初的 M5 只读版验收记录。
 
 - **证据**：`internal/control/metrics.go:24-27` 只注册了 `/healthz` `/readyz` `/status`
   `/metrics` 四个 JSON/文本端点；全仓库 `grep 'http.FileServer\|embed.FS'` 零命中，
@@ -1278,7 +1281,9 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 
 ---
 
-### [~] T-21 Windows：已提前到本期（2026-09-06 决定），方案见 `docs/ui-plan.md` 阶段 C
+### [x] T-21 Windows：双产物已交付（静态无挂载 + `-tags winfsp` WinFsp，均 nocgo 交叉），真机验收待补
+
+> 2026-09-06：C1 静态版与 C2 WinFsp 适配均完成并交叉编译通过，见 T-24 阶段 C。运行时行为需 Windows 真机按 `docs/distribution.md` 清单验收。
 
 - **状态**：本条**不是新发现的遗漏**。`internal/fusefs/` 只有 `platform_linux.go` 与
   `platform_darwin.go`，WinFsp 适配在《明确不在当前范围内》里已列为二期，接口已预留。
@@ -1292,7 +1297,7 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 
 ---
 
-### [~] T-24 桌面界面的控制面 API（2026-09-06 启动）
+### [x] T-24 桌面界面的控制面 API（2026-09-06 完成阶段 0–5 + A/B/C/D）
 
 设计稿 https://claude.ai/code/artifact/2c5d82b9-8ca9-4f8b-a4f7-02158cd95153 ，开发方案与逐项 TODO 见
 **`docs/ui-plan.md`**（阶段 0–5 是后端，A 前端，B 桌面壳，C Windows，D 发布）。这里只记进度。
@@ -1346,8 +1351,6 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   确认守护进程在线再开浏览器（darwin `open` / windows `rundll32` / 其它 `xdg-open`）。
   回归重写 `ui_test.go`：多文件资产/类型/ETag/304、CSP 收紧、未知路径 404、**全资产字节里
   无 password 输入、无凭据字段名、指向 `config auth`**。README 与用法表已更新。
-- **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
-- **[ ] 阶段 B** 桌面壳 `cmd/cloudfs-desktop`（webview_go）
 - **[x] 阶段 C1 Windows 仅编译**：`GOOS=windows go build ./...` 现在干净，产出无 mount 的静态
   `cloudfs.exe`（config/doctor/mcp/webdav/账号管理全可用，`Supported()` 如实报告不支持挂载）。
   拆分：`journal/lock_{unix,windows}.go`（flock ↔ `LockFileEx`+`LOCKFILE_FAIL_IMMEDIATELY`）、
@@ -1360,11 +1363,33 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   CI 加 `cross` job：Linux runner 上 `GOOS=windows` build + vet 我方包；`release.sh` 加
   windows/amd64（`.exe` 后缀）。native 全量 + `-race` 仍绿。
   **C2 WinFsp 适配（cgo，`-tags winfsp`）与真机验收仍开放**，见 `docs/ui-plan.md` 阶段 C2。
-- **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
-- **[ ] 阶段 B** 桌面壳 `cmd/cloudfs-desktop`（webview_go）
-- **[ ] 阶段 C2** WinFsp 挂载适配 `internal/winfs`（cgo，需 Windows 真机验收）
+- **[x] 阶段 5 生命周期**：服务管理迁到 `internal/service`（可注入的 `Runtime`，CLI 与控制面
+  共用一份；install/uninstall 加非阻塞侧车锁，已装再装回 409，卸载顺序"停服务→拔挂载→删定义"
+  仍是唯一不变量并被断言）。`POST /daemon/restart`（confirm）置 draining 标志后原地 re-exec
+  （unix execve / windows spawn-then-exit）——先由 `cmdMount` 的 defer 释放 journal 锁与监听，
+  保证同一刻只有一个 owner；`POST /service/install|uninstall`、`GET /service/status` 接上。
+  回归：draining 中的变更 503、restart/uninstall 的 confirm 门、install 409。诊断页接了这三项。
+- **[x] 阶段 B 桌面壳 `cmd/cloudfs-desktop`**：薄 cgo 壳（webview_go，WebKitGTK/WKWebView/
+  WebView2），把 WebView 指向守护进程的控制台 URL，不内嵌守护进程、不自服务静态资源。三种解析：
+  直连配置的回环 TCP UI；socket-only 守护进程经壳内回环反向代理转接（保留浏览器的回环 Host
+  以满足同源守卫）；无守护进程时用 `CLOUDFS_CONTROL_UI` 起一个带 UI 的回环 TCP 面。单实例 flock +
+  focus socket 唤起旧窗（Linux `gtk_window_present`）。`-tags desktop` 门控，默认 `go build ./...`
+  仍绿；`packaging/pkgconfig` 的 4.0→4.1 shim 绕过 webview_go 硬编码。已验证：对 WebKitGTK 4.1
+  编译链接、Xvfb 下开窗、`CLOUDFS_CONTROL_UI` 握手在真实守护进程上服务出控制台。
+- **[x] 阶段 C2 WinFsp 适配 `internal/winfs`**：cgofuse 路径式适配，与 fusefs 同形；
+  `-tags winfsp` 下 fusefs 变成一文件 façade（类型别名）转发到 winfs。cgofuse v1.6.0 的 no-cgo
+  Windows 后端运行时加载 `winfsp-x64.dll`，所以两个 Windows 产物都 `CGO_ENABLED=0` 从 Linux
+  交叉编译——比原方案（假设需 cgo 交叉链）更好。两项产品决策在 `naming.go` 里显式给出并注释：
+  大小写敏感对齐 POSIX 远端；Windows 无法表示的名字（非法字符/尾点空格/保留设备名）列目录时
+  跳过、创建时拒绝，而非静默不可逆改写。已验证到本机极限：`GOOS=windows CGO_ENABLED=0 -tags winfsp`
+  交叉编译+type-check、go-fuse 不进任一 Windows 构建图、默认 Linux 构建/vet 不变；每条运行时
+  假设标 `UNVERIFIED:`，真机验收清单见 `docs/distribution.md`。
+- **[x] 阶段 D 发布/CI/文档**：`ci.yml` 的 `cross` job 加 `-tags winfsp` 交叉 build + `winfs` vet，
+  新增 `desktop` job（装 GTK/WebKitGTK + shim，build/vet `-tags desktop`）；`release.sh` 加
+  `_mount.exe`（winfsp，nocgo 交叉）——一次产出两个 Windows 产物；`docs/distribution.md` 写清
+  两产物与 WinFsp 真机验收清单；README 补 `ui`/桌面壳；`docs/DESIGN.md` §4.8 补全部新控制端点。
 
-### [ ] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）
+### [x] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）
 
 见 `docs/ui-plan.md` 阶段 B。守护进程保持 `CGO_ENABLED=0`；壳只是指向回环 URL 的窗口 + 托盘，
 不内嵌第二份装配逻辑，不自己服务静态文件。

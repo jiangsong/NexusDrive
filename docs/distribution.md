@@ -8,9 +8,29 @@
 doctor、mcp、webdav 输出、账号管理——除挂载外的一切；`doctor` 如实报告本平台不支持挂载，
 `cloudfs mount` 返回清晰错误而不是崩溃。这与 MCP-only 容器同一种"能力缩减、明说"的取法。
 
-内核挂载需要单独的 **WinFsp 构建**（`-tags winfsp`，cgo，运行时依赖已安装的 WinFsp 驱动），
-它是另一个产物、另一条构建线，需要 Windows 或 cgo 交叉工具链，且只能在有 Windows 真机时验收。
-本机无 Windows，C2 适配代码与验收清单见 `docs/ui-plan.md` 阶段 C2。
+内核挂载需要第二个产物 **WinFsp 构建**（`-tags winfsp`）：
+`cloudfs_<ver>_windows_amd64_mount.exe`。它把 `internal/winfs`（cgofuse 适配层）链接进来，
+其余能力与静态版一致；用户只在想要内核挂载、且已安装 [WinFsp](https://winfsp.dev) 驱动时才装它。
+cgofuse v1.6.0 的 no-cgo Windows 后端在运行时动态加载 `winfsp-x64.dll`，因此这个产物同样
+`CGO_ENABLED=0`、同样从 Linux 交叉编译，不需要 cgo 工具链——`release.sh` 一次产出两个 `.exe`。
+`doctor` 会探测 WinFsp 是否安装并如实报告；未安装时 `cloudfs mount` 给出"请安装 WinFsp"的清晰错误。
+
+**运行时行为无法在非 Windows 机器上验证**。适配层里每条运行时假设都标了 `UNVERIFIED:`，
+有 Windows 真机时按下面的验收清单逐项跑通再删除标注：
+
+1. `-tags winfsp` 的 `.exe` 能链接并启动，`doctor` 在装/未装 WinFsp 两态下都报告正确。
+2. 用 `type: fake` remote 挂到一个空目录或空闲盘符，`cmd` 与 PowerShell 下 `dir` / `type` /
+   `copy` / `del` / `ren` / `mkdir` 行为正确。
+3. 写入后立刻读回（验证 Flush 在 WinFsp 的 CLEANUP/CLOSE 派发下确实提交——这是最需要真机确认的
+   假设，Linux "FLUSH 每个 fd 触发多次" 的前提在 WinFsp 上未必成立）。
+4. 大小写敏感：在远端建 `Report.txt` 与 `report.txt`，确认两者都可见、互不覆盖。
+5. 非法名/保留名：远端存在含 `<>:"|?*`、尾部点/空格、或 `CON`/`NUL`/`COM1` 的文件，确认列目录时
+   被跳过而非报错崩溃（当前策略），并据此决定是否改为可逆转义。
+6. 并发写 + 上传中改名的手工 chaos；Defender 实时保护开启下的大文件读写。
+7. 能编就跑 `test/conformance`，有意差异写成显式例外；再跑 WinFsp 上游的 `winfsp-tests`。
+8. 桌面壳在干净 Win10 21H2 / Win11 上经 WebView2 加载。
+
+（**fsx-via-WSL 不算验证**——那是另一套文件系统栈。）
 
 ## 本地构建
 

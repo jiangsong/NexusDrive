@@ -38,11 +38,27 @@ build_one() {
         -o "$output" ./cmd/cloudfs
 }
 
+# The Windows WinFsp mount build. cgofuse loads winfsp-x64.dll at run time, so
+# it needs no cgo and cross-compiles from Linux like every other target; it
+# ships alongside the static binary as a second product a user installs only if
+# they want a kernel mount (and have the WinFsp driver).
+build_winfsp() {
+    output="$release_dir/cloudfs_${release_version}_windows_amd64_mount.exe"
+    echo "building windows/amd64 (WinFsp mount)"
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+        -buildvcs=false \
+        -trimpath \
+        -tags winfsp \
+        -ldflags "-s -w -buildid= -X main.version=$release_version" \
+        -o "$output" ./cmd/cloudfs
+}
+
 build_one linux amd64
 build_one linux arm64
 build_one darwin amd64
 build_one darwin arm64
 build_one windows amd64
+build_winfsp
 
 (
     cd "$release_dir"

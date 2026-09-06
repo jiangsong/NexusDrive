@@ -247,6 +247,7 @@ mcp --http [addr]         以 Streamable HTTP 提供 MCP（非回环需 CLOUDFS_
 mcp install --client claude|codex [--write <file>]
 strm <virtual-path> --out <dir> [--prune] 通过运行中的 WebDAV 生成媒体库 .strm
 status [--json]           缓存、上传队列、代理、限流状态
+ui | open [--print]       在浏览器打开桌面式控制台（需 control.metrics）
 doctor [--fix] [--json]   环境与本地状态诊断
 cache stats | gc | pins   查看缓存、回收未固定内容或列出固定规则
 uploads list | retry | cancel | resume | drop | flush
@@ -273,13 +274,22 @@ config add|auth|list      账号管理、授权、凭据导入与迁移
 配置了 `control.metrics` 后，`cloudfs ui` 会在浏览器打开 `http://127.0.0.1:9101/` 的桌面式
 控制台（`--print` 只打印 URL）。它是一套嵌进二进制的多文件 Web 应用（ES modules + 一个
 设计令牌 CSS，不引入 Node，`go build` 仍是唯一构建），涵盖：连接优先的主窗口与文件浏览、
-传输队列、缓存与固定、代理出口、诊断与服务。所有操作走既有和新增的 control 端点
-（`/fs/*`、`/search`、`/doctor/*`、`/events` SSE、`/accounts/*`、`/proxy/*`、`/mounts`）。
+传输队列、缓存与固定、代理出口、诊断与服务。诊断页可安装/卸载开机自启服务，并可一键**重启守护进程**
+（改了 remote、mount 或无热更能力的代理段后让改动生效）。所有操作走既有和新增的 control 端点
+（`/fs/*`、`/search`、`/doctor/*`、`/events` SSE、`/accounts/*`、`/proxy/*`、`/mounts`、`/service/*`、`/daemon/restart`）。
 CSP 收紧为 `script-src 'self'; style-src 'self'`，页面资源按内容哈希带 ETag 版本化。
 **凭据永不经过界面**：授权在终端用 `cloudfs config auth` 完成（境外 OAuth/扫码可由守护
 进程代跑，秘密值不进浏览器）。`control.ui: false` 只关闭 `/` 与 `/ui/`，不改变 `/status`、
 `/metrics` 或 Unix socket。control TCP 仍只接受回环地址。浏览器请求须同源并携带
 `X-CloudFS-Control`，跨站 Origin、DNS rebinding Host 与简单表单请求会被拒绝。
+
+想要一个原生窗口而不是浏览器标签，可另外构建桌面壳
+`go build -tags desktop ./cmd/cloudfs-desktop`（cgo，依赖系统 WebView：Linux 的 WebKitGTK、
+macOS 的 WKWebView、Windows 的 WebView2）。它不内嵌第二份守护进程、也不自己服务静态资源：
+找到在跑的守护进程就把窗口指向它的控制台 URL，找不到就用你的配置起一个（通过
+`CLOUDFS_CONTROL_UI` 交给它一个回环 TCP 地址），只经 unix socket 暴露的守护进程则由壳内的
+回环反向代理转接。单实例用文件锁，第二次启动会唤起已有窗口而不是再开一个。守护进程本身仍是
+`CGO_ENABLED=0` 静态二进制，桌面壳只是可选的额外产物。
 
 配置 `webdav.http` 后，同一个 owner 进程会把 `webdav.root` 作为只读 DAV 根目录输出。
 支持有界 PROPFIND、GET/HEAD、Range 和不泄露 provider opaque version 的 ETag；所有读取

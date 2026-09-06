@@ -40,8 +40,33 @@ jobs:
       # Linux runner; no Windows runner is needed for this. The WinFsp mount
       # build (-tags winfsp, cgo) is verified separately when hardware exists.
       - run: GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath ./cmd/cloudfs
+      # The WinFsp mount build. cgofuse's no-cgo Windows backend loads the
+      # driver DLL at run time, so this cross-compiles from Linux too; only its
+      # runtime behaviour needs a Windows machine.
+      - run: GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath -tags winfsp ./cmd/cloudfs
       - name: our packages vet clean for Windows
         run: GOOS=windows GOARCH=amd64 go vet ./internal/config/... ./internal/journal/... ./internal/control/... ./internal/vfs/... ./internal/fusefs/... ./cmd/cloudfs/...
+      - name: WinFsp adapter vet clean for Windows
+        run: GOOS=windows GOARCH=amd64 go vet -tags winfsp ./internal/winfs/...
+
+  desktop:
+    name: Desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install WebView toolchain
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      # webview_go still asks pkg-config for webkit2gtk-4.0; the committed shim
+      # redirects that to the 4.1 the distro ships. Remove the shim once
+      # webview_go grows a 4.1 build tag.
+      - name: Build the desktop shell
+        run: PKG_CONFIG_PATH=$PWD/packaging/pkgconfig go build -tags desktop ./cmd/cloudfs-desktop
+      - name: Desktop shell vet
+        run: PKG_CONFIG_PATH=$PWD/packaging/pkgconfig go vet -tags desktop ./cmd/cloudfs-desktop
 
   container:
     name: Container build

@@ -487,8 +487,18 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 ### 4.8 控制面与可观测性
 
-- CLI：`config add | auth | list`、`mount | umount`、`pin | unpin`、`warm`、`uploads list | retry | drop`、`cache stats | gc`、`proxy test`、`status`、`doctor [--fix]`、`mcp --stdio | --http`。
+- CLI：`config add | auth | list`、`mount | umount`、`service install | uninstall | status`、`ui | open`、`pin | unpin`、`warm`、`uploads list | retry | drop`、`cache stats | gc`、`proxy test`、`status`、`doctor [--fix]`、`mcp --stdio | --http`。
 - 控制 API：Unix socket（默认）+ 可选 `127.0.0.1` HTTP；`/healthz`、`/readyz`、`/metrics`（Prometheus）、`/status`（JSON）。
+- 图形控制面端点（供内嵌 Web 应用与桌面壳使用，守卫同上，非 GET 需 `X-CloudFS-Control`，只接受回环 Host 与同源 Origin）：
+  文件树 `GET /fs/list|stat|preview|download-url`、`POST /fs/mkdir|rename|delete`；`GET /search`；诊断 `POST /doctor/run|fix`；
+  变更流 `GET /events`（SSE：目录变更事件 + 每 2s 一次 `status`，断线退避重连并回落 `/status` 轮询）；
+  账号 `GET/POST /accounts`、`GET/PATCH/DELETE /accounts/{name}`、`POST /accounts/{name}/check`、账号授权 `POST /accounts/{name}/auth/start|cancel`、`GET .../auth/status`；
+  代理 `GET /proxy/explain`、`POST /proxy/check`、`GET/PUT /proxy/config`（代理段热加载，其余改动 `restart_required`）；
+  挂载 `GET/POST /mounts`、`DELETE /mounts/{path}`（仅改配置）；
+  生命周期 `POST /daemon/restart`（confirm；置 draining 后原地 re-exec，保证同一时刻只有一个 journal/mount owner）、
+  服务 `GET /service/status`、`POST /service/install|uninstall`（confirm）。
+  凭据边界：任何 `IsSecretField` 键在 `POST /accounts` 与 `PATCH` 上一律 400 并指向 `cloudfs config auth`，秘密值不回显、不落盘、不经浏览器；
+  `/fs/download-url` 是唯一有意返回签名 URL 的端点（no-store、不落日志）。桌面壳的 `CLOUDFS_CONTROL_UI=<loopback:port>` 让 `mount` 额外开一个带 UI 的回环 TCP 面（仍受 `Start` 的回环校验约束）。
 - 上传管理（已接线）：`GET /uploads?limit=200&cursor=<id>`、`POST /uploads/retry`（JSON `{"id":"..."}` 或 `{"all":true}`）、`POST /uploads/flush`（JSON `{}`）。POST 要求 `Content-Type: application/json` 和 `X-CloudFS-Control: 1`，不提供 CORS；本地原生客户端使用 `Host: cloudfs`。列表不暴露上传 session 和 blob 路径。
 - `uploads flush` 与内部 `DrainAll` 语义不同：前者等已提交队列（包括延迟和在途）排空，并对死信、取消及未完成清理报错；后者只处理当前到期任务。在线 flush 不启动额外 worker，连接取消仅结束等待。CLI 默认等待上限 30 分钟，`--timeout` 可调整。
 - 上传取消：`uploads cancel <id>` 与 `POST /uploads/cancel`（JSON `{"id":"..."}`）
