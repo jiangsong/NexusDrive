@@ -549,9 +549,22 @@ func (f *FS) ReadDir(ctx context.Context, ino uint64) ([]Attr, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This is the kernel mount's hot path: every ls(1) lands here. Resolve the
+	// directory's own path once (it is cached) so each child's Pinned is
+	// answered by joining, not by a recursive path query per entry — the same
+	// fix ReadDirPath got. pathOf is only worth calling when a pin exists at
+	// all, which is the only case attrAt consults the path.
+	dir := ""
+	if f.hasPins.Load() {
+		dir, _ = f.pathOf(ctx, ino)
+	}
 	out := make([]Attr, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, f.attrOf(ctx, n))
+		if dir == "" {
+			out = append(out, f.attrOf(ctx, n))
+			continue
+		}
+		out = append(out, f.attrAt(ctx, n, path.Join(dir, n.Name)))
 	}
 	return out, nil
 }

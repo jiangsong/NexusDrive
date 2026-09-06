@@ -150,6 +150,19 @@ func buildRouting(opt ManagerOptions) (*routingState, error) {
 		}
 		st.groups[g.Name] = g
 	}
+	// A rule that names an outbound or group which does not exist is refused
+	// here, not discovered by the first request that happens to match it. This
+	// lives in buildRouting so NewManager (daemon start) and Reload validate
+	// identically: a configuration one accepts is exactly one the other does.
+	for _, r := range st.router.Rules() {
+		if _, ok := st.outbounds[r.Outbound]; ok {
+			continue
+		}
+		if _, ok := st.groups[r.Outbound]; ok {
+			continue
+		}
+		return nil, fmt.Errorf("proxy: rule %s targets unknown outbound %q", r.Kind, r.Outbound)
+	}
 	return st, nil
 }
 
@@ -201,21 +214,11 @@ func NewManager(opt ManagerOptions) (*Manager, error) {
 // provider's HTTP client asks this manager per request, so nothing but the
 // manager's own state has to move.
 func (m *Manager) Reload(opt ManagerOptions) error {
+	// buildRouting validates rule targets, so a configuration Reload refuses is
+	// one NewManager would refuse, and the old one stays in force.
 	st, err := buildRouting(opt)
 	if err != nil {
 		return err
-	}
-	// A running daemon is never switched into a configuration it cannot
-	// route: a rule naming an outbound or group that does not exist is
-	// refused here, not discovered by the first request that matches it.
-	for _, r := range st.router.Rules() {
-		if _, ok := st.outbounds[r.Outbound]; ok {
-			continue
-		}
-		if _, ok := st.groups[r.Outbound]; ok {
-			continue
-		}
-		return fmt.Errorf("proxy: rule %s targets unknown outbound %q", r.Kind, r.Outbound)
 	}
 	old := m.routing.Swap(st)
 	m.mu.Lock()
@@ -416,10 +419,18 @@ func probe(ctx context.Context, o Outbound, target string, timeout time.Duration
 
 // Resolve maps an outbound-or-group name to a concrete outbound.
 func (m *Manager) Resolve(name string) (Outbound, error) {
+	return m.resolveIn(m.routing.Load(), name)
+}
+
+// resolveIn resolves a route name to an outbound within one routing snapshot.
+// Callers that also picked the name from a snapshot (OutboundFor, RoundTrip)
+// pass that same snapshot in, so a routing decision and the outbound/group
+// definition it resolves to can never come from two different configurations
+// across a concurrent Reload — the invariant routingState documents.
+func (m *Manager) resolveIn(st *routingState, name string) (Outbound, error) {
 	if name == "" {
 		name = "direct"
 	}
-	st := m.routing.Load()
 	m.mu.RLock()
 	sel, isGroup := m.selected[name]
 	m.mu.RUnlock()
@@ -438,8 +449,9 @@ func (m *Manager) Resolve(name string) (Outbound, error) {
 
 // OutboundFor returns the outbound the rules pick for a host.
 func (m *Manager) OutboundFor(host string) (Outbound, error) {
-	name := m.routing.Load().router.Outbound(Target{Host: host})
-	return m.Resolve(name)
+	st := m.routing.Load()
+	name := st.router.Outbound(Target{Host: host})
+	return m.resolveIn(st, name)
 }
 
 // Health returns the last known state of every probed outbound.
@@ -505,11 +517,12 @@ type ruleTransport struct {
 }
 
 func (t *ruleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	st := t.m.routing.Load()
 	name := t.override
 	if name == "" {
-		name = t.m.routing.Load().router.Outbound(Target{Host: req.URL.Hostname()})
+		name = st.router.Outbound(Target{Host: req.URL.Hostname()})
 	}
-	o, err := t.m.Resolve(name)
+	o, err := t.m.resolveIn(st, name)
 	if err != nil {
 		return nil, err
 	}

@@ -126,6 +126,11 @@ func TestAttributesReportPinned(t *testing.T) {
 	ctx := context.Background()
 	e.fake.Seed("keep/inside", []byte("inside"))
 	e.fake.Seed("loose", []byte("loose"))
+	// A directory with several children, seeded before any listing so it is
+	// materialised in full, for the by-ino cost check at the end.
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		e.fake.Seed("bulk/"+name, []byte(name))
+	}
 	if _, err := e.fs.ReadDirPath(ctx, "/ali/keep"); err != nil {
 		t.Fatal(err)
 	}
@@ -173,5 +178,38 @@ func TestAttributesReportPinned(t *testing.T) {
 	after, _ := e.store.QueryStats()
 	if n := after - before; n > 4 {
 		t.Fatalf("listing two entries under a pin cost %d metadata queries; Pinned is being looked up per entry", n)
+	}
+
+	// The by-ino ReadDir is what the FUSE kernel mount calls for every ls; it
+	// must be as cheap as the by-path one and must not scale with the number of
+	// entries. Before the fix it went back to the store for each child's path
+	// whenever any pin existed, so a directory of six files cost six extra
+	// queries.
+	if err := e.fs.Pin(ctx, "/ali/bulk"); err != nil {
+		t.Fatal(err)
+	}
+	bulkIno, err := e.fs.StatPath(ctx, "/ali/bulk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.fs.ReadDir(ctx, bulkIno.Ino); err != nil { // warm listing + path cache
+		t.Fatal(err)
+	}
+	before, _ = e.store.QueryStats()
+	byIno, err := e.fs.ReadDir(ctx, bulkIno.Ino)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ = e.store.QueryStats()
+	if n := after - before; n > 4 {
+		t.Fatalf("by-ino ReadDir of six pinned entries cost %d metadata queries; Pinned is looked up per entry on the kernel hot path", n)
+	}
+	if len(byIno) != 6 {
+		t.Fatalf("expected 6 entries, got %d", len(byIno))
+	}
+	for _, a := range byIno {
+		if !a.Pinned {
+			t.Fatalf("child %s under a recursive pin is not reported pinned on the by-ino path", a.Name)
+		}
 	}
 }

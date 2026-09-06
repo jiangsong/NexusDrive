@@ -107,16 +107,17 @@ func TestBuiltInRulesFindTheProxyWhateverItIsCalled(t *testing.T) {
 // the request must fail rather than quietly leave through the wrong door —
 // silently going direct is exactly the leak the rule set exists to prevent.
 func TestAWrittenRuleNamingAMissingOutboundStillFails(t *testing.T) {
-	m, err := NewManager(ManagerOptions{Rules: []string{
+	// A user's rule naming an outbound that does not exist is now refused when
+	// the manager is built, rather than accepted and left to fail on the first
+	// request that matches it — the same loud-at-startup treatment Reload gives.
+	_, err := NewManager(ManagerOptions{Rules: []string{
 		"DOMAIN-SUFFIX,googleapis.com,proxy",
 		"FINAL,direct",
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("a rule naming an undefined outbound was accepted at build time")
 	}
-	if _, err := m.OutboundFor("www.googleapis.com"); err == nil {
-		t.Fatal("a user's rule naming an undefined outbound was silently routed")
-	} else if !strings.Contains(err.Error(), "unknown outbound") {
+	if !strings.Contains(err.Error(), "unknown outbound") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -180,8 +180,16 @@ func TestDialContextRejectsBadAddress(t *testing.T) {
 }
 
 func TestDialContextUnknownOutbound(t *testing.T) {
-	m := newManager(t, nil, []string{"FINAL,nowhere"})
-	if _, err := m.DialContext(context.Background(), "tcp", "127.0.0.1:1", ""); err == nil {
-		t.Fatal("an unresolvable outbound should be an error")
+	// A rule naming an outbound that does not exist is refused when the manager
+	// is built — at daemon start, loudly — not accepted and left to fail on the
+	// first request that happens to match it (which is how an overseas drive
+	// used to break quietly). NewManager and Reload validate identically.
+	_, err := NewManager(ManagerOptions{Rules: []string{"FINAL,nowhere"}})
+	if err == nil {
+		t.Fatal("NewManager accepted a rule targeting an unknown outbound")
+	}
+	m := newManager(t, nil, []string{"FINAL,direct"})
+	if err := m.Reload(ManagerOptions{Rules: []string{"FINAL,nowhere"}}); err == nil {
+		t.Fatal("Reload accepted a rule targeting an unknown outbound")
 	}
 }
