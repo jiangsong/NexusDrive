@@ -18,6 +18,5 @@
 .DS_Store
 .idea/
 .vscode/
-cloudfs.exe
-cloudfs
-cloudfs-desktop
+/cloudfs.exe
+/cloudfs-desktop
