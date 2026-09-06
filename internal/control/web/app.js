@@ -51,13 +51,15 @@ function screenForHash(hash) {
 }
 
 let disposeScreen = null;
+let titlebarEl = null;
 function render() {
   const app = document.getElementById('app');
   const tag = currentTag();
   const status = get().status;
   if (disposeScreen) { disposeScreen(); disposeScreen = null; }
+  titlebarEl = titlebar(status);
   app.replaceChildren(
-    titlebar(status),
+    titlebarEl,
     el('div', { class: 'body' },
       nav(tag),
       (() => {
@@ -68,8 +70,21 @@ function render() {
       })()));
 }
 
+// A status tick arrives every couple of seconds. It must update only the title
+// bar, never remount the active screen: remounting re-ran side-effecting loads
+// (/doctor/run, /proxy/check, /accounts, /fs/list) on a timer and destroyed the
+// focus, scroll and half-typed search of whoever was using the page. Screens
+// that want live data subscribe themselves (transfers) or listen for change
+// events (the file browser, via onFsChange); the shell just repaints the chips.
+function refreshTitlebar() {
+  if (!titlebarEl) return;
+  const next = titlebar(get().status);
+  titlebarEl.replaceWith(next);
+  titlebarEl = next;
+}
+
 startRouter(() => render());
-subscribe(() => render());
+subscribe(() => refreshTitlebar());
 
 // One event stream feeds the whole app: status ticks update the title bar and
 // any screen watching, change events let the file browser refresh the affected

@@ -17,7 +17,7 @@ export function renderStorage(host) {
   function refreshCards() {
     const c = (get().status || {}).cache || {};
     cards.replaceChildren(
-      card(t('storage.used'), c.bytes_human || '0 B', `上限 ${bytes(c.max_bytes)}`),
+      card(t('storage.used'), c.bytes_human || '0 B', c.max_bytes ? `上限 ${bytes(c.max_bytes)}` : '无上限'),
       card(t('storage.hit'), Math.round((c.hit_ratio || 0) * 100) + '%', `${(c.hits || 0).toLocaleString()} 读`),
       card('最近淘汰', String(c.evictions || 0), '固定与打开中的不参与'),
       card('可用磁盘', bytes(c.free_bytes), '逼近留白时拒绝写入'));

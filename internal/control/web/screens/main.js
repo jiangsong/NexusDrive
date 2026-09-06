@@ -162,5 +162,5 @@ export function renderMain(host) {
   loadAccounts();
   load();
   renderInspector();
-  return () => off();
+  return () => { off(); clearTimeout(searchTimer); };
 }

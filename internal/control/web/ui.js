@@ -44,7 +44,8 @@ export function confirmDelete({ title, body, confirmToken, confirmLabel, danger 
     const go = el('button', { class: danger ? 'danger' : 'primary', disabled: true }, confirmLabel || t('action.delete'));
     const cancel = el('button', {}, t('confirm.cancel'));
     input.addEventListener('input', () => { go.disabled = input.value !== confirmToken; });
-    const close = (result) => { scrim.remove(); if (opener && opener.focus) opener.focus(); resolve(result); };
+    const app = document.getElementById('app');
+    const close = (result) => { scrim.remove(); if (app) app.inert = false; if (opener && opener.focus) opener.focus(); resolve(result); };
     go.addEventListener('click', () => close(true));
     cancel.addEventListener('click', () => close(false));
     const sheet = el('div', { class: 'sheet' + (danger ? ' danger' : ''), role: 'dialog', 'aria-modal': 'true' },
@@ -56,6 +57,9 @@ export function confirmDelete({ title, body, confirmToken, confirmLabel, danger 
     const scrim = el('div', { class: 'scrim' }, sheet);
     scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(false); });
     document.getElementById('modal-root').append(scrim);
+    // Take the background out of the tab order so focus cannot leave the sheet
+    // into the destructive buttons behind it (nav, restart, delete rows).
+    if (app) app.inert = true;
     input.focus();
   });
 }
