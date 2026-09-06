@@ -172,7 +172,15 @@ func DropCaches(addr string) error {
 		url = "http://" + url
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Post(strings.TrimSuffix(url, "/")+"/cache/drop", "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(url, "/")+"/cache/drop", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// The control plane refuses a mutation without this header so a browser
+	// form cannot reach it; a native client sends it.
+	req.Header.Set("X-CloudFS-Control", "1")
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

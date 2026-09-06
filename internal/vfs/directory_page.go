@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"errors"
+	"path"
 	"sync"
 
 	"cloudfs/internal/meta"
@@ -69,9 +70,10 @@ func (f *FS) ReadDirPagePath(ctx context.Context, p string, opt DirectoryPageOpt
 		out.HasMore = true
 		nodes = nodes[:opt.Limit]
 	}
+	dir := path.Clean("/" + p)
 	out.Entries = make([]Attr, 0, len(nodes))
 	for _, node := range nodes {
-		out.Entries = append(out.Entries, f.attrOf(ctx, node))
+		out.Entries = append(out.Entries, f.attrAt(ctx, node, path.Join(dir, node.Name)))
 	}
 	if opt.Count {
 		out.Total, err = f.meta.ChildrenCount(ctx, n.Ino)

@@ -9,6 +9,17 @@ import (
 	"testing"
 )
 
+// post is what a native client sends: the mutation header a browser form
+// cannot set.
+func post(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-CloudFS-Control", "1")
+	return http.DefaultClient.Do(req)
+}
+
 func TestCacheDropEndpoint(t *testing.T) {
 	calls := 0
 	c := &Collector{DropCaches: func(context.Context) (int, error) { calls++; return 7, nil }}
@@ -24,7 +35,7 @@ func TestCacheDropEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed || calls != 0 {
 		t.Fatalf("GET = %s, calls = %d", resp.Status, calls)
 	}
-	resp, err = http.Post(srv.URL+"/cache/drop", "", nil)
+	resp, err = post(srv.URL + "/cache/drop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,10 +49,22 @@ func TestCacheDropEndpoint(t *testing.T) {
 		t.Fatalf("body = %s", body[:n])
 	}
 
+	// A POST without the control header is what an HTML form on another
+	// site can send. It must not empty the cache. This was the one mutating
+	// route that forgot the guard.
+	resp, err = http.Post(srv.URL+"/cache/drop", "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || calls != 1 {
+		t.Fatalf("form POST without the header = %s, calls = %d; a cross-site form can drop the cache", resp.Status, calls)
+	}
+
 	// A daemon without the hook says so instead of pretending.
 	unwired := httptest.NewServer(NewServer(&Collector{}).Handler())
 	defer unwired.Close()
-	resp, _ = http.Post(unwired.URL+"/cache/drop", "", nil)
+	resp, _ = post(unwired.URL + "/cache/drop")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("unwired = %s", resp.Status)
@@ -51,7 +74,7 @@ func TestCacheDropEndpoint(t *testing.T) {
 		DropCaches: func(context.Context) (int, error) { return 0, errors.New("disk on fire") },
 	}).Handler())
 	defer failing.Close()
-	resp, _ = http.Post(failing.URL+"/cache/drop", "", nil)
+	resp, _ = post(failing.URL + "/cache/drop")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("failing = %s", resp.Status)

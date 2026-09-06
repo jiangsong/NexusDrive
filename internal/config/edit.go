@@ -94,6 +94,34 @@ func removeNode(n *yaml.Node, key string) {
 	}
 }
 
+// SafeExtraFieldName reports whether name may be set as a public field of a
+// remote by a caller that did not write the YAML itself: the CLI's --set, the
+// control plane's account endpoints, and the config editors here. It is the
+// one definition of that rule, so the HTTP side and the file side cannot
+// drift on which keys a request is allowed to write.
+//
+// Structural keys (type, proxy, qps, upload_workers) are set through their
+// own typed paths, never through the free-form field map; keys starting with
+// "_" are the daemon's injection slots (provider.ConfigHTTPClient and
+// friends) and must never come from outside the process.
+func SafeExtraFieldName(name string) bool {
+	if name == "" || len(name) > 64 || strings.HasPrefix(name, "_") {
+		return false
+	}
+	switch name {
+	case "type", "proxy", "qps", "upload_workers", "account_binding":
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // AddRemote creates an account without overwriting an existing one. MountPath
 // optionally attaches it to a mount in the same atomic configuration edit.
 type AddRemoteOptions struct {
@@ -114,8 +142,8 @@ func AddRemote(configPath, name string, r Remote, opt AddRemoteOptions) error {
 		return errors.New("config: remote account binding is invalid")
 	}
 	for k, v := range r.Extra {
-		if k == "type" || k == "proxy" || k == "qps" || k == "upload_workers" || strings.HasPrefix(k, "_") {
-			return fmt.Errorf("config: reserved remote field %s", k)
+		if !SafeExtraFieldName(k) {
+			return fmt.Errorf("config: reserved or invalid remote field %s", k)
 		}
 		if IsSecretField(k) && v != "" {
 			return fmt.Errorf("config: set %s through config auth, not config add", k)

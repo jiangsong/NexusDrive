@@ -115,3 +115,63 @@ func TestReconcileFollowsContentMovedIntoAndOutOfAPinnedDirectory(t *testing.T) 
 		t.Fatal("a file moved out of the pinned directory is still retained")
 	}
 }
+
+// TestAttributesReportPinned. Attr.Pinned had a doc comment and no writer:
+// every listing and every stat reported every file unpinned, so any adapter
+// that showed a pinned column showed a lie. A listing must say which entries
+// a rule covers without paying a path lookup per entry, and a stat by path
+// must agree with it.
+func TestAttributesReportPinned(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	e.fake.Seed("keep/inside", []byte("inside"))
+	e.fake.Seed("loose", []byte("loose"))
+	if _, err := e.fs.ReadDirPath(ctx, "/ali/keep"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.store.QueryStats()
+	if err := e.fs.Pin(ctx, "/ali/keep"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := e.fs.ReadDirPath(ctx, "/ali")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, a := range entries {
+		got[a.Name] = a.Pinned
+	}
+	if !got["keep"] || got["loose"] {
+		t.Fatalf("listing reports pinned=%v, want keep pinned and loose not", got)
+	}
+	inside, err := e.fs.ReadDirPath(ctx, "/ali/keep")
+	if err != nil || len(inside) != 1 || !inside[0].Pinned {
+		t.Fatalf("a file under a recursive pin is not reported pinned: %+v %v", inside, err)
+	}
+	page, err := e.fs.ReadDirPagePath(ctx, "/ali", DirectoryPageOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range page.Entries {
+		if a.Pinned != got[a.Name] {
+			t.Fatalf("paged listing disagrees with the full one for %s", a.Name)
+		}
+	}
+	for p, want := range map[string]bool{"/ali/keep/inside": true, "/ali/loose": false} {
+		a, err := e.fs.StatPath(ctx, p)
+		if err != nil || a.Pinned != want {
+			t.Fatalf("stat %s pinned=%v (%v), want %v", p, a.Pinned, err, want)
+		}
+	}
+	// A listing that already knows its directory must not go back to the
+	// metadata store for every child's path just to answer this.
+	before, _ = e.store.QueryStats()
+	if _, err := e.fs.ReadDirPath(ctx, "/ali"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := e.store.QueryStats()
+	if n := after - before; n > 4 {
+		t.Fatalf("listing two entries under a pin cost %d metadata queries; Pinned is being looked up per entry", n)
+	}
+}

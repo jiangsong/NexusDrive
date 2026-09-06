@@ -1278,7 +1278,7 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 
 ---
 
-### [ ] T-21 Windows 缺席的采用代价（登记，不改范围）
+### [~] T-21 Windows：已提前到本期（2026-09-06 决定），方案见 `docs/ui-plan.md` 阶段 C
 
 - **状态**：本条**不是新发现的遗漏**。`internal/fusefs/` 只有 `platform_linux.go` 与
   `platform_darwin.go`，WinFsp 适配在《明确不在当前范围内》里已列为二期，接口已预留。
@@ -1292,11 +1292,35 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 
 ---
 
+### [~] T-24 桌面界面的控制面 API（2026-09-06 启动）
+
+设计稿 https://claude.ai/code/artifact/2c5d82b9-8ca9-4f8b-a4f7-02158cd95153 ，开发方案与逐项 TODO 见
+**`docs/ui-plan.md`**（阶段 0–5 是后端，A 前端，B 桌面壳，C Windows，D 发布）。这里只记进度。
+
+- **[x] 阶段 0 地基**：`/cache/drop` 补上 `privateRequest`（此前是唯一没守卫的变更路由，
+  一个普通 HTML 表单就能让缓存变冷；`cloudfs bench --cold` 的客户端跟着补了头）；
+  路由改为从表注册，`security_all_routes_test.go` 遍历每条路由断言"要么守卫、要么在
+  `NewServer` 注释里被论证为只读开放"（去掉守卫立刻报 `got 501, want 403`）；抽出
+  `writeJSON` / `requireConfirm` / `rejectSecretFields`（凭据边界只此一处）；
+  `config.SafeExtraFieldName` 成为"哪些键可由外部请求写入"的唯一定义；
+  修了 `vfs.Attr.Pinned` 从不被设置的 bug（`attrAt` 让知道路径的列举零额外查询地报出它，
+  回归 `TestAttributesReportPinned`）。
+- **[ ] 阶段 1** `/fs/*` `/search` `/doctor` `/events`
+- **[ ] 阶段 2** 配置变更库
+- **[ ] 阶段 3 / 3a** 账号、代理、挂载端点；代理热加载
+- **[ ] 阶段 4** 守护进程驾驭的 OAuth / 扫码授权（浏览器永不见秘密）
+- **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
+
+### [ ] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）
+
+见 `docs/ui-plan.md` 阶段 B。守护进程保持 `CGO_ENABLED=0`；壳只是指向回环 URL 的窗口 + 托盘，
+不内嵌第二份装配逻辑，不自己服务静态文件。
+
 ## 明确不在当前范围内
 
 以下是设计文档中标注为二期或预留的部分，列在这里是为了避免被误当作遗漏：
 
-- **Windows / WinFsp 适配**：接口已预留（平台相关代码都在 `platform_*.go`），未实现。
+- ~~**Windows / WinFsp 适配**~~：2026-09-06 提前到本期，见 T-21 与 `docs/ui-plan.md` 阶段 C。
 - **macOS File Provider / FSKit 原生集成**：一期以 macFUSE 为准，FSKit 仅作试验开关。
 - **OpenList 代码移植**：出于 AGPL 许可考虑，国内驱动只参考协议细节自行实现。
   当前 `openlist` 类型是 WebDAV 实现的别名（`internal/provider/webdav/webdav.go:505`），

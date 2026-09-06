@@ -103,15 +103,6 @@ func credentialSummary(typ string) string {
 	return strings.Join(creds.Fields, " or ")
 }
 
-// writeAccountJSON answers with no-store: the reply names configured remotes
-// and the path of the configuration file, neither of which belongs in a cache.
-func writeAccountJSON(w http.ResponseWriter, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
@@ -140,7 +131,7 @@ func (s *Server) listAccounts(w http.ResponseWriter) {
 			out.Remotes = append(out.Remotes, AccountSummary{Name: name, Type: cfg.Remotes[name].Type})
 		}
 	}
-	writeAccountJSON(w, out)
+	writeJSON(w, out)
 }
 
 func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +159,7 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	writeAccountJSON(w, AddAccountResponse{
+	writeJSON(w, AddAccountResponse{
 		Name: in.Name, Type: in.Type,
 		NextCommand: fmt.Sprintf("cloudfs config auth %s --config %s", in.Name, cfg.SourcePath),
 		Credentials: credentialSummary(in.Type),
@@ -191,15 +182,12 @@ func buildAccount(in AddAccountRequest) (config.Remote, error) {
 	if !known {
 		return config.Remote{}, fmt.Errorf("unknown backend type %q", in.Type)
 	}
+	if err := rejectSecretFields(in.Name, in.Fields); err != nil {
+		return config.Remote{}, err
+	}
 	remote := config.Remote{Type: in.Type, Extra: map[string]any{}}
 	for key, value := range in.Fields {
-		if config.IsSecretField(key) {
-			// The whole point of the boundary: a credential never arrives
-			// over this API, so it can never be logged, proxied or left in a
-			// browser's memory by it.
-			return config.Remote{}, fmt.Errorf("%s is a credential; set it with `cloudfs config auth %s`", key, in.Name)
-		}
-		if !safeFieldName(key) {
+		if !config.SafeExtraFieldName(key) {
 			return config.Remote{}, fmt.Errorf("invalid setting name %q", key)
 		}
 		if len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") {
@@ -228,25 +216,6 @@ func safeRemoteName(name string) bool {
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func safeFieldName(name string) bool {
-	if name == "" || len(name) > 64 || strings.HasPrefix(name, "_") {
-		return false
-	}
-	switch name {
-	case "type", "proxy", "qps", "upload_workers":
-		// Structural keys the config owns; a remote block sets them itself.
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
 		default:
 			return false
 		}

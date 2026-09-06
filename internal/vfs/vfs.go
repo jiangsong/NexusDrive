@@ -381,7 +381,17 @@ type Attr struct {
 	LocalOnly bool
 }
 
+// attrOf builds the attributes of a node whose virtual path the caller does
+// not have. Callers that do — a listing knows the directory it is listing —
+// use attrAt, because Pinned is a property of the path and looking each
+// child's path up again would cost a query per entry.
 func (f *FS) attrOf(ctx context.Context, n meta.Node) Attr {
+	return f.attrAt(ctx, n, "")
+}
+
+// attrAt is attrOf with the node's virtual path already known; pass "" to
+// have it resolved, which only happens when a pin rule exists at all.
+func (f *FS) attrAt(ctx context.Context, n meta.Node, p string) Attr {
 	a := Attr{
 		Ino: n.Ino, Name: n.Name, IsDir: n.IsDir(), Size: n.Size,
 		MTime: n.MTime, Mode: n.Mode, Remote: n.Remote, Version: n.Version,
@@ -393,6 +403,16 @@ func (f *FS) attrOf(ctx context.Context, n meta.Node) Attr {
 			a.Cached = float64(have) / float64(total)
 		} else if n.Size == 0 {
 			a.Cached = 1
+		}
+	}
+	// The field existed before anything set it: every listing reported every
+	// file unpinned, which made a "pinned" column in any adapter a lie.
+	if f.hasPins.Load() {
+		if p == "" {
+			p, _ = f.meta.Path(ctx, n.Ino)
+		}
+		if p != "" {
+			a.Pinned = f.pathPinned(p)
 		}
 	}
 	return a
@@ -466,7 +486,7 @@ func (f *FS) StatPath(ctx context.Context, p string) (Attr, error) {
 	if err != nil {
 		return Attr{}, err
 	}
-	return f.attrOf(ctx, n), nil
+	return f.attrAt(ctx, n, path.Clean("/"+p)), nil
 }
 
 // resolve walks a path, filling directories from the provider on the way.
@@ -546,7 +566,16 @@ func (f *FS) ReadDirPath(ctx context.Context, p string) ([]Attr, error) {
 	if !n.IsDir() {
 		return nil, ErrNotDir
 	}
-	return f.ReadDir(ctx, n.Ino)
+	nodes, err := f.readDirRefresh(ctx, n.Ino, false)
+	if err != nil {
+		return nil, err
+	}
+	dir := path.Clean("/" + p)
+	out := make([]Attr, 0, len(nodes))
+	for _, child := range nodes {
+		out = append(out, f.attrAt(ctx, child, path.Join(dir, child.Name)))
+	}
+	return out, nil
 }
 
 // freshenDir brings ino's listing up to date without loading it. The lookup

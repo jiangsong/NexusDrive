@@ -24,21 +24,52 @@ type Server struct {
 }
 
 // NewServer builds the control HTTP server.
+//
+// Every route that changes anything, or that names something about the
+// configuration, goes through privateRequest. The four that do not —
+// /healthz, /readyz, /status and /metrics — are read-only, carry no
+// credential-shaped field (Status is checked for that in tests), and are
+// reachable only by processes on this machine, which can already read far
+// more from /proc. Keeping them open is what lets a monitoring agent scrape
+// them without a custom header. Anything new here is guarded unless it is
+// argued into that list.
 func NewServer(c *Collector) *Server {
 	s := &Server{collector: c, mux: http.NewServeMux()}
-	s.mux.HandleFunc("/healthz", s.healthz)
-	s.mux.HandleFunc("/readyz", s.readyz)
-	s.mux.HandleFunc("/status", s.status)
-	s.mux.HandleFunc("/metrics", s.metrics)
-	s.mux.HandleFunc("/cache/drop", s.dropCaches)
-	s.mux.HandleFunc("/cache/", s.manageCache)
-	s.mux.HandleFunc("/uploads", s.uploads)
-	s.mux.HandleFunc("/uploads/", s.uploads)
-	s.mux.HandleFunc("/copy", s.copyFile)
-	s.mux.HandleFunc("/copies", s.copies)
-	s.mux.HandleFunc("/copies/", s.mutateCopy)
-	s.mux.HandleFunc("/accounts", s.accounts)
+	for _, r := range s.routes() {
+		s.mux.HandleFunc(r.pattern, r.handler)
+	}
 	return s
+}
+
+// route is one registered pattern. The table exists so a test can walk every
+// route and prove the guard is on it: /cache/drop went unguarded for as long
+// as it did because nothing enumerated the routes and asked.
+type route struct {
+	pattern string
+	handler http.HandlerFunc
+	// open marks the few read-only routes that deliberately skip
+	// privateRequest; see NewServer.
+	open bool
+	// probe is a concrete path under a prefix pattern for the guard test to
+	// hit, since "/cache/" itself is not a route anyone calls.
+	probe string
+}
+
+func (s *Server) routes() []route {
+	return []route{
+		{pattern: "/healthz", handler: s.healthz, open: true},
+		{pattern: "/readyz", handler: s.readyz, open: true},
+		{pattern: "/status", handler: s.status, open: true},
+		{pattern: "/metrics", handler: s.metrics, open: true},
+		{pattern: "/cache/drop", handler: s.dropCaches},
+		{pattern: "/cache/", handler: s.manageCache, probe: "/cache/gc"},
+		{pattern: "/uploads", handler: s.uploads},
+		{pattern: "/uploads/", handler: s.uploads, probe: "/uploads/retry"},
+		{pattern: "/copy", handler: s.copyFile},
+		{pattern: "/copies", handler: s.copies},
+		{pattern: "/copies/", handler: s.mutateCopy, probe: "/copies/retry"},
+		{pattern: "/accounts", handler: s.accounts},
+	}
 }
 
 // EnableUI mounts the embedded status page. It must be called before the
@@ -75,9 +106,13 @@ func loopbackAddr(addr string) bool {
 }
 
 // dropCaches empties the block cache and stales every listing. It is a POST
-// because it changes what the next reads cost, and it is only ever reachable
-// on the loopback control address.
+// because it changes what the next reads cost, and like every other mutation
+// it takes the same-origin guard: a plain HTML form on any site could
+// otherwise post here and make the next hour of reads cold.
 func (s *Server) dropCaches(w http.ResponseWriter, r *http.Request) {
+	if !privateRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
