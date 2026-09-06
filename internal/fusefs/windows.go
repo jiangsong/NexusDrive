@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows && !winfsp
 
 // Package fusefs on Windows is a stub. FUSE mounting needs the WinFsp build
 // (internal/winfs, built with -tags winfsp and cgo); a plain Windows binary
