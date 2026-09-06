@@ -1,6 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
+import { openAddDrive } from '/ui/add_drive.js';
 import { onFsChange } from '/ui/app.js';
 
 // The main window: connections on the left, the file table in the middle, an
@@ -156,7 +157,6 @@ export function renderMain(host) {
       el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, t('col.name')), el('th', { class: 'num' }, t('col.size')),
         el('th', { style: 'padding-left:20px' }, t('col.modified')), el('th', { style: 'padding-left:20px' }, t('col.state')))), rows)));
 
-  function openAddDrive() { location.hash = '#/connections'; toast('用 cloudfs config auth 在终端完成授权'); }
 
   const off = onFsChange((c) => { if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) load(); });
   loadAccounts();

@@ -27,6 +27,17 @@ const zh = {
   'diag.daemon': '守护进程', 'diag.restart': '重启守护进程',
   'diag.restart.confirm': '重启会先把进行中的上传落盘，短暂断开挂载点，然后原地重启并重连。改动过的配置会在重启后生效。',
   'diag.restart.progress': '守护进程正在重启，稍候将自动重连…',
+  'add.title': '添加网盘', 'add.type': '网盘类型', 'add.name': '名称（本地标识）',
+  'add.name.ph': '例如 my-aliyun，仅字母数字-_', 'add.mount': '同时挂载为文件夹',
+  'add.create': '创建', 'add.creating': '创建中…', 'add.required': '必填',
+  'add.credstep': '凭据步骤', 'add.next': '下一步：授权',
+  'add.auth.url': '在浏览器打开下面的地址完成授权，然后回到这里：',
+  'add.auth.qr': '用该网盘的手机 App 扫描下面的内容完成授权：',
+  'add.auth.term': '这个网盘的凭据需要在终端完成（密码 / cookie / 外部令牌不经过浏览器）：',
+  'add.auth.open': '打开授权页', 'add.copy': '复制', 'add.copied': '已复制',
+  'add.waiting': '等待授权完成…', 'add.done': '授权完成', 'add.denied': '授权未通过',
+  'add.saved': '已保存到配置。重启守护进程后这个网盘才会生效。',
+  'add.restart': '立即重启守护进程', 'add.finish': '完成',
   'empty': '没有内容',
 };
 export function t(key, ...args) {
