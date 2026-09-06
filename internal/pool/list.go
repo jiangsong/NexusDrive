@@ -166,7 +166,14 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 	// directory that other drives still serve.
 	results := make([]memberListing, len(p.members))
 	var wg sync.WaitGroup
+	probe := p.probeInterval()
 	for i, m := range p.members {
+		if !m.usable(probe) {
+			// Known to be down: do not wait on it again; what the index
+			// last saw of it stands in until a probe brings it back.
+			results[i] = memberListing{m: m, err: fmt.Errorf("%w: member %s is %s", provider.ErrUnavailable, m.name, m.state())}
+			continue
+		}
 		wg.Add(1)
 		go func(i int, m *member) {
 			defer wg.Done()

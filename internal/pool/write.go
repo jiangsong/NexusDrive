@@ -310,7 +310,13 @@ func (p *Pool) fanout(ctx context.Context, targets []target, op, pth string, arg
 	ok := 0
 	var lastErr, lastUnreachable error
 	now := p.now().UnixNano()
+	probe := p.probeInterval()
 	for _, t := range targets {
+		if !t.m.usable(probe) {
+			lastUnreachable = fmt.Errorf("member %s is %s", t.m.name, t.m.state())
+			p.pendingOp(ctx, t.m, op, pth, args, now)
+			continue
+		}
 		err := do(t)
 		switch {
 		case err == nil, errors.Is(err, provider.ErrNotFound):
@@ -431,7 +437,13 @@ func (p *Pool) Mkdir(ctx context.Context, parentID, name string) (provider.Entry
 	// of the tree is mirrored everywhere, only the files are placed.
 	var targets []target
 	var lastUnreachable error
+	probe := p.probeInterval()
 	for _, m := range p.members {
+		if !m.usable(probe) {
+			lastUnreachable = fmt.Errorf("member %s is %s", m.name, m.state())
+			p.pendingOp(ctx, m, "mkdir", pth, nil, p.now().UnixNano())
+			continue
+		}
 		id, err := p.dirID(ctx, m, parentPath)
 		if err != nil {
 			if unreachable(err) {

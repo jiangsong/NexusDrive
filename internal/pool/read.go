@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"time"
 
 	"cloudfs/internal/provider"
 )
@@ -31,18 +33,25 @@ func (p *Pool) replicasOf(ctx context.Context, pth, ctoken string) ([]replicaRow
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Declaration order is the fixed tie-breaker; health and latency
-	// reorder in front of it.
+	// Healthy members first, then the fastest, then declaration order.
 	sortReplicas(out, p.byName)
 	return out, nil
 }
 
 func sortReplicas(rs []replicaRow, byName map[string]*member) {
-	for i := 1; i < len(rs); i++ {
-		for j := i; j > 0 && byName[rs[j].member].order < byName[rs[j-1].member].order; j-- {
-			rs[j], rs[j-1] = rs[j-1], rs[j]
+	sort.SliceStable(rs, func(i, j int) bool {
+		ri, li, oi := byName[rs[i].member].rank()
+		rj, lj, oj := byName[rs[j].member].rank()
+		if ri != rj {
+			return ri < rj
 		}
-	}
+		if li != lj {
+			// An unmeasured member sorts first: it gets its chance to be
+			// the fastest.
+			return li < lj
+		}
+		return oi < oj
+	})
 }
 
 // resolveFile finds the file at id and the replicas that can serve version.
@@ -74,17 +83,29 @@ func (p *Pool) tryReplicas(ctx context.Context, pth string, reps []replicaRow, d
 		return fmt.Errorf("%w: %s has no replica", provider.ErrNotFound, pth)
 	}
 	var lastUnreachable error
+	probe := p.probeInterval()
 	for _, r := range reps {
 		m := p.byName[r.member]
 		if m == nil {
 			continue
 		}
+		if !m.usable(probe) {
+			lastUnreachable = fmt.Errorf("member %s is %s", m.name, m.state())
+			continue
+		}
+		start := time.Now()
 		err := do(m, r)
 		if err == nil {
 			m.note(nil)
+			m.noteLatency(time.Since(start))
 			return nil
 		}
 		if ctx.Err() != nil {
+			return err
+		}
+		if errors.Is(err, provider.ErrUnsupported) {
+			// Nothing was asked of the member; the caller falls back to
+			// another path. Says nothing about health.
 			return err
 		}
 		switch {

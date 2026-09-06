@@ -32,6 +32,10 @@ type poolRig struct {
 func (r *poolRig) now() time.Time { return r.clock }
 
 func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
+	return newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1}, memberNames...)
+}
+
+func newPoolRigWith(t *testing.T, settings config.Pool, memberNames ...string) *poolRig {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
@@ -45,7 +49,7 @@ func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
 	}
 	t.Cleanup(func() { ca.Close() })
 	r := &poolRig{members: map[string]*fakeprovider.Fake{}, clock: time.Now()}
-	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: config.Pool{Replicas: 2, MinReplicas: 1}}
+	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: settings}
 	for _, n := range memberNames {
 		f := fakeprovider.New(n)
 		r.members[n] = f
@@ -250,5 +254,91 @@ func TestPoolRemoteChangedUnderUsProducesConflictCopy(t *testing.T) {
 	}
 	if data, _ := r.members["a"].Content("/shared.md"); string(data) != "their edit" {
 		t.Fatalf("their edit was overwritten: %q", data)
+	}
+}
+
+// TestPoolMemberDownDoesNotAffectFilesOnOtherMembers: requirement 2 of the
+// pool. A member that stops answering costs the files on other members
+// nothing — not an error, not a wait on the dead member — once the pool has
+// noticed, and the pool notices from the failures themselves.
+func TestPoolMemberDownDoesNotAffectFilesOnOtherMembers(t *testing.T) {
+	r := newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1, ProbeInterval: time.Hour, OutAfter: time.Hour}, "a", "b")
+	a, b := r.members["a"], r.members["b"]
+	for i := 0; i < 4; i++ {
+		b.Seed("/on-b/"+string(rune('0'+i))+".txt", []byte("b"))
+		a.Seed("/on-a/"+string(rune('0'+i))+".txt", []byte("a"))
+	}
+	ctx := context.Background()
+	for _, dir := range []string{"/", "/on-a", "/on-b"} {
+		if _, err := r.fs.ReadDirPath(ctx, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = true; ft.Latency = 20 * time.Millisecond })
+	// Three failed operations mark a down. Each cold listing of /on-a
+	// asks a once.
+	for i := 0; i < 3; i++ {
+		if _, err := r.fs.DropCaches(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.fs.ReadDirPath(ctx, "/on-a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := r.pool.Status()[0]; st.Health.State != provider.HealthDown {
+		t.Fatalf("a = %s after repeated failures", st.Health.State)
+	}
+	refused := a.Calls("down")
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if _, err := r.fs.DropCaches(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := listNames(t, r.fs, "/on-b"); got != "0.txt,1.txt,2.txt,3.txt" {
+			t.Fatalf("/on-b with a down = %s", got)
+		}
+		if data, err := r.fs.ReadFileRange(ctx, "/on-b/2.txt", 0, 0); err != nil || string(data) != "b" {
+			t.Fatalf("read on b = %q, %v", data, err)
+		}
+	}
+	if a.Calls("down") != refused {
+		t.Fatalf("operations on b's files touched the down member %d times", a.Calls("down")-refused)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Fatalf("operations on b's files waited on the down member: %v", took)
+	}
+	// a's own files are still listed, and say why they cannot be read.
+	if got := listNames(t, r.fs, "/on-a"); got != "0.txt,1.txt,2.txt,3.txt" {
+		t.Fatalf("/on-a with a down = %s", got)
+	}
+	if _, err := r.fs.ReadFileRange(ctx, "/on-a/1.txt", 0, 0); !errors.Is(err, provider.ErrUnavailable) {
+		t.Fatalf("read of a's file = %v", err)
+	}
+}
+
+// TestPoolMemberRecoversWithoutRestart: the probe notices a member that
+// answers again, and the next operation uses it.
+func TestPoolMemberRecoversWithoutRestart(t *testing.T) {
+	r := newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1, ProbeInterval: time.Hour, OutAfter: time.Hour}, "a", "b")
+	a := r.members["a"]
+	a.Seed("/only-a.txt", []byte("a"))
+	ctx := context.Background()
+	if _, err := r.fs.ReadDirPath(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	a.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = true })
+	for i := 0; i < 3; i++ {
+		_, _ = r.fs.ReadFileRange(ctx, "/only-a.txt", 0, 0)
+	}
+	if st := r.pool.Status()[0]; st.Health.State != provider.HealthDown {
+		t.Fatalf("a = %s", st.Health.State)
+	}
+	a.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = false })
+	if _, err := r.fs.ReadFileRange(ctx, "/only-a.txt", 0, 0); !errors.Is(err, provider.ErrUnavailable) {
+		t.Fatalf("before the probe the member is still down: %v", err)
+	}
+	r.pool.ProbeOnce(ctx)
+	if data, err := r.fs.ReadFileRange(ctx, "/only-a.txt", 0, 0); err != nil || string(data) != "a" {
+		t.Fatalf("after the probe = %q, %v", data, err)
 	}
 }

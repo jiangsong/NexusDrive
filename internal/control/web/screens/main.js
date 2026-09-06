@@ -3,6 +3,7 @@ import { el, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { openAddDrive } from '/ui/add_drive.js';
 import { onFsChange } from '/ui/app.js';
+import { get, subscribe } from '/ui/store.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
@@ -31,6 +32,43 @@ export function renderMain(host) {
   const rows = el('tbody');
   const searchBox = el('input', { type: 'search', placeholder: t('search.placeholder'), style: 'width:220px' });
 
+  // The dot beside each connection is its reachability from /status: the
+  // daemon marks a remote down from the calls it actually makes, so a drive
+  // whose API stopped answering shows red here without anyone restarting.
+  const dots = new Map();
+  function healthDot(name) {
+    const dot = el('span', { class: 'dot ' + dotClass(remoteState(name)), title: remoteStateTitle(name) });
+    dots.set(name, dot);
+    return dot;
+  }
+  function remoteOf(name) {
+    return ((get().status || {}).remotes || []).find((r) => r.remote === name);
+  }
+  function remoteState(name) {
+    const r = remoteOf(name);
+    return r ? r.state : 'up';
+  }
+  function remoteStateTitle(name) {
+    const r = remoteOf(name);
+    if (!r) return t('health.up');
+    const base = t('health.' + (r.state || 'up'));
+    return r.last_error ? base + ': ' + r.last_error : base;
+  }
+  function dotClass(state) {
+    switch (state) {
+      case 'up': return 'ok';
+      case 'degraded': return 'warn';
+      case 'down': case 'out': return 'bad';
+      default: return '';
+    }
+  }
+  const unsubscribeHealth = subscribe(() => {
+    for (const [name, dot] of dots) {
+      dot.className = 'dot ' + dotClass(remoteState(name));
+      dot.title = remoteStateTitle(name);
+    }
+  });
+
   async function loadAccounts() {
     try {
       const a = await api.get('/accounts');
@@ -44,7 +82,7 @@ export function renderMain(host) {
               onclick: () => selectRemote(r),
             }, el('span', { style: 'width:28px;height:28px;border-radius:8px;background:#16283d;display:flex;align-items:center;justify-content:center;color:var(--accent-text)' }, iconEl('cloud')),
               el('div', { style: 'flex-grow:1;min-width:0' }, el('div', { style: 'font-weight:600' }, r.name), el('div', { class: 'dim', style: 'font-size:11px' }, r.type)),
-              el('span', { class: 'dot ok' }));
+              healthDot(r.name));
             return item;
           }),
           (a.remotes || []).length ? null : el('div', { class: 'dim', style: 'padding:12px' }, t('empty'))),
@@ -162,5 +200,5 @@ export function renderMain(host) {
   loadAccounts();
   load();
   renderInspector();
-  return () => { off(); clearTimeout(searchTimer); };
+  return () => { off(); unsubscribeHealth(); clearTimeout(searchTimer); };
 }

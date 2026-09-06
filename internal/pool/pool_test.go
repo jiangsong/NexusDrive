@@ -15,8 +15,12 @@ import (
 )
 
 func newTestPool(t *testing.T, dir string, fakes ...*fakeprovider.Fake) *Pool {
+	return newTestPoolWith(t, dir, config.Pool{Replicas: 2, MinReplicas: 1}, fakes...)
+}
+
+func newTestPoolWith(t *testing.T, dir string, settings config.Pool, fakes ...*fakeprovider.Fake) *Pool {
 	t.Helper()
-	opt := Options{Name: "home", StateDir: dir, Settings: config.Pool{Replicas: 2, MinReplicas: 1}}
+	opt := Options{Name: "home", StateDir: dir, Settings: settings}
 	for _, f := range fakes {
 		opt.Members = append(opt.Members, Member{Name: f.Name(), Provider: f, Adopt: true})
 	}

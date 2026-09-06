@@ -28,10 +28,28 @@ type Stats struct {
 	// the bytes accepted by UploadPart.
 	readBytes  atomic.Int64
 	writeBytes atomic.Int64
+	// health is what the outcomes of those calls say about reachability.
+	health *Health
 }
 
 // NewStats returns an empty counter.
-func NewStats() *Stats { return &Stats{ops: map[string]int64{}} }
+func NewStats() *Stats { return &Stats{ops: map[string]int64{}, health: NewHealth(HealthOptions{})} }
+
+// Health reports the backend's reachability as seen from its calls.
+func (s *Stats) Health() HealthSnapshot {
+	if s == nil {
+		return HealthSnapshot{State: HealthUp}
+	}
+	return s.health.Snapshot()
+}
+
+// note records one call's outcome for health.
+func (s *Stats) note(err error) {
+	if s == nil {
+		return
+	}
+	s.health.Note(err)
+}
 
 // timed returns the function that records one call to op: the count and the
 // time it took land together, under one acquisition of the lock every backend
@@ -159,22 +177,29 @@ func (c *counting) ListStream(ctx context.Context, dirID string, visit func(Entr
 		return ErrUnsupported
 	}
 	defer c.s.timed("list")()
-	return c.sl.ListStream(ctx, dirID, visit)
+	err := c.sl.ListStream(ctx, dirID, visit)
+	c.s.note(err)
+	return err
 }
 
 func (c *counting) List(ctx context.Context, dirID, cursor string) ([]Entry, string, error) {
 	defer c.s.timed("list")()
-	return c.Provider.List(ctx, dirID, cursor)
+	entries, next, err := c.Provider.List(ctx, dirID, cursor)
+	c.s.note(err)
+	return entries, next, err
 }
 
 func (c *counting) Stat(ctx context.Context, id string) (Entry, error) {
 	defer c.s.timed("stat")()
-	return c.Provider.Stat(ctx, id)
+	e, err := c.Provider.Stat(ctx, id)
+	c.s.note(err)
+	return e, err
 }
 
 func (c *counting) ReadRange(ctx context.Context, id, version string, off, n int64) (io.ReadCloser, error) {
 	done := c.s.timed("read_range")
 	rc, err := c.Provider.ReadRange(ctx, id, version, off, n)
+	c.s.note(err)
 	if err != nil || rc == nil {
 		done()
 		return rc, err
@@ -194,23 +219,29 @@ func (c *counting) ReadRangeAt(ctx context.Context, id, version string, off int6
 	done := c.s.timed("read_range")
 	n, err := c.ra.ReadRangeAt(ctx, id, version, off, buf)
 	done()
+	c.s.note(err)
 	c.s.readBytes.Add(int64(n))
 	return n, err
 }
 
 func (c *counting) DownloadURL(ctx context.Context, id string) (Link, error) {
 	defer c.s.timed("download_url")()
-	return c.Provider.DownloadURL(ctx, id)
+	l, err := c.Provider.DownloadURL(ctx, id)
+	c.s.note(err)
+	return l, err
 }
 
 func (c *counting) BeginUpload(ctx context.Context, parentID, name string, size int64, h Hashes) (UploadSession, error) {
 	defer c.s.timed("begin_upload")()
-	return c.Provider.BeginUpload(ctx, parentID, name, size, h)
+	sess, err := c.Provider.BeginUpload(ctx, parentID, name, size, h)
+	c.s.note(err)
+	return sess, err
 }
 
 func (c *counting) UploadPart(ctx context.Context, s UploadSession, idx int, r io.Reader, n int64) (PartToken, error) {
 	defer c.s.timed("upload_part")()
 	t, err := c.Provider.UploadPart(ctx, s, idx, r, n)
+	c.s.note(err)
 	if err == nil && n > 0 {
 		c.s.writeBytes.Add(n)
 	}
@@ -219,27 +250,37 @@ func (c *counting) UploadPart(ctx context.Context, s UploadSession, idx int, r i
 
 func (c *counting) CompleteUpload(ctx context.Context, s UploadSession, parts []PartToken) (Entry, error) {
 	defer c.s.timed("complete_upload")()
-	return c.Provider.CompleteUpload(ctx, s, parts)
+	e, err := c.Provider.CompleteUpload(ctx, s, parts)
+	c.s.note(err)
+	return e, err
 }
 
 func (c *counting) Mkdir(ctx context.Context, parentID, name string) (Entry, error) {
 	defer c.s.timed("mkdir")()
-	return c.Provider.Mkdir(ctx, parentID, name)
+	e, err := c.Provider.Mkdir(ctx, parentID, name)
+	c.s.note(err)
+	return e, err
 }
 
 func (c *counting) Rename(ctx context.Context, id, newName string) (Entry, error) {
 	defer c.s.timed("rename")()
-	return c.Provider.Rename(ctx, id, newName)
+	e, err := c.Provider.Rename(ctx, id, newName)
+	c.s.note(err)
+	return e, err
 }
 
 func (c *counting) Move(ctx context.Context, id, newParentID string) (Entry, error) {
 	defer c.s.timed("move")()
-	return c.Provider.Move(ctx, id, newParentID)
+	e, err := c.Provider.Move(ctx, id, newParentID)
+	c.s.note(err)
+	return e, err
 }
 
 func (c *counting) Delete(ctx context.Context, id string) error {
 	defer c.s.timed("delete")()
-	return c.Provider.Delete(ctx, id)
+	err := c.Provider.Delete(ctx, id)
+	c.s.note(err)
+	return err
 }
 
 // countingReader adds the bytes a caller actually consumed, and closes out
@@ -273,7 +314,9 @@ type countingChanges struct {
 
 func (c *countingChanges) Changes(ctx context.Context, cursor string) ([]Change, string, error) {
 	defer c.s.timed("changes")()
-	return c.cl.Changes(ctx, cursor)
+	events, next, err := c.cl.Changes(ctx, cursor)
+	c.s.note(err)
+	return events, next, err
 }
 
 type countingCopy struct {
@@ -294,7 +337,9 @@ type countingBoth struct {
 
 func (c *countingBoth) Changes(ctx context.Context, cursor string) ([]Change, string, error) {
 	defer c.s.timed("changes")()
-	return c.cl.Changes(ctx, cursor)
+	events, next, err := c.cl.Changes(ctx, cursor)
+	c.s.note(err)
+	return events, next, err
 }
 
 func (c *countingBoth) Copy(ctx context.Context, id, newParentID, newName string) (Entry, error) {
@@ -324,6 +369,7 @@ type countingPut struct {
 func (c *countingPut) PutFile(ctx context.Context, parentID, name string, r io.Reader, size int64, h Hashes) (Entry, error) {
 	defer c.s.timed("put_file")()
 	e, err := c.sp.PutFile(ctx, parentID, name, r, size, h)
+	c.s.note(err)
 	if err == nil && size > 0 {
 		c.s.writeBytes.Add(size)
 	}

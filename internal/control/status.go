@@ -117,6 +117,15 @@ type RemoteStatus struct {
 	BreakerOpen bool    `json:"breaker_open"`
 	// BreakerUntil says when the remote becomes usable again.
 	BreakerUntil string `json:"breaker_until,omitempty"`
+	// State is the remote's reachability as seen from the calls made to
+	// it: up, degraded, down, out, disabled or draining. The breaker says
+	// whether the account is being protected; this says whether the drive
+	// answers at all — a remote whose API is unreachable never trips the
+	// breaker and would otherwise look healthy.
+	State     string `json:"state"`
+	LastOK    string `json:"last_ok,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+	DownSince string `json:"down_since,omitempty"`
 	// Calls counts backend requests by operation since the daemon started,
 	// and Bytes the payload those requests moved.
 	Calls map[string]int64 `json:"calls,omitempty"`
@@ -267,10 +276,23 @@ func (c *Collector) Collect(ctx context.Context) Status {
 				rs.BreakerUntil = until.Format(time.RFC3339)
 			}
 		}
+		rs.State = string(provider.HealthUp)
 		if st := c.CallStats[r]; st != nil {
 			rs.Calls, rs.Nanos, rs.CallsTotal = st.Report()
 			rs.ReadBytes = st.ReadBytes()
 			rs.WriteBytes = st.WriteBytes()
+			h := st.Health()
+			rs.State = string(h.State)
+			if !h.LastOK.IsZero() {
+				rs.LastOK = h.LastOK.Format(time.RFC3339)
+			}
+			if !h.DownSince.IsZero() {
+				rs.DownSince = h.DownSince.Format(time.RFC3339)
+			}
+			rs.LastError = h.LastError
+		}
+		if rs.BreakerOpen && rs.State == string(provider.HealthUp) {
+			rs.State = string(provider.HealthDown)
 		}
 		s.Remotes = append(s.Remotes, rs)
 	}

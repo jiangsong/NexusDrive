@@ -332,6 +332,9 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		d.closers = append(d.closers, func() error { up.Stop(); return nil })
 	}
 	if !opt.NoBackground {
+		for _, pl := range d.Pools {
+			pl.Start(ctx)
+		}
 		d.Refresher.Start(ctx)
 		fsys.StartPins(ctx, time.Minute)
 		fsys.StartCopies(ctx, time.Minute)

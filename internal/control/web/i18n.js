@@ -2,6 +2,7 @@
 // copy-and-translate of one file. No locale negotiation — none is asked for.
 const zh = {
   'nav.connections': '连接', 'nav.transfers': '传输', 'nav.storage': '缓存',
+  'health.up': '正常', 'health.degraded': '不稳定(最近有失败)', 'health.down': '无法连接', 'health.out': '已离线较久,副本正在其它网盘重建', 'health.disabled': '已停用', 'health.draining': '正在迁出',
   'nav.proxy': '代理', 'nav.diagnostics': '诊断',
   'app.queue': '队列', 'app.cache': '缓存', 'app.egress': '出口', 'app.daemon': '守护进程运行中',
   'col.name': '名称', 'col.size': '大小', 'col.modified': '修改时间', 'col.state': '本地状态',

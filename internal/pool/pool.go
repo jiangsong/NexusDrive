@@ -74,6 +74,10 @@ type Pool struct {
 	// mu serialises index updates: one directory merge writes many rows and
 	// two merges of the same directory must not interleave.
 	mu sync.Mutex
+
+	bg     sync.WaitGroup
+	stopBG chan struct{}
+	bgMu   sync.Mutex
 }
 
 // New assembles a pool over already-built members.
@@ -114,7 +118,8 @@ func New(opt Options) (*Pool, error) {
 			db.Close()
 			return nil, fmt.Errorf("pool %q: member %q: %w", opt.Name, m.Name, err)
 		}
-		mm := &member{name: m.Name, p: m.Provider, root: root, weight: m.Weight, capacity: m.Capacity, adopt: m.Adopt, order: i, dirIDs: map[string]string{}}
+		mm := &member{name: m.Name, p: m.Provider, root: root, weight: m.Weight, capacity: m.Capacity, adopt: m.Adopt, order: i, dirIDs: map[string]string{},
+			health: provider.NewHealth(provider.HealthOptions{Threshold: 3, OutAfter: opt.Settings.OutAfter, Now: p.now})}
 		if mm.weight <= 0 {
 			mm.weight = 1
 		}
@@ -124,8 +129,36 @@ func New(opt Options) (*Pool, error) {
 	return p, nil
 }
 
-// Close releases the index database.
-func (p *Pool) Close() error { return p.db.Close() }
+// Close stops the background loops and releases the index database.
+func (p *Pool) Close() error {
+	p.Stop()
+	return p.db.Close()
+}
+
+// probeInterval is how often a member that is down is asked again.
+func (p *Pool) probeInterval() time.Duration { return p.settings.ProbeInterval }
+
+// MemberStatus is one member as the control plane sees it.
+type MemberStatus struct {
+	Name      string
+	Root      string
+	Health    provider.HealthSnapshot
+	LatencyMS float64
+	Weight    float64
+	Capacity  int64
+}
+
+// Status reports every member's health, in declaration order.
+func (p *Pool) Status() []MemberStatus {
+	out := make([]MemberStatus, 0, len(p.members))
+	for _, m := range p.members {
+		m.mu.Lock()
+		lat := m.latency / 1e6
+		m.mu.Unlock()
+		out = append(out, MemberStatus{Name: m.name, Root: m.root, Health: m.health.Snapshot(), LatencyMS: lat, Weight: m.weight, Capacity: m.capacity})
+	}
+	return out
+}
 
 func (p *Pool) Name() string { return p.name }
 

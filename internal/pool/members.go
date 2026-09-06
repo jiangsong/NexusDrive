@@ -23,33 +23,73 @@ type member struct {
 	capacity int64
 	adopt    bool
 	order    int
+	health   *provider.Health
 
 	mu sync.Mutex
 	// dirIDs caches path → directory id on this member; the member_dirs
 	// table is the durable copy.
-	dirIDs   map[string]string
-	lastOK   time.Time
-	lastErr  error
-	lastTry  time.Time
-	failures int
+	dirIDs map[string]string
+	// lastTry is when the member was last asked anything, so a member that
+	// is down is retried at most once per probe interval instead of on
+	// every operation that would have used it.
+	lastTry time.Time
+	// latency is an exponentially weighted average of read latency, in
+	// nanoseconds; reads prefer the replica that answers fastest.
+	latency float64
 }
 
 // note records the outcome of one call for health tracking.
 func (m *member) note(err error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.lastTry = time.Now()
-	if err == nil {
-		m.lastOK = m.lastTry
-		m.lastErr = nil
-		m.failures = 0
-		return
+	m.mu.Unlock()
+	m.health.Note(err)
+}
+
+// noteLatency folds one read's duration into the member's average.
+func (m *member) noteLatency(d time.Duration) {
+	m.mu.Lock()
+	if m.latency == 0 {
+		m.latency = float64(d)
+	} else {
+		m.latency = 0.8*m.latency + 0.2*float64(d)
 	}
-	switch retry.Classify(err) {
-	case retry.ClassRetryable, retry.ClassAuth, retry.ClassRiskControl:
-		m.lastErr = err
-		m.failures++
+	m.mu.Unlock()
+}
+
+// state is the member's health right now.
+func (m *member) state() provider.HealthState { return m.health.State() }
+
+// usable reports whether an operation should be sent to the member now: it
+// is up or merely degraded, or it is down but a probe interval has passed
+// since it was last tried, so the operation doubles as the probe.
+func (m *member) usable(probe time.Duration) bool {
+	st := m.health.Snapshot()
+	if st.Usable() {
+		return true
 	}
+	if st.State == provider.HealthDisabled || st.State == provider.HealthDraining {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return time.Since(m.lastTry) >= probe
+}
+
+// rank orders members for reads: healthy before degraded before the rest,
+// then by observed latency, then by declaration order.
+func (m *member) rank() (int, float64, int) {
+	r := 2
+	switch m.state() {
+	case provider.HealthUp:
+		r = 0
+	case provider.HealthDegraded:
+		r = 1
+	}
+	m.mu.Lock()
+	l := m.latency
+	m.mu.Unlock()
+	return r, l, m.order
 }
 
 // unreachable reports whether err means the member could not be talked to,
@@ -57,7 +97,7 @@ func (m *member) note(err error) {
 func unreachable(err error) bool {
 	switch retry.Classify(err) {
 	case retry.ClassRetryable, retry.ClassAuth, retry.ClassRiskControl:
-		return true
+		return !errors.Is(err, provider.ErrRateLimited)
 	}
 	return false
 }

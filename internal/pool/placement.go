@@ -18,14 +18,15 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		}
 		rows.Close()
 	}
+	probe := p.probeInterval()
 	out := make([]*member, 0, len(p.members))
 	for _, m := range p.members {
-		if holding[m.name] {
+		if holding[m.name] && m.usable(probe) {
 			out = append(out, m)
 		}
 	}
 	for _, m := range p.members {
-		if !holding[m.name] {
+		if !holding[m.name] && m.usable(probe) {
 			out = append(out, m)
 		}
 	}
