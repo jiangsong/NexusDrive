@@ -69,6 +69,9 @@ func New(opt Options) (*Provider, error) {
 	p := &Provider{
 		name: opt.Name, base: u, client: opt.Client, user: opt.User, pass: opt.Pass,
 		caps: provider.Caps{
+			// Naming: what the drive refuses in a name, so a pool never places
+			// a replica the drive would then reject.
+			Naming: provider.Naming{MaxNameBytes: 255, ForbiddenRunes: "\\"},
 			// A plain WebDAV server exposes no content hash, so the VFS falls
 			// back to size and mtime as the change fingerprint.
 			HashTypes:      nil,
@@ -262,6 +265,58 @@ func (p *Provider) entryFrom(r davResp) (provider.Entry, bool, error) {
 		e.Version = fmt.Sprintf("%d-%d", e.Size, e.ModTime.Unix())
 	}
 	return e, true, nil
+}
+
+const quotaBody = `<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:quota-available-bytes/>
+    <d:quota-used-bytes/>
+  </d:prop>
+</d:propfind>`
+
+type quotaStatus struct {
+	XMLName   xml.Name `xml:"DAV: multistatus"`
+	Responses []struct {
+		Propstat []struct {
+			Prop struct {
+				Available string `xml:"DAV: quota-available-bytes"`
+				Used      string `xml:"DAV: quota-used-bytes"`
+			} `xml:"DAV: prop"`
+		} `xml:"DAV: propstat"`
+	} `xml:"DAV: response"`
+}
+
+// Quota implements provider.Quotaer through RFC 4331's quota properties on
+// the root collection. A server without them (or one that reports the
+// pseudo-value -1 for "unlimited") is reported as unknown.
+func (p *Provider) Quota(ctx context.Context) (provider.Quota, error) {
+	var qs quotaStatus
+	err := p.client.XML(ctx, httpx.Request{
+		Method: "PROPFIND",
+		URL:    p.urlFor("/"),
+		Class:  ratelimit.Meta,
+		Header: p.header(map[string]string{"Depth": "0", "Content-Type": "application/xml"}),
+		Body:   strings.NewReader(quotaBody),
+		GetBody: func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(quotaBody)), nil
+		},
+		ExpectStatus: []int{http.StatusMultiStatus, http.StatusOK},
+	}, &qs)
+	if err != nil {
+		return provider.Quota{}, err
+	}
+	for _, r := range qs.Responses {
+		for _, ps := range r.Propstat {
+			avail, aerr := strconv.ParseInt(strings.TrimSpace(ps.Prop.Available), 10, 64)
+			used, uerr := strconv.ParseInt(strings.TrimSpace(ps.Prop.Used), 10, 64)
+			if aerr != nil || uerr != nil || avail < 0 {
+				continue
+			}
+			return provider.Quota{Total: avail + used, Used: used}, nil
+		}
+	}
+	return provider.Quota{}, provider.ErrUnsupported
 }
 
 // Stat returns one entry.

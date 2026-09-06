@@ -130,6 +130,9 @@ func New(opt Options) (*Provider, error) {
 		partSize: partSize, client: opt.Client, now: now, links: make(map[string]downloadLink),
 	}
 	p.caps = provider.Caps{
+		// Naming: what the drive refuses in a name, so a pool never places
+		// a replica the drive would then reject.
+		Naming:    provider.Naming{CaseInsensitive: true, MaxNameBytes: 255, MaxPathBytes: 400, ForbiddenRunes: "<>:\"|?*\\", ReservedNames: append([]string{"desktop.ini"}, provider.WindowsReservedNames...), NoTrailingDotSpace: true},
 		HashTypes: []provider.HashType{provider.HashSHA1}, RangeRead: true, StreamList: true,
 		PartSize: partSize, MaxParts: int((maxOneDriveFile + partSize - 1) / partSize), UploadParallel: 1,
 		SinglePutMax: defaultSinglePutMax,

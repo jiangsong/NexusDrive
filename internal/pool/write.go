@@ -73,7 +73,7 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 		return provider.UploadSession{}, err
 	}
 	pth := joinPath(parentPath, name)
-	var lastUnreachable error
+	var lastUnreachable, lastRefusal error
 	for _, m := range p.candidates(ctx, pth) {
 		dirID, err := p.ensureDir(ctx, m, parentPath)
 		if err != nil {
@@ -88,6 +88,14 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 			if unreachable(err) {
 				m.note(err)
 				lastUnreachable = err
+				continue
+			}
+			if refusedName(err) {
+				// The member will not spell this name; remember that
+				// and place elsewhere.
+				m.note(nil)
+				p.learnDenial(ctx, m, name)
+				lastRefusal = err
 				continue
 			}
 			return provider.UploadSession{}, err
@@ -106,7 +114,37 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 	if lastUnreachable != nil {
 		return provider.UploadSession{}, fmt.Errorf("%w: no member can take %s (%v)", provider.ErrUnavailable, pth, lastUnreachable)
 	}
+	if lastRefusal != nil {
+		return provider.UploadSession{}, lastRefusal
+	}
+	if len(p.candidates(ctx, pth)) == 0 {
+		if err := p.whyNoMember(ctx, pth); err != nil {
+			return provider.UploadSession{}, err
+		}
+	}
 	return provider.UploadSession{}, fmt.Errorf("%w: no member can take %s", provider.ErrUnavailable, pth)
+}
+
+// whyNoMember explains an empty candidate list when it is the name's
+// fault, so the user sees "not supported" with a reason instead of "no
+// reachable backend".
+func (p *Pool) whyNoMember(ctx context.Context, pth string) error {
+	parent, name := parentOf(pth), pth[strings.LastIndex(pth, "/")+1:]
+	var first error
+	inService := 0
+	for _, m := range p.members {
+		if st := m.state(); st == provider.HealthDraining || st == provider.HealthDisabled || !m.usable(p.probeInterval()) {
+			continue
+		}
+		inService++
+		if err := p.canHold(ctx, m, parent, name); err != nil && first == nil {
+			first = err
+		}
+	}
+	if inService > 0 && first != nil {
+		return fmt.Errorf("%w (no member of pool %s can hold it)", first, p.name)
+	}
+	return nil
 }
 
 func (p *Pool) UploadPart(ctx context.Context, s provider.UploadSession, idx int, r io.Reader, n int64) (provider.PartToken, error) {

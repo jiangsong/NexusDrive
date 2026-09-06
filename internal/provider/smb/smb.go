@@ -158,6 +158,9 @@ func New(opt Options) (*Provider, error) {
 	p := &Provider{
 		name: opt.Name, root: root, share: opt.share, handles: newHandleCache(),
 		caps: provider.Caps{
+			// Naming: what the drive refuses in a name, so a pool never places
+			// a replica the drive would then reject.
+			Naming: provider.Naming{CaseInsensitive: true, MaxNameBytes: 255, ForbiddenRunes: provider.WindowsForbiddenRunes, ReservedNames: provider.WindowsReservedNames, NoTrailingDotSpace: true},
 			// SMB exposes no content hash, so the VFS fingerprints on size
 			// and mtime through provider.EnsureVersion.
 			HashTypes: nil, RapidUpload: nil,

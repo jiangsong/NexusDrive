@@ -238,6 +238,10 @@ func (p *Pan115) Name() string { return p.name }
 // far more expensive than a slow directory walk.
 func (p *Pan115) Capabilities() provider.Caps {
 	return provider.Caps{
+		// UNVERIFIED: the forbidden set is the Windows-like set most domestic
+		// drives document; verify against the real API's error on each character
+		// and on names ending in a dot or a space.
+		Naming:         provider.Naming{MaxNameBytes: 255, ForbiddenRunes: "\\:*?\"<>|"},
 		HashTypes:      []provider.HashType{provider.HashSHA1},
 		RapidUpload:    []provider.HashType{provider.HashSHA1},
 		RangeRead:      true,

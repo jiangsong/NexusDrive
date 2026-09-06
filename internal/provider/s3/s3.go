@@ -97,6 +97,9 @@ func New(opt Options) (*Provider, error) {
 		name: opt.Name, bucket: opt.Bucket, prefix: prefix, partSize: partSize,
 		client: client, core: minio.Core{Client: client},
 		caps: provider.Caps{
+			// Naming: what the drive refuses in a name, so a pool never places
+			// a replica the drive would then reject.
+			Naming:    provider.Naming{MaxPathBytes: 1024},
 			RangeRead: true, StreamList: true,
 			PartSize: partSize, MaxParts: 10000, UploadParallel: 4, SinglePutMax: defaultSinglePutMax,
 			ServerMove: true, ServerRename: true, ServerCopy: true,

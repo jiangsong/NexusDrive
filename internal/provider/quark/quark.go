@@ -216,6 +216,10 @@ func (q *Quark) RootID() string { return q.rootID }
 // the QPS numbers are so low and why LinkShareable is false.
 func (q *Quark) Capabilities() provider.Caps {
 	return provider.Caps{
+		// UNVERIFIED: the forbidden set is the Windows-like set most domestic
+		// drives document; verify against the real API's error on each character
+		// and on names ending in a dot or a space.
+		Naming:    provider.Naming{MaxNameBytes: 255, ForbiddenRunes: "\\:*?\"<>|"},
 		HashTypes: []provider.HashType{provider.HashMD5, provider.HashSHA1},
 		// Quark's hash handshake takes MD5 and SHA1 together; supplying only
 		// one is not enough to attempt a rapid upload.

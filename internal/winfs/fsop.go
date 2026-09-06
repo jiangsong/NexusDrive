@@ -158,10 +158,18 @@ func (f *filesystem) Statfs(_ string, st *fuse.Statfs_t) int {
 	const block = 4096
 	st.Bsize = block
 	st.Frsize = block
+	st.Namemax = 255
+	// When the backends report their space — a pool's members together,
+	// a drive's quota — the drive's properties show that.
+	if sp := f.fs.Space(f.ctx); sp.Known {
+		st.Blocks = uint64(sp.Total) / block
+		st.Bfree = uint64(sp.Free()) / block
+		st.Bavail = st.Bfree
+		return 0
+	}
 	st.Blocks = 1 << 40 / block
 	st.Bfree = st.Blocks / 2
 	st.Bavail = st.Bfree
-	st.Namemax = 255
 	return 0
 }
 

@@ -129,6 +129,9 @@ func New(opt Options) (*Provider, error) {
 		client: opt.Client, now: now,
 	}
 	p.caps = provider.Caps{
+		// Naming: what the drive refuses in a name, so a pool never places
+		// a replica the drive would then reject.
+		Naming:    provider.Naming{CaseInsensitive: true, MaxNameBytes: 255, ForbiddenRunes: "\\", NoTrailingDotSpace: true},
 		HashTypes: []provider.HashType{provider.HashSHA1},
 		RangeRead: true, StreamList: true,
 		// Box dictates the part size when it opens a session; this is only the

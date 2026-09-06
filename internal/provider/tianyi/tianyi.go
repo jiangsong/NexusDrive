@@ -198,6 +198,10 @@ func NewWithOptions(name string, opt Options) (*Tianyi, error) {
 		pollAttempts: 40,
 	}
 	t.caps = provider.Caps{
+		// UNVERIFIED: the forbidden set is the Windows-like set most domestic
+		// drives document; verify against the real API's error on each character
+		// and on names ending in a dot or a space.
+		Naming:      provider.Naming{MaxNameBytes: 255, ForbiddenRunes: "\\:*?\"<>|"},
 		HashTypes:   []provider.HashType{provider.HashMD5},
 		RapidUpload: []provider.HashType{provider.HashMD5},
 		RangeRead:   true,

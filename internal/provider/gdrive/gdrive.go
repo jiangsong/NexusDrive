@@ -147,6 +147,9 @@ func New(opt Options) (*Provider, error) {
 		partSize: partSize, client: opt.Client, now: now,
 	}
 	p.caps = provider.Caps{
+		// Naming: what the drive refuses in a name, so a pool never places
+		// a replica the drive would then reject.
+		Naming:    provider.Naming{},
 		HashTypes: []provider.HashType{provider.HashMD5},
 		RangeRead: true, StreamList: true,
 		PartSize: partSize, MaxParts: int((maxDriveFileSize + partSize - 1) / partSize),
@@ -495,6 +498,26 @@ func (p *Provider) ListStream(ctx context.Context, dirID string, visit func(prov
 		cursor = next
 	}
 	return errors.New("gdrive: directory listing exceeds 10000 pages")
+}
+
+// Quota implements provider.Quotaer from the About resource. Google
+// reports "limit" only for accounts with one; an unlimited account has no
+// limit and is reported as unknown, which a pool treats as "do not prefer
+// by space".
+func (p *Provider) Quota(ctx context.Context) (provider.Quota, error) {
+	var about struct {
+		StorageQuota struct {
+			Limit string `json:"limit"`
+			Usage string `json:"usage"`
+		} `json:"storageQuota"`
+	}
+	if err := p.apiJSON(ctx, http.MethodGet, p.apiURL("/about")+"?fields=storageQuota", nil, &about, ratelimit.Meta, true); err != nil {
+		return provider.Quota{}, err
+	}
+	var q provider.Quota
+	q.Total, _ = strconv.ParseInt(about.StorageQuota.Limit, 10, 64)
+	q.Used, _ = strconv.ParseInt(about.StorageQuota.Usage, 10, 64)
+	return q, nil
 }
 
 func (p *Provider) getFile(ctx context.Context, id string) (driveFile, error) {

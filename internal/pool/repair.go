@@ -180,9 +180,11 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 	}
 	made := 0
 	var lastErr error
+	noMember := false
 	for len(live) < target {
 		dst := p.repairTarget(ctx, pth, live)
 		if dst == nil {
+			noMember = true
 			break
 		}
 		if err := p.copyReplica(ctx, pth, row, live, dst); err != nil {
@@ -225,6 +227,13 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 		if lastErr != nil {
 			reason = "retry: " + lastErr.Error()
 		}
+		if noMember && lastErr == nil {
+			// Nothing in service can take another copy: the name may be
+			// one the other members refuse. Look again in an hour, or
+			// when the scan finds the situation changed.
+			reason = "no-eligible-member"
+			delay = time.Hour
+		}
 		_, _ = p.db.ExecContext(ctx, `UPDATE repair_queue SET attempts = attempts + 1, next_at = ?, reason = ? WHERE path = ?`, p.now().Add(delay).UnixNano(), reason, pth)
 	}
 	return made, lastErr
@@ -250,12 +259,16 @@ func (p *Pool) repairTarget(ctx context.Context, pth string, live []replicaRow) 
 		rows.Close()
 	}
 	probe := p.probeInterval()
+	parent, name := parentOf(pth), path.Base(pth)
 	eligible := func(m *member) bool {
 		if taken[m.name] {
 			return false
 		}
 		switch m.state() {
 		case provider.HealthOut, provider.HealthDisabled, provider.HealthDraining:
+			return false
+		}
+		if !holding[m.name] && p.canHold(ctx, m, parent, name) != nil {
 			return false
 		}
 		return m.usable(probe)
@@ -379,6 +392,9 @@ func (p *Pool) copyReplica(ctx context.Context, pth string, row entryRow, live [
 		sess, err := dst.p.BeginUpload(ctx, dirID, name, src.size, src.hashes)
 		dst.note(err)
 		if err != nil {
+			if refusedName(err) {
+				p.learnDenial(ctx, dst, name)
+			}
 			return err
 		}
 		if sess.RapidDone && sess.Entry != nil {

@@ -39,6 +39,23 @@ type member struct {
 	// needsScrub is set when the member missed more than the op log kept;
 	// the next scrub re-lists everything it holds.
 	needsScrub bool
+	// learned are naming patterns the member refused at run time; nil
+	// until loaded from the index.
+	learned []string
+	space   spaceInfo
+}
+
+// isBadName reports whether a member's error says it will not hold the
+// name: its own naming error, or a terminal refusal that is not about the
+// name already existing or the parent being gone.
+func isBadName(err error) bool {
+	if errors.Is(err, provider.ErrBadName) {
+		return true
+	}
+	if errors.Is(err, provider.ErrNotFound) || errors.Is(err, provider.ErrExists) || errors.Is(err, provider.ErrConflict) {
+		return false
+	}
+	return retry.Classify(err) == retry.ClassTerminal
 }
 
 // note records the outcome of one call for health tracking.

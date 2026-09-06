@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS holds (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS holds_path ON holds(path);
+CREATE TABLE IF NOT EXISTS member_naming (
+  member     TEXT NOT NULL,
+  pattern    TEXT NOT NULL,
+  learned_at INTEGER NOT NULL,
+  PRIMARY KEY (member, pattern)
+);
 CREATE TABLE IF NOT EXISTS divergences (
   path    TEXT NOT NULL,
   member  TEXT NOT NULL,

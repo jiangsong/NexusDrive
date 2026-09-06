@@ -122,6 +122,8 @@ type FS struct {
 	now         func() time.Time
 
 	mounts []Mount // longest prefix first
+	// space caches what the backends report for df.
+	space spaceCache
 
 	mu      sync.Mutex
 	handles map[uint64]*Handle

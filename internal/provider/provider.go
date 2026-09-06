@@ -145,6 +145,9 @@ type Caps struct {
 	QPS             QPS
 	MaxConnsPerHost int
 	Tier            Tier
+
+	// Naming is what the backend refuses in a name; see CheckName.
+	Naming Naming
 }
 
 // Provider is implemented by every backend.

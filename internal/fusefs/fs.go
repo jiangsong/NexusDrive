@@ -524,12 +524,21 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 
 func (n *node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	n.root.count(opStatfs)
-	// The remotes have no meaningful free-space number that applies to the
-	// whole mount, so report the cache budget: that is what actually limits a
-	// write before the upload queue drains.
 	const bsize = 4096
 	out.Bsize = bsize
 	out.Frsize = bsize
+	out.NameLen = 255
+	// When the backends can say how much space they have — a pool's
+	// members together, a drive's quota — df shows that: it is the space a
+	// user is buying more of. The cache budget still decides ENOSPC.
+	if sp := n.root.opt.FS.Space(ctx); sp.Known {
+		out.Blocks = uint64(sp.Total) / bsize
+		out.Bfree = uint64(sp.Free()) / bsize
+		out.Bavail = out.Bfree
+		return 0
+	}
+	// Otherwise report the cache budget: that is what actually limits a
+	// write before the upload queue drains.
 	st := n.root.opt.FS.Cache().Stats()
 	used := uint64(st.Bytes) / bsize
 	// A large notional capacity keeps tools from refusing to write; the real
@@ -538,7 +547,6 @@ func (n *node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	out.Blocks = total
 	out.Bfree = total - used
 	out.Bavail = out.Bfree
-	out.NameLen = 255
 	return 0
 }
 

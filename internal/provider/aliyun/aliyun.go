@@ -174,6 +174,10 @@ func New(opt Options) (*Provider, error) {
 		partURLs:     map[string]map[int]string{},
 		links:        map[string]provider.Link{},
 		caps: provider.Caps{
+			// UNVERIFIED: the forbidden set is the Windows-like set most domestic
+			// drives document; verify against the real API's error on each character
+			// and on names ending in a dot or a space.
+			Naming:    provider.Naming{MaxNameBytes: 1024, ForbiddenRunes: "\\"},
 			HashTypes: []provider.HashType{provider.HashSHA1},
 			// pre_sha1 short-circuits the handshake; sha1 is the content hash
 			// the server matches against.
@@ -420,6 +424,27 @@ func (p *Provider) callWith(ctx context.Context, tok, path string, class ratelim
 		return asAPIError(err)
 	}
 	return nil
+}
+
+// pathSpaceInfo reports the account's space.
+const pathSpaceInfo = "/adrive/v1.0/user/getSpaceInfo"
+
+// Quota implements provider.Quotaer.
+//
+// UNVERIFIED: the open-platform documents getSpaceInfo as returning
+// personal_space_info{used_size,total_size}; verify the field names and
+// whether the numbers are bytes on a real account.
+func (p *Provider) Quota(ctx context.Context) (provider.Quota, error) {
+	var out struct {
+		PersonalSpaceInfo struct {
+			UsedSize  int64 `json:"used_size"`
+			TotalSize int64 `json:"total_size"`
+		} `json:"personal_space_info"`
+	}
+	if err := p.call(ctx, pathSpaceInfo, ratelimit.Meta, map[string]any{}, &out); err != nil {
+		return provider.Quota{}, err
+	}
+	return provider.Quota{Total: out.PersonalSpaceInfo.TotalSize, Used: out.PersonalSpaceInfo.UsedSize}, nil
 }
 
 // drive resolves the drive id, asking getDriveInfo once when it is not pinned.

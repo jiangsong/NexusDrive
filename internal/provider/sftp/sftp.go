@@ -138,6 +138,9 @@ func New(opt Options) (*Provider, error) {
 		handles:  newHandleCache(),
 		rootRaw:  opt.Root,
 		caps: provider.Caps{
+			// Naming: what the drive refuses in a name, so a pool never places
+			// a replica the drive would then reject.
+			Naming: provider.Naming{MaxNameBytes: 255},
 			// SFTP exposes no content hash, so the VFS uses size and mtime as
 			// the change fingerprint (provider.EnsureVersion).
 			HashTypes:   nil,

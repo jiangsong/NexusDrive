@@ -120,6 +120,9 @@ func New(opt Options) (*Provider, error) {
 		partSize: partSize, client: opt.Client, now: now,
 	}
 	p.caps = provider.Caps{
+		// Naming: what the drive refuses in a name, so a pool never places
+		// a replica the drive would then reject.
+		Naming:    provider.Naming{CaseInsensitive: true, MaxNameBytes: 255, ForbiddenRunes: "\\", NoTrailingDotSpace: true},
 		RangeRead: true, StreamList: true,
 		PartSize: partSize, MaxParts: int((maxDropboxFile + partSize - 1) / partSize),
 		UploadParallel: 1, SinglePutMax: defaultSinglePutMax,

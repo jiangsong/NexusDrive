@@ -13,6 +13,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,11 @@ type Fake struct {
 	// noHashes hides content hashes from every Entry, the way a backend
 	// without a hash API (sftp, webdav) reports files.
 	noHashes bool
+	// quota is what Quota reports; zero Total means the backend cannot say.
+	quota provider.Quota
+	// hideNaming keeps the naming rules out of Capabilities while still
+	// enforcing them, the way a drive that documents nothing behaves.
+	hideNaming bool
 }
 
 // RootID is the id of the root directory.
@@ -190,6 +196,52 @@ func (f *Fake) view(e provider.Entry) provider.Entry {
 	e.Version = ""
 	provider.EnsureVersion(&e)
 	return e
+}
+
+// SetQuota sets what the backend reports as its space.
+func (f *Fake) SetQuota(total, used int64) {
+	f.mu.Lock()
+	f.quota = provider.Quota{Total: total, Used: used}
+	f.mu.Unlock()
+}
+
+// Quota implements provider.Quotaer.
+func (f *Fake) Quota(ctx context.Context) (provider.Quota, error) {
+	if err := f.enter(ctx, "Quota"); err != nil {
+		return provider.Quota{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.quota.Total == 0 {
+		return provider.Quota{}, provider.ErrUnsupported
+	}
+	return f.quota, nil
+}
+
+// SetNaming makes the backend refuse names by these rules, the way a real
+// drive does, so a pool's placement can be tested against a refusal.
+func (f *Fake) SetNaming(n provider.Naming) {
+	f.mu.Lock()
+	f.caps.Naming = n
+	f.mu.Unlock()
+}
+
+// checkName applies the naming rules to a name about to be created.
+// Caller holds the lock.
+func (f *Fake) checkName(parentID, name string) error {
+	if err := provider.CheckName(f.caps.Naming, name); err != nil {
+		return err
+	}
+	if f.caps.Naming.CaseInsensitive {
+		if p, ok := f.nodes[parentID]; ok {
+			for existing := range p.children {
+				if existing != name && strings.EqualFold(existing, name) {
+					return fmt.Errorf("%w: %q differs from %q only by case", provider.ErrExists, name, existing)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // SetReportHashes hides (false) or shows (true, the default) content hashes.
@@ -309,7 +361,19 @@ func (f *Fake) RootID() string { return RootID }
 func (f *Fake) Capabilities() provider.Caps {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.caps
+	c := f.caps
+	if f.hideNaming {
+		c.Naming = provider.Naming{}
+	}
+	return c
+}
+
+// SetNamingAdvertised hides (false) the naming rules from Capabilities
+// while the backend keeps refusing by them.
+func (f *Fake) SetNamingAdvertised(on bool) {
+	f.mu.Lock()
+	f.hideNaming = !on
+	f.mu.Unlock()
 }
 
 // SetCaps overrides the capability matrix (tests use it to simulate backends
@@ -450,6 +514,9 @@ func (f *Fake) BeginUpload(ctx context.Context, parentID, name string, size int6
 	if !ok || p.entry.Kind != provider.KindDir {
 		return provider.UploadSession{}, provider.ErrNotFound
 	}
+	if err := f.checkName(parentID, name); err != nil {
+		return provider.UploadSession{}, err
+	}
 	if sum := h[provider.HashSHA1]; sum != "" {
 		if data, ok := f.blobs[sum]; ok && int64(len(data)) == size {
 			e, _ := f.putFile(parentID, name, data)
@@ -562,6 +629,9 @@ func (f *Fake) Mkdir(ctx context.Context, parentID, name string) (provider.Entry
 	if _, exists := p.children[name]; exists {
 		return provider.Entry{}, provider.ErrExists
 	}
+	if err := f.checkName(parentID, name); err != nil {
+		return provider.Entry{}, err
+	}
 	return f.newNode(parentID, name, provider.KindDir, nil), nil
 }
 
@@ -578,6 +648,9 @@ func (f *Fake) Rename(ctx context.Context, id, newName string) (provider.Entry, 
 	p := f.nodes[n.entry.ParentID]
 	if _, exists := p.children[newName]; exists {
 		return provider.Entry{}, provider.ErrExists
+	}
+	if err := f.checkName(n.entry.ParentID, newName); err != nil {
+		return provider.Entry{}, err
 	}
 	delete(p.children, n.entry.Name)
 	p.children[newName] = id
