@@ -1305,7 +1305,16 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   `config.SafeExtraFieldName` 成为"哪些键可由外部请求写入"的唯一定义；
   修了 `vfs.Attr.Pinned` 从不被设置的 bug（`attrAt` 让知道路径的列举零额外查询地报出它，
   回归 `TestAttributesReportPinned`）。
-- **[ ] 阶段 1** `/fs/*` `/search` `/doctor` `/events`
+- **[x] 阶段 1** `/fs/*`（list/stat/preview/download-url/mkdir/rename/delete）、`/search`、
+  `/doctor/run|fix`、`/events`（SSE：VFS 变更 + 状态快照）。目录分页游标移到
+  `vfs.ParseDirectoryCursor/NextDirectoryCursor`，MCP 与控制面发的是同一串字节。
+  e2e `TestUIAPIEndToEnd`：经控制面 mkdir→list→rename→delete，逐步在**内核挂载点**上核对。
+  它抓到一个既有 bug：**非内核发起的 Remove/Rename 不作废内核 dentry**——只作废了父目录
+  inode，内核对那个名字的正向 dentry 会在整个 entry timeout 内继续回答 stat(2)。MCP 的
+  delete 一直有这个问题，只是没有 e2e。现在 `invalidateEntryFrom` 在 remove/rename 上对
+  旧名（和改名的新名）各发一次 EntryNotify，内核自己做的 unlink/rename 跳过。回归
+  `TestOutOfKernelRemoveAndRenameDropTheKernelDentry`；去掉修复后 e2e 在 500ms 后仍能
+  stat 到已删目录。
 - **[ ] 阶段 2** 配置变更库
 - **[ ] 阶段 3 / 3a** 账号、代理、挂载端点；代理热加载
 - **[ ] 阶段 4** 守护进程驾驭的 OAuth / 扫码授权（浏览器永不见秘密）

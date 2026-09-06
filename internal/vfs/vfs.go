@@ -922,6 +922,21 @@ func (f *FS) invalidateFrom(ctx context.Context, ino uint64) {
 	f.invalidate(ino)
 }
 
+// invalidateEntryFrom drops one kernel dentry for a name that a request other
+// than the kernel's removed or moved. Invalidating the parent inode is not
+// enough: the kernel keeps a positive dentry for the name for the whole entry
+// timeout, and a file deleted through MCP or the control API kept answering
+// stat(2) from the mount for that long. The kernel drops its own dentries for
+// the unlinks and renames it performs, so those requests skip this.
+func (f *FS) invalidateEntryFrom(ctx context.Context, parent uint64, name string) {
+	if fromKernel(ctx) {
+		return
+	}
+	if fn := f.invalidateEntryFn.Load(); fn != nil && *fn != nil {
+		(*fn)(parent, name)
+	}
+}
+
 // pathOf resolves an inode's path, remembering the answer. Every create,
 // open and lookup resolves its parent's path to find the mount, and the
 // parent of a batch of small files is the same directory every time; a

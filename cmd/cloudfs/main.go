@@ -458,6 +458,7 @@ func cmdMount(ctx context.Context, args []string) error {
 			st := m.OpStats()
 			return control.FuseStatus{Ops: st.Ops, ReadBytes: st.ReadBytes, ReadSizes: st.ReadSizes}
 		}
+		col.Doctor = d.Doctor(fusefs.Supported)
 		srv := control.NewServer(col)
 		if cfg.Control.UI {
 			srv.EnableUI()

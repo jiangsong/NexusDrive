@@ -264,3 +264,51 @@ func TestChangesCloseRacesWithEmitAndSubscribe(t *testing.T) {
 		t.Fatal("closed event source retained subscribers")
 	}
 }
+
+// TestOutOfKernelRemoveAndRenameDropTheKernelDentry. Invalidating the parent
+// inode tells the kernel its directory stream is stale; it does not touch the
+// positive dentry the kernel holds for the name, and that keeps answering
+// stat(2) for the whole entry timeout. A delete or rename that did not come
+// through the mount — MCP, the control API — must drop the name itself. The
+// kernel's own unlink/rename drops its own dentries, so those send nothing.
+func TestOutOfKernelRemoveAndRenameDropTheKernelDentry(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	e.fake.Seed("dir/gone", []byte("x"))
+	e.fake.Seed("dir/moved", []byte("y"))
+	e.fake.Seed("dir/kernel", []byte("z"))
+	dir, err := e.fs.StatPath(ctx, "/ali/dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	dropped := []string{}
+	e.fs.SetInvalidateEntry(func(parent uint64, name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if parent == dir.Ino {
+			dropped = append(dropped, name)
+		}
+	})
+	if err := e.fs.Remove(ctx, dir.Ino, "gone", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.fs.Rename(ctx, dir.Ino, "moved", dir.Ino, "arrived"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.fs.Remove(FromKernel(ctx), dir.Ino, "kernel", false); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	got := map[string]bool{}
+	for _, n := range dropped {
+		got[n] = true
+	}
+	if !got["gone"] || !got["moved"] || !got["arrived"] {
+		t.Fatalf("dentries dropped: %v; want gone, moved and arrived", dropped)
+	}
+	if got["kernel"] {
+		t.Fatal("a removal the kernel itself made was invalidated back at it")
+	}
+}

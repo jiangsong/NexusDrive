@@ -69,6 +69,17 @@ func (s *Server) routes() []route {
 		{pattern: "/copies", handler: s.copies},
 		{pattern: "/copies/", handler: s.mutateCopy, probe: "/copies/retry"},
 		{pattern: "/accounts", handler: s.accounts},
+		{pattern: "/fs/list", handler: s.fsList},
+		{pattern: "/fs/stat", handler: s.fsStat},
+		{pattern: "/fs/preview", handler: s.fsPreview},
+		{pattern: "/fs/download-url", handler: s.fsDownloadURL},
+		{pattern: "/fs/mkdir", handler: s.fsMkdir},
+		{pattern: "/fs/rename", handler: s.fsRename},
+		{pattern: "/fs/delete", handler: s.fsDelete},
+		{pattern: "/search", handler: s.search},
+		{pattern: "/doctor/run", handler: s.doctorRun},
+		{pattern: "/doctor/fix", handler: s.doctorFix},
+		{pattern: "/events", handler: s.events},
 	}
 }
 

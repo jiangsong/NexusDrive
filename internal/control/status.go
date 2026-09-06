@@ -160,7 +160,11 @@ type Collector struct {
 	// FuseStats, when set, reports the kernel request counters of the
 	// live mount.
 	FuseStats func() FuseStatus
-	Now       func() time.Time
+	// Doctor, when set, answers /doctor/run and /doctor/fix. It is the same
+	// runner `cloudfs doctor` uses, on the live daemon's own stores — which
+	// is the only place it can run while this process owns the journal.
+	Doctor *Doctor
+	Now    func() time.Time
 }
 
 // Collect builds a Status snapshot.

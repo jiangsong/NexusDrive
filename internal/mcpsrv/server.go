@@ -519,7 +519,7 @@ func (s *Server) listDirectory(ctx context.Context, _ *mcp.CallToolRequest, in l
 	}
 	if page.HasMore {
 		out.Truncated = true
-		out.NextCursor = "n:" + base64.RawURLEncoding.EncodeToString([]byte(page.Entries[len(page.Entries)-1].Name))
+		out.NextCursor = vfs.NextDirectoryCursor(page)
 	}
 	msg := fmt.Sprintf("%s: %d entries", p, len(out.Entries))
 	if out.Truncated {

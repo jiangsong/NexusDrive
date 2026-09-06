@@ -784,6 +784,7 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	}
 	f.dropPaths()
 	f.invalidateFrom(ctx, parent)
+	f.invalidateEntryFrom(ctx, parent, name)
 	f.changedEntry(ctx, parent, name, n.IsDir())
 	return nil
 }
@@ -883,6 +884,10 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 	f.dropPaths()
 	f.invalidateFrom(ctx, oldParent)
 	f.invalidateFrom(ctx, newParent)
+	// Both names: the old one is now a stale positive dentry, and the new
+	// one may be a cached negative lookup from before the move.
+	f.invalidateEntryFrom(ctx, oldParent, oldName)
+	f.invalidateEntryFrom(ctx, newParent, newName)
 	return nil
 }
 

@@ -352,6 +352,9 @@ func (d *Daemon) Collector() *control.Collector {
 		DiscardUpload: d.FS.DiscardUpload,
 		CacheMaxBytes: int64(d.Config.Cache.MaxSize),
 		FreeSpace:     cache.FreeSpace,
+		// The runner without a FUSE probe: the mounting process, which knows
+		// the kernel, replaces it with d.Doctor(fusefs.Supported).
+		Doctor: d.Doctor(nil),
 	}
 }
 
