@@ -28,6 +28,14 @@ func (p *Pool) replicasOf(ctx context.Context, pth, ctoken string) ([]replicaRow
 		if ctoken != "" && r.ctoken != ctoken {
 			continue
 		}
+		// A row naming a member the pool no longer has is not a replica:
+		// there is no provider to read it through, and repair already
+		// counts it as missing. Dropping it here keeps every caller — and
+		// the ranking below, which reaches into the member — on members
+		// that exist.
+		if p.byName[r.member] == nil {
+			continue
+		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {

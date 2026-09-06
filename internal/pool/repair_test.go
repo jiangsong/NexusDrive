@@ -265,3 +265,34 @@ func TestHoldsAreReconciledAtStart(t *testing.T) {
 		t.Fatalf("hold rows = %d", rows)
 	}
 }
+
+// TestRemovingAMemberLeavesItsReplicaRowsReadable: taking a drive out of the
+// pool's configuration does not erase the index rows that named it, and the
+// pool must keep serving the file from the copies it still has. Ranking the
+// replicas reaches into the member that holds each one, so a row naming a
+// member the pool no longer has once crashed the read.
+func TestRemovingAMemberLeavesItsReplicaRowsReadable(t *testing.T) {
+	dir := t.TempDir()
+	a := fakeprovider.New("a")
+	b := fakeprovider.New("b")
+	ctx := context.Background()
+	p := newTestPoolWith(t, dir, config.Pool{Replicas: 2, MinReplicas: 1}, a, b)
+	e := upload(t, ctx, p, rootID, "f.txt", []byte("hello"))
+	if _, err := p.RepairOnce(ctx); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if n := liveCount(t, p, "/f.txt"); n != 2 {
+		t.Fatalf("live before removal = %d", n)
+	}
+	p.Close()
+
+	// The operator removed b from the pool; the index still names it.
+	p2 := newTestPoolWith(t, dir, config.Pool{Replicas: 2, MinReplicas: 1}, a)
+	if got := readAll(t, p2, e.ID); got != "hello" {
+		t.Fatalf("read after removal = %q", got)
+	}
+	// The file is short a replica now, so repair has work to do.
+	if n := liveCount(t, p2, "/f.txt"); n != 1 {
+		t.Fatalf("live after removal = %d, want the surviving copy only", n)
+	}
+}
