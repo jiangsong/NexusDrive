@@ -1,6 +1,10 @@
 package pool
 
-import "context"
+import (
+	"context"
+
+	"cloudfs/internal/provider"
+)
 
 // candidates orders the members for placing a replica of pth: the members
 // that already hold it come first, so an overwrite lands where the file
@@ -19,14 +23,20 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		rows.Close()
 	}
 	probe := p.probeInterval()
+	place := func(m *member) bool {
+		if st := m.state(); st == provider.HealthDraining || st == provider.HealthDisabled {
+			return false
+		}
+		return m.usable(probe)
+	}
 	out := make([]*member, 0, len(p.members))
 	for _, m := range p.members {
-		if holding[m.name] && m.usable(probe) {
+		if holding[m.name] && place(m) {
 			out = append(out, m)
 		}
 	}
 	for _, m := range p.members {
-		if !holding[m.name] && m.usable(probe) {
+		if !holding[m.name] && place(m) {
 			out = append(out, m)
 		}
 	}

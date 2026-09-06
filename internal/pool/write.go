@@ -438,17 +438,22 @@ func (p *Pool) Mkdir(ctx context.Context, parentID, name string) (provider.Entry
 	var targets []target
 	var lastUnreachable error
 	probe := p.probeInterval()
+	dirEntryID, err := p.idFor(ctx, pth)
+	if err != nil {
+		return provider.Entry{}, err
+	}
+	mkdirArgs := map[string]string{"id": dirEntryID}
 	for _, m := range p.members {
 		if !m.usable(probe) {
 			lastUnreachable = fmt.Errorf("member %s is %s", m.name, m.state())
-			p.pendingOp(ctx, m, "mkdir", pth, nil, p.now().UnixNano())
+			p.pendingOp(ctx, m, "mkdir", pth, mkdirArgs, p.now().UnixNano())
 			continue
 		}
 		id, err := p.dirID(ctx, m, parentPath)
 		if err != nil {
 			if unreachable(err) {
 				lastUnreachable = err
-				p.pendingOp(ctx, m, "mkdir", pth, nil, p.now().UnixNano())
+				p.pendingOp(ctx, m, "mkdir", pth, mkdirArgs, p.now().UnixNano())
 			}
 			continue
 		}
@@ -460,7 +465,7 @@ func (p *Pool) Mkdir(ctx context.Context, parentID, name string) (provider.Entry
 	if len(targets) == 0 {
 		return provider.Entry{}, fmt.Errorf("%w: parent %s", provider.ErrNotFound, parentPath)
 	}
-	ok, err := p.fanout(ctx, targets, "mkdir", pth, nil, func(t target) error {
+	ok, err := p.fanout(ctx, targets, "mkdir", pth, mkdirArgs, func(t target) error {
 		e, err := t.m.p.Mkdir(ctx, t.remoteID, name)
 		if errors.Is(err, provider.ErrExists) {
 			id, ferr := p.findDir(ctx, t.m, t.remoteID, pth)
@@ -517,7 +522,7 @@ func (p *Pool) Rename(ctx context.Context, id, newName string) (provider.Entry, 
 	if err != nil {
 		return provider.Entry{}, err
 	}
-	args := map[string]string{"from": pth, "to": newPath, "ctoken": row.ctoken}
+	args := map[string]string{"id": id, "from": pth, "to": newPath, "ctoken": row.ctoken}
 	renamed := map[string]provider.Entry{}
 	ok, err := p.fanout(ctx, targets, "rename", pth, args, func(t target) error {
 		e, err := t.m.p.Rename(ctx, t.remoteID, newName)
@@ -555,7 +560,7 @@ func (p *Pool) Move(ctx context.Context, id, newParentID string) (provider.Entry
 	if err != nil {
 		return provider.Entry{}, err
 	}
-	args := map[string]string{"from": pth, "to": newPath, "ctoken": row.ctoken}
+	args := map[string]string{"id": id, "from": pth, "to": newPath, "ctoken": row.ctoken}
 	moved := map[string]provider.Entry{}
 	ok, err := p.fanout(ctx, targets, "move", pth, args, func(t target) error {
 		dst, err := p.ensureDir(ctx, t.m, newParent)
@@ -655,12 +660,12 @@ func likePrefix(pth string) string {
 func movePaths(tx *sql.Tx, oldPath, newPath string) error {
 	like := likePrefix(oldPath)
 	n := len(oldPath)
-	for _, table := range []string{"ids", "entries", "replicas", "member_dirs", "holds", "divergences"} {
+	for _, table := range []string{"ids", "entries", "replicas", "member_dirs", "holds", "divergences", "pending_ops", "repair_queue"} {
 		if _, err := tx.Exec(`UPDATE `+table+` SET path = ? || substr(path, ?) WHERE path = ? OR path LIKE ? ESCAPE '\'`, newPath, n+1, oldPath, like); err != nil {
 			return err
 		}
 	}
-	for _, table := range []string{"entries", "replicas", "member_dirs"} {
+	for _, table := range []string{"entries", "replicas", "member_dirs", "pending_ops"} {
 		if _, err := tx.Exec(`UPDATE `+table+` SET parent = ? WHERE path = ?`, parentOf(newPath), newPath); err != nil {
 			return err
 		}

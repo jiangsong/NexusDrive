@@ -36,6 +36,9 @@ type member struct {
 	// latency is an exponentially weighted average of read latency, in
 	// nanoseconds; reads prefer the replica that answers fastest.
 	latency float64
+	// needsScrub is set when the member missed more than the op log kept;
+	// the next scrub re-lists everything it holds.
+	needsScrub bool
 }
 
 // note records the outcome of one call for health tracking.
@@ -68,9 +71,19 @@ func (m *member) usable(probe time.Duration) bool {
 	if st.Usable() {
 		return true
 	}
-	if st.State == provider.HealthDisabled || st.State == provider.HealthDraining {
+	if st.State == provider.HealthDisabled {
 		return false
 	}
+	if st.State == provider.HealthDraining {
+		// Draining is an operator intent about placement, not about
+		// reachability: the member is still asked to give up its copies
+		// and to follow tree changes until it is empty.
+		return st.DownSince.IsZero() || m.dueForProbe(probe)
+	}
+	return m.dueForProbe(probe)
+}
+
+func (m *member) dueForProbe(probe time.Duration) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return time.Since(m.lastTry) >= probe

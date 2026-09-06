@@ -409,3 +409,101 @@ func TestPoolDeadMemberTriggersReReplication(t *testing.T) {
 		t.Fatalf("read after re-replication = %q, %v", data, err)
 	}
 }
+
+// TestPoolDrainMovesEverythingOffThenRemoves: taking a member out on
+// purpose. Its files move to the others while every one of them stays
+// readable, and when it is empty nothing of the pool is left on it.
+func TestPoolDrainMovesEverythingOffThenRemoves(t *testing.T) {
+	r := newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1}, "a", "b", "c")
+	a := r.members["a"]
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if _, err := r.fs.WriteFile(ctx, "/f"+string(rune('0'+i))+".txt", []byte("keep me"), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Tree()) != 5 {
+		t.Fatalf("a as primary should hold everything: %v", a.Tree())
+	}
+	if err := r.pool.SetMemberState("a", "draining"); err != nil {
+		t.Fatal(err)
+	}
+	empty := false
+	for i := 0; i < 6 && !empty; i++ {
+		var err error
+		_, empty, err = r.pool.DrainOnce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.fs.DropCaches(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := r.fs.ReadFileRange(ctx, "/f2.txt", 0, 0); err != nil || string(data) != "keep me" {
+			t.Fatalf("read during drain = %q, %v", data, err)
+		}
+	}
+	if !empty || len(a.Tree()) != 0 {
+		t.Fatalf("a after drain: empty=%v tree=%v", empty, a.Tree())
+	}
+	if got := listNames(t, r.fs, "/"); got != "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt" {
+		t.Fatalf("listing after drain = %s", got)
+	}
+	for _, f := range []*fakeprovider.Fake{r.members["b"], r.members["c"]} {
+		if len(f.Tree()) != 5 {
+			t.Fatalf("%s after drain: %v", f.Name(), f.Tree())
+		}
+	}
+}
+
+// TestScrubDetectsOutOfBandDeletion: a copy deleted in the vendor's app is
+// a lost replica, not a deletion — deleting is done through the pool. The
+// scrub notices and repair puts the copy back.
+func TestScrubDetectsOutOfBandDeletion(t *testing.T) {
+	r := newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1, ScrubSample: 1}, "a", "b")
+	a, b := r.members["a"], r.members["b"]
+	ctx := context.Background()
+	if _, err := r.fs.WriteFile(ctx, "/docs/keep.txt", nil, false); err == nil {
+		t.Fatal("expected no /docs yet")
+	}
+	if _, err := r.fs.Mkdir(ctx, meta.RootIno, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.fs.WriteFile(ctx, "/docs/keep.txt", []byte("two copies please"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.Content("/docs/keep.txt"); !ok {
+		t.Fatalf("b lacks the replica: %v", b.Tree())
+	}
+	// Deleted in b's app.
+	id, _ := b.IDOf("/docs/keep.txt")
+	if err := b.Delete(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.ScrubOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := b.Content("/docs/keep.txt"); !ok || string(got) != "two copies please" {
+		t.Fatalf("b after scrub+repair = %q %v", got, ok)
+	}
+	if got, _ := a.Content("/docs/keep.txt"); string(got) != "two copies please" {
+		t.Fatalf("a = %q", got)
+	}
+	if got := listNames(t, r.fs, "/docs"); got != "keep.txt" {
+		t.Fatalf("listing = %s", got)
+	}
+}

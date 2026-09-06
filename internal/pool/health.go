@@ -48,6 +48,12 @@ func (p *Pool) Start(ctx context.Context) {
 		defer work.Stop()
 		scan := time.NewTicker(scanInterval)
 		defer scan.Stop()
+		scrubEvery := p.settings.ScrubInterval
+		if scrubEvery <= 0 {
+			scrubEvery = 24 * time.Hour
+		}
+		scrub := time.NewTicker(scrubEvery)
+		defer scrub.Stop()
 		if p.settings.Replicas > 1 {
 			_, _ = p.ScanOnce(ctx)
 		}
@@ -58,11 +64,16 @@ func (p *Pool) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-work.C:
+				_, _ = p.ReplayOnce(ctx)
 				_, _ = p.RepairOnce(ctx)
+				_, _, _ = p.DrainOnce(ctx)
 			case <-scan.C:
 				if p.settings.Replicas > 1 {
 					_, _ = p.ScanOnce(ctx)
 				}
+				_, _ = p.TrimOnce(ctx)
+			case <-scrub.C:
+				_, _ = p.ScrubOnce(ctx)
 			}
 		}
 	}()

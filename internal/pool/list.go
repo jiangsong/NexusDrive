@@ -419,10 +419,28 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 					return err
 				}
 			}
-			for key := range existingReplicas {
+			// A file this member lost that reappears under another name
+			// with the same hash was renamed in the vendor's app. The pool
+			// does not guess which side to follow; it says so.
+			byHash := map[string]string{}
+			for _, e := range r.entries {
+				if e.Kind != provider.KindFile {
+					continue
+				}
+				if _, known := existingReplicas[replicaKey{joinPath(pth, e.Name), r.m.name}]; known {
+					continue
+				}
+				if ht, hv := bestHash(e.Hashes); ht != "" {
+					byHash[string(ht)+":"+hv] = e.Name
+				}
+			}
+			for key, row := range existingReplicas {
 				if key.member == r.m.name && !seenReplica[key] {
 					if _, err := tx.Exec(`DELETE FROM replicas WHERE path = ? AND member = ?`, key.path, key.member); err != nil {
 						return err
+					}
+					if newName, ok := byHash[row.hashType+":"+row.hash]; ok && row.hash != "" {
+						recordDivergence(tx, key.path, r.m.name, "renamed-out-of-band", "the member now has the same content as "+newName+"; rename it through the pool or keep both", now)
 					}
 				}
 			}

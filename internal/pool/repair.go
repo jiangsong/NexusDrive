@@ -298,13 +298,23 @@ func (p *Pool) openSource(ctx context.Context, pth string, row entryRow, live []
 		hashes[provider.HashType(row.hashType)] = row.hash
 	}
 	probe := p.probeInterval()
-	for _, r := range live {
+	// Any live copy will do as a source, including one on a member being
+	// drained — that is the copy we are moving.
+	sources, err := p.replicasOf(ctx, pth, row.ctoken)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range sources {
 		m := p.byName[r.member]
 		if m == nil || r.state != "live" || !m.usable(probe) {
 			continue
 		}
+		if st := m.state(); st == provider.HealthOut || st == provider.HealthDisabled {
+			continue
+		}
 		return &source{ReaderAt: &replicaReader{ctx: ctx, m: m, r: r}, size: row.size, hashes: hashes, close: func() {}}, nil
 	}
+	_ = live
 	return nil, fmt.Errorf("%w: no source for %s", provider.ErrUnavailable, pth)
 }
 
