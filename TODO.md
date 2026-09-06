@@ -1315,9 +1315,27 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
   旧名（和改名的新名）各发一次 EntryNotify，内核自己做的 unlink/rename 跳过。回归
   `TestOutOfKernelRemoveAndRenameDropTheKernelDentry`；去掉修复后 e2e 在 500ms 后仍能
   stat 到已删目录。
-- **[ ] 阶段 2** 配置变更库
-- **[ ] 阶段 3 / 3a** 账号、代理、挂载端点；代理热加载
-- **[ ] 阶段 4** 守护进程驾驭的 OAuth / 扫码授权（浏览器永不见秘密）
+- **[x] 阶段 2** 配置变更库：`RemoveRemote`（有布局引用时拒绝）、`SetRemoteField`（部分更新，
+  nil 删键，空值/0 回默认即删键；拒秘密键与非法键名）、`SetProxy`（整段替换，先当完整配置
+  `Validate`）、`AddMount/SetLayout/RemoveMount`（与 `AddRemote` 共用 `upsertMountLayout`）。
+  测试用带注释的配置文件，断言每个编辑器都不动注释。
+- **[x] 阶段 3** `GET/PATCH/DELETE /accounts/{name}`、`POST /accounts/{name}/check`（经
+  `daemon.SanitizeAccountError`，CLI 同用）、`/proxy/explain|check|config`、`/mounts`。
+  代理地址里的 `user:pass@` 是凭据：GET 脱掉，PUT 拒绝。所有配置改动回 `restart_required`。
+- **[x] 阶段 3a** 代理热加载：`proxy.Manager.Reload`。路由状态（rules/outbounds/groups）放进
+  `atomic.Pointer[routingState]` 整体替换——顺带修掉了这三个字段此前的无锁读；健康检查
+  goroutine 按新分组集合起停；带悬空目标的 reload 被拒且旧配置原样生效。
+  `control.ProxyManagerOptions` 是 config→Manager 的唯一转换，冷启动与热加载共用。
+  `PUT /proxy/config` 现在 `applied:true, restart_required:false`。回归：下一次请求就走新出口；
+  分组换成员后旧成员停止探测、新分组可解析；`-race` 下 50 次 Reload 对 4 路请求。
+- **[x] 阶段 4** 守护进程驾驭的授权：`internal/daemon/auth.go` 的 `StartOAuthFlow`/
+  `StartDevice115Flow` 从 CLI 抽出、CLI 与控制面共用。守护进程自己绑回调、收 code、换 token、
+  存凭据——秘密值从不跨出进程边界给发起方。控制面 `POST/GET/POST
+  /accounts/{name}/auth/{start,status,cancel}`：内存会话表，session id 128 位随机，同账号
+  只允许一个在飞（第二个 409），终态轮询即回收；A 类（aliyun/baidu OAuth、pan115 扫码）返回
+  URL 或二维码内容字符串，B 类（密码/cookie/外部 token）拒绝并指向 `config auth`。失败一律
+  报 generic，不带 provider 原文。回归 `auth_test.go`：断言呈现的是 URL/QR、响应体永不含 token、
+  双飞 409、取消、终态脱敏。
 - **[ ] 阶段 5** 优雅重启、服务管理入 `internal/`
 
 ### [ ] T-25 桌面壳 `cmd/cloudfs-desktop`（webview_go，独立 cgo 二进制）

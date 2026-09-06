@@ -169,6 +169,9 @@ type Collector struct {
 	// ReloadProxy applies a saved proxy section to the running daemon. nil
 	// means a proxy change needs a restart to take effect.
 	ReloadProxy func(p config.Proxy) error
+	// Auth drives daemon-side OAuth and device logins; nil means the browser
+	// authorization flow is unavailable and credentials go through the CLI.
+	Auth *AuthStarter
 	// Doctor, when set, answers /doctor/run and /doctor/fix. It is the same
 	// runner `cloudfs doctor` uses, on the live daemon's own stores — which
 	// is the only place it can run while this process owns the journal.

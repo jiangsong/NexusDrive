@@ -101,17 +101,24 @@ func proxyConfigView(p config.Proxy) ProxyConfig {
 		}
 		out.Groups = append(out.Groups, pg)
 	}
-	out.Default = proxy.DefaultTargetFor(toManagerOptions(p))
+	out.Default = proxy.DefaultTargetFor(ProxyManagerOptions(p))
 	return out
 }
 
-func toManagerOptions(p config.Proxy) proxy.ManagerOptions {
+// ProxyManagerOptions is the one conversion from the configuration's proxy
+// section to what the manager consumes. The daemon uses it to build the
+// manager at start and to reload it; this package uses it to explain the
+// configuration. One conversion, so a start and a reload cannot disagree.
+func ProxyManagerOptions(p config.Proxy) proxy.ManagerOptions {
 	var opt proxy.ManagerOptions
 	for _, o := range p.Outbounds {
 		opt.Outbounds = append(opt.Outbounds, proxy.Outbound{Name: o.Name, Type: o.Type, Addr: o.Addr})
 	}
 	for _, g := range p.Groups {
-		opt.Groups = append(opt.Groups, proxy.Group{Name: g.Name, Type: proxy.GroupType(g.Type), Members: g.Members})
+		opt.Groups = append(opt.Groups, proxy.Group{
+			Name: g.Name, Type: proxy.GroupType(g.Type), Members: g.Members,
+			CheckURL: g.CheckURL, Interval: g.Interval, Timeout: g.Timeout,
+		})
 	}
 	opt.Rules = p.Rules
 	return opt

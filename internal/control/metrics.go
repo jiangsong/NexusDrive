@@ -21,6 +21,8 @@ type Server struct {
 	collector *Collector
 	mux       *http.ServeMux
 	srv       *http.Server
+	auth      *AuthStarter
+	authReg   *authRegistry
 }
 
 // NewServer builds the control HTTP server.
@@ -34,7 +36,7 @@ type Server struct {
 // them without a custom header. Anything new here is guarded unless it is
 // argued into that list.
 func NewServer(c *Collector) *Server {
-	s := &Server{collector: c, mux: http.NewServeMux()}
+	s := &Server{collector: c, mux: http.NewServeMux(), auth: c.Auth, authReg: newAuthRegistry()}
 	for _, r := range s.routes() {
 		s.mux.HandleFunc(r.pattern, r.handler)
 	}

@@ -164,7 +164,8 @@ func (s *Server) accountByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/accounts/")
-	name, action, _ := strings.Cut(rest, "/")
+	name, tail, _ := strings.Cut(rest, "/")
+	action, sub, _ := strings.Cut(tail, "/")
 	if !safeRemoteName(name) {
 		http.Error(w, "invalid remote name", http.StatusBadRequest)
 		return
@@ -194,6 +195,8 @@ func (s *Server) accountByName(w http.ResponseWriter, r *http.Request) {
 		}
 	case "check":
 		s.checkAccount(w, r, name)
+	case "auth":
+		s.handleAuth(w, r, name, sub)
 	default:
 		http.NotFound(w, r)
 	}

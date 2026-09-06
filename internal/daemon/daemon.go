@@ -348,6 +348,12 @@ func (d *Daemon) Collector() *control.Collector {
 		CheckAccount: func(ctx context.Context, name string) error {
 			return SanitizeAccountError(CheckAccount(ctx, d.Config, name))
 		},
+		// A saved proxy section takes effect without a restart: every
+		// provider's client asks the manager per request.
+		ReloadProxy: func(p config.Proxy) error {
+			return d.Proxy.Reload(control.ProxyManagerOptions(p))
+		},
+		Auth:          d.authStarter(),
 		CallStats:     d.CallStats,
 		DropCaches:    d.DropCaches,
 		FlushUploads:  flush,
@@ -379,20 +385,35 @@ func (d *Daemon) Doctor(fuseSupported func() (bool, string)) *control.Doctor {
 }
 
 func buildProxy(cfg *config.Config) (*proxy.Manager, error) {
-	var outbounds []proxy.Outbound
-	for _, o := range cfg.Proxy.Outbounds {
-		outbounds = append(outbounds, proxy.Outbound{Name: o.Name, Type: o.Type, Addr: o.Addr})
+	return proxy.NewManager(control.ProxyManagerOptions(cfg.Proxy))
+}
+
+// authStarter adapts the daemon's authorization flows to the control server's
+// AuthStarter, so the control package need not import daemon. The daemon saves
+// the credential in every flow; nothing about a token reaches the caller.
+func (d *Daemon) authStarter() *control.AuthStarter {
+	if d.Config == nil || d.Config.SourcePath == "" {
+		return nil
 	}
-	var groups []proxy.Group
-	for _, g := range cfg.Proxy.Groups {
-		groups = append(groups, proxy.Group{
-			Name: g.Name, Type: proxy.GroupType(g.Type), Members: g.Members,
-			CheckURL: g.CheckURL, Interval: g.Interval, Timeout: g.Timeout,
-		})
+	return &control.AuthStarter{
+		Supported: SupportsDaemonAuth,
+		OAuth: func(ctx context.Context, name string, present func(url string)) (string, func(context.Context) error, error) {
+			p, wait, err := StartOAuthFlow(ctx, d.Config, name, "", func(_ context.Context, url string) error {
+				present(url)
+				return nil
+			})
+			if err != nil {
+				return "", nil, err
+			}
+			return p.RedirectURI, wait, nil
+		},
+		Device: func(ctx context.Context, name string, present func(qr string), scanned func()) (func(context.Context) error, error) {
+			return StartDevice115Flow(ctx, d.Config, name, func(_ context.Context, qr string) error {
+				present(qr)
+				return nil
+			}, scanned)
+		},
 	}
-	return proxy.NewManager(proxy.ManagerOptions{
-		Outbounds: outbounds, Groups: groups, Rules: cfg.Proxy.Rules,
-	})
 }
 
 // buildLimiters seeds each remote's buckets, in this order of precedence:

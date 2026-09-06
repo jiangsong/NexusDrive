@@ -273,3 +273,23 @@ func TestTheAccountFormNeverAsksForACredential(t *testing.T) {
 		t.Fatal("the page never tells the user where credentials go")
 	}
 }
+
+// writeConfigLine appends a remote of the given type to the server's config
+// file and reloads the server's view, for tests that need one that is not
+// webdav.
+func writeConfigLine(t *testing.T, cfg *config.Config, name, rtype string) {
+	t.Helper()
+	f, err := os.OpenFile(cfg.SourcePath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("  " + name + ": {type: " + rtype + ", client_id: app, client_secret: s}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	fresh, err := config.Load(cfg.SourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*cfg = *fresh
+}

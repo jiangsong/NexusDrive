@@ -27,7 +27,7 @@ func (m *Manager) DialContext(ctx context.Context, network, addr, override strin
 	}
 	name := override
 	if name == "" {
-		name = m.router.Outbound(Target{Host: host})
+		name = m.routing.Load().router.Outbound(Target{Host: host})
 	}
 	o, err := m.Resolve(name)
 	if err != nil {

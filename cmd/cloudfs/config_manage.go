@@ -392,7 +392,24 @@ func configAuth(ctx context.Context, cfg *config.Config, f *flags, c configIO) e
 		} else if r.Type == "aliyun" || r.Type == "baidu" {
 			fields, err = browserAuthorize(ctx, cfg, name, r, f, c)
 		} else if r.Type == "pan115" {
-			fields, err = deviceAuthorize115(ctx, cfg, name, r, c)
+			// The 115 device flow saves the credential in the daemon helper,
+			// so there is nothing to hand to the shared save path. Report and
+			// verify it as the other flows are, then stop before the save.
+			if err = device115CLI(ctx, cfg, name, c); err != nil {
+				return err
+			}
+			fmt.Fprintf(c.Out, "credentials saved for %q; restart any running daemon using this account\n", name)
+			if f.bools["no-check"] {
+				return nil
+			}
+			updated, lerr := config.Load(cfg.SourcePath)
+			if lerr != nil {
+				return lerr
+			}
+			if cerr := checkConfiguredAccount(ctx, updated, name, c.Out); cerr != nil {
+				return fmt.Errorf("credentials are saved, but %w", cerr)
+			}
+			return nil
 		} else {
 			field := map[string]string{"webdav": "pass", "openlist": "pass", "sftp": "password", "quark": "cookie", "tianyi": "password", "pan123": "client_secret", "pan115": "refresh_token", "dropbox": "access_token", "onedrive": "access_token", "gdrive": "refresh_token", "box": "refresh_token", "smb": "password"}[r.Type]
 			if field == "" {
@@ -435,16 +452,12 @@ func configAuth(ctx context.Context, cfg *config.Config, f *flags, c configIO) e
 	return nil
 }
 
-func deviceAuthorize115(ctx context.Context, cfg *config.Config, name string, r config.Remote, c configIO) (map[string]string, error) {
-	get := func(key string) string { value, _ := r.Extra[key].(string); return value }
-	client, closeHTTP, err := daemon.AuthorizationHTTP(cfg, name)
-	if err != nil {
-		return nil, err
-	}
-	defer closeHTTP()
-	token, err := auth.Authorize115(ctx, auth.Device115Options{
-		Client: client, ClientID: get("client_id"), DeviceURL: get("oauth_device_url"), PollURL: get("oauth_poll_url"), TokenURL: get("oauth_token_url"),
-		Show: func(ctx context.Context, content string) error {
+// device115CLI drives 115's device flow from the terminal, rendering the QR
+// content the daemon hands back. The daemon saves the credential; this returns
+// only after it has, and carries nothing back.
+func device115CLI(ctx context.Context, cfg *config.Config, name string, c configIO) error {
+	wait, err := daemon.StartDevice115Flow(ctx, cfg, name,
+		func(_ context.Context, content string) error {
 			qr, err := qrcode.New(content, qrcode.Medium)
 			if err != nil {
 				return errors.New("config auth: cannot render 115 authorization QR code")
@@ -453,12 +466,11 @@ func deviceAuthorize115(ctx context.Context, cfg *config.Config, name string, r 
 			_, err = fmt.Fprint(c.Out, qr.ToSmallString(false))
 			return err
 		},
-		Scanned: func() { fmt.Fprintln(c.Out, "QR scanned; waiting for confirmation on your phone...") },
-	})
+		func() { fmt.Fprintln(c.Out, "QR scanned; waiting for confirmation on your phone...") })
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return map[string]string{"refresh_token": token.RefreshToken}, nil
+	return wait(ctx)
 }
 
 func checkConfiguredAccount(ctx context.Context, cfg *config.Config, name string, out io.Writer) error {

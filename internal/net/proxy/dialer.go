@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -76,14 +77,21 @@ type Health struct {
 // http.Transport every provider uses, so proxy rules and rate limits apply
 // uniformly (docs/DESIGN.md §4.2).
 type Manager struct {
-	router    *Router
-	outbounds map[string]Outbound
-	groups    map[string]Group
+	// routing is the rule set and the outbounds and groups it names. It is
+	// replaced as a whole by Reload and read without a lock by every request,
+	// so a request sees either the old configuration or the new one, never a
+	// mix of the two.
+	routing atomic.Pointer[routingState]
 
 	mu     sync.RWMutex
 	health map[string]Health
-	// resolved caches the member a group currently selects.
+	// selected caches the member a group currently selects.
 	selected map[string]string
+	// checkers holds the stop channel of the health goroutine per group,
+	// once StartHealthChecks has run; Reload starts and stops them to match
+	// the new group set.
+	checkers map[string]chan struct{}
+	checkCtx context.Context
 
 	stopOnce sync.Once
 	stopC    chan struct{}
@@ -91,19 +99,17 @@ type Manager struct {
 	checkFn func(ctx context.Context, o Outbound, url string, timeout time.Duration) (time.Duration, error)
 }
 
-// ManagerOptions configures New.
-type ManagerOptions struct {
-	Outbounds []Outbound
-	Groups    []Group
-	Rules     []string
-	// GeoIP resolves an IP to an ISO country code for GEOIP rules.
-	GeoIP func(net.IP) string
-	// Check overrides the health probe (tests).
-	Check func(ctx context.Context, o Outbound, url string, timeout time.Duration) (time.Duration, error)
+// routingState is one consistent configuration: what NewManager built, or
+// what Reload replaced it with.
+type routingState struct {
+	router    *Router
+	outbounds map[string]Outbound
+	groups    map[string]Group
 }
 
-// NewManager builds a manager. Rules default to DefaultRules when empty.
-func NewManager(opt ManagerOptions) (*Manager, error) {
+// buildRouting validates opt into a routingState. NewManager and Reload share
+// it, so a configuration Reload accepts is exactly one NewManager would.
+func buildRouting(opt ManagerOptions) (*routingState, error) {
 	rules := opt.Rules
 	if len(rules) == 0 {
 		rules = defaultRulesFor(opt)
@@ -113,24 +119,16 @@ func NewManager(opt ManagerOptions) (*Manager, error) {
 		return nil, err
 	}
 	router.GeoIP = opt.GeoIP
-
-	m := &Manager{
+	st := &routingState{
 		router:    router,
 		outbounds: map[string]Outbound{"direct": {Name: "direct", Type: "direct"}},
 		groups:    map[string]Group{},
-		health:    map[string]Health{},
-		selected:  map[string]string{},
-		stopC:     make(chan struct{}),
-		checkFn:   opt.Check,
-	}
-	if m.checkFn == nil {
-		m.checkFn = probe
 	}
 	for _, o := range opt.Outbounds {
 		if _, err := o.URL(); err != nil {
 			return nil, err
 		}
-		m.outbounds[o.Name] = o
+		st.outbounds[o.Name] = o
 	}
 	for _, g := range opt.Groups {
 		if g.Type == "" {
@@ -146,43 +144,182 @@ func NewManager(opt ManagerOptions) (*Manager, error) {
 			g.Timeout = 5 * time.Second
 		}
 		for _, member := range g.Members {
-			if _, ok := m.outbounds[member]; !ok {
+			if _, ok := st.outbounds[member]; !ok {
 				return nil, fmt.Errorf("proxy: group %q references unknown outbound %q", g.Name, member)
 			}
 		}
-		m.groups[g.Name] = g
+		st.groups[g.Name] = g
+	}
+	return st, nil
+}
+
+// ManagerOptions configures New.
+type ManagerOptions struct {
+	Outbounds []Outbound
+	Groups    []Group
+	Rules     []string
+	// GeoIP resolves an IP to an ISO country code for GEOIP rules.
+	GeoIP func(net.IP) string
+	// Check overrides the health probe (tests).
+	Check func(ctx context.Context, o Outbound, url string, timeout time.Duration) (time.Duration, error)
+}
+
+// NewManager builds a manager. Rules default to DefaultRules when empty.
+func NewManager(opt ManagerOptions) (*Manager, error) {
+	st, err := buildRouting(opt)
+	if err != nil {
+		return nil, err
+	}
+	m := &Manager{
+		health:   map[string]Health{},
+		selected: map[string]string{},
+		stopC:    make(chan struct{}),
+		checkFn:  opt.Check,
+	}
+	if m.checkFn == nil {
+		m.checkFn = probe
+	}
+	m.routing.Store(st)
+	for name, g := range st.groups {
 		if len(g.Members) > 0 {
 			// Assume healthy until a check says otherwise, so the first
 			// request does not have to wait for a probe.
-			m.selected[g.Name] = g.Members[0]
+			m.selected[name] = g.Members[0]
 		}
 	}
 	return m, nil
 }
 
-// Router exposes the rule router for `cloudfs proxy test`.
-func (m *Manager) Router() *Router { return m.router }
-
-// StartHealthChecks runs periodic probes until Stop.
-func (m *Manager) StartHealthChecks(ctx context.Context) {
-	for name := range m.groups {
-		g := m.groups[name]
-		go func(g Group) {
-			t := time.NewTicker(g.Interval)
-			defer t.Stop()
-			m.checkGroup(ctx, g)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-m.stopC:
-					return
-				case <-t.C:
-					m.checkGroup(ctx, g)
-				}
-			}
-		}(g)
+// Reload replaces the routing configuration of a running manager. Requests in
+// flight finish on whatever they resolved; the next request resolves against
+// the new rules. Health for outbounds that still exist is kept; state for
+// groups and outbounds that are gone is dropped, and health checking follows
+// the new group set when it is running. A configuration Reload refuses is one
+// NewManager would refuse, and the old configuration stays in force.
+//
+// This is what lets a proxy change land without restarting the daemon: every
+// provider's HTTP client asks this manager per request, so nothing but the
+// manager's own state has to move.
+func (m *Manager) Reload(opt ManagerOptions) error {
+	st, err := buildRouting(opt)
+	if err != nil {
+		return err
 	}
+	// A running daemon is never switched into a configuration it cannot
+	// route: a rule naming an outbound or group that does not exist is
+	// refused here, not discovered by the first request that matches it.
+	for _, r := range st.router.Rules() {
+		if _, ok := st.outbounds[r.Outbound]; ok {
+			continue
+		}
+		if _, ok := st.groups[r.Outbound]; ok {
+			continue
+		}
+		return fmt.Errorf("proxy: rule %s targets unknown outbound %q", r.Kind, r.Outbound)
+	}
+	old := m.routing.Swap(st)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name := range m.selected {
+		if _, ok := st.groups[name]; !ok {
+			delete(m.selected, name)
+		}
+	}
+	for name := range m.health {
+		if _, ok := st.outbounds[name]; !ok {
+			delete(m.health, name)
+		}
+	}
+	for name, g := range st.groups {
+		// A group whose selection no longer names a member starts over.
+		if sel, ok := m.selected[name]; !ok || !containsString(g.Members, sel) {
+			if len(g.Members) > 0 {
+				m.selected[name] = g.Members[0]
+			}
+		}
+	}
+	if m.checkers != nil {
+		for name, stop := range m.checkers {
+			ng, ok := st.groups[name]
+			if !ok || old == nil || !sameGroup(old.groups[name], ng) {
+				close(stop)
+				delete(m.checkers, name)
+			}
+		}
+		for name, g := range st.groups {
+			if _, running := m.checkers[name]; !running {
+				m.startCheckerLocked(g)
+			}
+		}
+	}
+	return nil
+}
+
+func containsString(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func sameGroup(a, b Group) bool {
+	if a.Name != b.Name || a.Type != b.Type || a.CheckURL != b.CheckURL || a.Interval != b.Interval || a.Timeout != b.Timeout || len(a.Members) != len(b.Members) {
+		return false
+	}
+	for i := range a.Members {
+		if a.Members[i] != b.Members[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Router exposes the rule router for `cloudfs proxy test`. It is the router
+// of the configuration in force when called; a Reload afterwards does not
+// change the returned value.
+func (m *Manager) Router() *Router { return m.routing.Load().router }
+
+// StartHealthChecks runs periodic probes until Stop. Reload keeps the set of
+// probed groups in step with the configuration from then on.
+func (m *Manager) StartHealthChecks(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.checkers != nil {
+		return
+	}
+	m.checkers = map[string]chan struct{}{}
+	m.checkCtx = ctx
+	for _, g := range m.routing.Load().groups {
+		m.startCheckerLocked(g)
+	}
+}
+
+// startCheckerLocked runs one group's probe loop until Stop, ctx, or the
+// group's own stop channel — which Reload closes when the group changes or
+// goes away. m.mu must be held.
+func (m *Manager) startCheckerLocked(g Group) {
+	stop := make(chan struct{})
+	m.checkers[g.Name] = stop
+	ctx := m.checkCtx
+	go func() {
+		t := time.NewTicker(g.Interval)
+		defer t.Stop()
+		m.checkGroup(ctx, g)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.stopC:
+				return
+			case <-stop:
+				return
+			case <-t.C:
+				m.checkGroup(ctx, g)
+			}
+		}
+	}()
 }
 
 // Stop ends health checking.
@@ -191,7 +328,7 @@ func (m *Manager) Stop() { m.stopOnce.Do(func() { close(m.stopC) }) }
 // CheckNow probes every group once and returns the results. `cloudfs proxy
 // test` and `doctor` use it.
 func (m *Manager) CheckNow(ctx context.Context) []Health {
-	for _, g := range m.groups {
+	for _, g := range m.routing.Load().groups {
 		m.checkGroup(ctx, g)
 	}
 	m.mu.RLock()
@@ -210,8 +347,12 @@ func (m *Manager) checkGroup(ctx context.Context, g Group) {
 		err     error
 	}
 	results := make([]result, 0, len(g.Members))
+	outbounds := m.routing.Load().outbounds
 	for _, member := range g.Members {
-		o := m.outbounds[member]
+		o, ok := outbounds[member]
+		if !ok {
+			continue // the group was reloaded out from under this probe
+		}
 		lat, err := m.checkFn(ctx, o, g.CheckURL, g.Timeout)
 		results = append(results, result{name: member, latency: lat, err: err})
 	}
@@ -240,7 +381,9 @@ func (m *Manager) checkGroup(ctx context.Context, g Group) {
 		}
 	}
 	if best != "" {
-		m.selected[g.Name] = best
+		if _, still := m.routing.Load().groups[g.Name]; still {
+			m.selected[g.Name] = best
+		}
 	}
 	// Every member is down: keep the previous selection so a transient probe
 	// failure does not strand requests with no outbound at all.
@@ -276,15 +419,17 @@ func (m *Manager) Resolve(name string) (Outbound, error) {
 	if name == "" {
 		name = "direct"
 	}
+	st := m.routing.Load()
 	m.mu.RLock()
 	sel, isGroup := m.selected[name]
 	m.mu.RUnlock()
-	if isGroup {
+	if _, isConfiguredGroup := st.groups[name]; isConfiguredGroup {
+		if !isGroup {
+			return Outbound{}, fmt.Errorf("proxy: group %q has no healthy member", name)
+		}
 		name = sel
-	} else if _, ok := m.groups[name]; ok {
-		return Outbound{}, fmt.Errorf("proxy: group %q has no healthy member", name)
 	}
-	o, ok := m.outbounds[name]
+	o, ok := st.outbounds[name]
 	if !ok {
 		return Outbound{}, fmt.Errorf("proxy: unknown outbound %q", name)
 	}
@@ -293,7 +438,7 @@ func (m *Manager) Resolve(name string) (Outbound, error) {
 
 // OutboundFor returns the outbound the rules pick for a host.
 func (m *Manager) OutboundFor(host string) (Outbound, error) {
-	name := m.router.Outbound(Target{Host: host})
+	name := m.routing.Load().router.Outbound(Target{Host: host})
 	return m.Resolve(name)
 }
 
@@ -362,7 +507,7 @@ type ruleTransport struct {
 func (t *ruleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	name := t.override
 	if name == "" {
-		name = t.m.router.Outbound(Target{Host: req.URL.Hostname()})
+		name = t.m.routing.Load().router.Outbound(Target{Host: req.URL.Hostname()})
 	}
 	o, err := t.m.Resolve(name)
 	if err != nil {
