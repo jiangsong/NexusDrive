@@ -562,6 +562,20 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 ---
 
+### 4.11 存储池(多网盘融合、N 副本、自动修复)
+
+存储池是一个实现了 `provider.Provider` 的复合后端(`internal/pool`,`type: pool`),把若干 remote 融合成一个命名空间,对 vfs/cache/journal/upload 而言就是一个普通 remote——分层与「永不按网盘名特判」都不变。设计与语义详见 `docs/pool.md`;要点:
+
+- **镜像目录树**:每个持有副本的成员在自己的 `root` 下保存同样的路径与文件名;成员是命名空间的共享真相,本机 `pool-<name>.db` 只是可重建的副本索引。
+- **稳定不透明 id + 内容令牌**:池对外的 id 在改名/移动/覆盖时不变(vfs 从不重写子孙 `remote_id`,路径式 id 会让改名后的子孙失联);`Entry.Version` 是内容令牌(`h1:<hash>` 或 `t1:<size|mtime>`),是内容的属性而不是「哪个副本回答」的属性,所以修复复制、切换副本都不会翻转 Version、不会制造假冲突,delta 回声对 vfs 是 no-op。
+- **读**:并行列举、按名并集、mtime 最新者胜、败者以稳定的冲突副本名露出;读路径无副作用;成员不可达用索引快照顶上;读文件按健康→延迟→声明顺序选副本并自动切换。
+- **写**:上传透传给一个主成员,树只在 `CompleteUpload` 提交;其余副本由修复 worker 从本地 hold(上传时对 blob 的硬链接,`provider.WithUploadBlobLink`)复制;树操作向所有持有者扇出,不可达成员记 op-log,按目标状态幂等重放,永不删陌生内容。
+- **健康**:`provider.Health` 从调用结果推出 `up/degraded/down/out`,对所有 remote 生效并进 `/status`;池按它路由,`out` 触发再复制。`provider.ErrUnavailable` → `EHOSTDOWN`,上传队列延期而不消耗尝试次数。
+- **放置**:健康 → 命名规则(`Caps.Naming` + 运行时学习)→ 剩余空间(`provider.Quotaer`)→ 权重 → 声明顺序;同一成员不放两份。
+- **多机**:无锁无租约;成员标记文件 `.cloudfs-pool.json` 供 `pool join`;最终一致,已知异常见 `docs/pool.md`。
+
+控制面:`/pool/status|create|members|members/state|members/drain|members/remove|repair|scrub|rebuild|divergences|join`,`/fs/list` 与 `/fs/stat` 的条目带 `availability`、`replicas_live/target`、`degraded_reason`;`/status.remotes[].state` 对所有 remote 报告可达性。
+
 ## 5. 可靠性场景矩阵
 
 | 场景 | 行为 |
@@ -578,6 +592,10 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 | SQLite 损坏 | `doctor` 检测；`meta.db` 可整体重建（不是真相源）；`journal.db` 独立文件、每次提交 fsync |
 | 同名并发写（两个进程） | 句柄级隔离，最后 close 的版本胜出，前一个成为冲突副本 |
 | 挂载点被强制卸载 | journal 已提交的上传由守护进程继续；下次挂载恢复视图 |
+| 存储池成员失联 | 成员按调用结果转 down；其它成员上的文件不受影响；仅在该成员上的文件被列出但读返回 EHOSTDOWN；每 probe_interval 探一次，答了即恢复 |
+| 存储池成员永久丢失 | down 超过 out_after 转 out；其上副本不再计数，扫描把它持有的文件排队，在其余成员从活副本重建，全程可读 |
+| 官方 App 里带外删除 / 改名 | 删除视为副本丢失，核对后补回；改名报告为分歧（带新名字），不猜 |
+| 两台机器共用同一批网盘 | 各自索引 + op-log，靠成员 delta/TTL 收敛；同文件并发写成为冲突副本；裁剪只在哈希一致且过 trim_grace 后 |
 
 ---
 

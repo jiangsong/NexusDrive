@@ -37,6 +37,13 @@ type FSEntry struct {
 	Cached    float64   `json:"cached"`
 	Pinned    bool      `json:"pinned"`
 	LocalOnly bool      `json:"local_only"`
+	// Availability is set for paths under a pool: full, degraded (fewer
+	// replicas than the target, or a replica on a member that is down) or
+	// unavailable (no replica on a member that can be reached now).
+	Availability   string `json:"availability,omitempty"`
+	ReplicasLive   int    `json:"replicas_live,omitempty"`
+	ReplicasTarget int    `json:"replicas_target,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 // FSListResponse is a page of a directory.
@@ -90,6 +97,20 @@ func canonicalPath(raw string) (string, error) {
 		}
 	}
 	return path.Clean(raw), nil
+}
+
+// decorateAvailability adds the pool's view of a file: nothing for a
+// directory or a path outside a pool, and nothing that names a member's
+// object.
+func (s *Server) decorateAvailability(ctx context.Context, e *FSEntry) {
+	if e.IsDir || e.LocalOnly {
+		return
+	}
+	a, ok := s.poolAvailability(ctx, e.Path)
+	if !ok {
+		return
+	}
+	e.Availability, e.ReplicasLive, e.ReplicasTarget, e.DegradedReason = a.State, a.Live, a.Target, a.Reason
 }
 
 func toEntry(dir string, a vfs.Attr) FSEntry {
@@ -196,7 +217,9 @@ func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
 	}
 	out := FSListResponse{Path: p, Entries: make([]FSEntry, 0, len(page.Entries)), Total: page.Total, NextCursor: vfs.NextDirectoryCursor(page)}
 	for _, a := range page.Entries {
-		out.Entries = append(out.Entries, toEntry(p, a))
+		e := toEntry(p, a)
+		s.decorateAvailability(r.Context(), &e)
+		out.Entries = append(out.Entries, e)
 	}
 	writeJSON(w, out)
 }
@@ -216,6 +239,7 @@ func (s *Server) fsStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e := toEntry(path.Dir(p), a)
+	s.decorateAvailability(r.Context(), &e)
 	e.Path = p
 	writeJSON(w, e)
 }

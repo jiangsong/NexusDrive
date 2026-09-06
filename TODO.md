@@ -1394,6 +1394,30 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 见 `docs/ui-plan.md` 阶段 B。守护进程保持 `CGO_ENABLED=0`；壳只是指向回环 URL 的窗口 + 托盘，
 不内嵌第二份装配逻辑，不自己服务静态文件。
 
+### [x] T-26 存储池：多网盘融合为一个命名空间，N 副本、自动修复、本地热缓存（2026-09-06）
+
+`internal/pool`（`type: pool`）。设计与已知异常见 `docs/pool.md`，架构摘要见 `docs/DESIGN.md` §4.11。
+交付：只读镜像命名空间（合并列举、冲突副本、成员失联快照、读故障转移）；写路径（主成员透传、hold、树操作扇出、op-log）；
+成员健康状态机（对所有 remote 生效，`/status` 与侧栏圆点）；修复 worker（hold/活副本、out 触发再复制、封顶）；
+op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置、`df` 显示后端容量；delta 聚合、成员标记文件、
+多机收敛；控制面 `/pool/*`、`/fs/list` 可用性、存储池界面、`cloudfs pool`。
+验收：`internal/pool`、`test/chaos`（成员失联 / 永久丢失 / drain / 带外删除 / delta 回声）、`test/perf`（热遍历 0 调用、
+冷目录按持有者计费、修复 N 文件 N 次上传）、`test/e2e/TestPoolEndToEndThroughFUSE`。
+真实账号验证缺口见 `docs/pool.md` 末节。
+
+### [ ] T-27 路径式 id 的后端改目录名后子孙失联（既有 bug，存储池设计时发现）
+
+`internal/vfs/write.go` 的 `Rename/Move` 丢弃 provider 返回的 Entry，`internal/meta/store.go` 的 `Store.Rename`
+只改 `parent_ino/name`、从不重写 `remote_id`，也不重写子孙。webdav/sftp/s3/smb 的 id 就是路径：目录改名后
+`dir_ttl` 内读子孙必失败（旧路径）。存储池用不透明稳定 id 绕开了它。
+验收：fake 以 path-id 模式运行，改名目录后立刻读子孙成功；回退即失败。
+
+### [ ] T-28 `provider.Instrument` 在后端同时实现 ChangeLister/ServerCopier 时丢掉 SinglePutter（既有 bug）
+
+`internal/provider/instrument.go` 的可选接口组合是硬编码 switch；gdrive/onedrive/dropbox 三个都中招——小文件本该
+1 次请求，实际走 3 次会话协议。新的可选接口（`Quotaer`）已改为经 `Unwrap` 取用以绕开它。
+验收：对同时实现三者的桩后端，`Instrument` 后仍能断言到 `SinglePutter`，且 `test/perf` 小文件上传调用数为 1。
+
 ## 明确不在当前范围内
 
 以下是设计文档中标注为二期或预留的部分，列在这里是为了避免被误当作遗漏：

@@ -67,12 +67,18 @@ type AddAccountRequest struct {
 	Mount  string `json:"mount,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
 	Mode   string `json:"mode,omitempty"`
+	// Pool, when set, also adds the new remote as a member of that pool:
+	// the drive joins the fused space instead of (or as well as) getting
+	// a prefix of its own.
+	Pool string `json:"pool,omitempty"`
 }
 
 // AddAccountResponse tells the caller what to do next.
 type AddAccountResponse struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	// JoinedPool names the pool the remote was made a member of, if any.
+	JoinedPool string `json:"joined_pool,omitempty"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
 	// NextCommand is the credential step, which this API does not perform.
 	NextCommand string `json:"next_command"`
 	Credentials string `json:"credentials,omitempty"`
@@ -155,9 +161,23 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "prefix and mode require a mount path", http.StatusBadRequest)
 		return
 	}
+	if in.Pool != "" {
+		if _, ok := cfg.Pools[in.Pool]; !ok {
+			http.Error(w, fmt.Sprintf("unknown pool %q", in.Pool), http.StatusBadRequest)
+			return
+		}
+	}
 	if err := config.AddRemote(cfg.SourcePath, in.Name, remote, opt); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
+	}
+	joined := ""
+	if in.Pool != "" {
+		if err := config.AddPoolMember(cfg.SourcePath, in.Pool, config.PoolMember{Remote: in.Name}); err != nil {
+			http.Error(w, "remote written, but joining the pool failed: "+err.Error(), http.StatusConflict)
+			return
+		}
+		joined = in.Pool
 	}
 	s.reloadConfigView()
 	writeJSON(w, AddAccountResponse{
@@ -165,6 +185,7 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		NextCommand:     fmt.Sprintf("cloudfs config auth %s --config %s", in.Name, cfg.SourcePath),
 		Credentials:     credentialSummary(in.Type),
 		RestartRequired: true,
+		JoinedPool:      joined,
 	})
 }
 

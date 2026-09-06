@@ -374,6 +374,7 @@ func (d *Daemon) Collector() *control.Collector {
 		FS: d.FS, Journal: d.Journal, Cache: d.Cache,
 		Proxy: d.Proxy, Limiters: d.Limiters, Remotes: remotes,
 		Providers: d.Providers,
+		Pools:     d.Pools,
 		CheckAccount: func(ctx context.Context, name string) error {
 			return SanitizeAccountError(CheckAccount(ctx, d.Config, name))
 		},

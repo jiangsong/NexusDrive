@@ -4,6 +4,7 @@ import { start as startRouter, currentTag, navItems } from '/ui/router.js';
 import { el, iconEl } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { renderMain } from '/ui/screens/main.js';
+import { renderPool } from '/ui/screens/pool.js';
 import { renderTransfers } from '/ui/screens/transfers.js';
 import { renderStorage } from '/ui/screens/storage.js';
 import { renderProxy } from '/ui/screens/proxy.js';
@@ -11,6 +12,7 @@ import { renderDiagnostics } from '/ui/screens/diagnostics.js';
 
 const screens = {
   'main-window': renderMain,
+  'pool-view': renderPool,
   'transfers-view': renderTransfers,
   'storage-view': renderStorage,
   'proxy-view': renderProxy,
@@ -46,7 +48,7 @@ function nav(activeTag) {
     }));
 }
 function screenForHash(hash) {
-  const map = { '#/connections': 'main-window', '#/transfers': 'transfers-view', '#/storage': 'storage-view', '#/proxy': 'proxy-view', '#/diagnostics': 'diagnostics-view' };
+  const map = { '#/connections': 'main-window', '#/pool': 'pool-view', '#/transfers': 'transfers-view', '#/storage': 'storage-view', '#/proxy': 'proxy-view', '#/diagnostics': 'diagnostics-view' };
   return map[hash];
 }
 

@@ -92,6 +92,8 @@ func main() {
 		err = cmdUmount(os.Args[2:])
 	case "service":
 		err = cmdService(os.Args[2:])
+	case "pool":
+		err = cmdPool(ctx, os.Args[2:])
 	case "strm":
 		err = cmdSTRM(ctx, os.Args[2:])
 	case "mcp":

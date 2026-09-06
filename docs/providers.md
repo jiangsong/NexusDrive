@@ -204,3 +204,18 @@ grep -rn 'UNVERIFIED:' internal/provider/
 4. 如实填写 `Caps`：上层完全按它决策，声明了却没实现的能力会变成运行时错误。
 5. `init()` 里 `provider.Register("<name>", Factory)`，并在 `cmd/cloudfs/main.go` 里加空导入。
 6. 用 `httptest` 写测试，回放真实响应形状，断言请求路径、必需头、分页、秒传、分片与错误码映射。
+
+## 配额与命名规则（存储池用）
+
+| 驱动 | 配额（`provider.Quotaer`） | 命名规则（`Caps.Naming`） |
+|---|---|---|
+| gdrive | About.storageQuota（无上限账号报告为未知） | 无限制 |
+| webdav | RFC 4331 quota-available/used-bytes，服务器不支持则未知 | 禁 `\`，255 字节 |
+| aliyun | `getSpaceInfo`（UNVERIFIED） | 禁 `\`（UNVERIFIED） |
+| baidu / pan115 / pan123 / quark / tianyi | 未实现（放置不按空间优先，可配 `capacity`） | Windows 类禁字符集（UNVERIFIED） |
+| onedrive | 未实现 | 大小写不敏感，禁 `<>:"|?*\`，保留名，不能以点/空格结尾 |
+| smb | 未实现 | 大小写不敏感，Windows 保留名与禁字符 |
+| dropbox / box | 未实现 | 大小写不敏感，不能以点/空格结尾 |
+| sftp / s3 | 未实现 | 255 字节名 / 1024 字节键 |
+
+驱动没声明的规则，存储池会在成员实际拒绝时学习下来（`member_naming` 表），之后不再往那个成员放同类名字。

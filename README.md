@@ -236,6 +236,25 @@ scripts/bench/run-matrix.sh /tmp/matrix 192.168.0.20 work '~/test'        # lan/
 | `strict` | 远端上传完成后 | 备份脚本、要求跨端立刻可见 |
 | `readonly` | 拒绝写（`EROFS`） | 媒体库、被熔断或未授权的账号 |
 
+## 存储池：把所有网盘融合成一块盘
+
+```yaml
+remotes:
+  ali:  {type: aliyun}
+  gd:   {type: gdrive}
+  home: {type: pool, pool: home}
+pools:
+  home:
+    members: [{remote: ali}, {remote: gd}]
+    replicas: 3
+mounts:
+  - path: /mnt/cloud
+    layout:
+      /: {remote: home}
+```
+
+一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；详见 `docs/pool.md`。
+
 ## 命令
 
 ```

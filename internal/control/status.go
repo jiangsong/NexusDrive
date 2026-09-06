@@ -14,6 +14,7 @@ import (
 	"cloudfs/internal/journal"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
+	"cloudfs/internal/pool"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
 )
@@ -169,6 +170,9 @@ type Collector struct {
 	// FuseStats, when set, reports the kernel request counters of the
 	// live mount.
 	FuseStats func() FuseStatus
+	// Pools are the running storage pools by the name of the remote that
+	// exposes each; nil when none is configured.
+	Pools map[string]*pool.Pool
 	// Providers are the live backends by remote name, for the capability
 	// table an account page shows. Nothing is served from them but Caps.
 	Providers map[string]provider.Provider

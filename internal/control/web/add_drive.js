@@ -8,11 +8,12 @@ import { api, ApiError } from '/ui/api.js';
 import { el, toast } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 
-export async function openAddDrive() {
-  let meta, mounts;
+export async function openAddDrive(opts = {}) {
+  let meta, mounts, pools;
   try {
     meta = await api.get('/accounts');
     mounts = await api.get('/mounts').catch(() => ({ mounts: [] }));
+    pools = await api.get('/pool/status').catch(() => ({ pools: [] }));
   } catch (e) {
     toast(e.message, 'bad');
     return;
@@ -23,6 +24,8 @@ export async function openAddDrive() {
   }
   const types = (meta.types || []).slice().sort((a, b) => a.type.localeCompare(b.type));
   const mountPath = (mounts.mounts && mounts.mounts[0] && mounts.mounts[0].path) || '';
+  const poolNames = (pools.pools || []).map((p) => p.name);
+  const defaultPool = opts.pool || poolNames[0] || '';
 
   const opener = document.activeElement;
   const app = document.getElementById('app');
@@ -44,7 +47,13 @@ export async function openAddDrive() {
     const credNote = el('div', { class: 'dim', style: 'font-size:12px;margin-top:4px' });
     const mountWrap = el('label', { style: 'display:flex;align-items:center;gap:9px;font-size:13px' });
     const mountChk = el('input', { type: 'checkbox' });
-    if (mountPath) mountChk.checked = true;
+    // A pool exists: the new drive joins it by default, and a prefix of
+    // its own is the opt-in. Without a pool, the prefix is the default.
+    const poolWrap = el('label', { style: 'display:flex;align-items:center;gap:9px;font-size:13px' });
+    const poolChk = el('input', { type: 'checkbox' });
+    const poolSel = el('select', { style: 'flex-grow:1' }, ...poolNames.map((n) => el('option', { value: n }, n)));
+    if (defaultPool) { poolChk.checked = true; poolSel.value = defaultPool; }
+    if (mountPath && !defaultPool) mountChk.checked = true;
     const prefixInput = el('input', { type: 'text', style: 'flex-grow:1' });
 
     function refreshType() {
@@ -69,9 +78,10 @@ export async function openAddDrive() {
     const create = el('button', { class: 'primary' }, t('add.create'));
     const cancel = el('button', {}, t('confirm.cancel'));
     cancel.addEventListener('click', close);
-    create.addEventListener('click', () => submit(typeSel.value, nameInput.value.trim(), fieldsHost, mountChk.checked, prefixInput.value.trim(), create));
+    create.addEventListener('click', () => submit(typeSel.value, nameInput.value.trim(), fieldsHost, mountChk.checked, prefixInput.value.trim(), poolChk.checked ? poolSel.value : '', create));
 
     mountWrap.append(mountChk, el('span', {}, t('add.mount')), prefixInput);
+    poolWrap.append(poolChk, el('span', {}, t('add.pool')), poolSel);
 
     body.replaceChildren(
       el('h3', {}, t('add.title')),
@@ -80,13 +90,14 @@ export async function openAddDrive() {
         labeled(t('add.name'), nameInput),
         fieldsHost,
         credNote,
+        poolNames.length ? poolWrap : null,
         mountPath ? mountWrap : null),
       el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' }, cancel, create));
     refreshType();
     nameInput.focus();
   }
 
-  async function submit(type, name, fieldsHost, doMount, prefix, btn) {
+  async function submit(type, name, fieldsHost, doMount, prefix, pool, btn) {
     if (!name) { toast(t('add.name') + ' ' + t('add.required'), 'bad'); return; }
     const fields = {};
     for (const inp of fieldsHost.querySelectorAll('input[data-field]')) {
@@ -94,6 +105,7 @@ export async function openAddDrive() {
     }
     const payload = { name, type, fields };
     if (doMount && mountPath) { payload.mount = mountPath; payload.prefix = prefix || ('/' + name); payload.mode = 'writeback'; }
+    if (pool) payload.pool = pool;
     btn.disabled = true; const label = btn.textContent; btn.textContent = t('add.creating');
     try {
       const res = await api.post('/accounts', payload);

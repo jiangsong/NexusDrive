@@ -12,6 +12,8 @@ import { get, subscribe } from '/ui/store.js';
 function stateCell(entry) {
   if (entry.is_dir) return el('span', { class: 'dim' }, el('span', { class: 'dot ok' }), ' ' + t('state.dir'));
   if (entry.local_only) return el('span', { style: 'color:var(--warn-text)' }, iconEl('up'), ' ' + t('state.pending'));
+  if (entry.availability === 'unavailable') return el('span', { style: 'color:var(--danger-text)', title: entry.degraded_reason || '' }, el('span', { class: 'dot bad' }), ' ' + t('avail.unavailable'));
+  if (entry.availability === 'degraded') return el('span', { style: 'color:var(--warn-text)', title: entry.degraded_reason || '' }, el('span', { class: 'dot warn' }), ` ${t('avail.degraded')} ${entry.replicas_live}/${entry.replicas_target}`);
   if (entry.pinned) return el('span', { style: 'color:var(--accent-text)' }, iconEl('pin'), ' ' + t('state.pinned'));
   if (entry.cached >= 1) return el('span', { class: 'dim' }, el('span', { class: 'dot ok' }), ' ' + t('state.cached'));
   if (entry.cached > 0) return el('span', { style: 'color:var(--warn-text)' }, `${t('state.partial')} ${Math.round(entry.cached * 100)}%`);
@@ -137,6 +139,7 @@ export function renderMain(host) {
       el('div', { class: 'dim', style: 'font-size:12px;margin-bottom:16px' }, e.is_dir ? '目录' : bytes(e.size)),
       infoRow('虚拟路径', e.path),
       infoRow('本地状态', e.local_only ? t('state.pending') : e.pinned ? t('state.pinned') : e.cached >= 1 ? t('state.cached') : e.cached > 0 ? `${Math.round(e.cached * 100)}%` : t('state.remote')),
+      e.availability ? infoRow('副本', `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}` + (e.degraded_reason ? `（${e.degraded_reason}）` : '')) : null,
       e.is_dir ? null : el('div', { class: 'progress' + (e.cached < 1 ? ' warn' : ''), style: 'margin:12px 0' }, el('span', { style: `width:${Math.round((e.cached || 0) * 100)}%` })),
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),
