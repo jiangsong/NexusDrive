@@ -30,6 +30,20 @@ type filesystem struct {
 	ops   map[string]int64
 	rbyte int64
 	rsize map[string]int64
+
+	// dirMu guards a per-open-directory snapshot so Readdir can resume from an
+	// offset the host hands back when its buffer fills, rather than re-listing
+	// from the top each call (which truncates or loops a large directory).
+	dirMu     sync.Mutex
+	dirs      map[uint64]*dirSnapshot
+	nextDirFH uint64
+}
+
+// dirSnapshot is one open directory's listing, taken at Opendir and paged
+// through by Readdir until Releasedir drops it.
+type dirSnapshot struct {
+	dir     string
+	entries []vfs.Attr
 }
 
 func newFilesystem(opt MountOptions) *filesystem {
@@ -45,6 +59,7 @@ func newFilesystem(opt MountOptions) *filesystem {
 		ctx:   context.Background(),
 		ops:   map[string]int64{},
 		rsize: map[string]int64{},
+		dirs:  map[uint64]*dirSnapshot{},
 	}
 }
 
@@ -159,26 +174,54 @@ func (f *filesystem) Getattr(p string, st *fuse.Stat_t, _ uint64) int {
 // Opendir is accepted so Readdir can run; the directory handle is unused
 // because Readdir lists by path.
 func (f *filesystem) Opendir(p string) (int, uint64) {
-	a, err := f.fs.StatPath(f.ctx, clean(p))
+	entries, err := f.fs.ReadDirPath(f.ctx, clean(p))
 	if err != nil {
 		return errc(err), ^uint64(0)
 	}
-	if !a.IsDir {
-		return -fuse.ENOTDIR, ^uint64(0)
-	}
-	return 0, 0
+	f.dirMu.Lock()
+	f.nextDirFH++
+	fh := f.nextDirFH
+	f.dirs[fh] = &dirSnapshot{dir: clean(p), entries: entries}
+	f.dirMu.Unlock()
+	return 0, fh
 }
 
 // Readdir lists a directory. It fills a full Stat_t per entry (readdir-plus).
-func (f *filesystem) Readdir(p string, fill func(name string, st *fuse.Stat_t, ofst int64) bool, _ int64, _ uint64) int {
+func (f *filesystem) Readdir(p string, fill func(name string, st *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
 	f.count("readdir")
-	entries, err := f.fs.ReadDirPath(f.ctx, clean(p))
-	if err != nil {
-		return errc(err)
+	f.dirMu.Lock()
+	snap := f.dirs[fh]
+	f.dirMu.Unlock()
+	var entries []vfs.Attr
+	if snap != nil {
+		entries = snap.entries
+	} else {
+		// No handle (a host that lists without Opendir): fall back to a fresh
+		// listing. Paging is still honoured within this one call.
+		var err error
+		entries, err = f.fs.ReadDirPath(f.ctx, clean(p))
+		if err != nil {
+			return errc(err)
+		}
 	}
-	fill(".", nil, 0)
-	fill("..", nil, 0)
-	for _, a := range entries {
+	// The virtual list is [".", "..", entries...]. The offset passed to fill is
+	// where a later Readdir resumes *after* that entry, so a host whose buffer
+	// fills mid-listing continues instead of restarting from the top.
+	i := ofst
+	if i <= 0 {
+		if !fill(".", nil, 1) {
+			return 0
+		}
+		i = 1
+	}
+	if i == 1 {
+		if !fill("..", nil, 2) {
+			return 0
+		}
+		i = 2
+	}
+	for ; i-2 < int64(len(entries)); i++ {
+		a := entries[i-2]
 		if !representable(a.Name) {
 			// A name Windows cannot hold is skipped rather than silently
 			// rewritten; see naming.go for why, and the limitation this is.
@@ -186,8 +229,8 @@ func (f *filesystem) Readdir(p string, fill func(name string, st *fuse.Stat_t, o
 		}
 		var st fuse.Stat_t
 		f.fillStat(a, &st)
-		if !fill(a.Name, &st, 0) {
-			break
+		if !fill(a.Name, &st, i+1) {
+			return 0
 		}
 	}
 	return 0
@@ -221,11 +264,13 @@ func (f *filesystem) Create(p string, flags int, _ uint32) (int, uint64) {
 	if !representable(name) {
 		return -fuse.EINVAL, ^uint64(0)
 	}
-	parent, err := f.fs.StatPath(f.ctx, dir)
+	ctx, cancel := durable(f.ctx)
+	defer cancel()
+	parent, err := f.fs.StatPath(ctx, dir)
 	if err != nil {
 		return errc(err), ^uint64(0)
 	}
-	h, err := f.fs.Create(f.ctx, parent.Ino, name)
+	h, err := f.fs.Create(ctx, parent.Ino, name)
 	if err != nil {
 		return errc(err), ^uint64(0)
 	}
@@ -318,7 +363,12 @@ func (f *filesystem) Release(_ string, fh uint64) int {
 	return errc(f.fs.Release(ctx, h))
 }
 
-func (f *filesystem) Releasedir(_ string, _ uint64) int { return 0 }
+func (f *filesystem) Releasedir(_ string, fh uint64) int {
+	f.dirMu.Lock()
+	delete(f.dirs, fh)
+	f.dirMu.Unlock()
+	return 0
+}
 
 // Truncate resizes a file. WinFsp may pass a valid fh (an open handle) or the
 // sentinel for a path-only truncate; vfs.TruncatePath prefers an open write
@@ -351,11 +401,13 @@ func (f *filesystem) Mkdir(p string, _ uint32) int {
 	if !representable(name) {
 		return -fuse.EINVAL
 	}
-	parent, err := f.fs.StatPath(f.ctx, dir)
+	ctx, cancel := durable(f.ctx)
+	defer cancel()
+	parent, err := f.fs.StatPath(ctx, dir)
 	if err != nil {
 		return errc(err)
 	}
-	_, err = f.fs.Mkdir(f.ctx, parent.Ino, name)
+	_, err = f.fs.Mkdir(ctx, parent.Ino, name)
 	return errc(err)
 }
 
@@ -365,11 +417,13 @@ func (f *filesystem) Unlink(p string) int {
 		return -fuse.EROFS
 	}
 	dir, name := split(p)
-	parent, err := f.fs.StatPath(f.ctx, dir)
+	ctx, cancel := durable(f.ctx)
+	defer cancel()
+	parent, err := f.fs.StatPath(ctx, dir)
 	if err != nil {
 		return errc(err)
 	}
-	return errc(f.fs.Remove(f.ctx, parent.Ino, name, false))
+	return errc(f.fs.Remove(ctx, parent.Ino, name, false))
 }
 
 func (f *filesystem) Rmdir(p string) int {
@@ -378,11 +432,13 @@ func (f *filesystem) Rmdir(p string) int {
 		return -fuse.EROFS
 	}
 	dir, name := split(p)
-	parent, err := f.fs.StatPath(f.ctx, dir)
+	ctx, cancel := durable(f.ctx)
+	defer cancel()
+	parent, err := f.fs.StatPath(ctx, dir)
 	if err != nil {
 		return errc(err)
 	}
-	return errc(f.fs.Remove(f.ctx, parent.Ino, name, false))
+	return errc(f.fs.Remove(ctx, parent.Ino, name, false))
 }
 
 func (f *filesystem) Rename(oldpath, newpath string) int {
@@ -395,15 +451,17 @@ func (f *filesystem) Rename(oldpath, newpath string) int {
 	if !representable(newName) {
 		return -fuse.EINVAL
 	}
-	oldParent, err := f.fs.StatPath(f.ctx, oldDir)
+	ctx, cancel := durable(f.ctx)
+	defer cancel()
+	oldParent, err := f.fs.StatPath(ctx, oldDir)
 	if err != nil {
 		return errc(err)
 	}
-	newParent, err := f.fs.StatPath(f.ctx, newDir)
+	newParent, err := f.fs.StatPath(ctx, newDir)
 	if err != nil {
 		return errc(err)
 	}
-	return errc(f.fs.Rename(f.ctx, oldParent.Ino, oldName, newParent.Ino, newName))
+	return errc(f.fs.Rename(ctx, oldParent.Ino, oldName, newParent.Ino, newName))
 }
 
 // clean normalises a WinFsp path (already forward-slashed) to the absolute
@@ -424,5 +482,10 @@ func split(p string) (dir, name string) {
 // durable detaches a commit from a cancellation so a close that must persist is
 // not abandoned midway. It mirrors fusefs.durable.
 func durable(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	// vfs.FromKernel tells the VFS this change came from the mount itself, so it
+	// does not turn around and invalidate what the kernel already made
+	// consistent — the same marking fusefs.durable applies. It matters once
+	// host.Notify is wired (winfs.go); marking now keeps the two adapters
+	// consistent and avoids a silent invalidation storm later.
+	return context.WithTimeout(vfs.FromKernel(context.WithoutCancel(ctx)), 5*time.Minute)
 }

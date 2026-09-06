@@ -52,9 +52,15 @@ func main() {
 	// A second launch pings the focus socket; raise the window when it does.
 	inst.onFocus(func() { w.Dispatch(func() { raiseWindow(w) }) })
 
-	// Resolve the daemon off the UI thread; navigate (or show the failure) on it.
+	// Resolve the daemon off the UI thread. Its own context is cancelled the
+	// moment the window closes — however it closes — so Close() below never
+	// races a resolve still in flight and can never leave a just-launched
+	// daemon orphaned.
+	resolveCtx, cancelResolve := context.WithCancel(ctx)
+	resolved := make(chan struct{})
 	go func() {
-		target, err := sh.Resolve(ctx)
+		defer close(resolved)
+		target, err := sh.Resolve(resolveCtx)
 		w.Dispatch(func() {
 			if err != nil {
 				w.SetHtml(placeholderHTML("无法连接守护进程", err.Error()))
@@ -64,13 +70,19 @@ func main() {
 		})
 	}()
 
-	// Ctrl-C in the launching terminal closes the window cleanly.
+	// Ctrl-C or SIGTERM closes the window cleanly.
 	go func() {
 		<-ctx.Done()
 		w.Dispatch(w.Terminate)
 	}()
 
-	w.Run()
+	w.Run() // returns when the window closes or Terminate is called
+
+	// The window is gone. Stop any in-flight resolve and wait for its goroutine
+	// to finish touching the shell before the deferred Close reads and tears it
+	// down; this is what turns the orphan race into a clean shutdown.
+	cancelResolve()
+	<-resolved
 }
 
 func defaultConfigPath() string {

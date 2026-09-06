@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"cloudfs/internal/config"
@@ -23,11 +24,18 @@ import (
 // shell resolves and owns the daemon the WebView talks to. It never hands the
 // WebView a unix-socket URL — a WebView cannot open one — so a socket-only
 // daemon is reached through a small loopback reverse proxy this process runs.
+//
+// mu guards the fields Resolve writes from a background goroutine and Close
+// reads from the main goroutine: without it, closing the window while a slow
+// launch is still in flight could read daemon==nil, miss it, and leave the
+// just-started daemon orphaned.
 type shell struct {
+	mu         sync.Mutex
 	configPath string
 	cfg        *config.Config
 	proxy      *http.Server
-	daemon     *exec.Cmd // set only when this shell launched the daemon
+	daemon     *exec.Cmd  // set only when this shell launched the daemon
+	exited     chan error // receives cmd.Wait() for a launched daemon
 }
 
 func newShell(configPath string, cfg *config.Config) *shell {
@@ -119,6 +127,14 @@ func probeUI(ctx context.Context, transport http.RoundTripper) error {
 
 // launch starts a fresh daemon with a loopback TCP dashboard on a free port,
 // handed to it in CLOUDFS_CONTROL_UI, and waits for it to answer.
+//
+// Note the threat-model shift this makes on a shared host: the daemon's control
+// plane, otherwise reachable only over a 0700 unix socket, is now also on a
+// loopback TCP port. privateRequest still blocks browser-driven cross-site
+// requests, but it cannot stop another local process (not bound by same-origin)
+// from forging the Host/Origin headers. The port is random and lives only for
+// the session, but on a multi-user machine this is a wider surface than the
+// socket alone; it is documented in docs/distribution.md.
 func (s *shell) launch(ctx context.Context) (string, error) {
 	port, err := freeLoopbackPort()
 	if err != nil {
@@ -136,41 +152,62 @@ func (s *shell) launch(ctx context.Context) (string, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), "CLOUDFS_CONTROL_UI="+addr)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	configureDaemonCmd(cmd) // platform hook: a new process group on Windows
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	s.daemon = cmd
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
+	// One Wait goroutine owns the child. Its result feeds `exited`, which both
+	// the readiness loop (to fail fast if the daemon dies early) and Close (to
+	// reap it without a second Wait) read.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	s.mu.Lock()
+	s.daemon, s.exited = cmd, exited
+	s.mu.Unlock()
+
+	deadline := time.After(20 * time.Second)
+	tick := time.NewTicker(300 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		if _, online, _ := control.FetchStatus(ctx, "", addr); online {
 			return "http://" + addr + "/", nil
 		}
 		select {
+		case err := <-exited:
+			return "", fmt.Errorf("the daemon exited before it was ready: %w", err)
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(300 * time.Millisecond):
+		case <-deadline:
+			return "", errors.New("the daemon did not come up in time; check its output in this terminal")
+		case <-tick.C:
 		}
 	}
-	return "", errors.New("the daemon did not come up in time; check its output in this terminal")
 }
 
 // Close shuts down the front door and, if this shell launched the daemon, takes
-// it down too. A daemon this shell only attached to is left running.
+// it down too. A daemon this shell only attached to is left running. It is safe
+// to call after Resolve has finished (main waits for the resolve goroutine
+// before Close), so the fields it reads are stable.
 func (s *shell) Close() {
-	if s.proxy != nil {
+	s.mu.Lock()
+	proxy, cmd, exited := s.proxy, s.daemon, s.exited
+	s.mu.Unlock()
+	if proxy != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.proxy.Shutdown(ctx)
+		_ = proxy.Shutdown(ctx)
 		cancel()
 	}
-	if s.daemon != nil && s.daemon.Process != nil {
-		_ = s.daemon.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() { _, _ = s.daemon.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			_ = s.daemon.Process.Kill()
-		}
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// Ask for a graceful stop (SIGINT on unix, a console break on Windows) so
+	// the daemon runs cmdMount's unmount/close path; fall back to a hard kill.
+	terminateDaemon(cmd.Process)
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-exited // reap; the Wait goroutine returns once the kill lands
 	}
 }
 
