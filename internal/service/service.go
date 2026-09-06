@@ -269,6 +269,12 @@ func (rt Runtime) prepare(cfg *config.Config, configPath string) (file, mountPat
 			return "", "", "", err
 		}
 	}
+	// The service manages exactly one mount — the unit runs `cloudfs mount`
+	// against the first. Say so, so a multi-mount config does not leave a user
+	// thinking uninstall detached everything.
+	if len(cfg.Mounts) > 1 {
+		fmt.Fprintf(rt.writer(), "service: note: only the first mount (%s) is managed; the other %d are not installed, started or detached by this service\n", mountPath, len(cfg.Mounts)-1)
+	}
 	return file, mountPath, absConfig, nil
 }
 
@@ -280,8 +286,13 @@ func (rt Runtime) writer() io.Writer {
 }
 
 func safeServiceValue(value string) error {
-	if value == "" || strings.ContainsAny(value, "\x00\r\n") {
+	if value == "" {
 		return errors.New("service: executable, config and mount paths must be nonempty single-line values")
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("service: executable, config and mount paths must not contain control characters")
+		}
 	}
 	return nil
 }

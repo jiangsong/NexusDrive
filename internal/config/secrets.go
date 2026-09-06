@@ -194,8 +194,12 @@ func atomicPrivateWrite(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	return d.Sync()
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 // UpdateRemoteFields preserves YAML comments and unrelated settings, and

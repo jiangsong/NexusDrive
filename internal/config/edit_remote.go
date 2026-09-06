@@ -56,9 +56,11 @@ func RemoveRemote(configPath, name string) error {
 }
 
 // SetRemoteFieldOptions is a partial update of one account. A nil pointer
-// leaves that setting alone. For Fields, a nil value deletes the key and a
-// non-nil one sets it. Proxy "" and UploadWorkers 0 remove their keys, which
-// returns the setting to the default.
+// leaves that setting alone. For Fields, a nil value — or a pointer to the
+// empty string — deletes the key; any other value sets it. Proxy "" and
+// UploadWorkers 0 likewise remove their keys, returning the setting to the
+// default. There is deliberately no way to set an extra field to the empty
+// string: an empty scalar and an absent key mean the same thing to the drivers.
 type SetRemoteFieldOptions struct {
 	Fields        map[string]*string
 	Proxy         *string

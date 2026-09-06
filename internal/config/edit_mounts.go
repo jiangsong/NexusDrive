@@ -12,8 +12,11 @@ import (
 // validMountPrefix is the one rule for a layout prefix: absolute, cleaned,
 // no backslash or NUL.
 func validMountPrefix(prefix string) error {
-	if !strings.HasPrefix(prefix, "/") || prefix != path.Clean(prefix) || strings.ContainsAny(prefix, "\\\x00") {
+	if !strings.HasPrefix(prefix, "/") || prefix != path.Clean(prefix) || strings.ContainsAny(prefix, "\\\x00") || containsControl(prefix) {
 		return errors.New("config: mount prefix must be absolute and normalized")
+	}
+	if len(prefix) > 4096 {
+		return errors.New("config: mount prefix is too long")
 	}
 	return nil
 }
@@ -87,8 +90,11 @@ func checkLayout(c *Config, layout Layout) error {
 // entry when it does not exist yet. An existing prefix is refused: replacing
 // what a path shows is SetLayout's job, said explicitly.
 func AddMount(configPath, mountPath, prefix string, layout Layout) error {
-	if strings.TrimSpace(mountPath) == "" || strings.ContainsAny(mountPath, "\x00") {
-		return errors.New("config: mount path is required")
+	if strings.TrimSpace(mountPath) == "" || containsControl(mountPath) {
+		return errors.New("config: mount path is required and must be a single-line value without control characters")
+	}
+	if len(mountPath) > 4096 {
+		return errors.New("config: mount path is too long")
 	}
 	if layout.Mode == "" {
 		layout.Mode = ModeWriteback

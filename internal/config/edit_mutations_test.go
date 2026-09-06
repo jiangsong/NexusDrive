@@ -171,6 +171,25 @@ func TestMountEditorsAddReplaceAndRemoveLayouts(t *testing.T) {
 	if err := AddMount(p, "/mnt/other", "relative", Layout{Remote: "nas"}); err == nil {
 		t.Fatal("accepted a relative prefix")
 	}
+	// A newline in the mount path or prefix must not reach the YAML: it is the
+	// classic injection an HTTP mounts API would otherwise pass straight
+	// through. Both fields are validated at the write boundary.
+	if err := AddMount(p, "/mnt/evil\ninjected: true", "/x", Layout{Remote: "nas"}); err == nil {
+		t.Fatal("accepted a newline in the mount path")
+	}
+	if err := AddMount(p, "/mnt/other", "/x\ninjected: true", Layout{Remote: "nas"}); err == nil {
+		t.Fatal("accepted a newline in the prefix")
+	}
+	if c := mustLoad(t, p); func() bool {
+		for _, m := range c.Mounts {
+			if strings.Contains(m.Path, "injected") {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Fatal("an injected value reached the configuration")
+	}
 	if err := AddMount(p, "/mnt/other", "/ghost", Layout{Remote: "ghost"}); err == nil {
 		t.Fatal("accepted a layout for a remote that does not exist")
 	}

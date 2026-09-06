@@ -46,6 +46,12 @@ func TestDefinitionsQuoteArgumentsAndRestartOnFailure(t *testing.T) {
 	if err := safeServiceValue("bad\npath"); err == nil {
 		t.Fatal("accepted multiline service argument")
 	}
+	if err := safeServiceValue("esc\x1bseq"); err == nil {
+		t.Fatal("accepted a control character in a service argument")
+	}
+	if err := safeServiceValue("/opt/cloud fs/bin"); err != nil {
+		t.Fatalf("rejected a legitimate path with a space: %v", err)
+	}
 }
 
 func TestLinuxInstallAndUninstall(t *testing.T) {
