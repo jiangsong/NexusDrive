@@ -96,3 +96,25 @@ func ContentRangeHasher(src io.ReaderAt, size int64) UploadRangeHasher {
 		return hex.EncodeToString(h.Sum(nil)), nil
 	}
 }
+
+// UploadBlobLinker hard-links the immutable content of the upload in
+// progress to dst, so a backend that wants to keep the bytes past the
+// transfer — a storage pool replicating them to other members — does not
+// have to read them back from the network after the queue reclaims its own
+// copy. The link shares the inode the queue and the read cache already
+// share; nothing is copied. It fails across filesystems, and the caller
+// must treat that as "no local copy", not as an error of the upload.
+type UploadBlobLinker func(dst string) error
+
+type uploadBlobKey struct{}
+
+func WithUploadBlobLink(ctx context.Context, link UploadBlobLinker) context.Context {
+	return context.WithValue(ctx, uploadBlobKey{}, link)
+}
+
+// UploadBlobLinkFrom returns the linker the uploader put in ctx, or nil when
+// the caller is not the uploader (a test, a copy pipeline).
+func UploadBlobLinkFrom(ctx context.Context) UploadBlobLinker {
+	link, _ := ctx.Value(uploadBlobKey{}).(UploadBlobLinker)
+	return link
+}

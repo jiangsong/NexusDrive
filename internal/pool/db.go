@@ -72,6 +72,38 @@ CREATE TABLE IF NOT EXISTS member_dirs (
   PRIMARY KEY (member, path)
 );
 CREATE INDEX IF NOT EXISTS member_dirs_parent ON member_dirs(parent, member);
+CREATE TABLE IF NOT EXISTS pending_ops (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  member     TEXT NOT NULL,
+  op         TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  parent     TEXT NOT NULL,
+  args       TEXT NOT NULL DEFAULT '',
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  next_at    INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  state      TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_ops_member ON pending_ops(member, state, seq);
+CREATE INDEX IF NOT EXISTS pending_ops_parent ON pending_ops(parent, member);
+CREATE TABLE IF NOT EXISTS repair_queue (
+  path        TEXT PRIMARY KEY,
+  reason      TEXT NOT NULL,
+  priority    INTEGER NOT NULL DEFAULT 0,
+  next_at     INTEGER NOT NULL DEFAULT 0,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  source_hint TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS holds (
+  hold_path  TEXT PRIMARY KEY,
+  path       TEXT NOT NULL,
+  ctoken     TEXT NOT NULL DEFAULT '',
+  size       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS holds_path ON holds(path);
 CREATE TABLE IF NOT EXISTS divergences (
   path    TEXT NOT NULL,
   member  TEXT NOT NULL,

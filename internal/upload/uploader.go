@@ -353,6 +353,15 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 		_ = u.opt.Journal.Succeed(ctx, up.ID)
 		return
 	}
+	if errors.Is(err, provider.ErrUnavailable) {
+		// Nothing that holds the destination can be reached. That is not a
+		// failure of this upload, and it must not spend the attempt budget:
+		// a pool whose members are all offline for an afternoon would
+		// otherwise dead-letter every write made that day. Wait and look
+		// again; the data stays in the journal meanwhile.
+		_ = u.opt.Journal.Defer(ctx, up.ID, unavailableRetry, err.Error())
+		return
+	}
 	if errors.Is(err, provider.ErrNotFound) && u.goneLocally(ctx, up) {
 		// The file, or the directory it lived in, was deleted here while
 		// this upload waited. Sending it is neither possible nor wanted,
@@ -570,6 +579,10 @@ func (u *Uploader) putWhole(ctx context.Context, sp provider.SinglePutter, up jo
 	return r, nil
 }
 
+// unavailableRetry is how long an upload waits when its backend reports
+// ErrUnavailable before the queue looks at it again.
+const unavailableRetry = 30 * time.Second
+
 // errSessionExpired marks a resumed session the provider no longer knows.
 // The uploader clears the session and starts over rather than dead-lettering.
 var errSessionExpired = errors.New("upload: resumed session is no longer valid")
@@ -626,6 +639,9 @@ func (u *Uploader) begin(ctx context.Context, p provider.Provider, up journal.Up
 	defer content.Close()
 	ctx = provider.WithUploadRangeHasher(ctx, provider.ContentRangeHasher(content, up.Size))
 	ctx = provider.WithUploadContentReader(ctx, provider.ContentRangeReader(content, up.Size))
+	// A backend that wants to keep the bytes past this transfer links the
+	// blob itself; the queue's own link is released on success as before.
+	ctx = provider.WithUploadBlobLink(ctx, func(dst string) error { return os.Link(up.BlobPath, dst) })
 	var sess provider.UploadSession
 	err = u.opt.Policy.Do(ctx, func() error {
 		var e error
@@ -638,23 +654,32 @@ func (u *Uploader) begin(ctx context.Context, p provider.Provider, up journal.Up
 // remoteChanged reports whether the remote file's version differs from what
 // the writer saw when it opened the file.
 func (u *Uploader) remoteChanged(ctx context.Context, p provider.Provider, up journal.Upload) (bool, error) {
-	entries, _, err := p.List(ctx, up.RemoteParentID, "")
-	if err != nil {
-		return false, err
-	}
 	expected := up.ExpectedVersion
 	if u.opt.Hooks.RemoteVersion != nil {
 		if v, ok := u.opt.Hooks.RemoteVersion(ctx, up); ok && v != "" {
 			expected = v
 		}
 	}
-	for _, e := range entries {
-		if e.Name == up.Name {
-			return e.Version != "" && e.Version != expected, nil
+	// The whole directory, not its first page: a file past the first page
+	// of a large directory would otherwise always look unchanged, and a
+	// rewrite of it would silently overwrite someone else's edit.
+	cursor := ""
+	for {
+		entries, next, err := p.List(ctx, up.RemoteParentID, cursor)
+		if err != nil {
+			return false, err
 		}
+		for _, e := range entries {
+			if e.Name == up.Name {
+				return e.Version != "" && e.Version != expected, nil
+			}
+		}
+		if next == "" {
+			// The file is gone; recreating it is not a conflict.
+			return false, nil
+		}
+		cursor = next
 	}
-	// The file is gone; recreating it is not a conflict.
-	return false, nil
 }
 
 // conflictName renders "notes.md" as "notes (conflict 2026-09-02 host).md".

@@ -10,9 +10,12 @@ import (
 
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
+	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
+	"cloudfs/internal/net/retry"
 	"cloudfs/internal/pool"
 	"cloudfs/internal/provider"
+	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 	"cloudfs/test/fakeprovider"
 )
@@ -21,7 +24,12 @@ type poolRig struct {
 	fs      *vfs.FS
 	pool    *pool.Pool
 	members map[string]*fakeprovider.Fake
+	j       *journal.Journal
+	up      *upload.Uploader
+	clock   time.Time
 }
+
+func (r *poolRig) now() time.Time { return r.clock }
 
 func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
 	t.Helper()
@@ -36,7 +44,7 @@ func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ca.Close() })
-	r := &poolRig{members: map[string]*fakeprovider.Fake{}}
+	r := &poolRig{members: map[string]*fakeprovider.Fake{}, clock: time.Now()}
 	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: config.Pool{Replicas: 2, MinReplicas: 1}}
 	for _, n := range memberNames {
 		f := fakeprovider.New(n)
@@ -59,6 +67,25 @@ func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
 	}
 	t.Cleanup(func() { fsys.Close() })
 	r.fs = fsys
+	j, err := journal.Open(journal.Options{Dir: filepath.Join(dir, "journal"), Now: r.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	up, err := upload.New(upload.Options{
+		Journal:     j,
+		Providers:   func(remote string) (provider.Provider, bool) { return p, remote == "home" },
+		Now:         r.now,
+		MaxAttempts: 4,
+		Policy:      retry.Policy{Backoff: retry.Backoff{Base: time.Millisecond, Max: 2 * time.Millisecond}, MaxAttempts: 2},
+		Backoff:     retry.Backoff{Base: time.Millisecond, Max: 2 * time.Millisecond, Rand: func() float64 { return 1 }},
+		Hooks:       fsys.UploadHooks(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys.SetWriteBackend(j, up)
+	r.j, r.up = j, up
 	return r
 }
 
@@ -112,5 +139,116 @@ func TestPoolListSurvivesOneMemberDown(t *testing.T) {
 	a.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = false })
 	if data, err := r.fs.ReadFileRange(ctx, "/on-a.txt", 0, 0); err != nil || string(data) != "a" {
 		t.Fatalf("after recovery = %q, %v", data, err)
+	}
+}
+
+// TestPoolWriteThroughTheVFSLandsOnAMember: the whole write path — staging,
+// journal commit, upload — works against a pool exactly as against one
+// drive, and the file ends up at its real path on a member.
+func TestPoolWriteThroughTheVFSLandsOnAMember(t *testing.T) {
+	r := newPoolRig(t, "a", "b")
+	ctx := context.Background()
+	if _, err := r.fs.Mkdir(ctx, meta.RootIno, "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.fs.WriteFile(ctx, "/notes/today.md", []byte("# today"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.up.DrainOnce(ctx, "home"); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := r.j.Stats(ctx)
+	if st.Pending+st.Uploading+st.Dead != 0 {
+		t.Fatalf("queue after drain: %+v", st)
+	}
+	attr, err := r.fs.StatPath(ctx, "/notes/today.md")
+	if err != nil || attr.LocalOnly {
+		t.Fatalf("node not adopted after upload: %+v, %v", attr, err)
+	}
+	landed := 0
+	for name, f := range r.members {
+		if got, ok := f.Content("/notes/today.md"); ok {
+			landed++
+			if string(got) != "# today" {
+				t.Fatalf("%s holds %q", name, got)
+			}
+		}
+	}
+	if landed != 1 {
+		t.Fatalf("the upload landed on %d members, want exactly the primary", landed)
+	}
+	data, err := r.fs.ReadFileRange(ctx, "/notes/today.md", 0, 0)
+	if err != nil || string(data) != "# today" {
+		t.Fatalf("read back = %q, %v", data, err)
+	}
+}
+
+// TestPoolWriteWhenAllMembersDownDefersInsteadOfDeadLettering: "成员全部失联"
+// is not a failed upload. The write stays committed in the journal, spends
+// no attempts, keeps its bytes, and lands when a member returns.
+func TestPoolWriteWhenAllMembersDownDefersInsteadOfDeadLettering(t *testing.T) {
+	r := newPoolRig(t, "a", "b")
+	ctx := context.Background()
+	if _, err := r.fs.WriteFile(ctx, "/offline.txt", []byte("written while every drive is down"), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range r.members {
+		f.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = true })
+	}
+	for i := 0; i < 6; i++ {
+		r.clock = r.clock.Add(time.Minute)
+		if _, err := r.up.DrainOnce(ctx, "home"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _ := r.j.Stats(ctx)
+	if st.Dead != 0 || st.Pending+st.Uploading != 1 {
+		t.Fatalf("queue with every member down: %+v", st)
+	}
+	ups, _ := r.j.All(ctx)
+	if len(ups) != 1 || ups[0].Attempt != 0 {
+		t.Fatalf("attempts were spent on an outage: %+v", ups)
+	}
+	if data, err := r.fs.ReadFileRange(ctx, "/offline.txt", 0, 0); err != nil || string(data) != "written while every drive is down" {
+		t.Fatalf("local read during the outage = %q, %v", data, err)
+	}
+	r.members["b"].SetFaults(func(ft *fakeprovider.Faults) { ft.Down = false })
+	r.clock = r.clock.Add(time.Minute) // past the deferral
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := r.members["b"].Content("/offline.txt"); !ok || string(got) != "written while every drive is down" {
+		t.Fatalf("after b returned: %q, %v", got, ok)
+	}
+}
+
+// TestPoolRemoteChangedUnderUsProducesConflictCopy: the existing conflict
+// rule holds through a pool. A member's copy edited after our writer opened
+// the file is not overwritten; our data lands beside it.
+func TestPoolRemoteChangedUnderUsProducesConflictCopy(t *testing.T) {
+	r := newPoolRig(t, "a", "b")
+	ctx := context.Background()
+	r.members["a"].Seed("/shared.md", []byte("original"))
+	if data, err := r.fs.ReadFileRange(ctx, "/shared.md", 0, 0); err != nil || string(data) != "original" {
+		t.Fatalf("seeded read = %q, %v", data, err)
+	}
+	if _, err := r.fs.WriteFile(ctx, "/shared.md", []byte("my edit"), false); err != nil {
+		t.Fatal(err)
+	}
+	// Someone else edits the member's copy before ours goes out.
+	r.members["a"].Seed("/shared.md", []byte("their edit"))
+	r.members["a"].SetMTime("/shared.md", time.Now().Add(time.Minute))
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.fs.DropCaches(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := listNames(t, r.fs, "/")
+	if !strings.Contains(got, "shared (conflict ") || !strings.Contains(got, "shared.md") {
+		t.Fatalf("listing after the race = %s", got)
+	}
+	if data, _ := r.members["a"].Content("/shared.md"); string(data) != "their edit" {
+		t.Fatalf("their edit was overwritten: %q", data)
 	}
 }

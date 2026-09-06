@@ -69,6 +69,7 @@ type Pool struct {
 	members  []*member
 	byName   map[string]*member
 	db       *sql.DB
+	stateDir string
 	now      func() time.Time
 	// mu serialises index updates: one directory merge writes many rows and
 	// two merges of the same directory must not interleave.
@@ -91,7 +92,7 @@ func New(opt Options) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Pool{name: opt.Name, settings: opt.Settings, db: db, byName: map[string]*member{}, now: opt.Now}
+	p := &Pool{name: opt.Name, settings: opt.Settings, db: db, stateDir: opt.StateDir, byName: map[string]*member{}, now: opt.Now}
 	if p.now == nil {
 		p.now = time.Now
 	}

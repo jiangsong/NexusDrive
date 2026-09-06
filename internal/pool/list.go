@@ -239,9 +239,14 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 	if err != nil {
 		return nil, err
 	}
+	pendingUnder, err := p.pendingOpsUnder(ctx, pth)
+	if err != nil {
+		return nil, err
+	}
 
 	// Observations by name.
 	byName := map[string][]obs{}
+	keepRows := map[replicaKey]bool{}
 	for _, r := range results {
 		switch {
 		case r.err != nil:
@@ -249,11 +254,15 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 				if row.member != r.m.name {
 					continue
 				}
+				if row.state == "stale" {
+					keepRows[replicaKey{row.path, r.m.name}] = true
+					continue
+				}
 				e := provider.Entry{ID: row.remoteID, Name: row.memberName, Kind: provider.KindFile, Size: row.size, ModTime: time.Unix(0, row.mtimeNS), Version: row.version}
 				if row.hashType != "" {
 					e.Hashes = provider.Hashes{provider.HashType(row.hashType): row.hash}
 				}
-				byName[e.Name] = append(byName[e.Name], obs{m: r.m, e: e, snapshot: true, ctoken: row.ctoken})
+				byName[path.Base(row.path)] = append(byName[path.Base(row.path)], obs{m: r.m, e: e, snapshot: true, ctoken: row.ctoken})
 			}
 			for dirPath, id := range existingDirs[r.m.name] {
 				name := path.Base(dirPath)
@@ -264,13 +273,38 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 				if hidden(e.Name) || e.Name == "" || strings.ContainsAny(e.Name, "/\x00") {
 					continue
 				}
-				ob := obs{m: r.m, e: e}
-				if row, ok := existingReplicas[replicaKey{joinPath(pth, e.Name), r.m.name}]; ok && row.version == e.Version && row.size == e.Size && row.mtimeNS == e.ModTime.UnixNano() {
-					ob.ctoken = row.ctoken
-				} else if row, ok := p.conflictRowFor(existingReplicas, pth, e.Name, r.m.name); ok && row.version == e.Version && row.size == e.Size && row.mtimeNS == e.ModTime.UnixNano() {
-					ob.ctoken = row.ctoken
+				physical := joinPath(pth, e.Name)
+				row, known := existingReplicas[replicaKey{physical, r.m.name}]
+				if !known {
+					row, known = p.physicalRowFor(existingReplicas, pth, e.Name, r.m.name)
 				}
-				byName[e.Name] = append(byName[e.Name], ob)
+				if pendingUnder[replicaKey{physical, r.m.name}] {
+					// A tree operation on this member is still to be
+					// replayed; what it shows here is the past, not a
+					// new observation. Its index row stays as it is.
+					if known {
+						keepRows[replicaKey{row.path, r.m.name}] = true
+					}
+					continue
+				}
+				ob := obs{m: r.m, e: e}
+				name := e.Name
+				if known && row.version == e.Version && row.size == e.Size && row.mtimeNS == e.ModTime.UnixNano() {
+					ob.ctoken = row.ctoken
+					switch row.state {
+					case "stale":
+						// Overwritten through the pool since; repair
+						// refreshes it. Not a conflict, not a replica.
+						keepRows[replicaKey{row.path, r.m.name}] = true
+						continue
+					case "pending":
+						// Renamed or moved through the pool, not yet on
+						// this member: it belongs to the entry at the
+						// new path.
+						name = path.Base(row.path)
+					}
+				}
+				byName[name] = append(byName[name], ob)
 			}
 		}
 	}
@@ -288,7 +322,7 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 	now := p.now().UnixNano()
 	var out []provider.Entry
 	produced := map[string]bool{}
-	seenReplica := map[replicaKey]bool{}
+	seenReplica := keepRows
 	seenDir := map[replicaKey]bool{}
 
 	err = p.tx(ctx, func(tx *sql.Tx) error {
@@ -425,9 +459,10 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 
 type replicaKey struct{ path, member string }
 
-// conflictRowFor finds the index row of a member's replica that was
-// surfaced as a conflict copy of pth/name.
-func (p *Pool) conflictRowFor(rows map[replicaKey]replicaRow, pth, name, member string) (replicaRow, bool) {
+// physicalRowFor finds the index row of a member's replica whose real name
+// on the member is name but which the pool indexes under another path: a
+// conflict copy, or a rename that member has not applied yet.
+func (p *Pool) physicalRowFor(rows map[replicaKey]replicaRow, pth, name, member string) (replicaRow, bool) {
 	for k, r := range rows {
 		if k.member == member && r.memberName == name && r.parent == pth && path.Base(k.path) != name {
 			return r, true
@@ -520,17 +555,11 @@ func (p *Pool) publishGroup(tx *sql.Tx, g *group, entryPath, parent, id, parentI
 		if ob.snapshot {
 			continue
 		}
-		oht, ohv := bestHash(ob.e.Hashes)
-		if _, err := tx.Exec(`INSERT INTO replicas(path, parent, member, remote_id, version, size, mtime_ns, hash_type, hash, ctoken, state, seen_at, member_name)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)
-			ON CONFLICT(path, member) DO UPDATE SET remote_id = excluded.remote_id, version = excluded.version, size = excluded.size,
-			mtime_ns = excluded.mtime_ns, hash_type = excluded.hash_type, hash = excluded.hash, ctoken = excluded.ctoken, state = 'live',
-			seen_at = excluded.seen_at, member_name = excluded.member_name`,
-			entryPath, parent, ob.m.name, ob.e.ID, ob.e.Version, ob.e.Size, ob.e.ModTime.UnixNano(), string(oht), ohv, g.token, now, ob.e.Name); err != nil {
-			return provider.Entry{}, err
+		state := "live"
+		if conflictOf == "" && ob.e.Name != name {
+			state = "pending" // the member still shows the old name
 		}
-		// The same physical file is indexed under exactly one path.
-		if _, err := tx.Exec(`DELETE FROM replicas WHERE member = ? AND parent = ? AND member_name = ? AND path <> ?`, ob.m.name, parent, ob.e.Name, entryPath); err != nil {
+		if err := upsertReplica(tx, entryPath, parent, ob.m.name, ob.e, g.token, state, now); err != nil {
 			return provider.Entry{}, err
 		}
 	}
@@ -646,4 +675,23 @@ func (p *Pool) forgetDirIDTx(tx *sql.Tx, m *member, pth string) {
 	m.mu.Unlock()
 	like := strings.ReplaceAll(strings.ReplaceAll(pth, "%", "\\%"), "_", "\\_") + "/%"
 	_, _ = tx.Exec(`DELETE FROM member_dirs WHERE member = ? AND (path = ? OR path LIKE ? ESCAPE '\')`, m.name, pth, like)
+}
+
+// pendingOpsUnder returns the (physical path, member) pairs under pth that
+// have a tree operation waiting to be replayed on that member.
+func (p *Pool) pendingOpsUnder(ctx context.Context, pth string) (map[replicaKey]bool, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT member, path, args FROM pending_ops WHERE parent = ? AND state = 'pending'`, pth)
+	if err != nil {
+		return nil, fmt.Errorf("pool: %w", err)
+	}
+	defer rows.Close()
+	out := map[replicaKey]bool{}
+	for rows.Next() {
+		var m, physical, args string
+		if err := rows.Scan(&m, &physical, &args); err != nil {
+			return nil, err
+		}
+		out[replicaKey{physical, m}] = true
+	}
+	return out, rows.Err()
 }

@@ -12,7 +12,7 @@ import (
 // replicasOf lists the live replicas of a file carrying the given content
 // token, in member declaration order.
 func (p *Pool) replicasOf(ctx context.Context, pth, ctoken string) ([]replicaRow, error) {
-	rows, err := p.db.QueryContext(ctx, `SELECT path, parent, member, remote_id, version, size, mtime_ns, hash_type, hash, ctoken, state, member_name FROM replicas WHERE path = ? AND state = 'live'`, pth)
+	rows, err := p.db.QueryContext(ctx, `SELECT path, parent, member, remote_id, version, size, mtime_ns, hash_type, hash, ctoken, state, member_name FROM replicas WHERE path = ? AND state IN ('live', 'pending')`, pth)
 	if err != nil {
 		return nil, fmt.Errorf("pool: %w", err)
 	}

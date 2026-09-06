@@ -9,8 +9,12 @@ import (
 
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
+	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
+	"cloudfs/internal/net/retry"
 	"cloudfs/internal/pool"
+	"cloudfs/internal/provider"
+	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 	"cloudfs/test/fakeprovider"
 )
@@ -20,6 +24,7 @@ import (
 type poolHarness struct {
 	fs      *vfs.FS
 	members []*fakeprovider.Fake
+	up      *upload.Uploader
 }
 
 func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
@@ -57,6 +62,22 @@ func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
 	}
 	t.Cleanup(func() { fsys.Close() })
 	h.fs = fsys
+	j, err := journal.Open(journal.Options{Dir: filepath.Join(dir, "journal")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	up, err := upload.New(upload.Options{
+		Journal:   j,
+		Providers: func(string) (provider.Provider, bool) { return p, true },
+		Policy:    retry.Policy{Backoff: retry.Backoff{Base: time.Millisecond, Max: time.Millisecond}, MaxAttempts: 2},
+		Hooks:     fsys.UploadHooks(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys.SetWriteBackend(j, up)
+	h.up = up
 	return h
 }
 
@@ -128,5 +149,69 @@ func TestPoolColdDirCostsOneCallPerHoldingMember(t *testing.T) {
 	}
 	if dc != 0 {
 		t.Fatalf("a member without the directory was asked %d times", dc)
+	}
+}
+
+// TestPoolWriteThenReadIsLocal: what this machine wrote it reads from its
+// own cache, before and after the upload, without asking any member.
+func TestPoolWriteThenReadIsLocal(t *testing.T) {
+	h := newPoolHarness(t, "a", "b")
+	ctx := context.Background()
+	if _, err := h.fs.WriteFile(ctx, "/local.txt", []byte("mine"), false); err != nil {
+		t.Fatal(err)
+	}
+	before := h.memberCalls()
+	if data, err := h.fs.ReadFileRange(ctx, "/local.txt", 0, 0); err != nil || string(data) != "mine" {
+		t.Fatalf("read before upload = %q, %v", data, err)
+	}
+	if extra := h.memberCalls() - before; extra != 0 {
+		t.Fatalf("reading a just-written file cost %d member calls", extra)
+	}
+	if _, err := h.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := h.memberCalls()
+	if data, err := h.fs.ReadFileRange(ctx, "/local.txt", 0, 0); err != nil || string(data) != "mine" {
+		t.Fatalf("read after upload = %q, %v", data, err)
+	}
+	if extra := h.memberCalls() - after; extra != 0 {
+		t.Fatalf("reading an uploaded file cost %d member calls", extra)
+	}
+}
+
+// TestPoolDedupUploadCostsNoParts: bytes a member already holds go up by
+// hash. The second write of the same content sends no part anywhere.
+func TestPoolDedupUploadCostsNoParts(t *testing.T) {
+	h := newPoolHarness(t, "a", "b")
+	ctx := context.Background()
+	content := []byte("the same bytes twice")
+	if _, err := h.fs.WriteFile(ctx, "/one.bin", content, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	parts := 0
+	for _, m := range h.members {
+		parts += m.Calls("UploadPart")
+	}
+	if parts == 0 {
+		t.Fatal("the first upload should have sent parts")
+	}
+	if _, err := h.fs.WriteFile(ctx, "/two.bin", content, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := 0
+	for _, m := range h.members {
+		after += m.Calls("UploadPart")
+	}
+	if after != parts {
+		t.Fatalf("the second upload of the same bytes sent %d parts", after-parts)
+	}
+	if data, err := h.fs.ReadFileRange(ctx, "/two.bin", 0, 0); err != nil || string(data) != string(content) {
+		t.Fatalf("dedup read = %q, %v", data, err)
 	}
 }
