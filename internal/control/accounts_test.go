@@ -47,6 +47,9 @@ func accountRequest(t *testing.T, srv *Server, method, target string, body any) 
 	if method != http.MethodGet {
 		req.Header.Set("X-CloudFS-Control", "1")
 	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	return rr

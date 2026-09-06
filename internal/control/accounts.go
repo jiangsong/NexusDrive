@@ -77,6 +77,8 @@ type AddAccountResponse struct {
 	// NextCommand is the credential step, which this API does not perform.
 	NextCommand string `json:"next_command"`
 	Credentials string `json:"credentials,omitempty"`
+	// RestartRequired: the file changed; the running daemon has not.
+	RestartRequired bool `json:"restart_required"`
 }
 
 func (c *Collector) accountTypes() []AccountType {
@@ -159,10 +161,12 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.reloadConfigView()
 	writeJSON(w, AddAccountResponse{
 		Name: in.Name, Type: in.Type,
-		NextCommand: fmt.Sprintf("cloudfs config auth %s --config %s", in.Name, cfg.SourcePath),
-		Credentials: credentialSummary(in.Type),
+		NextCommand:     fmt.Sprintf("cloudfs config auth %s --config %s", in.Name, cfg.SourcePath),
+		Credentials:     credentialSummary(in.Type),
+		RestartRequired: true,
 	})
 }
 

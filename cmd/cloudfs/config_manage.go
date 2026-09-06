@@ -468,17 +468,7 @@ func checkConfiguredAccount(ctx context.Context, cfg *config.Config, name string
 		}
 		// Provider errors may embed signed URLs, cookies or OAuth query
 		// strings. Do not print them from credential-management commands.
-		kind := "connection/provider error"
-		if errors.Is(err, provider.ErrAuth) {
-			kind = "authentication rejected"
-		}
-		if errors.Is(err, provider.ErrRateLimited) {
-			kind = "rate limited"
-		}
-		if errors.Is(err, provider.ErrRiskControl) {
-			kind = "risk control; pause account activity"
-		}
-		return fmt.Errorf("account check failed (%s); verify credentials, proxy and root settings", kind)
+		return daemon.SanitizeAccountError(err)
 	}
 	fmt.Fprintf(out, "account %q: root listing succeeded\n", name)
 	return nil

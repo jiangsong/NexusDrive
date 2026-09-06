@@ -40,6 +40,18 @@ func defaultRulesFor(opt ManagerOptions) []string {
 	return out
 }
 
+// DefaultTargetFor reports what the built-in rules' placeholder resolves to
+// for opt: the name of the group or outbound overseas hosts go through when no
+// rule of the user's own says otherwise, or "direct" when nothing proxy-like
+// is configured. The proxy page shows it so that "where does Drive go?" has an
+// answer before the first request.
+func DefaultTargetFor(opt ManagerOptions) string {
+	if t := defaultProxyTarget(opt); t != DefaultProxyTarget {
+		return t
+	}
+	return DefaultProxyTarget
+}
+
 func defaultProxyTarget(opt ManagerOptions) string {
 	for _, g := range opt.Groups {
 		if g.Name == DefaultProxyTarget {

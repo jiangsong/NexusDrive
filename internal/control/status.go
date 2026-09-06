@@ -160,6 +160,15 @@ type Collector struct {
 	// FuseStats, when set, reports the kernel request counters of the
 	// live mount.
 	FuseStats func() FuseStatus
+	// Providers are the live backends by remote name, for the capability
+	// table an account page shows. Nothing is served from them but Caps.
+	Providers map[string]provider.Provider
+	// CheckAccount performs one sanitised root listing of a configured
+	// remote; nil means the daemon does not offer it.
+	CheckAccount func(ctx context.Context, name string) error
+	// ReloadProxy applies a saved proxy section to the running daemon. nil
+	// means a proxy change needs a restart to take effect.
+	ReloadProxy func(p config.Proxy) error
 	// Doctor, when set, answers /doctor/run and /doctor/fix. It is the same
 	// runner `cloudfs doctor` uses, on the live daemon's own stores — which
 	// is the only place it can run while this process owns the journal.

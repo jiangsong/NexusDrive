@@ -344,6 +344,10 @@ func (d *Daemon) Collector() *control.Collector {
 		Version: d.version, Started: d.started,
 		FS: d.FS, Journal: d.Journal, Cache: d.Cache,
 		Proxy: d.Proxy, Limiters: d.Limiters, Remotes: remotes,
+		Providers: d.Providers,
+		CheckAccount: func(ctx context.Context, name string) error {
+			return SanitizeAccountError(CheckAccount(ctx, d.Config, name))
+		},
 		CallStats:     d.CallStats,
 		DropCaches:    d.DropCaches,
 		FlushUploads:  flush,

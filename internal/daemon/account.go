@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -64,6 +65,27 @@ func CheckAccount(ctx context.Context, cfg *config.Config, name string) error {
 	}
 	_, _, err = p.List(ctx, root, "")
 	return err
+}
+
+// SanitizeAccountError reduces a provider error to its kind. Provider errors
+// can embed signed URLs, cookies and OAuth query strings, so nothing that
+// reports an account check — the CLI, the control API — prints the original.
+func SanitizeAccountError(err error) error {
+	if err == nil {
+		return nil
+	}
+	kind := "connection/provider error"
+	switch {
+	case errors.Is(err, provider.ErrAuth):
+		kind = "authentication rejected"
+	case errors.Is(err, provider.ErrRateLimited):
+		kind = "rate limited"
+	case errors.Is(err, provider.ErrRiskControl):
+		kind = "risk control; pause account activity"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return err
+	}
+	return fmt.Errorf("account check failed (%s); verify credentials, proxy and root settings", kind)
 }
 
 // AuthorizationHTTP applies existing proxy rules and metadata rate limits.
