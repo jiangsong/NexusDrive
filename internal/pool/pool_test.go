@@ -365,7 +365,7 @@ func TestCapabilitiesAggregateMembers(t *testing.T) {
 	a, b := fakeprovider.New("a"), fakeprovider.New("b")
 	p := newTestPool(t, t.TempDir(), a, b)
 	c := p.Capabilities()
-	if !c.StreamList || !c.ServerMove || !c.ServerRename || c.Delta {
+	if !c.StreamList || !c.ServerMove || !c.ServerRename || !c.Delta {
 		t.Fatalf("caps = %+v", c)
 	}
 	if c.QPS.Meta != 20 || c.QPS.Upload != 10 {

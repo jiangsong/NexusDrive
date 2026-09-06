@@ -35,6 +35,9 @@ type Faults struct {
 	ShortRead int64
 	// LinkTTL is how long DownloadURL links stay valid.
 	LinkTTL time.Duration
+	// CursorReset makes the next Changes call report that the cursor is no
+	// longer valid, with the current end of the log as the replacement.
+	CursorReset bool
 	// Down makes every call fail with ErrTransient until cleared, the way a
 	// backend that is simply unreachable behaves. FailNext is a count; Down is
 	// a state, which is what "this drive is gone" needs. Calls refused this
@@ -716,6 +719,10 @@ func (f *Fake) Changes(ctx context.Context, cursor string) ([]provider.Change, s
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.Faults.CursorReset {
+		f.Faults.CursorReset = false
+		return nil, "", &provider.CursorResetError{Cursor: strconv.Itoa(len(f.changes))}
+	}
 	start := 0
 	if cursor != "" {
 		start, _ = strconv.Atoi(cursor)

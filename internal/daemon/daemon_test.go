@@ -515,10 +515,19 @@ mounts:
 	if d.CallStats["b"].Total() == 0 {
 		t.Fatal("the pool's calls to b are not counted on b")
 	}
-	// The direct view of a member coexists with the pool.
+	// The direct view of a member coexists with the pool. It shows the
+	// member as it is — the pool's marker file included, since that really
+	// is on the drive.
 	raw, err := d.FS.ReadDirPath(ctx, "/raw/a")
-	if err != nil || len(raw) != 1 || raw[0].Name != "from-a.txt" {
-		t.Fatalf("direct view = %v, %v", raw, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rawNames []string
+	for _, e := range raw {
+		rawNames = append(rawNames, e.Name)
+	}
+	if strings.Join(rawNames, ",") != ".cloudfs-pool.json,from-a.txt" && strings.Join(rawNames, ",") != "from-a.txt" {
+		t.Fatalf("direct view = %v", rawNames)
 	}
 	if _, err := os.Stat(filepath.Join(cacheDir, "pool", "pool-home.db")); err != nil {
 		t.Fatalf("pool index not in the cache dir: %v", err)

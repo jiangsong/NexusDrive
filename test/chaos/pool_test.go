@@ -36,6 +36,10 @@ func newPoolRig(t *testing.T, memberNames ...string) *poolRig {
 }
 
 func newPoolRigWith(t *testing.T, settings config.Pool, memberNames ...string) *poolRig {
+	return newPoolRigTTL(t, settings, time.Second, memberNames...)
+}
+
+func newPoolRigTTL(t *testing.T, settings config.Pool, ttl time.Duration, memberNames ...string) *poolRig {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
@@ -63,8 +67,8 @@ func newPoolRigWith(t *testing.T, settings config.Pool, memberNames ...string) *
 	r.pool = p
 	fsys, err := vfs.New(vfs.Options{
 		Meta: store, Cache: ca,
-		AttrTTL: time.Second, DefaultDirTTL: time.Second, NegativeTTL: time.Second,
-		Mounts: []vfs.Mount{{Prefix: "/", Remote: "home", RootID: p.RootID(), Provider: p, Mode: config.ModeWriteback, DirTTL: time.Second}},
+		AttrTTL: ttl, DefaultDirTTL: ttl, NegativeTTL: time.Second,
+		Mounts: []vfs.Mount{{Prefix: "/", Remote: "home", RootID: p.RootID(), Provider: p, Mode: config.ModeWriteback, DirTTL: ttl}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -505,5 +509,70 @@ func TestScrubDetectsOutOfBandDeletion(t *testing.T) {
 	}
 	if got := listNames(t, r.fs, "/docs"); got != "keep.txt" {
 		t.Fatalf("listing = %s", got)
+	}
+}
+
+// TestDeltaEchoOfOurOwnWriteIsANoOp: the pool has a change feed, and the
+// refresher polls it. The member reporting the upload this machine just
+// made must come back as the id and version the VFS already holds — zero
+// applied changes — or the refresher and the pool would feed each other.
+func TestDeltaEchoOfOurOwnWriteIsANoOp(t *testing.T) {
+	r := newPoolRigTTL(t, config.Pool{Replicas: 2, MinReplicas: 1}, time.Hour, "a", "b")
+	ctx := context.Background()
+	ref := vfs.NewRefresher(r.fs, time.Minute)
+	mount := r.fs.Mounts()[0]
+	if _, err := r.fs.ReadDirPath(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ref.PollOnce(ctx, mount); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.fs.WriteFile(ctx, "/mine.txt", []byte("written here"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := ref.PollOnce(ctx, mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatalf("the echo of our own write (and its repair copy) applied %d changes", applied)
+	}
+	if data, err := r.fs.ReadFileRange(ctx, "/mine.txt", 0, 0); err != nil || string(data) != "written here" {
+		t.Fatalf("read = %q, %v", data, err)
+	}
+}
+
+// TestDeltaSurfacesVendorAppEdit: an edit made on a member in its own app
+// reaches the mount through the feed, before any TTL would.
+func TestDeltaSurfacesVendorAppEdit(t *testing.T) {
+	r := newPoolRigTTL(t, config.Pool{Replicas: 2, MinReplicas: 1}, time.Hour, "a", "b")
+	a := r.members["a"]
+	a.Seed("/shared.txt", []byte("v1"))
+	ctx := context.Background()
+	ref := vfs.NewRefresher(r.fs, time.Minute)
+	mount := r.fs.Mounts()[0]
+	if data, err := r.fs.ReadFileRange(ctx, "/shared.txt", 0, 0); err != nil || string(data) != "v1" {
+		t.Fatalf("read v1 = %q, %v", data, err)
+	}
+	if _, err := ref.PollOnce(ctx, mount); err != nil {
+		t.Fatal(err)
+	}
+	a.Seed("/shared.txt", []byte("v2 from the app"))
+	a.Seed("/appended.txt", []byte("new in the app"))
+	applied, err := ref.PollOnce(ctx, mount)
+	if err != nil || applied == 0 {
+		t.Fatalf("applied = %d, %v", applied, err)
+	}
+	if data, err := r.fs.ReadFileRange(ctx, "/shared.txt", 0, 0); err != nil || string(data) != "v2 from the app" {
+		t.Fatalf("read after the feed = %q, %v", data, err)
+	}
+	if got := listNames(t, r.fs, "/"); got != "appended.txt,shared.txt" {
+		t.Fatalf("listing after the feed = %s", got)
 	}
 }

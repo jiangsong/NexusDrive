@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS replicas (
 );
 CREATE INDEX IF NOT EXISTS replicas_member ON replicas(member, path);
 CREATE INDEX IF NOT EXISTS replicas_parent ON replicas(parent, member);
+CREATE INDEX IF NOT EXISTS replicas_remote ON replicas(member, remote_id);
 CREATE TABLE IF NOT EXISTS member_dirs (
   member      TEXT NOT NULL,
   path        TEXT NOT NULL,
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS member_dirs (
   PRIMARY KEY (member, path)
 );
 CREATE INDEX IF NOT EXISTS member_dirs_parent ON member_dirs(parent, member);
+CREATE INDEX IF NOT EXISTS member_dirs_remote ON member_dirs(member, remote_id);
 CREATE TABLE IF NOT EXISTS pending_ops (
   seq        INTEGER PRIMARY KEY AUTOINCREMENT,
   member     TEXT NOT NULL,

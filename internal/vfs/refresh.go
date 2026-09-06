@@ -229,9 +229,20 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 		// The entry is somewhere we have not listed. Marking the parent stale
 		// is enough: the next readdir picks it up, and we avoid inventing a
 		// tree path we cannot verify.
-		if p, ok, err := r.nodeByRemoteID(ctx, m.Remote, e.ParentID); err != nil {
+		p, ok, err := r.nodeByRemoteID(ctx, m.Remote, e.ParentID)
+		if err != nil {
 			return false, err
-		} else if ok {
+		}
+		if !ok && m.Prefix == "/" && e.ParentID != "" && e.ParentID == m.RootID {
+			// A remote mounted at the root: the mount root is the meta
+			// root, which carries no remote id of its own. Without this a
+			// file created at the top of the drive never surfaced through
+			// the feed.
+			if root, rerr := store.Get(ctx, meta.RootIno); rerr == nil {
+				p, ok = root, true
+			}
+		}
+		if ok {
 			if err := store.Invalidate(ctx, p.Ino); err != nil {
 				return false, err
 			}

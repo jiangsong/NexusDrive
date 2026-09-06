@@ -78,6 +78,9 @@ type Pool struct {
 	bg     sync.WaitGroup
 	stopBG chan struct{}
 	bgMu   sync.Mutex
+
+	noticeMu sync.Mutex
+	notices  []string
 }
 
 // New assembles a pool over already-built members.
@@ -207,6 +210,9 @@ func (p *Pool) Capabilities() provider.Caps {
 			c.LinkShareable = mc.LinkShareable
 		} else if !mc.LinkShareable {
 			c.LinkShareable = false
+		}
+		if mc.Delta {
+			c.Delta = true
 		}
 		c.QPS.Meta += mc.QPS.Meta
 		c.QPS.Download += mc.QPS.Download
