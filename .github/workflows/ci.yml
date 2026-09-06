@@ -67,6 +67,10 @@ jobs:
         run: PKG_CONFIG_PATH=$PWD/packaging/pkgconfig go build -tags desktop ./cmd/cloudfs-desktop
       - name: Desktop shell vet
         run: PKG_CONFIG_PATH=$PWD/packaging/pkgconfig go vet -tags desktop ./cmd/cloudfs-desktop
+      # The shell's own tests need the same toolchain, and this is the only
+      # job that has it: they cover how it owns and reaps the daemon process.
+      - name: Desktop shell tests
+        run: PKG_CONFIG_PATH=$PWD/packaging/pkgconfig go test -tags desktop ./cmd/cloudfs-desktop
 
   container:
     name: Container build

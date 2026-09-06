@@ -34,8 +34,9 @@ type shell struct {
 	configPath string
 	cfg        *config.Config
 	proxy      *http.Server
-	daemon     *exec.Cmd  // set only when this shell launched the daemon
-	exited     chan error // receives cmd.Wait() for a launched daemon
+	daemon     *exec.Cmd     // set only when this shell launched the daemon
+	exited     chan struct{} // closed once cmd.Wait() has returned
+	exitErr    error         // what it returned; read under mu, after exited
 }
 
 func newShell(configPath string, cfg *config.Config) *shell {
@@ -156,14 +157,7 @@ func (s *shell) launch(ctx context.Context) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	// One Wait goroutine owns the child. Its result feeds `exited`, which both
-	// the readiness loop (to fail fast if the daemon dies early) and Close (to
-	// reap it without a second Wait) read.
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
-	s.mu.Lock()
-	s.daemon, s.exited = cmd, exited
-	s.mu.Unlock()
+	exited := s.own(cmd)
 
 	deadline := time.After(20 * time.Second)
 	tick := time.NewTicker(300 * time.Millisecond)
@@ -173,8 +167,8 @@ func (s *shell) launch(ctx context.Context) (string, error) {
 			return "http://" + addr + "/", nil
 		}
 		select {
-		case err := <-exited:
-			return "", fmt.Errorf("the daemon exited before it was ready: %w", err)
+		case <-exited:
+			return "", fmt.Errorf("the daemon exited before it was ready: %w", s.exitError())
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-deadline:
@@ -182,6 +176,27 @@ func (s *shell) launch(ctx context.Context) (string, error) {
 		case <-tick.C:
 		}
 	}
+}
+
+// own takes responsibility for a started child: one Wait goroutine reaps it.
+// Both the readiness loop (to fail fast if the daemon dies early) and Close
+// (to reap it without a second Wait) watch for it to finish, so the signal
+// is the channel closing rather than a value one of them takes from the
+// other — a value sent once leaves whichever arrives second waiting for a
+// process that has already been reaped.
+func (s *shell) own(cmd *exec.Cmd) chan struct{} {
+	exited := make(chan struct{})
+	go func() {
+		err := cmd.Wait()
+		s.mu.Lock()
+		s.exitErr = err
+		s.mu.Unlock()
+		close(exited)
+	}()
+	s.mu.Lock()
+	s.daemon, s.exited = cmd, exited
+	s.mu.Unlock()
+	return exited
 }
 
 // Close shuts down the front door and, if this shell launched the daemon, takes
@@ -209,6 +224,14 @@ func (s *shell) Close() {
 		_ = cmd.Process.Kill()
 		<-exited // reap; the Wait goroutine returns once the kill lands
 	}
+}
+
+// exitError reports what the daemon's Wait returned. Callers read it after
+// the exited channel is closed.
+func (s *shell) exitError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitErr
 }
 
 func freeLoopbackPort() (int, error) {
