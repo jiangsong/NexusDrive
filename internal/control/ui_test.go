@@ -31,11 +31,18 @@ func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `src="/ui/app.js"`) {
 		t.Fatalf("index = %d %q", rr.Code, rr.Body.String())
 	}
-	// The CSP is tightened, not loosened: scripts and styles come from 'self',
-	// never inline. An external script would be blocked.
+	// script-src is strict — 'self' only, no inline and no eval; that is the
+	// boundary against injected code running. style-src allows inline style
+	// attributes (the app is built with them) but still not an external origin.
 	csp := rr.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'self'") || !strings.Contains(csp, "style-src 'self'") || strings.Contains(csp, "unsafe-inline") {
-		t.Fatalf("CSP still allows inline or an external origin: %q", csp)
+	if !strings.Contains(csp, "script-src 'self'") {
+		t.Fatalf("script-src is not restricted to self: %q", csp)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") || strings.Contains(csp, "unsafe-eval") {
+		t.Fatalf("script-src must not allow inline or eval: %q", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
+		t.Fatalf("style-src should allow self + inline styles: %q", csp)
 	}
 	for _, header := range []string{"Referrer-Policy", "X-Content-Type-Options", "X-Frame-Options"} {
 		if rr.Header().Get(header) == "" {

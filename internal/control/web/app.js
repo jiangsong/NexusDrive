@@ -83,16 +83,17 @@ function refreshTitlebar() {
   titlebarEl = next;
 }
 
-startRouter(() => render());
-subscribe(() => refreshTitlebar());
-
 // One event stream feeds the whole app: status ticks update the title bar and
 // any screen watching, change events let the file browser refresh the affected
-// directory without a polling storm.
+// directory without a polling storm. These are declared before startRouter,
+// which renders synchronously — renderMain calls onFsChange during that first
+// render, so changeHandlers must already exist.
 const changeHandlers = new Set();
 export function onFsChange(fn) { changeHandlers.add(fn); return () => changeHandlers.delete(fn); }
+
+subscribe(() => refreshTitlebar());
+startRouter(() => render()); // performs the initial render
 events({
   onStatus: (s) => set({ status: s, health: healthOf(s), connected: true }),
   onChange: (c) => { for (const fn of changeHandlers) fn(c); },
 });
-render();

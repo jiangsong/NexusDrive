@@ -70,7 +70,12 @@ func contentTypeFor(p string) string {
 // and styles now come from 'self' (the multi-file app), not 'unsafe-inline'.
 // connect-src 'self' still lets the page reach the control API and the SSE
 // stream on the same origin, and nothing else.
-const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+// script-src stays strict ('self', no unsafe-inline/eval) — that is the
+// XSS-code-execution boundary. style-src allows 'unsafe-inline' because the app
+// styles elements with inline style attributes (ui.js el()); an inline style
+// cannot execute script, and every dynamic value reaches the DOM as a text
+// node, never as markup. Relaxing only style keeps the important guarantee.
+const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 func (s *Server) statusUI(w http.ResponseWriter, r *http.Request) {
 	// The app shell is static and carries no credential-shaped content, but it
