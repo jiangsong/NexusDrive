@@ -298,6 +298,20 @@ func (d *Doctor) checkJournal(ctx context.Context) []Check {
 			Detail: "power: close() returns only once the data is fsynced to local disk"})
 	}
 
+	// Payloads no row names. Normally none: they appear when a crash lands
+	// between removing a row and unlinking its object, and the next start
+	// clears them. If they persist, the queue has stopped reclaiming content —
+	// and these bytes are in no other report, being outside the cache budget
+	// and outside the queued total.
+	if n, held, err := d.Journal.OrphanObjects(ctx); err == nil && n > 0 {
+		out = append(out, Check{
+			Name:   "queue_objects",
+			Level:  LevelWarn,
+			Detail: fmt.Sprintf("%d upload payloads (%s) are on disk with no queue entry naming them", n, humanBytes(held)),
+			Fix:    "restart the daemon; startup recovery reclaims them, and they are not counted against cache.max_size",
+		})
+	}
+
 	// Orphan staging files mean a crash left partial writes behind.
 	entries, err := os.ReadDir(d.Journal.StagingDir())
 	if err == nil && len(entries) > 0 {

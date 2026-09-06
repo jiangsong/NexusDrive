@@ -892,14 +892,48 @@ func (j *Journal) Succeed(ctx context.Context, id string) error {
 	return nil
 }
 
-// pruneDoneTx reclaims completed rows past both bounds. Done rows carry no
-// blob and no parts, so this is a row delete and nothing else.
+// pruneDoneTx reclaims completed rows past both bounds, with whatever the
+// upload accumulated along the way — an upload that was dead-lettered and
+// retried, or cancelled and resumed, leaves rows in those side tables, and
+// dropping only the upload row would move the growth rather than stop it.
+//
+// upload_discarded is deliberately left alone: it is the record that stops a
+// discarded upload's ID coming back, not history. A row with an unfinished
+// cleanup intent is not a candidate at all — that intent is recovery state.
 func pruneDoneTx(tx *sql.Tx, before int64) error {
-	_, err := tx.Exec(`DELETE FROM uploads WHERE state = ? AND done_at > 0 AND done_at < ?
-AND id NOT IN (SELECT id FROM uploads WHERE state = ? AND done_at > 0 ORDER BY done_at DESC, id DESC LIMIT ?)`,
+	rows, err := tx.Query(`SELECT id FROM uploads WHERE state = ? AND done_at > 0 AND done_at < ?
+AND id NOT IN (SELECT id FROM uploads WHERE state = ? AND done_at > 0 ORDER BY done_at DESC, id DESC LIMIT ?)
+AND id NOT IN (SELECT upload_id FROM upload_cleanup)`,
 		string(StateDone), before, string(StateDone), doneHistory)
 	if err != nil {
 		return fmt.Errorf("journal: prune completed uploads: %w", err)
+	}
+	var victims []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("journal: prune completed uploads: %w", err)
+		}
+		victims = append(victims, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("journal: prune completed uploads: %w", err)
+	}
+	rows.Close()
+	for _, id := range victims {
+		for _, q := range []string{
+			`DELETE FROM uploads WHERE id = ?`,
+			`DELETE FROM upload_parts WHERE upload_id = ?`,
+			`DELETE FROM dead_letter WHERE upload_id = ?`,
+			`DELETE FROM upload_cancellation WHERE upload_id = ?`,
+			`DELETE FROM upload_resume_history WHERE upload_id = ?`,
+		} {
+			if _, err := tx.Exec(q, id); err != nil {
+				return fmt.Errorf("journal: prune completed uploads: %w", err)
+			}
+		}
 	}
 	return nil
 }

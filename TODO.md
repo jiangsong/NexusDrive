@@ -1355,6 +1355,16 @@ P3 是**对着竞品**核对出的缺口；两者交错推进，因为前者决�
 - **复制也走同一条路径**：服务端做不了的复制把 payload 暂存在 `copies/`，`SubmitCopy`
   交给上传行，因此现在上传成功时一并释放，而不是等下次重启的 `copyRetention`。
   批量复制不再需要双倍磁盘直到守护进程重启。
+- **回收要带上副表**：一次上传如果中途被取消再显式续传、或死信后被重试，会在
+  `upload_cancellation` / `upload_resume_history` / `dead_letter` / `upload_parts`
+  留下按 upload id 建的行。只删主表等于把无界增长挪个地方，所以回收连它们一起删。
+  `upload_discarded` 故意不动——那是阻止已丢弃的 upload id 复活的记录，不是历史；
+  带着未完成 cleanup 意图的行整条不参与回收，那是恢复状态。
+- **补上可观测性**：`cloudfs doctor` 新增 `queue_objects`，报告磁盘上没有任何队列行指向的
+  payload 数与字节数（`Journal.OrphanObjects`，只读，非 owner 进程也能问）。正常为零；
+  崩溃落在"删行"与"删对象"之间会留几个，下次启动的 `Recover` 清掉。单列是因为这些字节
+  既不在 `cache.max_size` 里也不在队列待传总量里——上面那个泄漏正是靠"没有任何报表会
+  提到它"活下来的。
 - **回归**：`internal/vfs/upload_reclaim_test.go`（三次成功上传后对象目录为空，且回读
   零后端请求——证明缓存那条链接还在；回退修复后报 "3 objects (51 bytes)"。另一条断言
   完成的复制不留 payload，回退后报 "left 1 payloads staged"）、

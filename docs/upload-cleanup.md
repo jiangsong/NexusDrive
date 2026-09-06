@@ -110,6 +110,16 @@ journal schema v12 → v13（新增 `done_at`，升级前完成的行为 0，一
 因此上传成功时一并释放，而不是等到下次重启的 `copyRetention` 才清。批量复制不再需要
 双倍磁盘直到守护进程重启。
 
+回收终态行时连同按 upload id 建的副表一起删（`upload_parts`、`dead_letter`、
+`upload_cancellation`、`upload_resume_history`）——取消后续传、死信后重试都会在那里留行，
+只删主表等于把无界增长挪个地方。`upload_discarded` 故意不动：它是阻止已丢弃 upload id
+复活的记录，不是历史。带着未完成 cleanup 意图的行整条不参与回收，那是恢复状态。
+
+`cloudfs doctor` 增加 `queue_objects` 检查：报告磁盘上**没有任何队列行指向**的 payload
+数量与字节数。正常应为零；崩溃落在"删行"与"删对象"之间会留下几个，下次启动的
+`Recover` 会清掉。之所以要单列，是因为这些字节既不在 `cache.max_size` 里，也不在队列的
+待传总量里——上面那个泄漏正是靠"没有任何报表会提到它"活了这么久的。
+
 回归：`internal/vfs/upload_reclaim_test.go`（三次成功上传后对象目录必须为空，
 且回读零后端请求——证明缓存那条链接还在；另一条断言完成的复制不留 payload，
 回退修复后报 "left 1 payloads staged"）、`internal/journal/succeed_reclaim_test.go`

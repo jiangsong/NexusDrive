@@ -2,7 +2,9 @@ package journal
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -113,5 +115,101 @@ func TestCompletedHistoryIsBoundedButOutlivesAWaiter(t *testing.T) {
 	newest := finish("newest")
 	if _, err := j.Get(ctx, newest); err != nil {
 		t.Fatalf("the row just completed is gone: %v", err)
+	}
+}
+
+// TestOrphanObjectsSeesWhatNoRowNames. The disk leak this file is about was
+// invisible: the bytes are outside cache.max_size and outside the queue's
+// reported total, so no report would ever have mentioned them. Doctor asks
+// this question now, and it has to answer honestly in both directions —
+// silent when the queue is consistent, and specific when it is not.
+func TestOrphanObjectsSeesWhatNoRowNames(t *testing.T) {
+	j, _, dir := openTest(t)
+	ctx := context.Background()
+	queued := stage(t, j, "queued", []byte("still to send"))
+	if err := j.Commit(ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	if n, bytes, err := j.OrphanObjects(ctx); err != nil || n != 0 || bytes != 0 {
+		t.Fatalf("a queued upload's own payload was reported as an orphan: %d objects, %d bytes, %v", n, bytes, err)
+	}
+	if err := j.Succeed(ctx, queued.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := j.OrphanObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("after a clean finish the store is not empty: %d objects, %v", n, err)
+	}
+
+	// Something no row names — what a crash between the row delete and the
+	// unlink leaves behind.
+	stray := filepath.Join(dir, "objects", "sha1-0000000000000000000000000000000000000000")
+	if err := os.WriteFile(stray, []byte("leaked payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, bytes, err := j.OrphanObjects(ctx)
+	if err != nil || n != 1 || bytes != int64(len("leaked payload")) {
+		t.Fatalf("orphaned payload not reported: %d objects, %d bytes, %v", n, bytes, err)
+	}
+}
+
+// TestReclaimingACompletedUploadTakesItsSideRowsWithIt. An upload that was
+// dead-lettered and retried, or cancelled and resumed, leaves rows in the side
+// tables keyed by its ID. Reclaiming only the upload row would move the
+// unbounded growth into those instead of stopping it.
+func TestReclaimingACompletedUploadTakesItsSideRowsWithIt(t *testing.T) {
+	j, c, _ := openTest(t)
+	ctx := context.Background()
+
+	// An upload that was cancelled and explicitly resumed, then landed: the
+	// resume keeps the old session in private history, and the cancellation
+	// revision stays behind it.
+	u := stage(t, j, "eventually", []byte("eventually sent"))
+	if err := j.Commit(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.RequestCancel(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := j.PrepareUploadResume(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"upload_cancellation", "upload_resume_history"} {
+		var n int
+		if err := j.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE upload_id = ?`, u.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			t.Fatalf("%s holds nothing for a resumed upload; this test is not exercising what it claims", table)
+		}
+	}
+	if err := j.Succeed(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(2 * doneRetention)
+	// Push it past the history bound as well.
+	for i := 0; i <= doneHistory; i++ {
+		other := stage(t, j, fmt.Sprintf("filler-%d", i), []byte(fmt.Sprintf("filler %d", i)))
+		if err := j.Commit(ctx, other); err != nil {
+			t.Fatal(err)
+		}
+		if err := j.Succeed(ctx, other.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := j.Get(ctx, u.ID); err != ErrNotFound {
+		t.Fatalf("the completed upload was not reclaimed: %v", err)
+	}
+	for _, table := range []string{"upload_parts", "dead_letter", "upload_cancellation", "upload_resume_history"} {
+		var n int
+		if err := j.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE upload_id = ?`, u.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%s still holds %d rows for a reclaimed upload", table, n)
+		}
 	}
 }

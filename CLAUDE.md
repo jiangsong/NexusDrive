@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 CloudFS：把国内外网盘挂载为本地目录的单机守护进程，同时通过 MCP 把同一份文件系统暴露给 agent。
-Go 1.27，模块名 `cloudfs`，约 103k 行、41 个包目录、1129 个测试函数。
+Go 1.27，模块名 `cloudfs`，约 105k 行、41 个包目录、1141 个测试函数。
 
 ## 工具链与常用命令
 
