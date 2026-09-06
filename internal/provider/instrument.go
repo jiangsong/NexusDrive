@@ -351,22 +351,18 @@ func (c *countingBoth) Copy(ctx context.Context, id, newParentID, newName string
 // other variants by Instrument when the backend implements SinglePutter.
 // countingPut also forwards the buffer-filling read; embedding the Provider
 // interface would otherwise hide it.
-func (c *countingPut) ReadRangeAt(ctx context.Context, id, version string, off int64, buf []byte) (int, error) {
-	return c.base.ReadRangeAt(ctx, id, version, off, buf)
-}
-
-func (c *countingPut) ListStream(ctx context.Context, dirID string, visit func(Entry) error) error {
-	return c.base.ListStream(ctx, dirID, visit)
-}
-
-type countingPut struct {
-	base *counting
-	Provider
+// putting counts a one-request upload. It is a mixin rather than a wrapper
+// of its own: a driver that offers PutFile usually offers a change feed or a
+// server-side copy as well, and each of those needs its own concrete type —
+// embedding an interface value forwards only Provider's own methods, so a
+// single "put" wrapper around the others would hide them. Every combination
+// therefore embeds the variant it belongs to and this.
+type putting struct {
 	s  *Stats
 	sp SinglePutter
 }
 
-func (c *countingPut) PutFile(ctx context.Context, parentID, name string, r io.Reader, size int64, h Hashes) (Entry, error) {
+func (c putting) PutFile(ctx context.Context, parentID, name string, r io.Reader, size int64, h Hashes) (Entry, error) {
 	defer c.s.timed("put_file")()
 	e, err := c.sp.PutFile(ctx, parentID, name, r, size, h)
 	c.s.note(err)
@@ -376,7 +372,25 @@ func (c *countingPut) PutFile(ctx context.Context, parentID, name string, r io.R
 	return e, err
 }
 
-func (c *countingPut) unwrap() Provider { return c.Provider }
+type countingPut struct {
+	*counting
+	putting
+}
+
+type countingChangesPut struct {
+	*countingChanges
+	putting
+}
+
+type countingCopyPut struct {
+	*countingCopy
+	putting
+}
+
+type countingBothPut struct {
+	*countingBoth
+	putting
+}
 
 // Unwrap returns the backend inside an instrumented provider, or p itself.
 // Callers that need the concrete driver — tests, and code that reaches for a
@@ -428,12 +442,20 @@ func Instrument(p Provider, s *Stats) Provider {
 		wrapped = &countingCopy{counting: base, sc: sc}
 	}
 	if sp, ok := p.(SinglePutter); ok {
-		// Wrapping the already-wrapped provider keeps every other optional
-		// interface reachable through embedding? It does not — embedding an
-		// interface value only forwards Provider's methods — so the put
-		// variant is only used when there is nothing else to preserve.
-		if !hasChanges && !hasCopy {
-			wrapped = &countingPut{base: base, Provider: base, s: s, sp: sp}
+		// A one-request upload is not an either/or with a change feed or a
+		// server-side copy: a backend that has all three must keep all
+		// three, or every small write silently pays for a three-request
+		// upload session instead.
+		put := putting{s: s, sp: sp}
+		switch w := wrapped.(type) {
+		case *countingBoth:
+			wrapped = &countingBothPut{countingBoth: w, putting: put}
+		case *countingChanges:
+			wrapped = &countingChangesPut{countingChanges: w, putting: put}
+		case *countingCopy:
+			wrapped = &countingCopyPut{countingCopy: w, putting: put}
+		default:
+			wrapped = &countingPut{counting: base, putting: put}
 		}
 	}
 	return wrapped

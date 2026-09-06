@@ -208,3 +208,88 @@ func TestStatsRecordTimePerOperation(t *testing.T) {
 		t.Fatal("Reset must clear the timings with the counts")
 	}
 }
+
+type stubWithPutAndChanges struct{ *stubProvider }
+
+func (s *stubWithPutAndChanges) Changes(context.Context, string) ([]Change, string, error) {
+	return nil, "", nil
+}
+func (s *stubWithPutAndChanges) PutFile(context.Context, string, string, io.Reader, int64, Hashes) (Entry, error) {
+	return Entry{}, nil
+}
+
+type stubWithPutAndCopy struct{ *stubProvider }
+
+func (s *stubWithPutAndCopy) Copy(context.Context, string, string, string) (Entry, error) {
+	return Entry{}, nil
+}
+func (s *stubWithPutAndCopy) PutFile(context.Context, string, string, io.Reader, int64, Hashes) (Entry, error) {
+	return Entry{}, nil
+}
+
+type stubWithEverything struct{ *stubProvider }
+
+func (s *stubWithEverything) Changes(context.Context, string) ([]Change, string, error) {
+	return nil, "", nil
+}
+func (s *stubWithEverything) Copy(context.Context, string, string, string) (Entry, error) {
+	return Entry{}, nil
+}
+func (s *stubWithEverything) PutFile(context.Context, string, string, io.Reader, int64, Hashes) (Entry, error) {
+	return Entry{}, nil
+}
+
+// TestInstrumentKeepsTheOneRequestUploadBesideTheOthers: a backend that
+// offers a one-request upload usually offers a change feed or a server-side
+// copy too — gdrive, onedrive, dropbox and box all do. The wrapper used to
+// choose: any of those and PutFile was dropped, so every small write to
+// those four paid for a three-request upload session instead, with nothing
+// to show for it. Each combination keeps everything the driver declared.
+func TestInstrumentKeepsTheOneRequestUploadBesideTheOthers(t *testing.T) {
+	cases := []struct {
+		name                  string
+		p                     Provider
+		changes, copies, puts bool
+	}{
+		{"put only", &stubWithPut{&stubProvider{}}, false, false, true},
+		{"put and changes", &stubWithPutAndChanges{&stubProvider{}}, true, false, true},
+		{"put and copy", &stubWithPutAndCopy{&stubProvider{}}, false, true, true},
+		{"all three", &stubWithEverything{&stubProvider{}}, true, true, true},
+		{"changes only", &stubWithChanges{&stubProvider{}}, true, false, false},
+	}
+	for _, c := range cases {
+		st := NewStats()
+		w := Instrument(c.p, st)
+		if _, ok := w.(ChangeLister); ok != c.changes {
+			t.Errorf("%s: ChangeLister = %v, want %v", c.name, ok, c.changes)
+		}
+		if _, ok := w.(ServerCopier); ok != c.copies {
+			t.Errorf("%s: ServerCopier = %v, want %v", c.name, ok, c.copies)
+		}
+		sp, ok := w.(SinglePutter)
+		if ok != c.puts {
+			t.Errorf("%s: SinglePutter = %v, want %v", c.name, ok, c.puts)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		// The put still goes through the counter, whichever variant carries it.
+		if _, err := sp.PutFile(context.Background(), "/", "x", strings.NewReader("abcd"), 4, nil); err != nil {
+			t.Errorf("%s: PutFile: %v", c.name, err)
+		}
+		if st.Snapshot()["put_file"] != 1 || st.WriteBytes() != 4 {
+			t.Errorf("%s: counts = %v bytes = %d", c.name, st.Snapshot(), st.WriteBytes())
+		}
+		// And the backend is still reachable through Unwrap.
+		if Unwrap(w) != c.p {
+			t.Errorf("%s: Unwrap did not reach the backend", c.name)
+		}
+		if _, ok := w.(RangeReaderAt); !ok {
+			t.Errorf("%s: lost ReadRangeAt", c.name)
+		}
+		if _, ok := w.(StreamLister); !ok {
+			t.Errorf("%s: lost ListStream", c.name)
+		}
+	}
+}

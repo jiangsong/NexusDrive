@@ -1413,11 +1413,14 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 `dir_ttl` 内读子孙必失败（旧路径）。存储池用不透明稳定 id 绕开了它。
 验收：fake 以 path-id 模式运行，改名目录后立刻读子孙成功；回退即失败。
 
-### [ ] T-28 `provider.Instrument` 在后端同时实现 ChangeLister/ServerCopier 时丢掉 SinglePutter（既有 bug）
+### [x] T-28 `provider.Instrument` 在后端实现 ChangeLister 或 ServerCopier 时丢掉 SinglePutter（既有 bug，2026-09-06）
 
-`internal/provider/instrument.go` 的可选接口组合是硬编码 switch；gdrive/onedrive/dropbox 三个都中招——小文件本该
-1 次请求，实际走 3 次会话协议。新的可选接口（`Quotaer`）已改为经 `Unwrap` 取用以绕开它。
-验收：对同时实现三者的桩后端，`Instrument` 后仍能断言到 `SinglePutter`，且 `test/perf` 小文件上传调用数为 1。
+`internal/provider/instrument.go` 的可选接口组合是硬编码 switch。实际条件是 `!hasChanges && !hasCopy`，所以只要
+**任一** 成立就丢——中招的是四个驱动而不是三个：gdrive/onedrive/dropbox（三者都有）以及 box（只有 Copy）。
+小文件本该 1 次请求，实际走 3 次会话协议。已改为 put 变体与 changes/copy 变体组合（`countingPut` /
+`countingChangesPut` / `countingCopyPut` / `countingBothPut` 共用 `putting`），四种组合都保留全部可选接口。
+回归：`TestInstrumentKeepsTheOneRequestUploadBesideTheOthers` 覆盖五种组合，并断言 `Unwrap`、`RangeReaderAt`、
+`StreamLister` 仍可达；回退实现即失败。
 
 ## 明确不在当前范围内
 
