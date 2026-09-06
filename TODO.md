@@ -1371,6 +1371,40 @@ P3 是**对着竞品**核对出的缺口；两者交错推进，因为前者决�
   `internal/journal/succeed_reclaim_test.go`（共享内容不误删、死信 payload 不动、
   终态历史的上下界）。详见 `docs/upload-cleanup.md`。
 
+### [x] T-23 内置代理规则指名一个从不存在的出口（2026-09-06，新发现）
+
+画 UI 方案时顺手核对「国外网盘是否都支持代理」，结果发现**管道层早就通了、默认配置反而是坏的**。
+
+- **能力本来就在**：`gdrive/box/dropbox/onedrive/s3/webdav` 经 `httpx` 的代理路由，
+  `sftp/smb` 经 `provider.DialerFrom` 注入的同一个拨号器（`internal/provider/smb/factory.go:92`）。
+  没有绕开规则的路径。
+- **但 `DefaultRules` 里的目标是字面量 `proxy`，而 `proxy` 这个出口从来不存在**——
+  没有配置时 `NewManager` 只内建一个 `direct`。于是：
+
+  ```
+  www.googleapis.com  -> proxy: unknown outbound "proxy"
+  api.dropboxapi.com  -> proxy: unknown outbound "proxy"
+  graph.microsoft.com -> proxy: unknown outbound "proxy"
+  api.box.com         -> proxy: unknown outbound "proxy"
+  ```
+
+  这不是边角情形，是两种最常见的配置：**完全没配代理**（用户加个 Google Drive 账号
+  什么都不配，账号直接不可用，报错还是我们的内部术语），以及**配了代理但没起名叫
+  `proxy`**（hk / auto 这种真实会用的名字）——后者同样全线失败。
+- **另外 S3 根本没有内置规则**，会落到 `FINAL,direct`：旁边四家都走代理，唯独它裸奔。
+- **修法**：新增 `defaultRulesFor`（`internal/net/proxy/default_target.go`），在建 router
+  之前把占位符换成配置里真实存在的东西，顺序是「名字就叫 `proxy` 的出口或组 → 第一个组 →
+  第一个非 direct 出口 → `direct`」。最后一档只在配置里完全没有代理时成立——用户没要求
+  代理，这套规则又是我们内置的。**用户自己写的规则不参与替换**：写了 `,proxy` 而没定义它
+  仍然报 `unknown outbound`，绝不悄悄直连（这正是规则引擎存在的意义）。
+  同时补上 `DOMAIN-SUFFIX,amazonaws.com,proxy`（`amazonaws.com.cn` 是另一个后缀，
+  仍走 `GEOIP,CN,direct`，这对 AWS 中国账号是对的）。
+- **回归**（`internal/net/proxy/default_target_test.go`，逐条验证过回退即失败）：
+  没配代理时境外域名解析到 `direct` 且不报错；出口叫任何名字都能被内置规则找到；
+  组优先于裸出口；`direct` 类型的出口不被误认成代理；用户手写的未定义出口仍然失败；
+  五个境外驱动的端点逐个断言走代理，AWS 中国走直连。
+- 文档：`docs/DESIGN.md` §4.2 的默认规则表已补全并写明 `proxy` 是占位符不是出口名。
+
 ### 2026-09-06 收尾：本机能做的都做完了
 
 这一轮把**不需要外部资源**的模块全部做完并补齐单测（详见各条 T-xx 下的当日记录）：

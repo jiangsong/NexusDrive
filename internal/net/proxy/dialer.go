@@ -106,7 +106,7 @@ type ManagerOptions struct {
 func NewManager(opt ManagerOptions) (*Manager, error) {
 	rules := opt.Rules
 	if len(rules) == 0 {
-		rules = DefaultRules
+		rules = defaultRulesFor(opt)
 	}
 	router, err := NewRouter(rules)
 	if err != nil {

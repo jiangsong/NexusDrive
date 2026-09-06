@@ -230,19 +230,37 @@ type ServerCopier interface {
 - 每个 remote 可用 `proxy: <出口或组名>` 整体覆盖；也可在规则里对 API 域与 CDN 域分别路由（例如海外用户让阿里 API 走国内出口而 CDN 直连）。
 - 实现方式：一个 `http.Transport.Proxy func(*http.Request) (*url.URL, error)` 加自定义 `DialContext`（SOCKS5 走 `golang.org/x/net/proxy`），所有 Provider（包括 rclone 后端，通过 `fshttp` 注入）共用。
 
-默认规则：
+默认规则（`proxy.DefaultRules`，覆盖全部已注册的境外驱动：Drive、OneDrive/SharePoint、
+Dropbox、Box、S3）：
 
 ```
 DOMAIN-SUFFIX,googleapis.com,proxy
 DOMAIN-SUFFIX,googleusercontent.com,proxy
+DOMAIN-SUFFIX,google.com,proxy
 DOMAIN-SUFFIX,graph.microsoft.com,proxy
+DOMAIN-SUFFIX,microsoftonline.com,proxy
 DOMAIN-SUFFIX,sharepoint.com,proxy
+DOMAIN-SUFFIX,1drv.com,proxy
+DOMAIN-SUFFIX,live.com,proxy
 DOMAIN-SUFFIX,dropboxapi.com,proxy
 DOMAIN-SUFFIX,dropboxusercontent.com,proxy
+DOMAIN-SUFFIX,dropbox.com,proxy
 DOMAIN-SUFFIX,box.com,proxy
+DOMAIN-SUFFIX,boxcloud.com,proxy
+DOMAIN-SUFFIX,amazonaws.com,proxy
 GEOIP,CN,direct
 FINAL,direct
 ```
+
+这里的 `proxy` **是一个占位符，不是出口名**。用户不必把自己的出口叫 `proxy`：
+`defaultRulesFor` 在建 router 之前把它换成配置里真实存在的东西，顺序是
+「名字就叫 `proxy` 的出口或组 → 第一个组 → 第一个非 direct 出口 → `direct`」。
+最后那档只在配置里**完全没有**任何代理时才成立——用户没要求代理，这套规则又是我们
+内置的，此时直连才是他们表达的意思。
+
+**用户自己写的规则不参与这个替换**：写了 `,proxy` 而没有定义它，请求就报
+`unknown outbound "proxy"` 而不是悄悄直连。用户让走代理的流量绝不能无声地裸奔，
+这是规则引擎存在的意义。
 
 **限流与熔断**（`internal/net/ratelimit`）
 

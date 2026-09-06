@@ -169,8 +169,21 @@ func (r *Router) match(rule *Rule, host string, ip net.IP) bool {
 	return false
 }
 
-// DefaultRules is the built-in rule set: overseas drives via "proxy", China
-// and everything else direct. Users override it in config.
+// DefaultProxyTarget is the placeholder the built-in rules name. It is not an
+// outbound: defaultRulesFor rewrites it to whatever the configuration actually
+// offers before the router ever sees it. A rule a user writes themselves is
+// left exactly as written, so naming an outbound that does not exist stays an
+// error rather than quietly going direct.
+const DefaultProxyTarget = "proxy"
+
+// DefaultRules is the built-in rule set: overseas drives via the configured
+// proxy, China and everything else direct. Users override it in config.
+//
+// Every host here belongs to a registered driver: Drive, OneDrive/SharePoint,
+// Dropbox, Box and S3. A driver whose endpoints are not on this list is
+// reachable only if the user writes a rule or pins the account to an outbound,
+// which is the bug that left S3 going direct while everything beside it was
+// proxied.
 var DefaultRules = []string{
 	"DOMAIN-SUFFIX,googleapis.com,proxy",
 	"DOMAIN-SUFFIX,googleusercontent.com,proxy",
@@ -185,6 +198,9 @@ var DefaultRules = []string{
 	"DOMAIN-SUFFIX,dropbox.com,proxy",
 	"DOMAIN-SUFFIX,box.com,proxy",
 	"DOMAIN-SUFFIX,boxcloud.com,proxy",
+	// S3. amazonaws.com.cn is a different suffix and stays on the China rule
+	// below, which is what an AWS China account wants.
+	"DOMAIN-SUFFIX,amazonaws.com,proxy",
 	"GEOIP,CN,direct",
 	"FINAL,direct",
 }
