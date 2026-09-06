@@ -37,13 +37,67 @@ export function renderDiagnostics(host) {
     catch (e) { toast(e.message, 'bad'); }
   }
 
+  // The self-start service and the restart control. Both change the machine
+  // beyond this session, so uninstall and restart go through the typed sheet.
+  const svcPanel = el('div', { class: 'panel pad' });
+  async function loadService() {
+    let st;
+    try { st = await api.get('/service/status'); }
+    catch (e) { svcPanel.replaceChildren(el('div', { class: 'detail' }, e.message)); return; }
+    const rows = [el('div', { class: 'eyebrow' }, t('diag.service'))];
+    if (!st.supported) {
+      rows.push(el('div', { class: 'detail', style: 'margin-top:6px' }, st.reason || t('diag.service.unsupported')));
+      svcPanel.replaceChildren(...rows); return;
+    }
+    const state = el('div', { style: 'display:flex;align-items:center;gap:9px;margin-top:8px' },
+      el('span', { class: 'dot ' + (st.installed ? 'ok' : '') }),
+      el('span', {}, st.installed ? t('diag.service.installed') : t('diag.service.absent')));
+    const action = st.installed
+      ? el('button', { class: 'danger', onclick: uninstallService }, t('diag.service.uninstall'))
+      : el('button', { class: 'primary', onclick: installService }, t('diag.service.install'));
+    rows.push(el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:16px' }, state, action));
+    rows.push(el('div', { class: 'dim', style: 'font-size:12px;margin-top:8px' }, t('diag.service.hint')));
+    svcPanel.replaceChildren(...rows);
+  }
+  async function installService() {
+    try { await api.post('/service/install', {}); toast(t('diag.service.installed')); loadService(); }
+    catch (e) { toast(e.message, 'bad'); }
+  }
+  async function uninstallService() {
+    const ok = await confirmDelete({ title: t('diag.service.uninstall'), body: t('diag.service.hint'), confirmToken: 'uninstall', confirmLabel: t('diag.service.uninstall') });
+    if (!ok) return;
+    try { await api.post('/service/uninstall?confirm=true', {}); toast(t('diag.service.absent')); loadService(); }
+    catch (e) { toast(e.message, 'bad'); }
+  }
+
+  const restartPanel = el('div', { class: 'panel pad' },
+    el('div', { class: 'eyebrow' }, t('diag.daemon')),
+    el('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:8px' },
+      el('div', { class: 'detail', style: 'max-width:60ch' }, t('diag.restart.confirm')),
+      el('button', { class: 'danger', style: 'flex-shrink:0', onclick: restartDaemon }, t('diag.restart'))));
+  async function restartDaemon() {
+    const ok = await confirmDelete({ title: t('diag.restart'), body: t('diag.restart.confirm'), confirmToken: 'restart', confirmLabel: t('diag.restart') });
+    if (!ok) return;
+    try {
+      await api.post('/daemon/restart?confirm=true', {});
+      toast(t('diag.restart.progress'));
+    } catch (e) {
+      // A dropped connection mid-restart is expected: the daemon closes its
+      // listener as it goes down. Only a real refusal is worth a red toast.
+      if (e.status) toast(e.message, 'bad');
+      else toast(t('diag.restart.progress'));
+    }
+  }
+
   host.append(
     el('div', { class: 'pad', style: 'display:flex;align-items:end;justify-content:space-between' },
       el('div', {}, el('div', { class: 'eyebrow' }, '运维'), el('h2', { class: 'section', style: 'margin:6px 0 0' }, t('diag.title'))),
       el('button', { onclick: run }, iconEl('refresh'), t('diag.recheck'))),
     el('div', { style: 'padding:0 20px 12px' }, counts),
-    el('div', { style: 'padding:0 20px 20px' }, list));
+    el('div', { style: 'padding:0 20px 20px' }, list),
+    el('div', { style: 'padding:0 20px 20px;display:grid;gap:16px' }, svcPanel, restartPanel));
 
   run();
+  loadService();
   return () => {};
 }

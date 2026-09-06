@@ -20,6 +20,13 @@ const zh = {
   'diag.title': '诊断与服务', 'diag.recheck': '重新检查', 'diag.fix': '修复',
   'confirm.type': '输入 %s 确认', 'confirm.cancel': '取消',
   'restart.required': '此改动需要重启守护进程才能生效',
+  'diag.service': '开机自启服务', 'diag.service.installed': '已安装并启用',
+  'diag.service.absent': '未安装', 'diag.service.unsupported': '此平台不支持自启服务',
+  'diag.service.install': '安装并启用', 'diag.service.uninstall': '卸载',
+  'diag.service.hint': '安装后系统登录时自动挂载（systemd / launchd 用户服务）。',
+  'diag.daemon': '守护进程', 'diag.restart': '重启守护进程',
+  'diag.restart.confirm': '重启会先把进行中的上传落盘，短暂断开挂载点，然后原地重启并重连。改动过的配置会在重启后生效。',
+  'diag.restart.progress': '守护进程正在重启，稍候将自动重连…',
   'empty': '没有内容',
 };
 export function t(key, ...args) {
