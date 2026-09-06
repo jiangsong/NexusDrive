@@ -217,6 +217,12 @@ var (
 	ErrCursorReset = errors.New("provider: change cursor reset")
 	ErrUnsupported = errors.New("provider: operation not supported")
 	ErrTransient   = errors.New("provider: transient failure")
+	// ErrUnavailable means no backend that holds the data can be reached
+	// right now. It is not a failure of the data: the caller should wait and
+	// try again rather than give up or spend a retry budget. A storage pool
+	// returns it when every member holding a replica is down; the uploader
+	// defers instead of dead-lettering, and the kernel sees EHOSTDOWN.
+	ErrUnavailable = errors.New("provider: no reachable backend")
 )
 
 // CursorResetError asks the caller to invalidate directory freshness and adopt
@@ -255,6 +261,24 @@ func HTTPClientFrom(cfg map[string]any) (any, bool) {
 		return nil, false
 	}
 	return v, true
+}
+
+// RootOf reports the id a provider lists its root from. Most cloud drives
+// identify the root by an opaque id (a file id, or a fixed "root"), which
+// the driver exposes through one of these methods; path-based backends
+// (webdav, sftp, s3, smb) have none and list the root from "/". The
+// instrumented wrapper does not forward optional interfaces, so the backend is
+// reached through Unwrap first.
+func RootOf(p Provider) string {
+	switch d := Unwrap(p).(type) {
+	case interface{ RootID() string }:
+		return d.RootID()
+	case interface{ RootFileID() string }:
+		return d.RootFileID()
+	case interface{ RootPath() string }:
+		return d.RootPath()
+	}
+	return "/"
 }
 
 // ConfigLimiters and ConfigDialer are the config keys under which the daemon

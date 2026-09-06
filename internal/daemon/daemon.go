@@ -25,6 +25,7 @@ import (
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
 	"cloudfs/internal/net/retry"
+	"cloudfs/internal/pool"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/provider/httpx"
 	"cloudfs/internal/service"
@@ -45,6 +46,9 @@ type Daemon struct {
 	Limiters  *ratelimit.Registry
 	// Providers maps remote name to backend.
 	Providers map[string]provider.Provider
+	// Pools maps the name of each pool remote to the pool behind it, for
+	// the control plane; Providers holds the same object instrumented.
+	Pools map[string]*pool.Pool
 	// CallStats maps remote name to its provider call counter. Every remote
 	// request passes through one, which is what makes "a warm listing costs
 	// zero calls" a measurable claim rather than an assertion.
@@ -87,7 +91,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: mount index %d is out of range (%d configured)", opt.MountIndex, len(cfg.Mounts))
 	}
 	d := &Daemon{Config: cfg, version: opt.Version, started: time.Now(),
-		Providers: map[string]provider.Provider{}, CallStats: map[string]*provider.Stats{}}
+		Providers: map[string]provider.Provider{}, CallStats: map[string]*provider.Stats{}, Pools: map[string]*pool.Pool{}}
 	if opt.RequireOwner {
 		cacheDir := cfg.Cache.Dir
 		if cacheDir == "" {
@@ -127,9 +131,17 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		return p.Capabilities(), true
 	})
 
-	// Providers.
+	// Providers. Pools are composite backends over other remotes, so they
+	// are assembled in a second pass once every member exists.
 	secrets := config.NewSecretStore(cfg)
+	cacheDir := cfg.Cache.Dir
+	if cacheDir == "" {
+		cacheDir = config.ExpandHome("~/.cache/cloudfs")
+	}
 	for name, rc := range cfg.Remotes {
+		if rc.Type == config.PoolType {
+			continue
+		}
 		resolved, err := secrets.ResolveRemote(rc)
 		if err != nil {
 			d.Close()
@@ -148,12 +160,23 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		d.CallStats[name] = st
 		d.Providers[name] = provider.Instrument(p, st)
 	}
+	for name, rc := range cfg.Remotes {
+		if rc.Type != config.PoolType {
+			continue
+		}
+		p, err := buildPool(name, rc, cfg, d.Providers, filepath.Join(cacheDir, "pool"))
+		if err != nil {
+			d.Close()
+			return nil, err
+		}
+		d.closers = append(d.closers, p.Close)
+		st := provider.NewStats()
+		d.CallStats[name] = st
+		d.Providers[name] = provider.Instrument(p, st)
+		d.Pools[name] = p
+	}
 
 	// Storage layers.
-	cacheDir := cfg.Cache.Dir
-	if cacheDir == "" {
-		cacheDir = config.ExpandHome("~/.cache/cloudfs")
-	}
 	store, err := meta.Open(filepath.Join(cacheDir, "meta.db"), meta.Options{})
 	if err != nil {
 		d.Close()
@@ -578,6 +601,37 @@ func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *r
 		}
 		return nil
 	}, nil
+}
+
+// buildPool assembles one pool remote over its already-built members. The
+// members are handed over instrumented, so each drive's call counter shows
+// the traffic the pool sends it.
+func buildPool(name string, rc config.Remote, cfg *config.Config, providers map[string]provider.Provider, stateDir string) (*pool.Pool, error) {
+	settings, ok := cfg.Pools[rc.PoolOf()]
+	if !ok {
+		return nil, fmt.Errorf("daemon: remote %q references unknown pool %q", name, rc.PoolOf())
+	}
+	members := map[string]provider.Provider{}
+	for _, m := range settings.Members {
+		mp, ok := providers[m.Remote]
+		if !ok {
+			return nil, fmt.Errorf("daemon: pool %q member %q was not built", name, m.Remote)
+		}
+		members[m.Remote] = mp
+	}
+	p, err := provider.New(config.PoolType, name, map[string]any{
+		pool.ConfigMembers:  members,
+		pool.ConfigSettings: settings,
+		pool.ConfigStateDir: stateDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("daemon: remote %q: %w", name, err)
+	}
+	pl, ok := p.(*pool.Pool)
+	if !ok {
+		return nil, fmt.Errorf("daemon: remote %q: the pool factory returned a %T", name, p)
+	}
+	return pl, nil
 }
 
 func remoteAccountBindings(cfg *config.Config) (map[string]string, error) {

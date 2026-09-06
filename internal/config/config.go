@@ -190,6 +190,56 @@ type WebDAV struct {
 	Writable bool   `yaml:"writable"`
 }
 
+// PoolMember is one backend that stores replicas for a storage pool.
+type PoolMember struct {
+	Remote string `yaml:"remote"`
+	// Root is the directory on the member under which the pool mirrors its
+	// tree. Empty means the member's own root.
+	Root string `yaml:"root"`
+	// Weight biases placement between members of equal health and space.
+	Weight float64 `yaml:"weight"`
+	// Capacity is the member's total space when the backend cannot report
+	// it. Zero means unknown.
+	Capacity Size `yaml:"capacity"`
+	// Adopt lets files already on the member enter the namespace as
+	// single-replica files. Nil means true: adding a drive adds its content.
+	Adopt *bool `yaml:"adopt"`
+}
+
+// Pool fuses several remotes into one namespace with N-replica placement.
+// It is referenced from a remote of type "pool" through that remote's `pool`
+// key; the pool settings live here, outside the remote's Extra, so that
+// adding a member never changes the remote's account binding.
+type Pool struct {
+	Members     []PoolMember `yaml:"members"`
+	Replicas    int          `yaml:"replicas"`
+	MinReplicas int          `yaml:"min_replicas"`
+	// OutAfter is how long a member stays down before it is declared out
+	// and its replicas are rebuilt elsewhere.
+	OutAfter          time.Duration `yaml:"out_after"`
+	ProbeInterval     time.Duration `yaml:"probe_interval"`
+	GCGrace           time.Duration `yaml:"gc_grace"`
+	OpTTL             time.Duration `yaml:"op_ttl"`
+	TrimGrace         time.Duration `yaml:"trim_grace"`
+	HoldMaxBytes      Size          `yaml:"hold_max_bytes"`
+	HoldMaxAge        time.Duration `yaml:"hold_max_age"`
+	RepairConcurrency int           `yaml:"repair_concurrency"`
+	ScrubInterval     time.Duration `yaml:"scrub_interval"`
+	ScrubSample       float64       `yaml:"scrub_sample"`
+}
+
+// PoolType is the remote type that exposes a Pool as a backend.
+const PoolType = "pool"
+
+// PoolOf returns the pool a remote refers to, or "" when it is not a pool.
+func (r Remote) PoolOf() string {
+	if r.Type != PoolType {
+		return ""
+	}
+	name, _ := r.Extra["pool"].(string)
+	return name
+}
+
 type Config struct {
 	SourcePath string            `yaml:"-"`
 	Secrets    Secrets           `yaml:"secrets"`
@@ -197,6 +247,7 @@ type Config struct {
 	Journal    Journal           `yaml:"journal"`
 	Proxy      Proxy             `yaml:"proxy"`
 	Remotes    map[string]Remote `yaml:"remotes"`
+	Pools      map[string]Pool   `yaml:"pools"`
 	Mounts     []Mount           `yaml:"mounts"`
 	MCP        MCP               `yaml:"mcp"`
 	Control    Control           `yaml:"control"`
@@ -333,6 +384,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: remote %q references unknown proxy %q", name, r.Proxy)
 		}
 	}
+	if err := c.validatePools(); err != nil {
+		return err
+	}
 	for _, m := range c.Mounts {
 		if m.Path == "" {
 			return fmt.Errorf("config: mount without path")
@@ -347,6 +401,109 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: mount %s%s has unknown mode %q", m.Path, sub, l.Mode)
 			}
 		}
+	}
+	return nil
+}
+
+// validatePools checks the pools section and the remotes that expose them,
+// and fills in the pool defaults. A pool remote must name an existing pool,
+// each pool is exposed by at most one remote, members are ordinary remotes
+// (never pools) and belong to at most one pool.
+func (c *Config) validatePools() error {
+	exposed := map[string]string{}
+	for name, r := range c.Remotes {
+		if r.Type != PoolType {
+			continue
+		}
+		pool := r.PoolOf()
+		if pool == "" {
+			return fmt.Errorf("config: remote %q is a pool but names no pool (set `pool: <name>`)", name)
+		}
+		if _, ok := c.Pools[pool]; !ok {
+			return fmt.Errorf("config: remote %q references unknown pool %q", name, pool)
+		}
+		if other, dup := exposed[pool]; dup {
+			return fmt.Errorf("config: pool %q is exposed by both %q and %q", pool, other, name)
+		}
+		exposed[pool] = name
+		for k := range r.Extra {
+			if k != "pool" {
+				return fmt.Errorf("config: remote %q: pool settings belong under pools.%s, not on the remote (%q)", name, pool, k)
+			}
+		}
+	}
+	owner := map[string]string{}
+	for name, p := range c.Pools {
+		if len(p.Members) == 0 {
+			return fmt.Errorf("config: pool %q has no members", name)
+		}
+		seen := map[string]bool{}
+		for _, m := range p.Members {
+			mr, ok := c.Remotes[m.Remote]
+			if !ok {
+				return fmt.Errorf("config: pool %q references unknown remote %q", name, m.Remote)
+			}
+			if mr.Type == PoolType {
+				return fmt.Errorf("config: pool %q member %q is itself a pool; pools do not nest", name, m.Remote)
+			}
+			if seen[m.Remote] {
+				return fmt.Errorf("config: pool %q lists member %q twice", name, m.Remote)
+			}
+			seen[m.Remote] = true
+			if other, dup := owner[m.Remote]; dup {
+				return fmt.Errorf("config: remote %q belongs to both pool %q and pool %q", m.Remote, other, name)
+			}
+			owner[m.Remote] = name
+			if m.Root != "" && (!strings.HasPrefix(m.Root, "/") || path.Clean(m.Root) != m.Root || strings.ContainsAny(m.Root, "\x00\\")) {
+				return fmt.Errorf("config: pool %q member %q root must be a canonical absolute path", name, m.Remote)
+			}
+			if m.Weight < 0 {
+				return fmt.Errorf("config: pool %q member %q has a negative weight", name, m.Remote)
+			}
+		}
+		if p.Replicas == 0 {
+			p.Replicas = 3
+		}
+		if p.MinReplicas == 0 {
+			p.MinReplicas = 1
+		}
+		if p.Replicas < 1 || p.MinReplicas < 1 || p.MinReplicas > p.Replicas {
+			return fmt.Errorf("config: pool %q needs replicas >= min_replicas >= 1 (got %d, %d)", name, p.Replicas, p.MinReplicas)
+		}
+		if p.OutAfter == 0 {
+			p.OutAfter = 10 * time.Minute
+		}
+		if p.ProbeInterval == 0 {
+			p.ProbeInterval = 30 * time.Second
+		}
+		if p.GCGrace == 0 {
+			p.GCGrace = 24 * time.Hour
+		}
+		if p.OpTTL == 0 {
+			p.OpTTL = 7 * 24 * time.Hour
+		}
+		if p.TrimGrace == 0 {
+			p.TrimGrace = time.Hour
+		}
+		if p.HoldMaxBytes == 0 {
+			p.HoldMaxBytes = 8 << 30
+		}
+		if p.HoldMaxAge == 0 {
+			p.HoldMaxAge = 24 * time.Hour
+		}
+		if p.RepairConcurrency == 0 {
+			p.RepairConcurrency = 1
+		}
+		if p.ScrubInterval == 0 {
+			p.ScrubInterval = 24 * time.Hour
+		}
+		if p.ScrubSample == 0 {
+			p.ScrubSample = 0.05
+		}
+		if p.ScrubSample < 0 || p.ScrubSample > 1 {
+			return fmt.Errorf("config: pool %q scrub_sample must be within [0, 1]", name)
+		}
+		c.Pools[name] = p
 	}
 	return nil
 }

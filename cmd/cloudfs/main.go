@@ -35,6 +35,7 @@ import (
 	"cloudfs/internal/webdavsrv"
 
 	// Backends register themselves in init.
+	_ "cloudfs/internal/pool"
 	_ "cloudfs/internal/provider/aliyun"
 	_ "cloudfs/internal/provider/baidu"
 	_ "cloudfs/internal/provider/box"

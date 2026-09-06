@@ -167,6 +167,11 @@ func errno(err error) syscall.Errno {
 		return syscall.EACCES
 	case errors.Is(err, provider.ErrRiskControl), errors.Is(err, provider.ErrRateLimited):
 		return syscall.EAGAIN
+	case errors.Is(err, provider.ErrUnavailable):
+		// The data exists; nothing holding it can be reached right now.
+		// EHOSTDOWN tells a shell exactly that, where EIO would say the
+		// file is broken.
+		return syscall.EHOSTDOWN
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return syscall.EINTR
 	default:

@@ -458,3 +458,69 @@ mounts:
 		t.Fatalf("entries = %+v", entries)
 	}
 }
+
+// TestPoolRemoteIsAssembledAfterItsMembers: a pool is a remote over other
+// remotes. The daemon builds the members first, hands them to the pool, and
+// mounts the pool like any drive — next to a direct view of one member.
+func TestPoolRemoteIsAssembledAfterItsMembers(t *testing.T) {
+	cfg, cacheDir := writeConfig(t, `
+cache:
+  dir: %s
+remotes:
+  a: { type: fake }
+  b: { type: fake }
+  home: { type: pool, pool: home }
+pools:
+  home:
+    members: [{remote: a}, {remote: b}]
+    replicas: 2
+mounts:
+  - path: /mnt/cloud
+    layout:
+      /: { remote: home }
+      /raw/a: { remote: a, mode: readonly }
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := Open(ctx, Options{Config: cfg, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(d.Providers) != 3 || d.Pools["home"] == nil {
+		t.Fatalf("providers = %d, pools = %v", len(d.Providers), d.Pools)
+	}
+	fa := provider.Unwrap(d.Providers["a"]).(*fakeprovider.Fake)
+	fb := provider.Unwrap(d.Providers["b"]).(*fakeprovider.Fake)
+	fa.Seed("/from-a.txt", []byte("a"))
+	fb.Seed("/from-b.txt", []byte("b"))
+
+	entries, err := d.FS.ReadDirPath(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name)
+	}
+	if strings.Join(got, ",") != "from-a.txt,from-b.txt,raw" {
+		t.Fatalf("pool root through the VFS = %v", got)
+	}
+	data, err := d.FS.ReadFileRange(ctx, "/from-b.txt", 0, 0)
+	if err != nil || string(data) != "b" {
+		t.Fatalf("read through the pool = %q, %v", data, err)
+	}
+	// The member's traffic is counted on the member, so /status can show
+	// what the pool sends each drive.
+	if d.CallStats["b"].Total() == 0 {
+		t.Fatal("the pool's calls to b are not counted on b")
+	}
+	// The direct view of a member coexists with the pool.
+	raw, err := d.FS.ReadDirPath(ctx, "/raw/a")
+	if err != nil || len(raw) != 1 || raw[0].Name != "from-a.txt" {
+		t.Fatalf("direct view = %v, %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "pool", "pool-home.db")); err != nil {
+		t.Fatalf("pool index not in the cache dir: %v", err)
+	}
+}

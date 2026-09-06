@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"cloudfs/internal/cache"
+	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
 )
 
@@ -23,5 +24,14 @@ func TestCancelledUploadIsBusyRatherThanIOFailure(t *testing.T) {
 		if got := errno(fmt.Errorf("retained version: %w", err)); got != syscall.EBUSY {
 			t.Fatalf("stopped upload %v mapped to %v", err, got)
 		}
+	}
+}
+
+// TestUnreachableBackendIsHostDownNotIOError: a file whose every replica
+// sits on a drive that cannot be reached is not broken; the kernel is told
+// the host is down so a shell can tell the difference.
+func TestUnreachableBackendIsHostDownNotIOError(t *testing.T) {
+	if got := errno(fmt.Errorf("pool: %w", provider.ErrUnavailable)); got != syscall.EHOSTDOWN {
+		t.Fatalf("unreachable backend mapped to %v", got)
 	}
 }

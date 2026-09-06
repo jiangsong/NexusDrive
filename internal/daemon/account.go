@@ -58,26 +58,10 @@ func CheckAccount(ctx context.Context, cfg *config.Config, name string) error {
 	return err
 }
 
-// providerRoot is the id or path a provider lists its root from. Most cloud
-// drives identify the root by an opaque id (a file id, or a fixed "root"),
-// discovered through one of these interfaces; path-based backends (webdav,
-// sftp, s3, smb) have no such method and list the root from "/". Both the
-// account check and the mount builder resolve it the same way, so a remote that
-// checks out is one that mounts.
-func providerRoot(p provider.Provider) string {
-	// The instrumented wrapper does not forward optional interfaces, so reach
-	// the backend through Unwrap before asking for its root (mount providers are
-	// instrumented; the account-check provider is raw — Unwrap handles both).
-	switch d := provider.Unwrap(p).(type) {
-	case interface{ RootID() string }:
-		return d.RootID()
-	case interface{ RootFileID() string }:
-		return d.RootFileID()
-	case interface{ RootPath() string }:
-		return d.RootPath()
-	}
-	return "/"
-}
+// providerRoot is the id or path a provider lists its root from; both the
+// account check and the mount builder resolve it the same way, so a remote
+// that checks out is one that mounts.
+func providerRoot(p provider.Provider) string { return provider.RootOf(p) }
 
 // SanitizeAccountError reduces a provider error to its kind. Provider errors
 // can embed signed URLs, cookies and OAuth query strings, so nothing that

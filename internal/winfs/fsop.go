@@ -113,6 +113,11 @@ func errc(err error) int {
 		return -fuse.EACCES
 	case is(err, provider.ErrRiskControl), is(err, provider.ErrRateLimited):
 		return -fuse.EAGAIN
+	case is(err, provider.ErrUnavailable):
+		// The data exists; nothing holding it can be reached right now.
+		// cgofuse has no EHOSTDOWN; host-unreachable is the nearest
+		// status WinFsp knows.
+		return -fuse.EHOSTUNREACH
 	default:
 		return -fuse.EIO
 	}

@@ -34,6 +34,11 @@ type Faults struct {
 	ShortRead int64
 	// LinkTTL is how long DownloadURL links stay valid.
 	LinkTTL time.Duration
+	// Down makes every call fail with ErrTransient until cleared, the way a
+	// backend that is simply unreachable behaves. FailNext is a count; Down is
+	// a state, which is what "this drive is gone" needs. Calls refused this
+	// way are counted under "down", not under their own op.
+	Down bool
 }
 
 type node struct {
@@ -67,6 +72,9 @@ type Fake struct {
 	readBytes int64
 	total     int
 	Faults    Faults
+	// noHashes hides content hashes from every Entry, the way a backend
+	// without a hash API (sftp, webdav) reports files.
+	noHashes bool
 }
 
 // RootID is the id of the root directory.
@@ -172,9 +180,93 @@ func (f *Fake) newNode(parent, name string, kind provider.Kind, data []byte) pro
 
 func (f *Fake) record(c provider.Change) { f.changes = append(f.changes, c) }
 
+// view is what a caller sees of an entry: with hashes hidden, the version
+// is what a hashless backend can still distinguish (size and mtime).
+func (f *Fake) view(e provider.Entry) provider.Entry {
+	if !f.noHashes || e.Kind != provider.KindFile {
+		return e
+	}
+	e.Hashes = nil
+	e.Version = ""
+	provider.EnsureVersion(&e)
+	return e
+}
+
+// SetReportHashes hides (false) or shows (true, the default) content hashes.
+func (f *Fake) SetReportHashes(on bool) {
+	f.mu.Lock()
+	f.noHashes = !on
+	f.mu.Unlock()
+}
+
+// SetMTime rewrites the modification time of the file at path, the way an
+// out-of-band edit or a backend that stamps its own time would. It mints no
+// new content version.
+func (f *Fake) SetMTime(path string, t time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.lookupLocked(path)
+	if !ok {
+		return false
+	}
+	f.nodes[id].entry.ModTime = t
+	return true
+}
+
+// Tree lists every path the backend holds, sorted, directories with a
+// trailing slash. Tests use it to assert that a mirrored replica landed at
+// the real path a user would see in the vendor's own app.
+func (f *Fake) Tree() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	var walk func(id, prefix string)
+	walk = func(id, prefix string) {
+		n := f.nodes[id]
+		names := make([]string, 0, len(n.children))
+		for name := range n.children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			cid := n.children[name]
+			c := f.nodes[cid]
+			if c.entry.Kind == provider.KindDir {
+				out = append(out, prefix+name+"/")
+				walk(cid, prefix+name+"/")
+			} else {
+				out = append(out, prefix+name)
+			}
+		}
+	}
+	walk(RootID, "/")
+	return out
+}
+
+// lookupLocked resolves a slash path to an id. Caller holds the lock.
+func (f *Fake) lookupLocked(path string) (string, bool) {
+	id := RootID
+	for _, s := range splitPath(path) {
+		n, ok := f.nodes[id]
+		if !ok {
+			return "", false
+		}
+		if id, ok = n.children[s]; !ok {
+			return "", false
+		}
+	}
+	_, ok := f.nodes[id]
+	return id, ok
+}
+
 // enter applies fault injection and counts the call. Caller must hold no lock.
 func (f *Fake) enter(ctx context.Context, op string) error {
 	f.mu.Lock()
+	if f.Faults.Down {
+		f.calls["down"]++
+		f.mu.Unlock()
+		return provider.ErrTransient
+	}
 	f.calls[op]++
 	f.total++
 	total := f.total
@@ -267,7 +359,7 @@ func (f *Fake) List(ctx context.Context, dirID, cursor string) ([]provider.Entry
 	}
 	out := make([]provider.Entry, 0, end-start)
 	for _, n := range names[start:end] {
-		out = append(out, f.nodes[d.children[n]].entry)
+		out = append(out, f.view(f.nodes[d.children[n]].entry))
 	}
 	next := ""
 	if end < len(names) {
@@ -286,7 +378,7 @@ func (f *Fake) Stat(ctx context.Context, id string) (provider.Entry, error) {
 	if !ok {
 		return provider.Entry{}, provider.ErrNotFound
 	}
-	return n.entry, nil
+	return f.view(n.entry), nil
 }
 
 func (f *Fake) ReadRange(ctx context.Context, id, version string, off, n int64) (io.ReadCloser, error) {
@@ -361,6 +453,7 @@ func (f *Fake) BeginUpload(ctx context.Context, parentID, name string, size int6
 	if sum := h[provider.HashSHA1]; sum != "" {
 		if data, ok := f.blobs[sum]; ok && int64(len(data)) == size {
 			e, _ := f.putFile(parentID, name, data)
+			e = f.view(e)
 			return provider.UploadSession{ID: "rapid-" + e.ID, RapidDone: true, Entry: &e}, nil
 		}
 	}
@@ -398,7 +491,7 @@ func (f *Fake) CompleteUpload(ctx context.Context, s provider.UploadSession, par
 	if !ok {
 		// Idempotent: a completed upload id resolves to the resulting entry.
 		if id, done := f.completedUpload(s.ID); done {
-			return f.nodes[id].entry, nil
+			return f.view(f.nodes[id].entry), nil
 		}
 		return provider.Entry{}, provider.ErrNotFound
 	}
@@ -420,7 +513,7 @@ func (f *Fake) CompleteUpload(ctx context.Context, s provider.UploadSession, par
 	}
 	delete(f.uploads, s.ID)
 	f.nodes[e.ID].entry.Hashes["upload_id"] = s.ID // remember for idempotent Complete
-	return e, nil
+	return f.view(e), nil
 }
 
 func (f *Fake) completedUpload(uploadID string) (string, bool) {
@@ -606,19 +699,16 @@ func init() {
 func (f *Fake) Content(path string) ([]byte, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	id := RootID
-	for _, s := range splitPath(path) {
-		n, ok := f.nodes[id]
-		if !ok {
-			return nil, false
-		}
-		if id, ok = n.children[s]; !ok {
-			return nil, false
-		}
-	}
-	n, ok := f.nodes[id]
+	id, ok := f.lookupLocked(path)
 	if !ok {
 		return nil, false
 	}
-	return append([]byte(nil), n.data...), true
+	return append([]byte(nil), f.nodes[id].data...), true
+}
+
+// IDOf resolves a slash path to the backend's id for it.
+func (f *Fake) IDOf(path string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookupLocked(path)
 }

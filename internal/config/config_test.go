@@ -82,17 +82,28 @@ func TestParseExample(t *testing.T) {
 
 func TestValidateErrors(t *testing.T) {
 	cases := map[string]string{
-		"unknown remote":   "remotes: {a: {type: x}}\nmounts: [{path: /m, layout: {/x: {remote: b}}}]",
-		"unknown proxy":    "remotes: {a: {type: x, proxy: nope}}",
-		"unknown outbound": "proxy: {groups: [{name: g, type: fallback, members: [zzz]}]}",
-		"bad rule target":  "proxy: {rules: [\"FINAL,ghost\"]}",
-		"bad mode":         "remotes: {a: {type: x}}\nmounts: [{path: /m, layout: {/x: {remote: a, mode: fast}}}]",
-		"bad block size":   "cache: {block_size: 100}",
-		"unknown field":    "cache: {dirr: /x}",
-		"webdav prefix":    "webdav: {http: '127.0.0.1:8080', prefix: /}",
-		"webdav root":      "webdav: {http: '127.0.0.1:8080', root: relative}",
-		"webdav traversal": "webdav: {http: '127.0.0.1:8080', root: /media/../secret}",
-		"webdav strategy":  "webdav: {http: '127.0.0.1:8080', strategy: magic}",
+		"unknown remote":          "remotes: {a: {type: x}}\nmounts: [{path: /m, layout: {/x: {remote: b}}}]",
+		"unknown proxy":           "remotes: {a: {type: x, proxy: nope}}",
+		"unknown outbound":        "proxy: {groups: [{name: g, type: fallback, members: [zzz]}]}",
+		"bad rule target":         "proxy: {rules: [\"FINAL,ghost\"]}",
+		"bad mode":                "remotes: {a: {type: x}}\nmounts: [{path: /m, layout: {/x: {remote: a, mode: fast}}}]",
+		"bad block size":          "cache: {block_size: 100}",
+		"unknown field":           "cache: {dirr: /x}",
+		"webdav prefix":           "webdav: {http: '127.0.0.1:8080', prefix: /}",
+		"webdav root":             "webdav: {http: '127.0.0.1:8080', root: relative}",
+		"webdav traversal":        "webdav: {http: '127.0.0.1:8080', root: /media/../secret}",
+		"webdav strategy":         "webdav: {http: '127.0.0.1:8080', strategy: magic}",
+		"pool names no pool":      "remotes: {home: {type: pool}}",
+		"pool unknown":            "remotes: {home: {type: pool, pool: x}}",
+		"pool settings on remote": "remotes: {a: {type: x}, home: {type: pool, pool: p, replicas: 3}}\npools: {p: {members: [{remote: a}]}}",
+		"pool no members":         "remotes: {home: {type: pool, pool: p}}\npools: {p: {}}",
+		"pool unknown member":     "remotes: {home: {type: pool, pool: p}}\npools: {p: {members: [{remote: ghost}]}}",
+		"pool nests":              "remotes: {a: {type: x}, p1: {type: pool, pool: p1}, p2: {type: pool, pool: p2}}\npools: {p1: {members: [{remote: a}]}, p2: {members: [{remote: p1}]}}",
+		"pool member twice":       "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}, {remote: a}]}}",
+		"pool shared member":      "remotes: {a: {type: x}, h1: {type: pool, pool: p1}, h2: {type: pool, pool: p2}}\npools: {p1: {members: [{remote: a}]}, p2: {members: [{remote: a}]}}",
+		"pool exposed twice":      "remotes: {a: {type: x}, h1: {type: pool, pool: p}, h2: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}]}}",
+		"pool min > replicas":     "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}], replicas: 1, min_replicas: 2}}",
+		"pool bad root":           "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a, root: relative}]}}",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
@@ -124,5 +135,58 @@ func TestDurabilityMustBeKnown(t *testing.T) {
 		if err := c.Validate(); err != nil && !strings.Contains(err.Error(), "remote") && !strings.Contains(err.Error(), "mount") {
 			t.Fatalf("durability %q rejected: %v", d, err)
 		}
+	}
+}
+
+func TestPoolConfigDefaultsAndCoexistence(t *testing.T) {
+	c, err := Parse([]byte(`
+remotes:
+  ali: {type: aliyun}
+  gd:  {type: gdrive}
+  home: {type: pool, pool: home}
+pools:
+  home:
+    members:
+      - {remote: ali}
+      - {remote: gd, root: /cloudfs, capacity: 2TiB, weight: 2, adopt: false}
+mounts:
+  - path: /mnt/cloud
+    layout:
+      /:       {remote: home}
+      /raw/gd: {remote: gd, mode: readonly}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Pools["home"]
+	if p.Replicas != 3 || p.MinReplicas != 1 || p.OutAfter != 10*time.Minute || p.HoldMaxBytes != 8<<30 || p.ScrubSample != 0.05 {
+		t.Fatalf("defaults not applied: %+v", p)
+	}
+	if p.Members[1].Capacity != 2<<40 || p.Members[1].Weight != 2 || p.Members[1].Adopt == nil || *p.Members[1].Adopt {
+		t.Fatalf("member fields lost: %+v", p.Members[1])
+	}
+	if c.Remotes["home"].PoolOf() != "home" || c.Remotes["gd"].PoolOf() != "" {
+		t.Fatal("PoolOf")
+	}
+	// The pool remote's identity is just its pool name: adding a member
+	// must not rotate the account binding that fences queued uploads.
+	before, _ := EffectiveAccountBinding(c.Remotes["home"])
+	c2, err := Parse([]byte(`
+remotes:
+  ali: {type: aliyun}
+  gd:  {type: gdrive}
+  nas: {type: webdav, url: 'https://nas/dav'}
+  home: {type: pool, pool: home}
+pools:
+  home:
+    members: [{remote: ali}, {remote: gd}, {remote: nas}]
+    replicas: 2
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := EffectiveAccountBinding(c2.Remotes["home"])
+	if before == "" || before != after {
+		t.Fatalf("adding a member changed the pool remote's binding: %q -> %q", before, after)
 	}
 }

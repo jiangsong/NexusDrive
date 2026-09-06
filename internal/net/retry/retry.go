@@ -72,7 +72,7 @@ func Classify(err error) Class {
 		return ClassCanceled
 	case errors.Is(err, provider.ErrRiskControl):
 		return ClassRiskControl
-	case errors.Is(err, provider.ErrRateLimited), errors.Is(err, provider.ErrTransient):
+	case errors.Is(err, provider.ErrRateLimited), errors.Is(err, provider.ErrTransient), errors.Is(err, provider.ErrUnavailable):
 		return ClassRetryable
 	case errors.Is(err, provider.ErrAuth):
 		return ClassAuth
