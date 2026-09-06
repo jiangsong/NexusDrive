@@ -1400,7 +1400,8 @@ fsync + rename 原子写，重复内容不改写，大小写不敏感的目标�
 交付：只读镜像命名空间（合并列举、冲突副本、成员失联快照、读故障转移）；写路径（主成员透传、hold、树操作扇出、op-log）；
 成员健康状态机（对所有 remote 生效，`/status` 与侧栏圆点）；修复 worker（hold/活副本、out 触发再复制、封顶）；
 op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置、`df` 显示后端容量；delta 聚合、成员标记文件、
-多机收敛；控制面 `/pool/*`、`/fs/list` 可用性、存储池界面、`cloudfs pool`。
+多机收敛；控制面 `/pool/*`、`/fs/list` 可用性、存储池界面、`cloudfs pool`；索引重建、hold 对账、
+`doctor` 的成员/副本/积压/标记检查。
 验收：`internal/pool`、`test/chaos`（成员失联 / 永久丢失 / drain / 带外删除 / delta 回声）、`test/perf`（热遍历 0 调用、
 冷目录按持有者计费、修复 N 文件 N 次上传）、`test/e2e/TestPoolEndToEndThroughFUSE`。
 真实账号验证缺口见 `docs/pool.md` 末节。
