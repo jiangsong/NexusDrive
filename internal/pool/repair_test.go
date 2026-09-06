@@ -235,3 +235,33 @@ func TestOutMemberTriggersReReplication(t *testing.T) {
 		t.Fatalf("live after return = %d", liveCount(t, p, "/f.txt"))
 	}
 }
+
+func TestHoldsAreReconciledAtStart(t *testing.T) {
+	a := fakeprovider.New("a")
+	dir := t.TempDir()
+	p := newTestPoolWith(t, dir, config.Pool{Replicas: 2, MinReplicas: 1}, a)
+	ctx := context.Background()
+	blob := filepath.Join(dir, "blob")
+	os.WriteFile(blob, []byte("held"), 0o600)
+	upload(t, provider_ctx(ctx, func(dst string) error { return os.Link(blob, dst) }), p, rootID, "h.txt", []byte("held"))
+	// An orphan file left by an older process, and a row without a file.
+	// A hold being linked right now is younger than the grace and stays.
+	orphan := filepath.Join(p.holdsDir(), "orphan")
+	os.WriteFile(orphan, []byte("x"), 0o600)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(orphan, old, old)
+	os.WriteFile(filepath.Join(p.holdsDir(), "in-flight"), []byte("y"), 0o600)
+	p.db.Exec(`INSERT INTO holds(hold_path, path, ctoken, size, created_at) VALUES(?, '/ghost', '', 1, 0)`, filepath.Join(p.holdsDir(), "gone"))
+	if n := p.reconcileHolds(ctx); n != 1 {
+		t.Fatalf("orphans removed = %d", n)
+	}
+	holds, _ := filepath.Glob(filepath.Join(p.holdsDir(), "*"))
+	if len(holds) != 2 { // the real hold and the one still being linked
+		t.Fatalf("holds after reconcile = %v", holds)
+	}
+	var rows int
+	p.db.QueryRow(`SELECT COUNT(*) FROM holds`).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("hold rows = %d", rows)
+	}
+}

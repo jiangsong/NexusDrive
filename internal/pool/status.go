@@ -249,5 +249,8 @@ func (p *Pool) Rebuild(ctx context.Context) error {
 		return err
 	}
 	_, err = p.ScrubOnce(ctx)
+	if err == nil {
+		p.addNotice("the index was rebuilt from the members; uploads queued before the rebuild finish as usual (cloudfs uploads flush)")
+	}
 	return err
 }

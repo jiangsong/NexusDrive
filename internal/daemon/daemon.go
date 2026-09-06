@@ -467,16 +467,30 @@ func (d *Daemon) serviceControl() *control.ServiceControl {
 func (d *Daemon) Doctor(fuseSupported func() (bool, string)) *control.Doctor {
 	cacheDir := d.Config.Cache.Dir
 	return &control.Doctor{
-		Config:        d.Config,
-		CacheDir:      filepath.Join(cacheDir, "blocks"),
-		Journal:       d.Journal,
-		Meta:          d.Meta,
-		Cache:         d.Cache,
-		Proxy:         d.Proxy,
-		MinFree:       int64(d.Config.Cache.MinFree),
-		FreeSpace:     cache.FreeSpace,
-		FUSESupported: fuseSupported,
+		Config:          d.Config,
+		CacheDir:        filepath.Join(cacheDir, "blocks"),
+		Journal:         d.Journal,
+		Meta:            d.Meta,
+		Cache:           d.Cache,
+		Proxy:           d.Proxy,
+		MinFree:         int64(d.Config.Cache.MinFree),
+		FreeSpace:       cache.FreeSpace,
+		FUSESupported:   fuseSupported,
+		Pools:           d.Pools,
+		MemberProviders: d.Providers,
+		HoldMaxBytes:    d.holdBudget(),
 	}
+}
+
+// holdBudget is the largest hold budget any pool declares, for doctor.
+func (d *Daemon) holdBudget() int64 {
+	var max int64
+	for _, p := range d.Config.Pools {
+		if int64(p.HoldMaxBytes) > max {
+			max = int64(p.HoldMaxBytes)
+		}
+	}
+	return max
 }
 
 func buildProxy(cfg *config.Config) (*proxy.Manager, error) {

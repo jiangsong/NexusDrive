@@ -15,6 +15,8 @@ import (
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
+	"cloudfs/internal/pool"
+	"cloudfs/internal/provider"
 )
 
 // Level grades one check.
@@ -57,6 +59,11 @@ type Doctor struct {
 	// FUSESupported reports whether a mount is possible here.
 	FUSESupported func() (bool, string)
 	Now           func() time.Time
+	// Pools are the running storage pools by the remote that exposes each;
+	// MemberProviders the live member backends, for the marker check.
+	Pools           map[string]*pool.Pool
+	MemberProviders map[string]provider.Provider
+	HoldMaxBytes    int64
 }
 
 // Run performs every check.
@@ -67,6 +74,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkMeta(ctx)...)
 	out = append(out, d.checkJournal(ctx)...)
 	out = append(out, d.checkProxy(ctx)...)
+	out = append(out, d.checkPools(ctx)...)
 	if d.Config != nil {
 		for name, r := range d.Config.Remotes {
 			level, detail := LevelOK, "credentials use the system keyring"

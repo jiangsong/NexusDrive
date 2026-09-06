@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"cloudfs/internal/provider"
 )
@@ -134,4 +135,55 @@ func (p *Pool) HoldsBytes(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("pool: %w", err)
 	}
 	return n.Int64, nil
+}
+
+// holdOrphanGrace keeps reconcileHolds off a link that was made a moment
+// ago: takeHold links the blob before it inserts the row, so a young file
+// no row names may simply be a hold being taken right now.
+const holdOrphanGrace = time.Minute
+
+// reconcileHolds squares the holds directory with the holds table at
+// start: a file no row names is an orphan of a crash between the link and
+// the insert, and a row whose file is gone names nothing. Both go.
+func (p *Pool) reconcileHolds(ctx context.Context) (orphans int) {
+	dir := p.holdsDir()
+	if dir == "" {
+		return 0
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT hold_path FROM holds`)
+	if err != nil {
+		return 0
+	}
+	known := map[string]bool{}
+	var missing []string
+	for rows.Next() {
+		var hp string
+		if rows.Scan(&hp) == nil {
+			known[hp] = true
+			if _, err := os.Stat(hp); err != nil {
+				missing = append(missing, hp)
+			}
+		}
+	}
+	rows.Close()
+	for _, hp := range missing {
+		_, _ = p.db.ExecContext(ctx, `DELETE FROM holds WHERE hold_path = ?`, hp)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	cutoff := p.now().Add(-holdOrphanGrace)
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		if known[full] {
+			continue
+		}
+		if fi, err := e.Info(); err != nil || fi.ModTime().After(cutoff) {
+			continue
+		}
+		os.Remove(full)
+		orphans++
+	}
+	return orphans
 }

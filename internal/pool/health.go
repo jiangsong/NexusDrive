@@ -54,6 +54,7 @@ func (p *Pool) Start(ctx context.Context) {
 		}
 		scrub := time.NewTicker(scrubEvery)
 		defer scrub.Stop()
+		p.reconcileHolds(ctx)
 		_ = p.WriteMarkers(ctx)
 		if p.settings.Replicas > 1 {
 			_, _ = p.ScanOnce(ctx)
