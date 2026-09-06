@@ -122,6 +122,9 @@ type FS struct {
 	now         func() time.Time
 
 	mounts []Mount // longest prefix first
+	// mountDirs are the inodes of the mount-prefix directories, which no
+	// provider's listing may remove.
+	mountDirs map[uint64]bool
 	// space caches what the backends report for df.
 	space spaceCache
 
@@ -292,6 +295,7 @@ func (f *FS) Meta() *meta.Store { return f.meta }
 // ensureMountDirs creates the intermediate directories that hold the mount
 // prefixes, so "/work" and "/gd" exist even before any listing.
 func (f *FS) ensureMountDirs(ctx context.Context) error {
+	f.mountDirs = map[uint64]bool{}
 	for _, m := range f.mounts {
 		if m.Prefix == "/" {
 			continue
@@ -314,11 +318,18 @@ func (f *FS) ensureMountDirs(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("vfs: create mount dir %s: %w", m.Prefix, err)
 			}
+			f.mountDirs[n.Ino] = true
 			parent = n.Ino
 		}
 	}
 	return nil
 }
+
+// isMountDir reports whether ino is a segment of a mount prefix. Such a node
+// belongs to the layout, not to any provider's listing: a remote mounted at
+// "/" lists the root completely and does not know about /raw, so without this
+// the reconciliation removed the prefix directories of the other mounts.
+func (f *FS) isMountDir(ino uint64) bool { return f.mountDirs[ino] }
 
 // mountFor returns the mount serving p (the deepest matching prefix).
 func (f *FS) mountFor(p string) (Mount, bool) {
@@ -779,7 +790,7 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 	// directory just before a local mkdir would apply its stale view and
 	// delete the new directory, and the next create in it failed with ENOENT.
 	protect := func(n meta.Node) bool {
-		return f.protectRemoteNode(n) || !n.FetchedAt.Before(started.Truncate(time.Second))
+		return f.protectRemoteNode(n) || f.isMountDir(n.Ino) || !n.FetchedAt.Before(started.Truncate(time.Second))
 	}
 	f.remotePublishMu.Lock()
 	err = listing.Commit(ctx, f.opt.AttrTTL, protect)
