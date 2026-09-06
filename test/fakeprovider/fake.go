@@ -205,6 +205,13 @@ func (f *Fake) enter(ctx context.Context, op string) error {
 
 func (f *Fake) Name() string { return f.name }
 
+// RootID reports the id the daemon should list a mount's root from. In-process
+// tests build the mount with RootID directly, but the daemon discovers it
+// through this interface (daemon/account.go); without it a fake remote mounted
+// via a config would list from "/" and 404. Exposing it makes `fake` a usable
+// empty drive for a running daemon, which is what the dev/demo setup needs.
+func (f *Fake) RootID() string { return RootID }
+
 // Capabilities returns the capability matrix. It takes the lock because
 // tests change the matrix while the daemon is running.
 func (f *Fake) Capabilities() provider.Caps {

@@ -607,7 +607,10 @@ func buildMounts(m config.Mount, providers map[string]provider.Provider, binding
 		}
 		root := l.Root
 		if root == "" {
-			root = "/"
+			// An unset root means "the remote's own root". Discover it the same
+			// way CheckAccount does, so a config that checks out also mounts;
+			// path-based backends fall back to "/".
+			root = providerRoot(p)
 		}
 		out = append(out, vfs.Mount{
 			Prefix: prefix, Remote: l.Remote, RootID: root, AccountBinding: bindings[l.Remote], Provider: p,

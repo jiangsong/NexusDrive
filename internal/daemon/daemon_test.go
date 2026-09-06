@@ -422,3 +422,39 @@ func TestSecondOpenDoesNotRunAnUploader(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMountDiscoversProviderRootWithoutExplicitConfig(t *testing.T) {
+	// A layout that does not spell out `root:` must still mount. buildMounts
+	// discovers the provider's own root (the fake's is "root", not "/") through
+	// the same interface CheckAccount uses, reaching it via provider.Unwrap
+	// because the mount provider is instrumented. Before the fix this listed
+	// from a hardcoded "/", so every access to a real drive mounted without an
+	// explicit root 404'd — the whole baseConfig only worked by spelling out
+	// `root: root`.
+	const body = `
+cache: { dir: %s, block_size: 64KiB }
+remotes:
+  demo: { type: fake }
+mounts:
+  - path: /mnt/cloud
+    layout:
+      /demo: { remote: demo }
+`
+	cfg, _ := writeConfig(t, body)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := Open(ctx, Options{Config: cfg, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	fake := provider.Unwrap(d.Providers["demo"]).(*fakeprovider.Fake)
+	fake.Seed("readme.md", []byte("hi"))
+	entries, err := d.FS.ReadDirPath(ctx, "/demo")
+	if err != nil {
+		t.Fatalf("listing a fake mounted without an explicit root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "readme.md" {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
