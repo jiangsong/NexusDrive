@@ -1,0 +1,9 @@
+# Shim: webview_go v0.0.0-20240831 hard-codes `pkg-config webkit2gtk-4.0`, but
+# modern distributions (Ubuntu 24.04, Fedora 39+) ship only webkit2gtk-4.1,
+# which is ABI-compatible for the small surface the WebView uses. Put this
+# directory on PKG_CONFIG_PATH when building `-tags desktop` so the 4.0 request
+# resolves to 4.1. Remove it once webview_go ships a 4.1 build tag.
+Name: webkit2gtk-4.0
+Description: compatibility shim redirecting to webkit2gtk-4.1
+Version: 4.1
+Requires: webkit2gtk-4.1

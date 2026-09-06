@@ -471,8 +471,16 @@ func cmdMount(ctx context.Context, args []string) error {
 		fmt.Printf("  %-10s -> %s (%s)\n", mnt.Prefix, mnt.Remote, mnt.Mode)
 	}
 
-	// Control endpoints, when configured.
-	if cfg.Control.Metrics != "" || cfg.Control.Socket != "" {
+	// Control endpoints, when configured. The desktop shell hands its spawned
+	// daemon a loopback TCP address in CLOUDFS_CONTROL_UI so it has a URL a
+	// WebView can load; it forces the UI on and overrides the configured TCP
+	// endpoint for that one process. Start still refuses a non-loopback
+	// address, so the env cannot open the control plane to the network.
+	controlSocket, controlTCP, controlUI := cfg.Control.Socket, cfg.Control.Metrics, cfg.Control.UI
+	if addr := os.Getenv("CLOUDFS_CONTROL_UI"); addr != "" {
+		controlTCP, controlUI = addr, true
+	}
+	if controlTCP != "" || controlSocket != "" {
 		col := d.Collector()
 		col.FuseStats = func() control.FuseStatus {
 			st := m.OpStats()
@@ -486,21 +494,21 @@ func cmdMount(ctx context.Context, args []string) error {
 			}
 		}}
 		srv := control.NewServer(col)
-		if cfg.Control.UI {
+		if controlUI {
 			srv.EnableUI()
 		}
-		running, err := srv.Start(ctx, cfg.Control.Socket, cfg.Control.Metrics)
+		running, err := srv.Start(ctx, controlSocket, controlTCP)
 		if err != nil {
 			return err
 		}
 		defer running.Close()
-		if cfg.Control.Socket != "" {
-			fmt.Printf("  control socket %s\n", cfg.Control.Socket)
+		if controlSocket != "" {
+			fmt.Printf("  control socket %s\n", controlSocket)
 		}
-		if cfg.Control.Metrics != "" {
-			fmt.Printf("  metrics on http://%s/metrics\n", cfg.Control.Metrics)
-			if cfg.Control.UI {
-				fmt.Printf("  dashboard on http://%s/  (or run: cloudfs ui)\n", cfg.Control.Metrics)
+		if controlTCP != "" {
+			fmt.Printf("  metrics on http://%s/metrics\n", controlTCP)
+			if controlUI {
+				fmt.Printf("  dashboard on http://%s/  (or run: cloudfs ui)\n", controlTCP)
 			}
 		}
 	}
