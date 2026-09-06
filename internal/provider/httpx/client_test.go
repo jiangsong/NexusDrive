@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -330,6 +331,34 @@ func TestUserAgentIsSent(t *testing.T) {
 	}
 	if seen != "pan.baidu.com" {
 		t.Fatalf("User-Agent = %q", seen)
+	}
+}
+
+// TestDecodeErrorRedactsURLQueryCredentials: a backend that authenticates by
+// query string (baidu passes access_token that way) puts a live credential in
+// every request URL. A body that will not decode must not make that URL part
+// of an error: the text reaches the daemon log and, through /fs/list and its
+// neighbours, the response body a browser reads.
+func TestDecodeErrorRedactsURLQueryCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>risk control</html>"))
+	}))
+	defer srv.Close()
+	c := newClient(t, nil)
+	var out struct{}
+	err := c.JSON(context.Background(), Request{Method: http.MethodGet, URL: srv.URL + "/file?method=list&access_token=live-secret"}, &out)
+	if err == nil {
+		t.Fatal("expected a decode error")
+	}
+	if strings.Contains(err.Error(), "live-secret") {
+		t.Fatalf("access token leaked through the decode error: %v", err)
+	}
+	// The XML decoder takes the same path; a body with no element at all is
+	// what a risk-control interstitial looks like to it.
+	if err := c.XML(context.Background(), Request{Method: http.MethodGet, URL: srv.URL + "/file?access_token=live-secret"}, &struct {
+		XMLName xml.Name `xml:"result"`
+	}{}); err == nil || strings.Contains(err.Error(), "live-secret") {
+		t.Fatalf("access token leaked through the XML decode error: %v", err)
 	}
 }
 

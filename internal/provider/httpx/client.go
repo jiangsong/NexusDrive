@@ -247,8 +247,11 @@ func (c *Client) once(ctx context.Context, r Request) (*Response, error) {
 	return out, nil
 }
 
-// errorURL removes query credentials carried by presigned download and upload
-// session URLs before an error can reach logs, journals, metrics, or a user.
+// errorURL removes query credentials before an error can reach logs,
+// journals, metrics, or a user. Presigned download and upload session URLs
+// carry them, and so does every call to a backend that authenticates by
+// query string (baidu passes access_token that way): a decode failure on
+// such a call must not quote the request URL back.
 func errorURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -358,7 +361,7 @@ func (c *Client) JSON(ctx context.Context, r Request, out any) error {
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "..."
 		}
-		return fmt.Errorf("httpx: decode %s response: %w (body: %s)", r.URL, err, snippet)
+		return fmt.Errorf("httpx: decode %s response: %w (body: %s)", errorURL(r.URL), err, snippet)
 	}
 	return nil
 }
@@ -377,7 +380,7 @@ func (c *Client) XML(ctx context.Context, r Request, out any) error {
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "..."
 		}
-		return fmt.Errorf("httpx: decode %s response: %w (body: %s)", r.URL, err, snippet)
+		return fmt.Errorf("httpx: decode %s response: %w (body: %s)", errorURL(r.URL), err, snippet)
 	}
 	return nil
 }
