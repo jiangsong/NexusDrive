@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -168,41 +167,13 @@ func AddRemote(configPath, name string, r Remote, opt AddRemoteOptions) error {
 			if prefix == "" {
 				prefix = "/" + name
 			}
-			if !strings.HasPrefix(prefix, "/") || prefix != path.Clean(prefix) || strings.ContainsAny(prefix, "\\\x00") {
-				return errors.New("config: mount prefix must be absolute and normalized")
-			}
 			mode := opt.Mode
 			if mode == "" {
 				mode = ModeWriteback
 			}
-			layout := Layout{Remote: name, Root: opt.Root, Mode: mode}
-			mounts := mappingValue(root, "mounts")
-			if mounts == nil || mounts.Tag == "!!null" {
-				mounts = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-				setNode(root, "mounts", mounts)
-			}
-			for _, m := range mounts.Content {
-				if p := mappingValue(m, "path"); p != nil && p.Value == opt.MountPath {
-					ln := mappingValue(m, "layout")
-					if ln == nil || ln.Kind != yaml.MappingNode {
-						return errors.New("config: mount layout must be a mapping")
-					}
-					if mappingValue(ln, prefix) != nil {
-						return fmt.Errorf("config: mount prefix %s already exists", prefix)
-					}
-					var entry yaml.Node
-					if err := entry.Encode(layout); err != nil {
-						return err
-					}
-					setNode(ln, prefix, &entry)
-					return nil
-				}
-			}
-			var m yaml.Node
-			if err := m.Encode(Mount{Path: opt.MountPath, Layout: map[string]Layout{prefix: layout}}); err != nil {
+			if err := upsertMountLayout(root, opt.MountPath, prefix, Layout{Remote: name, Root: opt.Root, Mode: mode}, true, false); err != nil {
 				return err
 			}
-			mounts.Content = append(mounts.Content, &m)
 		}
 		return nil
 	})
