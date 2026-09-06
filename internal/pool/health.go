@@ -23,7 +23,7 @@ func (p *Pool) Start(ctx context.Context) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	p.bg.Add(1)
+	p.bg.Add(2)
 	go func() {
 		defer p.bg.Done()
 		t := time.NewTicker(interval)
@@ -36,6 +36,33 @@ func (p *Pool) Start(ctx context.Context) {
 				return
 			case <-t.C:
 				p.ProbeOnce(ctx)
+			}
+		}
+	}()
+	// The repair worker: the queue every few seconds, a scan for files the
+	// queue does not know about now and then. Sequential, so repair never
+	// competes with itself for a member.
+	go func() {
+		defer p.bg.Done()
+		work := time.NewTicker(repairInterval)
+		defer work.Stop()
+		scan := time.NewTicker(scanInterval)
+		defer scan.Stop()
+		if p.settings.Replicas > 1 {
+			_, _ = p.ScanOnce(ctx)
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-work.C:
+				_, _ = p.RepairOnce(ctx)
+			case <-scan.C:
+				if p.settings.Replicas > 1 {
+					_, _ = p.ScanOnce(ctx)
+				}
 			}
 		}
 	}()

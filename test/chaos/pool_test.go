@@ -49,7 +49,7 @@ func newPoolRigWith(t *testing.T, settings config.Pool, memberNames ...string) *
 	}
 	t.Cleanup(func() { ca.Close() })
 	r := &poolRig{members: map[string]*fakeprovider.Fake{}, clock: time.Now()}
-	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: settings}
+	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: settings, Now: r.now}
 	for _, n := range memberNames {
 		f := fakeprovider.New(n)
 		r.members[n] = f
@@ -340,5 +340,72 @@ func TestPoolMemberRecoversWithoutRestart(t *testing.T) {
 	r.pool.ProbeOnce(ctx)
 	if data, err := r.fs.ReadFileRange(ctx, "/only-a.txt", 0, 0); err != nil || string(data) != "a" {
 		t.Fatalf("after the probe = %q, %v", data, err)
+	}
+}
+
+// TestPoolDeadMemberTriggersReReplication: requirement 4 of the pool. A
+// member that stays down past out_after is treated as lost; its files are
+// rebuilt on the remaining members from the surviving replicas, and they
+// stay readable throughout.
+func TestPoolDeadMemberTriggersReReplication(t *testing.T) {
+	r := newPoolRigWith(t, config.Pool{Replicas: 2, MinReplicas: 1, OutAfter: 10 * time.Minute, ProbeInterval: time.Hour}, "a", "b", "c")
+	a, b, c := r.members["a"], r.members["b"], r.members["c"]
+	ctx := context.Background()
+	if _, err := r.fs.WriteFile(ctx, "/precious.txt", []byte("two copies"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holders := 0
+	for _, f := range []*fakeprovider.Fake{a, b, c} {
+		if _, ok := f.Content("/precious.txt"); ok {
+			holders++
+		}
+	}
+	if holders != 2 {
+		t.Fatalf("after repair the file is on %d members, want 2", holders)
+	}
+	// The primary dies for good. Listings notice (the block cache still
+	// serves the file's own bytes locally, as it should).
+	a.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = true })
+	for i := 0; i < 3; i++ {
+		if _, err := r.fs.DropCaches(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := listNames(t, r.fs, "/"); got != "precious.txt" {
+			t.Fatalf("listing while a is down = %s", got)
+		}
+		if data, err := r.fs.ReadFileRange(ctx, "/precious.txt", 0, 0); err != nil || string(data) != "two copies" {
+			t.Fatalf("read while a is down = %q, %v", data, err)
+		}
+	}
+	if st := r.pool.Status()[0].Health.State; st != provider.HealthDown {
+		t.Fatalf("a = %s", st)
+	}
+	r.clock = r.clock.Add(11 * time.Minute)
+	if n, err := r.pool.ScanOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("scan after a went out: %d, %v", n, err)
+	}
+	if _, err := r.pool.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holders = 0
+	for _, f := range []*fakeprovider.Fake{b, c} {
+		if got, ok := f.Content("/precious.txt"); ok {
+			holders++
+			if string(got) != "two copies" {
+				t.Fatalf("%s holds %q", f.Name(), got)
+			}
+		}
+	}
+	if holders != 2 {
+		t.Fatalf("after re-replication the file is on %d live members, want 2", holders)
+	}
+	if data, err := r.fs.ReadFileRange(ctx, "/precious.txt", 0, 0); err != nil || string(data) != "two copies" {
+		t.Fatalf("read after re-replication = %q, %v", data, err)
 	}
 }

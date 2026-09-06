@@ -25,6 +25,7 @@ type poolHarness struct {
 	fs      *vfs.FS
 	members []*fakeprovider.Fake
 	up      *upload.Uploader
+	pool    *pool.Pool
 }
 
 func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
@@ -52,6 +53,7 @@ func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
+	h.pool = p
 	fsys, err := vfs.New(vfs.Options{
 		Meta: store, Cache: ca,
 		AttrTTL: time.Hour, DefaultDirTTL: time.Hour, NegativeTTL: time.Minute,
@@ -213,5 +215,41 @@ func TestPoolDedupUploadCostsNoParts(t *testing.T) {
 	}
 	if data, err := h.fs.ReadFileRange(ctx, "/two.bin", 0, 0); err != nil || string(data) != string(content) {
 		t.Fatalf("dedup read = %q, %v", data, err)
+	}
+}
+
+// TestRepairCostIsOneUploadPerReplica: making the missing replicas of N
+// files costs N uploads on the receiving member and no listing anywhere.
+// Repair reads the index, not the drives.
+func TestRepairCostIsOneUploadPerReplica(t *testing.T) {
+	h := newPoolHarness(t, "a", "b")
+	ctx := context.Background()
+	const files = 8
+	for i := 0; i < files; i++ {
+		if _, err := h.fs.WriteFile(ctx, fmt.Sprintf("/f%02d.txt", i), []byte(fmt.Sprintf("content %d", i)), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	listsBefore := h.members[0].Calls("List") + h.members[1].Calls("List")
+	uploadsBefore := h.members[0].Calls("BeginUpload") + h.members[1].Calls("BeginUpload")
+	made := 0
+	for i := 0; i < 4 && made < files; i++ {
+		n, err := h.pool.RepairOnce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		made += n
+	}
+	if made != files {
+		t.Fatalf("repair made %d replicas, want %d", made, files)
+	}
+	if extra := h.members[0].Calls("List") + h.members[1].Calls("List") - listsBefore; extra != 0 {
+		t.Fatalf("repair listed directories %d times", extra)
+	}
+	if extra := h.members[0].Calls("BeginUpload") + h.members[1].Calls("BeginUpload") - uploadsBefore; extra != files {
+		t.Fatalf("repair began %d uploads for %d files", extra, files)
 	}
 }
