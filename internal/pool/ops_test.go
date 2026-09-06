@@ -324,3 +324,132 @@ func TestListReportsOutOfBandRenameAsDivergence(t *testing.T) {
 	}
 	_ = provider.KindFile
 }
+
+// TestMoveRefusedByOneMemberDoesNotDuplicateTheFile: a member can be
+// perfectly reachable and still refuse a move — something already occupies
+// the name over there, or the name breaks a rule that member enforces. The
+// pool used to note the refusal and move on, which left the member's copy
+// where it was with nothing scheduled to fix it: the next listing of the
+// old directory found a file no index row claimed and published it a second
+// time, under a second id. The refusal is now an operation the member owes,
+// and until it is settled the copy the member kept is not a new file.
+func TestMoveRefusedByOneMemberDoesNotDuplicateTheFile(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, b := fakeprovider.New("a"), fakeprovider.New("b")
+	p, err := New(Options{Name: "home", StateDir: t.TempDir(), Settings: config.Pool{Replicas: 2, MinReplicas: 1, OpTTL: 7 * 24 * time.Hour},
+		Members: []Member{{Name: "a", Provider: a}, {Name: "b", Provider: b}}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx := context.Background()
+	oldDir, err := p.Mkdir(ctx, rootID, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newDir, err := p.Mkdir(ctx, rootID, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := upload(t, ctx, p, oldDir.ID, "x.txt", []byte("ours"))
+	if _, err := p.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Someone else's file already sits at the destination name on b, so b
+	// answers the move with ErrExists while a applies it.
+	b.Seed("/new/x.txt", []byte("theirs"))
+
+	if _, err := p.Move(ctx, moved.ID, newDir.ID); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	entries, _, err := p.List(ctx, oldDir.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(names(entries), ","); got != "" {
+		t.Fatalf("the old directory still lists %q; the copy b kept was published as a new file", got)
+	}
+	if pendingCount(t, p, "b") != 1 {
+		t.Fatal("the member that refused the move owes the pool nothing")
+	}
+
+	// It keeps refusing. The op is parked, and the row that claimed b holds
+	// the moved entry goes with it: the entry is short a replica, which is
+	// the truth, and b is flagged for a scrub.
+	for i := 0; i < opMaxAttempts; i++ {
+		now = now.Add(time.Hour)
+		if _, err := p.ReplayOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pendingCount(t, p, "b") != 0 {
+		t.Fatal("a refused op retries forever")
+	}
+	if n := liveCount(t, p, "/new/x.txt"); n != 1 {
+		t.Fatalf("live replicas of the moved entry = %d, want only the member that applied it", n)
+	}
+	if !p.byName["b"].needsScrub {
+		t.Fatal("the member that refused is not flagged for a scrub")
+	}
+	// The bytes are never touched: what b kept is still on b, for a person
+	// to deal with, with the divergence beside it.
+	if _, ok := b.Content("/old/x.txt"); !ok {
+		t.Fatal("the pool deleted the copy the member refused to move")
+	}
+	divs, err := p.Divergences(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(divs) == 0 {
+		t.Fatal("nothing tells a person why b still holds the old copy")
+	}
+}
+
+// TestMoveWithAMemberDownDoesNotDuplicateTheFile: the same shape, with the
+// member unreachable rather than refusing. It comes back before the op log
+// is replayed, so a listing of the old directory sees its leftover file
+// first — and must not mistake it for a new one.
+func TestMoveWithAMemberDownDoesNotDuplicateTheFile(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a, b := fakeprovider.New("a"), fakeprovider.New("b")
+	p, err := New(Options{Name: "home", StateDir: t.TempDir(), Settings: config.Pool{Replicas: 2, MinReplicas: 1, OpTTL: 7 * 24 * time.Hour},
+		Members: []Member{{Name: "a", Provider: a}, {Name: "b", Provider: b}}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx := context.Background()
+	oldDir, _ := p.Mkdir(ctx, rootID, "old")
+	newDir, _ := p.Mkdir(ctx, rootID, "new")
+	moved := upload(t, ctx, p, oldDir.ID, "x.txt", []byte("ours"))
+	if _, err := p.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = true })
+	p.ProbeOnce(ctx)
+	if _, err := p.Move(ctx, moved.ID, newDir.ID); err != nil {
+		t.Fatal(err)
+	}
+	b.SetFaults(func(ft *fakeprovider.Faults) { ft.Down = false })
+	p.ProbeOnce(ctx)
+
+	entries, _, _ := p.List(ctx, oldDir.ID, "")
+	if got := strings.Join(names(entries), ","); got != "" {
+		t.Fatalf("the old directory lists %q before the op log was replayed", got)
+	}
+	entries, _, _ = p.List(ctx, newDir.ID, "")
+	if got := strings.Join(names(entries), ","); got != "x.txt" {
+		t.Fatalf("the new directory lists %q", got)
+	}
+	// The replay puts b's copy where the entry now lives.
+	now = now.Add(time.Hour)
+	if _, err := p.ReplayOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.Content("/new/x.txt"); !ok {
+		t.Fatalf("the replay did not move b's copy: %v", b.Tree())
+	}
+	if n := liveCount(t, p, "/new/x.txt"); n != 2 {
+		t.Fatalf("live replicas after the replay = %d", n)
+	}
+}

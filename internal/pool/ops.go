@@ -71,6 +71,7 @@ func (p *Pool) ReplayOnce(ctx context.Context) (int, error) {
 						recordDivergence(tx, op.path, m.name, "op-failed-"+op.op, err.Error(), p.now().UnixNano())
 						return nil
 					})
+					p.giveUpOn(ctx, m, op)
 				}
 				delay := 30 * time.Second << uint(min(attempts, 6))
 				_, _ = p.db.ExecContext(ctx, `UPDATE pending_ops SET attempts = ?, next_at = ?, last_error = ?, state = ? WHERE seq = ?`, attempts, p.now().Add(delay).UnixNano(), err.Error(), state, op.seq)
@@ -103,6 +104,28 @@ func (p *Pool) pendingOpsFor(ctx context.Context, member string) ([]pendingOp, e
 
 // expireOps drops ops older than op_ttl. A member that missed that much is
 // reconciled by a full scrub instead, which the flag on it requests.
+// giveUpOn stops claiming a member holds what it has refused to move. The
+// row said "this member has a copy of the entry, at the entry's path"; the
+// member kept the file where it was, so the claim is false. Dropping it
+// leaves the entry short a replica, which repair rebuilds elsewhere, and
+// lets the copy the member kept surface as what it now is — a stray file,
+// with the divergence beside it saying how it got there. The file itself is
+// never touched: the pool does not delete what it cannot account for.
+func (p *Pool) giveUpOn(ctx context.Context, m *member, op pendingOp) {
+	switch op.op {
+	case "rename", "move":
+	default:
+		return
+	}
+	p.mu.Lock()
+	_, _ = p.db.ExecContext(ctx, `DELETE FROM replicas WHERE member = ? AND path = ?`, m.name, op.path)
+	p.mu.Unlock()
+	m.mu.Lock()
+	m.needsScrub = true
+	m.mu.Unlock()
+	_ = p.enqueueRepair(ctx, op.path, "op-failed-"+op.op, 1)
+}
+
 func (p *Pool) expireOps(ctx context.Context) {
 	ttl := p.settings.OpTTL
 	if ttl <= 0 {
@@ -222,7 +245,11 @@ func (p *Pool) relocateOnMember(ctx context.Context, m *member, remoteID, curren
 	if e.ParentID != "" && e.ParentID != parentID {
 		if e, err = m.p.Move(ctx, remoteID, parentID); err != nil {
 			if errors.Is(err, provider.ErrExists) {
-				return p.tx(ctx, func(tx *sql.Tx) error {
+				// Something else holds that name on this member. Say so,
+				// and let the op stand: it may clear (another machine
+				// mid-operation), and if it does not, the retries run out
+				// and the pool stops claiming this member has the file.
+				_ = p.tx(ctx, func(tx *sql.Tx) error {
 					recordDivergence(tx, current, m.name, "relocate-conflict", "another item with that name exists on the member", p.now().UnixNano())
 					return nil
 				})
@@ -233,7 +260,11 @@ func (p *Pool) relocateOnMember(ctx context.Context, m *member, remoteID, curren
 	if e.Name != name {
 		if e, err = m.p.Rename(ctx, remoteID, name); err != nil {
 			if errors.Is(err, provider.ErrExists) {
-				return p.tx(ctx, func(tx *sql.Tx) error {
+				// Something else holds that name on this member. Say so,
+				// and let the op stand: it may clear (another machine
+				// mid-operation), and if it does not, the retries run out
+				// and the pool stops claiming this member has the file.
+				_ = p.tx(ctx, func(tx *sql.Tx) error {
 					recordDivergence(tx, current, m.name, "relocate-conflict", "another item with that name exists on the member", p.now().UnixNano())
 					return nil
 				})

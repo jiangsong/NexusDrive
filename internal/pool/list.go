@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -250,10 +251,21 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 	if err != nil {
 		return nil, err
 	}
+	moves, err := p.pendingMoves(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// Observations by name.
 	byName := map[string][]obs{}
 	keepRows := map[replicaKey]bool{}
+	// A member that owes the pool a tree operation here has not shown the
+	// file yet, and its absence from the member's listing is expected: the
+	// row is what the op will act on, so the reconciliation must not take
+	// it away.
+	for k := range pendingUnder {
+		keepRows[k] = true
+	}
 	for _, r := range results {
 		switch {
 		case r.err != nil:
@@ -284,6 +296,13 @@ func (p *Pool) listDir(ctx context.Context, pth string) ([]provider.Entry, error
 				row, known := existingReplicas[replicaKey{physical, r.m.name}]
 				if !known {
 					row, known = p.physicalRowFor(existingReplicas, pth, e.Name, r.m.name)
+				}
+				if dst, owed := moves[replicaKey{physical, r.m.name}]; owed {
+					// This member owes the pool a move of exactly this
+					// file, out of this directory. What it shows here is
+					// the old location, not a new file.
+					keepRows[replicaKey{dst, r.m.name}] = true
+					continue
 				}
 				if pendingUnder[replicaKey{physical, r.m.name}] {
 					// A tree operation on this member is still to be
@@ -487,6 +506,37 @@ type replicaKey struct{ path, member string }
 // physicalRowFor finds the index row of a member's replica whose real name
 // on the member is name but which the pool indexes under another path: a
 // conflict copy, or a rename that member has not applied yet.
+// pendingMoves maps a member's not-yet-applied rename or move by the path
+// the file still occupies on that member. The index row travelled to the
+// destination with the entry, out of the source directory's parent-scoped
+// view, so without this a listing of the source would see the member's
+// leftover file, find nothing that claims it, and publish the same content
+// a second time under a new id. An out-of-band move by the vendor's own app
+// has no such op and stays a new observation, as documented.
+func (p *Pool) pendingMoves(ctx context.Context) (map[replicaKey]string, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT member, args FROM pending_ops WHERE op IN ('rename', 'move') AND state = 'pending'`)
+	if err != nil {
+		return nil, fmt.Errorf("pool: %w", err)
+	}
+	defer rows.Close()
+	out := map[replicaKey]string{}
+	for rows.Next() {
+		var member, raw string
+		if err := rows.Scan(&member, &raw); err != nil {
+			return nil, err
+		}
+		var args map[string]string
+		if json.Unmarshal([]byte(raw), &args) != nil {
+			continue
+		}
+		if args["from"] == "" || args["to"] == "" {
+			continue
+		}
+		out[replicaKey{args["from"], member}] = args["to"]
+	}
+	return out, rows.Err()
+}
+
 func (p *Pool) physicalRowFor(rows map[replicaKey]replicaRow, pth, name, member string) (replicaRow, bool) {
 	for k, r := range rows {
 		if k.member == member && r.memberName == name && r.parent == pth && path.Base(k.path) != name {

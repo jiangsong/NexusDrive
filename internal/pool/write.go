@@ -365,12 +365,20 @@ func (p *Pool) fanout(ctx context.Context, targets []target, op, pth string, arg
 			lastUnreachable = err
 			p.pendingOp(ctx, t.m, op, pth, args, now)
 		default:
+			// The member answered and refused: a name it will not take, a
+			// quota, something already at the destination. Record it for a
+			// person to see, and still queue the operation — the member is
+			// as far behind as an unreachable one, and the replay path is
+			// what eventually gives up and asks for a scrub instead of
+			// leaving the old copy behind for a listing to mistake for a
+			// new file.
 			t.m.note(nil)
 			lastErr = err
 			_ = p.tx(ctx, func(tx *sql.Tx) error {
 				recordDivergence(tx, pth, t.m.name, "refused-"+op, err.Error(), now)
 				return nil
 			})
+			p.pendingOp(ctx, t.m, op, pth, args, now)
 		}
 	}
 	if ok > 0 {
@@ -646,6 +654,21 @@ func (p *Pool) relocate(ctx context.Context, row entryRow, oldPath, newPath stri
 		}
 		if err := movePaths(tx, oldPath, newPath); err != nil {
 			return err
+		}
+		// A member that did not apply the operation still holds the file
+		// where it was. Its row travelled to the destination with the
+		// entry, so the row is the only place that can say so. Names
+		// cannot: a move across directories keeps the name, and reading
+		// "the name still matches" as "this member is up to date" is what
+		// let the copy sit there unnoticed.
+		for _, m := range p.members {
+			if _, did := applied[m.name]; did {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE replicas SET state = 'pending' WHERE member = ? AND (path = ? OR path LIKE ? ESCAPE '\') AND state = 'live'
+				AND NOT EXISTS (SELECT 1 FROM entries e WHERE e.path = replicas.path AND e.conflict_of <> '')`, m.name, newPath, likePrefix(newPath)); err != nil {
+				return err
+			}
 		}
 		for name, e := range applied {
 			if row.kind == provider.KindDir {
