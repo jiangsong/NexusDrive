@@ -17,7 +17,7 @@ import (
 // Configuration edits go to the file (and tell the daemon's next start);
 // the rest asks the running daemon.
 func cmdPool(ctx context.Context, args []string) error {
-	f := parseFlags(args, "full")
+	f := parseFlags(args, "full", "confirm")
 	action := f.arg(0)
 	cfg, configPath, err := loadConfig(f)
 	if err != nil {
@@ -88,7 +88,10 @@ func cmdPool(ctx context.Context, args []string) error {
 	case "remove":
 		pool, remote := f.arg(1), f.arg(2)
 		if pool == "" || remote == "" {
-			return errors.New("pool remove: usage: pool remove <pool> <remote> (drain it first)")
+			return errors.New("pool remove: usage: pool remove <pool> <remote> --confirm (drain it first)")
+		}
+		if !f.bool("confirm") {
+			return errors.New("pool remove: removing a member drops its copies from the pool; pass --confirm")
 		}
 		var out control.PoolMutationResponse
 		online, err := control.CallPool(ctx, socket, tcp, "members/remove", control.PoolMemberRequest{Pool: pool, Remote: remote, Confirm: true}, &out)
@@ -107,6 +110,9 @@ func cmdPool(ctx context.Context, args []string) error {
 		if pool == "" || remote == "" {
 			return fmt.Errorf("pool %s: usage: pool %s <pool> <remote>", action, action)
 		}
+		if action == "drain" && !f.bool("confirm") {
+			return errors.New("pool drain: draining moves every file off the member; pass --confirm")
+		}
 		state := map[string]string{"drain": "draining", "enable": "enabled", "disable": "disabled"}[action]
 		var out control.PoolMutationResponse
 		online, err := control.CallPool(ctx, socket, tcp, "members/state", control.PoolMemberRequest{Pool: pool, Remote: remote, State: state, Confirm: true}, &out)
@@ -120,6 +126,9 @@ func cmdPool(ctx context.Context, args []string) error {
 		return nil
 	case "repair", "scrub", "rebuild":
 		pool := f.arg(1)
+		if action == "rebuild" && !f.bool("confirm") {
+			return errors.New("pool rebuild: rebuilding drops the index and re-lists every member; pass --confirm")
+		}
 		var out map[string]any
 		online, err := control.CallPool(ctx, socket, tcp, action, control.PoolPathRequest{Pool: pool, Path: f.str("path", ""), Full: f.bool("full"), Confirm: true}, &out)
 		if err != nil {
@@ -159,12 +168,26 @@ func cmdPool(ctx context.Context, args []string) error {
 			return errors.New("pool join: usage: pool join <remote> [--root /dir]")
 		}
 		var out map[string]any
-		online, err := control.CallPool(ctx, socket, tcp, "join", control.PoolJoinRequest{Remote: remote, Root: f.str("root", ""), Confirm: true}, &out)
+		online, err := control.CallPool(ctx, socket, tcp, "join", control.PoolJoinRequest{Remote: remote, Root: f.str("root", ""), Confirm: f.bool("confirm")}, &out)
 		if err != nil {
 			return err
 		}
 		if !online {
 			return errors.New("pool join needs the running daemon (it reads the marker through the remote's provider)")
+		}
+		if !f.bool("confirm") {
+			// Without --confirm the daemon describes the pool the marker
+			// names instead of writing it into the configuration.
+			fmt.Printf("%s carries the marker of pool %v\n", remote, out["pool"])
+			if ms, ok := out["members"].([]any); ok && len(ms) > 0 {
+				parts := make([]string, 0, len(ms))
+				for _, m := range ms {
+					parts = append(parts, fmt.Sprint(m))
+				}
+				fmt.Printf("members: %s\n", strings.Join(parts, ", "))
+			}
+			fmt.Printf("join it with: cloudfs pool join %s --confirm\n", remote)
+			return nil
 		}
 		fmt.Printf("joined pool %v; restart the daemon for it to take effect\n", out["pool"])
 		if d, ok := out["detail"].(string); ok && d != "" {
