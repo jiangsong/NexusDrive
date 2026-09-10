@@ -2,8 +2,17 @@
 // cross-site form cannot set; a non-2xx becomes an ApiError whose message is
 // the server's own text. Errors bubble to the toast host unless a caller
 // catches them for inline display.
+import { locale } from '/ui/i18n.js';
+
 export class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
+}
+
+// withLang appends the chosen language to a request. fetch and EventSource
+// both refuse to set Accept-Language, and the parameter is what lets the
+// switch in the title bar beat the browser's own header on the daemon side.
+function withLang(path) {
+  return path + (path.includes('?') ? '&' : '?') + 'lang=' + encodeURIComponent(locale());
 }
 
 async function request(method, path, body) {
@@ -14,7 +23,7 @@ async function request(method, path, body) {
     payload = JSON.stringify(body);
   }
   if (method !== 'GET') headers['X-CloudFS-Control'] = '1';
-  const resp = await fetch(path, { method, headers, body: payload, cache: 'no-store' });
+  const resp = await fetch(withLang(path), { method, headers, body: payload, cache: 'no-store' });
   if (!resp.ok) {
     const text = (await resp.text()).trim();
     throw new ApiError(resp.status, text || `HTTP ${resp.status}`);
@@ -49,7 +58,7 @@ export function events({ onStatus, onChange }) {
   const stopPoll = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
   const connect = () => {
     if (stopped) return;
-    try { es = new EventSource('/events'); }
+    try { es = new EventSource(withLang('/events')); }
     catch (_) { startPoll(); return; }
     es.addEventListener('open', () => { backoff = 1000; stopPoll(); });
     es.addEventListener('status', (e) => { try { onStatus && onStatus(JSON.parse(e.data)); } catch (_) {} });

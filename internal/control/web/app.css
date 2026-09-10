@@ -69,6 +69,9 @@ button, input, select, textarea {
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: #121a25; font-size: 12px; color: var(--detail);
 }
+/* The select already inherits its border, radius, background and colour from
+   the control rule above; only the compact padding is its own. */
+.titlebar .lang { padding: 4px 6px; font-size: 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--dimmer); }
 .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
 
@@ -120,6 +123,17 @@ button:hover, .btn:hover { border-color: var(--accent-border); background: #2032
 button.primary { border-color: var(--accent-border); background: var(--accent-bg); font-weight: 600; }
 button.danger { color: var(--danger-text); border-color: var(--danger-border); background: transparent; }
 button:disabled { opacity: .45; cursor: not-allowed; }
+/* The delete control on a connection row. It is hidden until the row is
+   hovered or something inside it takes focus, so the list stays calm, but it
+   is a real button in the tab order for anyone not using a mouse. */
+.conn .icon-btn {
+  padding: 4px; border-color: transparent; background: transparent;
+  color: var(--dim); opacity: 0; flex-shrink: 0;
+}
+.conn:hover .icon-btn, .conn:focus-within .icon-btn { opacity: 1; }
+.conn .icon-btn:hover { color: var(--danger-text); border-color: var(--danger-border); background: transparent; }
+.conn .icon-btn:focus-visible { opacity: 1; }
+
 input[type=text], input[type=search], select {
   padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: #121a25; width: 100%;

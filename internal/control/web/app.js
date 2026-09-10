@@ -1,29 +1,52 @@
 import { get, set, subscribe } from '/ui/store.js';
 import { events } from '/ui/api.js';
-import { start as startRouter, currentTag, navItems } from '/ui/router.js';
+import { start as startRouter, currentTag, navItems, routes } from '/ui/router.js';
 import { el, fill, iconEl } from '/ui/ui.js';
-import { t } from '/ui/i18n.js';
+import { t, locale, setLocale, LOCALES } from '/ui/i18n.js';
 import { renderMain } from '/ui/screens/main.js';
 import { renderPool } from '/ui/screens/pool.js';
 import { renderTransfers } from '/ui/screens/transfers.js';
+import { renderCopies } from '/ui/screens/copies.js';
 import { renderStorage } from '/ui/screens/storage.js';
 import { renderProxy } from '/ui/screens/proxy.js';
 import { renderDiagnostics } from '/ui/screens/diagnostics.js';
+import { renderSetup } from '/ui/screens/setup.js';
 
 const screens = {
   'main-window': renderMain,
+  'setup-view': renderSetup,
   'pool-view': renderPool,
   'transfers-view': renderTransfers,
+  'copies-view': renderCopies,
   'storage-view': renderStorage,
   'proxy-view': renderProxy,
   'diagnostics-view': renderDiagnostics,
 };
 
+// healthOf reads the structured snapshot, never the warning text: the daemon
+// renders warnings in the reader's language, so matching words in them was a
+// dot that turned the wrong colour the moment the language changed.
 function healthOf(status) {
   if (!status) return 'unknown';
-  if ((status.warnings || []).some((w) => /失败|dead|risk|full/i.test(w))) return 'bad';
-  if ((status.uploads && status.uploads.dead) || (status.warnings || []).length) return 'warn';
+  const u = status.uploads || {};
+  const c = status.cache || {};
+  const breaker = (status.remotes || []).some((r) => r.breaker_open);
+  const full = c.max_bytes > 0 && c.bytes > c.max_bytes * 0.9;
+  if (u.dead > 0 || breaker || full) return 'bad';
+  if ((status.warnings || []).length) return 'warn';
   return 'ok';
+}
+
+// languagePicker is a select rather than a link: the choice is stored and the
+// page reloads, so the daemon re-renders its own strings in the same language.
+function languagePicker() {
+  const sel = el('select', {
+    class: 'lang',
+    'aria-label': t('app.language'),
+    onchange: (e) => setLocale(e.target.value),
+  }, ...LOCALES.map((l) => el('option', { value: l.code }, l.label)));
+  sel.value = locale();
+  return sel;
 }
 
 function titlebar(status) {
@@ -36,20 +59,20 @@ function titlebar(status) {
     el('div', { class: 'chip' }, iconEl('up'), `${t('app.queue')} ${active}`),
     el('div', { class: 'chip' }, iconEl('db'), `${t('app.cache')} ${c.bytes_human || '0 B'}`),
     el('div', { class: 'chip' }, el('span', { class: 'dot ' + healthOf(status) }),
-      status ? (status.uptime || t('app.daemon')) : '…'));
+      status ? (status.uptime || t('app.daemon')) : '…'),
+    languagePicker());
 }
 
 function nav(activeTag) {
   return el('nav', { class: 'nav' },
     navItems.map((item) => {
       const a = el('a', { href: item.hash }, iconEl(item.icon), el('span', {}, t(item.key)));
-      if (currentTag() === activeTag && screenForHash(item.hash) === activeTag) a.classList.add('active');
+      // The router owns the hash-to-screen table; a second copy here meant
+      // every new screen had to be added in two places or silently never
+      // highlighted.
+      if (routes[item.hash] === activeTag) a.classList.add('active');
       return a;
     }));
-}
-function screenForHash(hash) {
-  const map = { '#/connections': 'main-window', '#/pool': 'pool-view', '#/transfers': 'transfers-view', '#/storage': 'storage-view', '#/proxy': 'proxy-view', '#/diagnostics': 'diagnostics-view' };
-  return map[hash];
 }
 
 let disposeScreen = null;
@@ -80,6 +103,10 @@ function render() {
 // events (the file browser, via onFsChange); the shell just repaints the chips.
 function refreshTitlebar() {
   if (!titlebarEl) return;
+  const picker = titlebarEl.querySelector('select.lang');
+  // Opening a native select focuses it. Replacing that node on an SSE status
+  // tick closes the menu before a person can choose a language.
+  if (picker && document.activeElement === picker) return;
   const next = titlebar(get().status);
   titlebarEl.replaceWith(next);
   titlebarEl = next;

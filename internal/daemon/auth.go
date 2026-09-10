@@ -21,9 +21,13 @@ import (
 // ever passing through it.
 //
 // Only the flows where the daemon can obtain the credential on the user's
-// behalf are here: aliyun and baidu (OAuth) and pan115 (device/QR). The
-// providers whose credential is a password, a cookie or an externally issued
-// token are not — there is nothing for the daemon to fetch, and those stay
+// behalf are here: every backend with an entry in OAuthProfileFor, plus
+// pan115's device/QR exchange. Naming them in prose instead went stale twice —
+// gdrive, box and dropbox were each added to the table while this comment
+// still listed three backends — so the table below is the answer, and
+// SupportsDaemonAuth derives from it rather than repeating it. The providers
+// whose credential is a password, a cookie or an externally issued token have
+// no entry: there is nothing for the daemon to fetch, and those stay
 // `cloudfs config auth --stdin`.
 
 // OAuthPresentation is what a caller must show the user to complete an OAuth
@@ -36,11 +40,112 @@ type OAuthPresentation struct {
 // SupportsDaemonAuth reports whether StartOAuthFlow or StartDevice115Flow can
 // drive this remote's authorization. Everything else is terminal-only import.
 func SupportsDaemonAuth(remoteType string) bool {
-	switch remoteType {
-	case "aliyun", "baidu", "pan115":
+	if remoteType == "pan115" {
 		return true
 	}
-	return false
+	_, ok := OAuthProfileFor(remoteType)
+	return ok
+}
+
+// OAuthProfile is everything about a backend's authorization server that does
+// not depend on the account: the two endpoints, the scope to ask for, the
+// shape of the token exchange, and any extra authorization parameters. It is
+// the one table both the CLI and the control API read, so a browser login and
+// a terminal login cannot drift apart.
+type OAuthProfile struct {
+	AuthorizeURL string
+	TokenURL     string
+	Scope        string
+	// JSONToken and FormToken select the exchange the server accepts; a
+	// profile setting neither uses the query exchange.
+	JSONToken bool
+	FormToken bool
+	// PKCE authorizes as a public client (RFC 7636): the code is bound to a
+	// per-attempt verifier instead of a static client secret, so no secret has
+	// to exist for the exchange to be safe against interception. It is what
+	// lets a shipped desktop binary hold a client registration at all — a
+	// secret compiled into a binary anyone can download is not a secret.
+	PKCE       bool
+	AuthParams url.Values
+}
+
+// OAuthProfileFor returns the profile for a remote type, if it has one. A
+// backend whose credential is a password, a cookie or a device code has none.
+func OAuthProfileFor(remoteType string) (OAuthProfile, bool) {
+	switch remoteType {
+	case "aliyun":
+		return OAuthProfile{
+			AuthorizeURL: "https://openapi.alipan.com/oauth/authorize",
+			TokenURL:     "https://openapi.alipan.com/oauth/access_token",
+			Scope:        "user:base,file:all:read,file:all:write",
+			JSONToken:    true,
+			AuthParams:   url.Values{"style": {"folder"}},
+		}, true
+	case "baidu":
+		return OAuthProfile{
+			AuthorizeURL: "https://openapi.baidu.com/oauth/2.0/authorize",
+			TokenURL:     "https://openapi.baidu.com/oauth/2.0/token",
+			Scope:        "basic netdisk",
+		}, true
+	case "gdrive":
+		return OAuthProfile{
+			AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:     "https://oauth2.googleapis.com/token",
+			Scope:        "https://www.googleapis.com/auth/drive",
+			FormToken:    true,
+			// Google returns a refresh token only for an offline grant, and
+			// only re-issues one when consent is asked for again. An account
+			// authorized without both stops working after an hour.
+			AuthParams: url.Values{"access_type": {"offline"}, "prompt": {"consent"}},
+		}, true
+	case "dropbox":
+		return OAuthProfile{
+			AuthorizeURL: "https://www.dropbox.com/oauth2/authorize",
+			TokenURL:     "https://api.dropboxapi.com/oauth2/token",
+			// The scopes the driver actually calls, and no more: metadata and
+			// content both ways, plus the account read that reports the space.
+			// A scope the app was never granted in the App Console fails the
+			// whole authorization, so this list has to match reality rather
+			// than ask for everything.
+			Scope:     "account_info.read files.metadata.read files.metadata.write files.content.read files.content.write",
+			FormToken: true,
+			// Dropbox issues no client secret to a public client, and none is
+			// needed: the verifier proves the exchange comes from whoever
+			// started the authorization.
+			PKCE: true,
+			// Without an offline grant the exchange returns an access token
+			// that expires in hours. Every Dropbox account added before this
+			// profile existed died that way, because the fallback asked for
+			// exactly that token by hand.
+			AuthParams: url.Values{"token_access_type": {"offline"}},
+		}, true
+	case "box":
+		return OAuthProfile{
+			AuthorizeURL: "https://account.box.com/api/oauth2/authorize",
+			TokenURL:     "https://api.box.com/oauth2/token",
+			Scope:        "root_readwrite",
+			FormToken:    true,
+		}, true
+	}
+	return OAuthProfile{}, false
+}
+
+// Apply writes the profile into the options a caller is assembling, then lets
+// the account's own configuration override the endpoints and the scope. A
+// self-hosted or region-specific authorization server is configured per
+// account; the exchange shape is a property of the protocol, not of the host.
+func (p OAuthProfile) Apply(o *auth.OAuthOptions, r config.Remote) {
+	o.AuthorizeURL, o.TokenURL, o.Scope = p.AuthorizeURL, p.TokenURL, p.Scope
+	o.JSONToken, o.FormToken, o.AuthParams = p.JSONToken, p.FormToken, p.AuthParams
+	o.PKCE = p.PKCE
+	override := func(key string, dst *string) {
+		if v := remoteField(r, key); v != "" {
+			*dst = v
+		}
+	}
+	override("oauth_authorize_url", &o.AuthorizeURL)
+	override("oauth_token_url", &o.TokenURL)
+	override("oauth_scope", &o.Scope)
 }
 
 func remoteField(r config.Remote, key string) string {
@@ -52,19 +157,19 @@ func remoteField(r config.Remote, key string) string {
 // client secret from storage. present receives the authorization URL once the
 // callback socket is listening and must return without waiting.
 func oauthOptions(cfg *config.Config, name string, r config.Remote, redirectURI string, present func(context.Context, string) error) (auth.OAuthOptions, func(), error) {
-	if remoteField(r, "client_id") == "" {
-		return auth.OAuthOptions{}, nil, errors.New("client_id is required; set it in the account configuration first")
+	// Whether a secret is required at all is a property of the profile, so it
+	// is read first. A public client (PKCE) has none: the per-attempt verifier
+	// is what proves the exchange, and demanding a secret would make the flow
+	// unusable for a backend that never issues one.
+	profile, ok := OAuthProfileFor(r.Type)
+	if !ok {
+		return auth.OAuthOptions{}, nil, fmt.Errorf("account: %q does not use daemon-driven OAuth", r.Type)
 	}
-	secret := remoteField(r, "client_secret")
-	if config.IsSecretReference(secret) {
-		resolved, err := config.NewSecretStore(cfg).Get(secret)
-		if err != nil {
-			return auth.OAuthOptions{}, nil, err
-		}
-		secret = resolved
-	}
-	if secret == "" {
-		return auth.OAuthOptions{}, nil, errors.New("client_secret is required for this authorization mode; import it first with `cloudfs config auth --stdin`")
+	// A browser cannot be prompted, so this path passes no prompt: an account
+	// that needs a secret it does not have is a refusal here, not a question.
+	clientID, secret, err := ResolveOAuthClient(cfg, r, profile, nil)
+	if err != nil {
+		return auth.OAuthOptions{}, nil, err
 	}
 	client, closeHTTP, err := AuthorizationHTTP(cfg, name)
 	if err != nil {
@@ -76,27 +181,8 @@ func oauthOptions(cfg *config.Config, name string, r config.Remote, redirectURI 
 	if redirectURI == "" {
 		redirectURI = "http://127.0.0.1:53682/callback"
 	}
-	o := auth.OAuthOptions{Client: client, ClientID: remoteField(r, "client_id"), ClientSecret: secret, RedirectURI: redirectURI, RequireRefresh: true, OpenURL: present}
-	switch r.Type {
-	case "aliyun":
-		o.AuthorizeURL = "https://openapi.alipan.com/oauth/authorize"
-		o.TokenURL = "https://openapi.alipan.com/oauth/access_token"
-		o.Scope = "user:base,file:all:read,file:all:write"
-		o.JSONToken = true
-		o.AuthParams = url.Values{"style": {"folder"}}
-	case "baidu":
-		o.AuthorizeURL = "https://openapi.baidu.com/oauth/2.0/authorize"
-		o.TokenURL = "https://openapi.baidu.com/oauth/2.0/token"
-		o.Scope = "basic netdisk"
-	default:
-		closeHTTP()
-		return auth.OAuthOptions{}, nil, fmt.Errorf("account: %q does not use daemon-driven OAuth", r.Type)
-	}
-	for key, dst := range map[string]*string{"oauth_authorize_url": &o.AuthorizeURL, "oauth_token_url": &o.TokenURL, "oauth_scope": &o.Scope} {
-		if v := remoteField(r, key); v != "" {
-			*dst = v
-		}
-	}
+	o := auth.OAuthOptions{Client: client, ClientID: clientID, ClientSecret: secret, RedirectURI: redirectURI, RequireRefresh: true, OpenURL: present}
+	profile.Apply(&o, r)
 	return o, closeHTTP, nil
 }
 
@@ -133,9 +219,15 @@ func StartOAuthFlow(ctx context.Context, cfg *config.Config, name string, redire
 		}
 		// The daemon saves the credential; it is never handed back to the
 		// caller that started the flow.
-		_, saveErr := config.SaveCredentialsForRemote(cfg.SourcePath, name, map[string]string{
-			"refresh_token": token.RefreshToken, "client_secret": o.ClientSecret,
-		}, r)
+		// A public client has no secret to store, and saveCredentials refuses
+		// an empty value: sending the key unconditionally would fail the save
+		// after the authorization already succeeded, blaming a field the
+		// person never supplied.
+		saved := map[string]string{"refresh_token": token.RefreshToken}
+		if o.ClientSecret != "" {
+			saved["client_secret"] = o.ClientSecret
+		}
+		_, saveErr := config.SaveCredentialsForRemote(cfg.SourcePath, name, saved, r)
 		result <- saveErr
 	}()
 	// Authorize sends the URL to present before it blocks; wait for it so the

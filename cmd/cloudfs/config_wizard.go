@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/provider"
 
 	"golang.org/x/term"
@@ -97,7 +98,7 @@ func collectFields(in *bufio.Reader, out io.Writer, typ string, have map[string]
 		if _, ok := have[field.Name]; ok {
 			continue
 		}
-		answer, err := ask(in, out, field.Prompt, field.Default, field.Example)
+		answer, err := ask(in, out, i18n.FieldPrompt(cliLang, typ, field.Name, field.Prompt), field.Default, field.Example)
 		if err != nil {
 			return err
 		}
@@ -132,8 +133,8 @@ func missingRequired(typ string, have map[string]string) []string {
 // driver declared rather than a lookup table over provider names.
 func credentialHint(typ string) string {
 	creds := provider.CredentialsFor(typ)
-	if creds.Note != "" {
-		return creds.Note
+	if note := i18n.CredentialNote(cliLang, typ, creds.Note); note != "" {
+		return note
 	}
 	if len(creds.Fields) > 0 {
 		return strings.Join(creds.Fields, " or ")

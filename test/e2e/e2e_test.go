@@ -27,6 +27,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	_ "cloudfs/internal/provider/webdav"
+
+	"cloudfs/internal/i18n"
 )
 
 type stack struct {
@@ -389,7 +391,7 @@ func TestStatusAndMetricsReflectRealWork(t *testing.T) {
 	}
 	s.settle(t)
 
-	st := s.d.Collector().Collect(context.Background())
+	st := s.d.Collector().Collect(context.Background(), i18n.EN)
 	if st.Cache.Blocks == 0 && st.Cache.HydratedFiles == 0 {
 		t.Fatalf("cache reports nothing after a 300 KB read: %+v", st.Cache)
 	}
@@ -428,7 +430,7 @@ func (r *recorder) WriteHeader(c int)           { r.code = c }
 
 func TestDoctorOnALiveSystem(t *testing.T) {
 	s := newStack(t, "writeback")
-	checks := s.d.Doctor(fusefs.Supported).Run(context.Background())
+	checks := s.d.Doctor(nil, fusefs.Supported).Run(context.Background())
 	if len(checks) == 0 {
 		t.Fatal("doctor produced no checks")
 	}

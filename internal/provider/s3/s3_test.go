@@ -560,3 +560,10 @@ func TestFactoryAndVFSReadPath(t *testing.T) {
 		t.Fatalf("VFS read = %q, %v", body, err)
 	}
 }
+
+func TestCapabilitiesSayTheIDsArePaths(t *testing.T) {
+	p, _ := newTestProvider(t, newFakeS3())
+	if !p.Capabilities().PathIDs {
+		t.Fatal("an S3 key is a path, so renaming a prefix changes every id beneath it; the VFS needs to be told")
+	}
+}

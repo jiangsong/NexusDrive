@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -48,25 +47,11 @@ func (s *Server) copyFile(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", 405)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
-	if r.Header.Get("Content-Type") != "application/json" {
-		http.Error(w, "use application/json", 415)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16384)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	var q CopyRequest
-	if err := dec.Decode(&q); err != nil {
-		http.Error(w, "invalid JSON request", 400)
-		return
-	}
-	if err := dec.Decode(new(any)); err != io.EOF {
-		http.Error(w, "expected one JSON object", 400)
+	if !decodeMutation(w, r, &q) {
 		return
 	}
 	if err := q.Validate(); err != nil {
@@ -74,7 +59,7 @@ func (s *Server) copyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.collector.FS == nil {
-		http.Error(w, "copy is not wired", 503)
+		httpErrorT(w, r, 503, "err.copy_unwired")
 		return
 	}
 	a, err := s.collector.FS.Copy(r.Context(), q.From, q.To)

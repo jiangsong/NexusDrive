@@ -39,7 +39,12 @@ type OAuthOptions struct {
 	RedirectURI, Scope     string
 	// JSONToken selects Aliyun's POST JSON exchange. Otherwise a GET query
 	// implements Baidu's documented token exchange.
-	JSONToken      bool
+	JSONToken bool
+	// FormToken selects the RFC 6749 form-encoded POST exchange, which is
+	// what Google and Box require. It keeps the authorization code and the
+	// client secret out of the request URL, so neither reaches a proxy log.
+	// JSONToken wins if both are set; a remote profile sets exactly one.
+	FormToken      bool
 	PKCE           bool
 	RequireRefresh bool
 	AuthParams     url.Values
@@ -191,10 +196,14 @@ func Authorize(ctx context.Context, opt OAuthOptions) (Token, error) {
 		params["code_verifier"] = verifier
 	}
 	req := httpx.Request{Class: ratelimit.Meta, Stream: true, URL: opt.TokenURL}
-	if opt.JSONToken {
+	switch {
+	case opt.JSONToken:
 		req.Method = http.MethodPost
 		req.JSON = params
-	} else {
+	case opt.FormToken:
+		req.Method = http.MethodPost
+		req.Form = params
+	default:
 		req.Method = http.MethodGet
 		values := url.Values{}
 		for k, v := range params {

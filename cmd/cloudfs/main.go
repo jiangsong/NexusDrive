@@ -26,6 +26,7 @@ import (
 	"cloudfs/internal/control"
 	"cloudfs/internal/daemon"
 	"cloudfs/internal/fusefs"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/mcpsrv"
 	"cloudfs/internal/net/proxy"
@@ -55,6 +56,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// cliLang is the language every message this command prints is rendered in.
+// It is read once, from CLOUDFS_LANG or the shell's locale: a run answers in
+// the language the shell is set to without a flag to remember. The daemon
+// renders its own refusals, so the same value is handed to the control client
+// here: settling it in two places is how they came to disagree.
+var cliLang = resolveCLILanguage()
+
+func resolveCLILanguage() i18n.Lang {
+	lang := i18n.FromEnv()
+	control.SetClientLanguage(lang)
+	return lang
+}
+
 // version is a variable so release builds can inject the tag with
 // -ldflags "-X main.version=<tag>". Local builds retain the development
 // baseline instead of reporting an empty version.
@@ -80,6 +94,8 @@ func main() {
 		for _, t := range provider.Types() {
 			fmt.Println(t)
 		}
+	case "setup":
+		err = cmdSetup(ctx, os.Args[2:])
 	case "config":
 		err = cmdConfig(ctx, os.Args[2:])
 	case "proxy":
@@ -142,6 +158,9 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: cloudfs <command> [args]
+
+Getting started
+  setup                     first run: write a starter config, then add drives in the browser
 
 Mounting
   mount [path]              mount the configured remotes and serve until interrupted
@@ -363,29 +382,29 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		// Without a config we can still check the platform.
 		fmt.Fprintf(os.Stderr, "note: %v\n", err)
 		d := &control.Doctor{FUSESupported: fusefs.Supported, Passthrough: fusefs.PassthroughEnabled}
-		return reportChecks(d.Run(ctx), f.bool("json"))
+		return reportChecks(control.LocalizeChecks(d.Run(ctx), cliLang), f.bool("json"))
 	}
 	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version})
 	if err != nil {
 		return err
 	}
 	defer d.Close()
-	doc := d.Doctor(fusefs.Supported)
+	doc := d.Doctor(nil, fusefs.Supported)
 	doc.Passthrough = fusefs.PassthroughEnabled
-	checks := doc.Run(ctx)
+	checks := control.LocalizeChecks(doc.Run(ctx), cliLang)
 	if err := reportChecks(checks, f.bool("json")); err != nil {
 		return err
 	}
 	if f.bool("fix") {
-		fmt.Println("\nApplying fixes:")
-		for _, line := range doc.Fix(ctx) {
+		fmt.Println("\n" + i18n.T(cliLang, "cli.applying_fixes"))
+		for _, line := range doc.Fix(ctx, cliLang) {
 			fmt.Println("  " + line)
 		}
 	}
 	_ = path
 	_, _, fail := control.Summary(checks)
 	if fail > 0 && !f.bool("fix") {
-		return fmt.Errorf("%d check(s) failed; run 'cloudfs doctor --fix' for the ones marked fixable", fail)
+		return errors.New(i18n.T(cliLang, "cli.checks_failed", fail))
 	}
 	return nil
 }
@@ -489,7 +508,7 @@ func cmdMount(ctx context.Context, args []string) error {
 			st := m.OpStats()
 			return control.FuseStatus{Ops: st.Ops, ReadBytes: st.ReadBytes, ReadSizes: st.ReadSizes}
 		}
-		col.Doctor = d.Doctor(fusefs.Supported)
+		col.Doctor = d.Doctor(col.ConfigView, fusefs.Supported)
 		col.Lifecycle = &control.Lifecycle{Restart: func() {
 			select {
 			case restart <- struct{}{}:
@@ -798,7 +817,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	st, online, err := control.FetchStatus(ctx, cfg.Control.Socket, cfg.Control.Metrics)
+	st, online, err := control.FetchStatusInLanguage(ctx, cfg.Control.Socket, cfg.Control.Metrics, cliLang)
 	if err != nil {
 		return err
 	}
@@ -816,7 +835,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		st = col.Collect(ctx)
+		st = col.Collect(ctx, cliLang)
 		st.Durability = cfg.Journal.Durability
 	}
 	if f.bool("json") {

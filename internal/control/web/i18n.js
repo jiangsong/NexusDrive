@@ -1,14 +1,58 @@
-// Chinese first; strings routed through t() so an en table is later a
-// copy-and-translate of one file. No locale negotiation — none is asked for.
+// Every string the page shows goes through t(). The tables below are the whole
+// translation story for the UI: one file to copy when a language is added, and
+// a key that renders as itself when an entry is missing, so a gap is visible
+// rather than blank.
+//
+// The daemon has its own catalog for the sentences it writes (diagnostics,
+// backend prompts, status warnings). The page tells it which language to use
+// with the lang query parameter every request carries — fetch cannot set
+// Accept-Language, and the parameter is also what makes a chosen language beat
+// the browser's own header.
 const zh = {
+  'nav.copies': '复制',
+  'copies.eyebrow': '服务端复制', 'copies.title': '复制任务',
+  'copies.empty': '没有复制任务', 'copies.progress': '进度', 'copies.target': '目标路径',
+  'copies.new': '新建复制', 'copies.start': '开始', 'copies.started': '复制任务已提交',
+  'copies.new.note': '两端都写虚拟路径。同一网盘内的复制由远端自己完成，字节不经过本机。',
+  'copies.new.needpaths': '源路径和目标路径都要填',
+  'copies.forget': '丢弃记录', 'copies.forget.title': '丢弃这条复制记录',
+  'copies.forget.body': '只删除本地这条记录。远端已经做过的事不会撤销。',
+  'copies.forgotten': '记录已丢弃',
+  'copies.note': '失败的任务保留记录，重试会从检查点继续。',
+  'copy.state.preparing': '准备中', 'copy.state.ready': '待提交', 'copy.state.submitted': '已提交',
+  'copy.state.failed': '失败', 'copy.state.cancelled': '已取消', 'copy.state.purging': '清理中',
   'nav.connections': '连接', 'nav.transfers': '传输', 'nav.storage': '缓存',
   'nav.pool': '存储池',
   'pool.eyebrow': '存储池', 'pool.space': '可用空间', 'pool.space.used': '已用', 'pool.space.unknown': '成员未报告容量', 'pool.files': '文件',
-  'pool.replicas': '副本数', 'pool.target': '当前可达', 'pool.capped': '成员不足', 'pool.health': '副本健康', 'pool.under': '个欠副本', 'pool.unavail': '个不可访问',
-  'pool.repair': '修复队列', 'pool.waiting': '个等待中', 'pool.holds': '本地暂存', 'pool.members': '成员', 'pool.col.member': '成员', 'pool.col.state': '状态',
+  'pool.replicas': '副本数', 'pool.capped': '成员不足', 'pool.health': '副本健康',
+  'pool.files.sub': '目标 %s 份，当前能放 %s 份', 'pool.health.sub': '%s 个文件还没凑齐副本，%s 个暂时读不到',
+  'setup.start': '引导设置', 'setup.title': '把几个网盘合成一块盘', 'setup.step': '第 %s 步，共 %s 步',
+  'setup.welcome.body': '接下来把你的几个网盘合并成一个文件夹：每个文件保存多份，任何一个网盘掉线都不影响使用。需要准备好这些网盘的账号，大约五分钟。这个控制台只在本机监听，不会暴露到网络上。',
+  'setup.drives.title': '选择要加入的网盘', 'setup.drives.body': '至少两个；混用不同厂商也可以。名字只是本地标识，可以改。',
+  'setup.drives.add': '再加一个', 'setup.drives.remove': '移除这一行', 'setup.drives.more': '更多类型',
+  'setup.drives.min': '至少选两个网盘才能做冗余',
+  'setup.connect.title': '逐个连接', 'setup.connect.body': '一次只能授权一个网盘：授权回调共用本机的同一个端口。完成一个再开始下一个。',
+  'setup.connect.pending': '待授权', 'setup.connect.active': '正在授权', 'setup.connect.ok': '已连接',
+  'setup.connect.space': '已连接 · 剩余 %s', 'setup.connect.nospace': '已连接 · 这个网盘不报告剩余空间',
+  'setup.connect.begin': '开始授权', 'setup.connect.retry': '重新授权',
+  'setup.replicas.title': '每个文件保存几份',
+  'setup.replicas.body': '%s 个网盘，每份文件保存 %s 份：可用空间约为总空间的 %s 分之一，坏掉任意 %s 个网盘都不丢文件。',
+  'setup.capacity.title': '这些网盘不报告剩余空间',
+  'setup.capacity.body': '不填也能用，但放置时它们会排在会报告空间的网盘之后。填个大概的总容量就行。',
+  'setup.capacity.ph': '例如 2TiB',
+  'setup.place.title': '放在哪个文件夹', 'setup.place.body': '这个文件夹就是那块合并后的盘；里面的东西实际存在各个网盘上。',
+  'setup.place.folder': '文件夹',
+  'setup.finish.title': '重启并完成', 'setup.finish.body': '配置已写好。守护进程重启后这块盘就挂上了。',
+  'setup.finish.restart': '重启并挂载', 'setup.finish.waiting': '正在重启…', 'setup.finish.done': '完成了。打开 %s 就能用。',
+  'setup.finish.open': '查看存储池', 'setup.restart.slow': '守护进程还没回来。可以在终端运行 %s 看看。',
+  'setup.resume': '上次进行到这里，继续即可。', 'setup.resume.found': '配置里已经有 %s 个网盘，已经帮你选上了。',
+  'setup.next': '下一步', 'setup.back': '上一步',
+  'pool.protect.async': '新文件先写到一个网盘就算保存成功，其余 %s 份由后台补上（通常几秒到几分钟）。',
+  'pool.repair': '修复队列', 'pool.repair.sub': '%s 个等待中，本地暂存 %s', 'pool.members': '成员', 'pool.col.member': '成员', 'pool.col.state': '状态',
   'pool.col.space': '空间', 'pool.col.files': '文件', 'pool.col.ops': '待重放', 'pool.action.enable': '启用', 'pool.action.disable': '停用', 'pool.action.drain': '迁出',
   'pool.action.remove': '移除', 'pool.action.add': '加入', 'pool.action.newdrive': '添加新网盘到池', 'pool.action.repair': '立即修复', 'pool.action.scrub': '核对',
   'pool.add.existing': '把已有网盘加入：', 'pool.restart': '已写入配置，重启守护进程后生效', 'pool.enabled': '已启用', 'pool.disabled': '已停用，不再放置新文件',
+  'pool.member.pending.add': '已加入配置，重启后生效', 'pool.member.pending.remove': '已从配置移除，重启后生效',
   'pool.draining': '正在迁出，迁空后可移除', 'pool.drain.q': '把 %s 上的所有副本迁到其它成员？迁空后再移除。', 'pool.remove.q': '从池配置中移除 %s？',
   'pool.repaired': '本轮补齐副本数：', 'pool.scrubbed': '本轮核对目录数：', 'pool.div.title': '需要你决定的分歧', 'pool.div.none': '没有分歧',
   'pool.div.path': '路径', 'pool.div.kind': '类型', 'pool.div.detail': '说明', 'pool.div.relist': '以网盘为准', 'pool.div.clear': '忽略', 'pool.div.relisted': '已按网盘现状重新核对',
@@ -18,21 +62,95 @@ const zh = {
   'add.pool': '加入存储池',
   'health.up': '正常', 'health.degraded': '不稳定(最近有失败)', 'health.down': '无法连接', 'health.out': '已离线较久,副本正在其它网盘重建', 'health.disabled': '已停用', 'health.draining': '正在迁出',
   'nav.proxy': '代理', 'nav.diagnostics': '诊断',
-  'app.queue': '队列', 'app.cache': '缓存', 'app.egress': '出口', 'app.daemon': '守护进程运行中',
+  'app.queue': '队列', 'app.cache': '缓存', 'app.egress': '出口', 'app.daemon': '守护进程运行中', 'app.language': '语言',
   'col.name': '名称', 'col.size': '大小', 'col.modified': '修改时间', 'col.state': '本地状态',
+  'col.path': '路径', 'col.scope': '范围', 'col.source': '来源', 'col.actions': '操作',
+  'col.type': '类型', 'col.address': '地址', 'col.latency': '延迟', 'col.status': '状态',
+  'col.file': '文件', 'col.drive': '网盘',
   'state.cached': '已缓存', 'state.dir': '目录已缓存', 'state.partial': '部分', 'state.pinned': '已固定',
   'state.pending': '等待上传', 'state.remote': '仅在远端',
-  'action.pin': '固定', 'action.unpin': '取消固定', 'action.warm': '预热', 'action.link': '复制直链',
-  'action.refresh': '刷新', 'action.retry': '重试', 'action.stop': '停止', 'action.delete': '删除',
+  'upload.state.pending': '等待上传', 'upload.state.uploading': '上传中', 'upload.state.done': '已完成',
+  'upload.state.dead': '上传失败', 'upload.state.cancelling': '停止中', 'upload.state.cancelled': '已停止', 'upload.state.purging': '清理中',
+  'action.pin': '固定', 'action.unpin': '取消固定', 'action.warm': '预热',
+  'action.refresh': '刷新', 'action.retry': '重试', 'action.stop': '停止', 'action.delete': '删除', 'action.edit': '编辑',
   'action.newfolder': '新建文件夹', 'action.add': '添加网盘', 'action.check': '测试连通性',
-  'search.placeholder': '搜索这个网盘',
+  'action.resume': '恢复…', 'action.discard': '丢弃本地版本…',
+  'search.placeholder': '搜索这个网盘', 'search.more': '可能还有更多结果',
+  'inspector.title': '详情', 'inspector.empty': '选择一个文件', 'inspector.dir': '目录',
+  'inspector.path': '虚拟路径', 'inspector.replicas': '副本', 'inspector.replicas.reason': '%s %s/%s（%s）',
+  'toast.pinned': '已固定', 'toast.unpinned': '已取消固定', 'toast.warmed': '预热了 %s 个目录',
+  'toast.deleted': '已删除', 'toast.gc': '回收了 %s', 'toast.resumed': '已恢复', 'toast.discarded': '已丢弃',
+  'toast.retried': '已重新加入上传队列', 'toast.stopped': '已停止上传',
+  'toast.restarting': '守护进程正在重启…',
+  'confirm.delete.title': '删除 %s', 'confirm.delete.body': '这会同时删除远端上的文件。',
+  'conn.remove': '删除连接', 'conn.remove.title': '删除连接 %s',
+  'conn.title': '%s 的设置', 'conn.settings': '连接设置', 'conn.close': '关闭',
+  'conn.live': '已装载', 'conn.offline': '未装载', 'conn.hascreds': '已授权', 'conn.nocreds': '未授权',
+  'conn.proxy': '代理出口', 'conn.proxy.ph': '出口或组名，留空表示直连',
+  'conn.qps.meta': '元数据 QPS', 'conn.qps.download': '下载 QPS', 'conn.qps.upload': '上传 QPS',
+  'conn.workers': '上传并发', 'conn.zero': '留空或填 0 表示用默认值。',
+  'conn.fields': '后端字段', 'conn.fields.empty': '这个连接没有可编辑的公开字段',
+  'conn.caps': '后端能力', 'conn.save': '保存', 'conn.saved': '已保存 %s',
+  'conn.nochange': '没有改动', 'conn.checking': '正在测试…',
+  'conn.check.ok': '连接正常', 'conn.check.fail': '连接失败',
+  'conn.mounts': '挂载', 'conn.mounts.empty': '这个连接还没有挂载到任何前缀',
+  'conn.mounts.nopath': '配置里还没有挂载点，先用 cloudfs config mount 建一个',
+  'conn.mount.add': '绑定', 'conn.mount.bound': '已绑定 %s',
+  'conn.mount.needprefix': '前缀不能为空',
+  'conn.mount.unbind': '解除挂载', 'conn.mount.unbind.title': '解除挂载 %s',
+  'conn.mount.unbind.body': '只从配置里移除这条布局。云端文件不动。重启守护进程后生效。',
+  'conn.mount.unbound': '已解除 %s',
+  'conn.restart': '这里的改动立即写入配置文件，重启守护进程后生效。',
+  'mode.writeback': '回写', 'mode.strict': '强一致', 'mode.readonly': '只读',
+  'caps.yes': '支持', 'caps.no': '不支持', 'caps.range': '范围读', 'caps.delta': '增量同步',
+  'tier.official': '官方接口', 'tier.unofficial': '非官方接口（限流更保守）',
+  'caps.servercopy': '服务端复制', 'caps.servermove': '服务端移动', 'caps.rapid': '秒传摘要', 'caps.tier': '接口来源',
+  'conn.remove.body': '只从配置里移除这个连接。云端文件和已保存的凭据都不动。重启守护进程后生效。',
+  'conn.remove.mounted': '%s 仍挂载在 %s。先解除该挂载再删除。',
+  'conn.remove.pooled': '%s 仍是存储池 %s 的成员。请先到“存储池”页面迁出并移除该成员。',
+  'toast.conn.removed': '已删除 %s。重启守护进程后生效',
+  'newfolder.title': '新建文件夹', 'newfolder.label': '文件夹名', 'newfolder.create': '创建',
   'transfers.title': '传输队列', 'transfers.active': '进行中', 'transfers.dead': '死信',
   'transfers.stopped': '已停止', 'transfers.done': '最近完成',
+  'transfers.eyebrow': '写入', 'transfers.empty': '当前没有活动、死信或已停止的上传',
+  'transfers.queued': '待传数据', 'transfers.tasks': '%s 个任务', 'transfers.retained': '死信持有',
+  'transfers.retained.note': '重试要用，不会自动清', 'transfers.completed': '已完成', 'transfers.keep': '最近保留 200 条',
+  'resume.title': '恢复上传', 'resume.body': '恢复可能在远端产生重复文件或覆盖。确认已核对目标。', 'resume.confirm': '确认恢复',
+  'discard.title': '永久丢弃本地版本', 'discard.body': '不删除远端数据，但会永久丢弃本地保留的这一版。若远端从未收到，内容就没了。',
   'storage.title': '缓存与固定', 'storage.used': '已用', 'storage.hit': '命中率',
-  'storage.rules': '固定规则', 'storage.gc': '立即回收',
+  'storage.rules': '固定规则', 'storage.gc': '立即回收', 'storage.eyebrow': '本地',
+  'storage.limit': '上限 %s', 'storage.nolimit': '无上限', 'storage.reads': '%s 读',
+  'storage.evictions': '最近淘汰', 'storage.evictions.note': '固定与打开中的不参与',
+  'storage.free': '可用磁盘', 'storage.free.note': '逼近留白时拒绝写入',
+  'storage.recursive': '递归', 'storage.single': '单个文件', 'storage.source.config': '配置',
+  'storage.source.ui': '界面', 'storage.editconfig': '改配置',
   'proxy.title': '代理出口', 'proxy.outbounds': '出口', 'proxy.groups': '分组', 'proxy.rules': '规则',
-  'proxy.recheck': '全部重新探测',
+  'proxy.save': '保存并生效', 'proxy.apply': '确定',
+  'proxy.saved.applied': '已保存并立即生效', 'proxy.saved.restart': '已保存，重启守护进程后生效',
+  'proxy.outbounds.add': '添加出口', 'proxy.outbound.add': '添加出口', 'proxy.outbound.edit': '编辑出口',
+  'proxy.outbound.remove': '删除出口 %s', 'proxy.outbound.remove.body': '引用它的组和规则会一并失效，保存前请一起改。',
+  'proxy.group.add': '添加分组', 'proxy.group.edit': '编辑分组',
+  'proxy.group.remove': '删除分组 %s', 'proxy.group.remove.body': '指向它的规则会一并失效，保存前请一起改。',
+  'proxy.group.needmembers': '分组需要名字和至少一个成员',
+  'proxy.field.name': '名称', 'proxy.field.members': '成员', 'proxy.field.checkurl': '探测 URL',
+  'proxy.field.interval': '探测间隔', 'proxy.field.timeout': '探测超时',
+  'proxy.hascreds': '（含凭据）',
+  'proxy.creds.note': '这个出口的地址里存有用户名或密码，界面只显示打码后的形式，不改地址就不会覆盖它。',
+  'proxy.creds.reenter': '改名称或类型时，要连完整地址一起重新输入（含用户名和密码）。保留原地址只能在原名称和原类型下进行。',
+  'proxy.creds.cleared': '地址不能留空。要换凭据请输入完整的新地址；要删掉这个出口请用删除。',
+  'proxy.name.required': '名称必填。',
+  'proxy.rename.refs': '重命名会同时改写引用它的 %s 个组和 %s 条规则。',
+  'proxy.rename.blocked': '这些网盘的 proxy 设置指向它：%s。请先在网盘设置里改过去，再重命名。',
+  'proxy.rules.hint': '一行一条规则，格式如 DOMAIN-SUFFIX,googleapis.com,auto；最后一条通常是 FINAL,direct。',
+  'proxy.explain.ph': '输入域名看它走哪条线', 'proxy.explain.go': '解释',
+  'proxy.explain.result': '命中 %s，出口 %s，实际 %s', 'proxy.explain.norule': '无规则（走默认）',
+  'proxy.explain.error': '无法解析出口：%s',
+  'proxy.recheck': '全部重新探测', 'proxy.eyebrow': '网络', 'proxy.local': '本机出口',
+  'proxy.healthy': '可用', 'proxy.unprobed': '未探测', 'proxy.members': '成员：', 'proxy.default': '默认出口：',
   'diag.title': '诊断与服务', 'diag.recheck': '重新检查', 'diag.fix': '修复',
+  'diag.eyebrow': '运维', 'diag.count.ok': '正常', 'diag.count.warn': '提醒', 'diag.count.fail': '需处理',
+  'diag.fix.title': '运行修复', 'diag.fix.body': 'doctor --fix 会跑日志恢复、清理旧完成上传、回收缓存。',
+  'diag.fix.none': '无需修复',
   'confirm.type': '输入 %s 确认', 'confirm.cancel': '取消',
   'restart.required': '此改动需要重启守护进程才能生效',
   'diag.service': '开机自启服务', 'diag.service.installed': '已安装并启用',
@@ -45,18 +163,294 @@ const zh = {
   'add.title': '添加网盘', 'add.type': '网盘类型', 'add.name': '名称（本地标识）',
   'add.name.ph': '例如 my-aliyun，仅字母数字-_', 'add.mount': '同时挂载为文件夹',
   'add.create': '创建', 'add.creating': '创建中…', 'add.required': '必填',
-  'add.credstep': '凭据步骤', 'add.next': '下一步：授权',
+  'add.credstep': '凭据步骤', 'add.credstep.value': '凭据步骤：%s', 'add.next': '下一步：授权',
   'add.auth.url': '在浏览器打开下面的地址完成授权，然后回到这里：',
   'add.auth.qr': '用该网盘的手机 App 扫描下面的内容完成授权：',
   'add.auth.term': '这个网盘的凭据需要在终端完成（密码 / cookie / 外部令牌不经过浏览器）：',
   'add.auth.open': '打开授权页', 'add.copy': '复制', 'add.copied': '已复制',
-  'add.waiting': '等待授权完成…', 'add.done': '授权完成', 'add.denied': '授权未通过',
+  'add.waiting': '等待授权完成…', 'add.done': '授权完成', 'add.denied': '授权未通过', 'add.denied.detail': '授权未通过：%s',
   'add.saved': '已保存到配置。重启守护进程后这个网盘才会生效。',
   'add.restart': '立即重启守护进程', 'add.finish': '完成',
-  'empty': '没有内容',
+  'add.noconfig': '这个守护进程没有配置文件，无法添加网盘',
+  'empty': '没有内容', 'loading': '加载中…',
+  'page.more': '加载更多',
+  'transfers.flush': '立即冲刷队列', 'transfers.retryall': '重试全部死信',
+  'toast.flushed': '已冲刷，队列还剩 %s 个', 'toast.requeued': '已重新排队 %s 个', 'toast.dropped': '已释放 %s 个文件的内核缓存',
+  'storage.drop': '释放内核缓存',
+  'storage.editconfig.help': '配置来源的固定项由配置文件的 cache.pin 决定，界面删不掉——守护进程每次启动都会重新读进来。改配置文件后重启守护进程。',
+  'pool.rebuild': '重建索引', 'pool.rebuild.title': '重建 %s 的索引',
+  'pool.rebuild.body': '遍历全部成员重写索引。过程较长，期间池不可用。远端文件不动。',
+  'pool.rebuilt': '索引已重建',
+  'pool.action.scrubpath': '校验单个路径',
+  'pool.scrubpath.title': '校验一个路径', 'pool.scrubpath.label': '池内路径',
+  'pool.join': '加入已有池', 'pool.join.title': '从远端标记文件加入池',
+  'pool.join.remote': '远端连接', 'pool.join.root': '池根路径',
+  'pool.join.note': '读取该远端上的池标记文件，把这台机器接入同一个池。会改写本机配置，重启后生效。',
+  'pool.join.nocandidates': '没有可用于加入的连接',
+  'action.rename': '重命名', 'action.preview': '预览', 'action.link': '下载链接',
+  'rename.title': '重命名 %s', 'rename.label': '新名称', 'rename.noslash': '名称里不能有斜杠',
+  'toast.renamed': '已重命名为 %s',
+  'preview.binary': '这是二进制内容，不做文本显示。', 'preview.empty': '（空文件）',
+  'link.title': '%s 的下载链接', 'link.expires': '有效期至 %s', 'link.noexpiry': '这个链接没有标注有效期',
+  'link.headers': '这个链接需要特定请求头，浏览器直接打开可能失败。', 'search.truncated': '结果被截断，缩小搜索范围可以看到更准确的列表',
 };
+
+const en = {
+  'nav.copies': 'Copies',
+  'copies.eyebrow': 'Server-side copy', 'copies.title': 'Copy jobs',
+  'copies.empty': 'No copy jobs', 'copies.progress': 'Progress', 'copies.target': 'Target path',
+  'copies.new': 'New copy', 'copies.start': 'Start', 'copies.started': 'The copy job was submitted',
+  'copies.new.note': 'Both are virtual paths. Within one drive the remote does the copy itself and the bytes never cross this machine.',
+  'copies.new.needpaths': 'Both the source and the target path are required',
+  'copies.forget': 'Forget', 'copies.forget.title': 'Forget this copy record',
+  'copies.forget.body': 'Removes the local record only. Nothing the remote already did is undone.',
+  'copies.forgotten': 'The record was dropped',
+  'copies.note': 'A failed job keeps its record; a retry resumes from the checkpoint.',
+  'copy.state.preparing': 'Preparing', 'copy.state.ready': 'Ready', 'copy.state.submitted': 'Submitted',
+  'copy.state.failed': 'Failed', 'copy.state.cancelled': 'Cancelled', 'copy.state.purging': 'Purging',
+  'nav.connections': 'Connections', 'nav.transfers': 'Transfers', 'nav.storage': 'Cache',
+  'nav.pool': 'Pool',
+  'pool.eyebrow': 'Pool', 'pool.space': 'Free space', 'pool.space.used': 'used', 'pool.space.unknown': 'members report no capacity', 'pool.files': 'Files',
+  'pool.replicas': 'Replicas', 'pool.capped': 'too few members', 'pool.health': 'Replica health',
+  'pool.files.sub': 'Target %s copies, %s placeable now', 'pool.health.sub': '%s files not yet fully copied, %s temporarily unreadable',
+  'setup.start': 'Guided setup', 'setup.title': 'Fuse several drives into one', 'setup.step': 'Step %s of %s',
+  'setup.welcome.body': 'This joins your drives into one folder: every file is kept on more than one of them, so a single drive going offline does not stop you. Have the accounts ready; it takes about five minutes. This console listens on your own machine only.',
+  'setup.drives.title': 'Choose the drives to join', 'setup.drives.body': 'At least two; mixing providers is fine. The name is a local label and can be changed.',
+  'setup.drives.add': 'Add another', 'setup.drives.remove': 'Remove this row', 'setup.drives.more': 'More types',
+  'setup.drives.min': 'Pick at least two drives to have redundancy',
+  'setup.connect.title': 'Connect them one at a time', 'setup.connect.body': 'Only one drive can be authorized at a time: the authorization callbacks share one local port. Finish one, then start the next.',
+  'setup.connect.pending': 'Not authorized yet', 'setup.connect.active': 'Authorizing', 'setup.connect.ok': 'Connected',
+  'setup.connect.space': 'Connected · %s free', 'setup.connect.nospace': 'Connected · this drive does not report free space',
+  'setup.connect.begin': 'Start authorization', 'setup.connect.retry': 'Authorize again',
+  'setup.replicas.title': 'How many copies of each file',
+  'setup.replicas.body': '%s drives, %s copies of each file: usable space is about one %s of the total, and losing any %s of them loses nothing.',
+  'setup.capacity.title': 'These drives do not report free space',
+  'setup.capacity.body': 'You can leave this blank, but they will be placed after the drives that do report space. An approximate total is enough.',
+  'setup.capacity.ph': 'for example 2TiB',
+  'setup.place.title': 'Where it appears', 'setup.place.body': 'This folder is the fused drive; what is inside really lives on the individual drives.',
+  'setup.place.folder': 'Folder',
+  'setup.finish.title': 'Restart and finish', 'setup.finish.body': 'The configuration is written. The drive is mounted once the daemon restarts.',
+  'setup.finish.restart': 'Restart and mount', 'setup.finish.waiting': 'Restarting…', 'setup.finish.done': 'Done. Open %s and start using it.',
+  'setup.finish.open': 'Open the pool screen', 'setup.restart.slow': 'The daemon has not come back. Run %s in a terminal to see why.',
+  'setup.resume': 'Picking up where you left off.', 'setup.resume.found': 'The configuration already has %s drives; they are selected for you.',
+  'setup.next': 'Next', 'setup.back': 'Back',
+  'pool.protect.async': 'A new file counts as saved once it reaches one drive; the other %s copies are filled in by the repair worker in the background (usually seconds to minutes).',
+  'pool.repair': 'Repair queue', 'pool.repair.sub': '%s waiting, Local holds %s', 'pool.members': 'Members', 'pool.col.member': 'Member', 'pool.col.state': 'State',
+  'pool.col.space': 'Space', 'pool.col.files': 'Files', 'pool.col.ops': 'To replay', 'pool.action.enable': 'Enable', 'pool.action.disable': 'Disable', 'pool.action.drain': 'Drain',
+  'pool.action.remove': 'Remove', 'pool.action.add': 'Join', 'pool.action.newdrive': 'Add a new drive to the pool', 'pool.action.repair': 'Repair now', 'pool.action.scrub': 'Scrub',
+  'pool.add.existing': 'Add an existing drive:', 'pool.restart': 'Written to the configuration; it takes effect after a daemon restart', 'pool.enabled': 'Enabled', 'pool.disabled': 'Disabled; no new files are placed here',
+  'pool.member.pending.add': 'Added to configuration; effective after restart', 'pool.member.pending.remove': 'Removed from configuration; effective after restart',
+  'pool.draining': 'Draining; it can be removed once empty', 'pool.drain.q': 'Move every replica on %s to the other members? Remove it once empty.', 'pool.remove.q': 'Remove %s from the pool configuration?',
+  'pool.repaired': 'Replicas restored this round:', 'pool.scrubbed': 'Directories checked this round:', 'pool.div.title': 'Divergences needing a decision', 'pool.div.none': 'No divergences',
+  'pool.div.path': 'Path', 'pool.div.kind': 'Kind', 'pool.div.detail': 'Detail', 'pool.div.relist': 'Trust the drive', 'pool.div.clear': 'Ignore', 'pool.div.relisted': 'Rechecked against what the drive holds now',
+  'pool.div.cleared': 'Ignored', 'pool.none.title': 'Fuse every drive into one', 'pool.none.body': 'A pool merges several drives into one directory: the system decides where each file goes, keeps N replicas of it, and stays usable when any one drive goes offline; a lost drive is rebuilt from the replicas on the others. Local disk is only a hot cache. The more drives you add, the more space you have.',
+  'pool.create': 'Create a pool', 'pool.create.name': 'Name', 'pool.create.members': 'Members', 'pool.create.nomembers': 'Pick at least one member', 'pool.create.nocandidates': 'Add a drive first',
+  'pool.noconfig': 'This daemon has no configuration file, so a pool cannot be created', 'avail.full': 'fully replicated', 'avail.degraded': 'under-replicated', 'avail.unavailable': 'unreachable',
+  'add.pool': 'Join the pool',
+  'health.up': 'OK', 'health.degraded': 'unstable (recent failures)', 'health.down': 'unreachable', 'health.out': 'offline for a while; replicas are rebuilding on other drives', 'health.disabled': 'disabled', 'health.draining': 'draining',
+  'nav.proxy': 'Proxy', 'nav.diagnostics': 'Diagnostics',
+  'app.queue': 'Queue', 'app.cache': 'Cache', 'app.egress': 'Egress', 'app.daemon': 'daemon running', 'app.language': 'Language',
+  'col.name': 'Name', 'col.size': 'Size', 'col.modified': 'Modified', 'col.state': 'Local state',
+  'col.path': 'Path', 'col.scope': 'Scope', 'col.source': 'Source', 'col.actions': 'Actions',
+  'col.type': 'Type', 'col.address': 'Address', 'col.latency': 'Latency', 'col.status': 'Status',
+  'col.file': 'File', 'col.drive': 'Drive',
+  'state.cached': 'cached', 'state.dir': 'directory cached', 'state.partial': 'partial', 'state.pinned': 'pinned',
+  'state.pending': 'waiting to upload', 'state.remote': 'remote only',
+  'upload.state.pending': 'waiting to upload', 'upload.state.uploading': 'uploading', 'upload.state.done': 'finished',
+  'upload.state.dead': 'upload failed', 'upload.state.cancelling': 'stopping', 'upload.state.cancelled': 'stopped', 'upload.state.purging': 'cleaning up',
+  'action.pin': 'Pin', 'action.unpin': 'Unpin', 'action.warm': 'Warm',
+  'action.refresh': 'Refresh', 'action.retry': 'Retry', 'action.stop': 'Stop', 'action.delete': 'Delete', 'action.edit': 'Edit',
+  'action.newfolder': 'New folder', 'action.add': 'Add a drive', 'action.check': 'Test the connection',
+  'action.resume': 'Resume…', 'action.discard': 'Discard the local version…',
+  'search.placeholder': 'Search this drive', 'search.more': 'there may be more results',
+  'inspector.title': 'Details', 'inspector.empty': 'Select a file', 'inspector.dir': 'directory',
+  'inspector.path': 'Virtual path', 'inspector.replicas': 'Replicas', 'inspector.replicas.reason': '%s %s/%s (%s)',
+  'toast.pinned': 'Pinned', 'toast.unpinned': 'Unpinned', 'toast.warmed': 'Warmed %s directories',
+  'toast.deleted': 'Deleted', 'toast.gc': 'Reclaimed %s', 'toast.resumed': 'Resumed', 'toast.discarded': 'Discarded',
+  'toast.retried': 'Put back in the upload queue', 'toast.stopped': 'Upload stopped',
+  'toast.restarting': 'The daemon is restarting…',
+  'confirm.delete.title': 'Delete %s', 'confirm.delete.body': 'This deletes the file on the remote too.',
+  'conn.remove': 'Delete connection', 'conn.remove.title': 'Delete connection %s',
+  'conn.title': 'Settings for %s', 'conn.settings': 'Connection settings', 'conn.close': 'Close',
+  'conn.live': 'Assembled', 'conn.offline': 'Not assembled', 'conn.hascreds': 'Authorized', 'conn.nocreds': 'Not authorized',
+  'conn.proxy': 'Proxy outbound', 'conn.proxy.ph': 'Outbound or group name; empty means direct',
+  'conn.qps.meta': 'Metadata QPS', 'conn.qps.download': 'Download QPS', 'conn.qps.upload': 'Upload QPS',
+  'conn.workers': 'Upload workers', 'conn.zero': 'Leave empty or 0 to use the default.',
+  'conn.fields': 'Backend fields', 'conn.fields.empty': 'This connection has no editable public field',
+  'conn.caps': 'Backend capabilities', 'conn.save': 'Save', 'conn.saved': 'Saved %s',
+  'conn.nochange': 'Nothing changed', 'conn.checking': 'Testing…',
+  'conn.check.ok': 'The connection works', 'conn.check.fail': 'The connection failed',
+  'conn.mounts': 'Mounts', 'conn.mounts.empty': 'This connection is bound to no prefix yet',
+  'conn.mounts.nopath': 'The configuration declares no mount point; create one with cloudfs config mount',
+  'conn.mount.add': 'Bind', 'conn.mount.bound': 'Bound %s',
+  'conn.mount.needprefix': 'The prefix cannot be empty',
+  'conn.mount.unbind': 'Unbind', 'conn.mount.unbind.title': 'Unbind %s',
+  'conn.mount.unbind.body': 'Removes this layout from the configuration. Files on the remote are left alone. Effective after the daemon restarts.',
+  'conn.mount.unbound': 'Unbound %s',
+  'conn.restart': 'Changes here are written to the configuration at once and take effect when the daemon restarts.',
+  'mode.writeback': 'Writeback', 'mode.strict': 'Strict', 'mode.readonly': 'Read-only',
+  'caps.yes': 'Yes', 'caps.no': 'No', 'caps.range': 'Range reads', 'caps.delta': 'Delta sync',
+  'tier.official': 'Official API', 'tier.unofficial': 'Unofficial API (rate-limited more conservatively)',
+  'caps.servercopy': 'Server-side copy', 'caps.servermove': 'Server-side move', 'caps.rapid': 'Rapid-upload digests', 'caps.tier': 'API tier',
+  'conn.remove.body': 'Removes this connection from the configuration. Files on the remote and stored credentials are left alone. Effective after the daemon restarts.',
+  'conn.remove.mounted': '%s is still mounted at %s. Remove that layout first.',
+  'conn.remove.pooled': '%s is still a member of pool %s. Drain and remove it on the Storage Pool page first.',
+  'toast.conn.removed': 'Removed %s; effective after the daemon restarts',
+  'newfolder.title': 'New folder', 'newfolder.label': 'Folder name', 'newfolder.create': 'Create',
+  'transfers.title': 'Upload queue', 'transfers.active': 'In flight', 'transfers.dead': 'Dead letters',
+  'transfers.stopped': 'Stopped', 'transfers.done': 'Recently finished',
+  'transfers.eyebrow': 'Writes', 'transfers.empty': 'No active, dead-lettered or stopped uploads',
+  'transfers.queued': 'Queued data', 'transfers.tasks': '%s tasks', 'transfers.retained': 'Held for dead letters',
+  'transfers.retained.note': 'kept for retries, never cleared automatically', 'transfers.completed': 'Finished', 'transfers.keep': 'the last 200 are kept',
+  'resume.title': 'Resume the upload', 'resume.body': 'Resuming can duplicate or overwrite a file on the remote. Confirm you have checked the target.', 'resume.confirm': 'Confirm the resume',
+  'discard.title': 'Discard the local version permanently', 'discard.body': 'The remote data is not deleted, but the version kept locally is discarded for good. If the remote never received it, the content is gone.',
+  'storage.title': 'Cache and pins', 'storage.used': 'Used', 'storage.hit': 'Hit ratio',
+  'storage.rules': 'Pin rules', 'storage.gc': 'Reclaim now', 'storage.eyebrow': 'Local',
+  'storage.limit': 'limit %s', 'storage.nolimit': 'no limit', 'storage.reads': '%s reads',
+  'storage.evictions': 'Recent evictions', 'storage.evictions.note': 'pinned and open files are exempt',
+  'storage.free': 'Free disk', 'storage.free.note': 'writes are refused as the reserve is approached',
+  'storage.recursive': 'recursive', 'storage.single': 'single file', 'storage.source.config': 'config',
+  'storage.source.ui': 'UI', 'storage.editconfig': 'edit the config',
+  'proxy.title': 'Proxy egress', 'proxy.outbounds': 'Outbounds', 'proxy.groups': 'Groups', 'proxy.rules': 'Rules',
+  'proxy.save': 'Save and apply', 'proxy.apply': 'OK',
+  'proxy.saved.applied': 'Saved and applied at once', 'proxy.saved.restart': 'Saved; effective after the daemon restarts',
+  'proxy.outbounds.add': 'Add an outbound', 'proxy.outbound.add': 'Add an outbound', 'proxy.outbound.edit': 'Edit the outbound',
+  'proxy.outbound.remove': 'Delete outbound %s', 'proxy.outbound.remove.body': 'Groups and rules that name it stop working; fix them in the same save.',
+  'proxy.group.add': 'Add a group', 'proxy.group.edit': 'Edit the group',
+  'proxy.group.remove': 'Delete group %s', 'proxy.group.remove.body': 'Rules that point at it stop working; fix them in the same save.',
+  'proxy.group.needmembers': 'A group needs a name and at least one member',
+  'proxy.field.name': 'Name', 'proxy.field.members': 'Members', 'proxy.field.checkurl': 'Probe URL',
+  'proxy.field.interval': 'Probe interval', 'proxy.field.timeout': 'Probe timeout',
+  'proxy.hascreds': '(carries a credential)',
+  'proxy.creds.note': 'This address stores a username or password. The page only ever shows it redacted, and leaves it alone unless you replace the address.',
+  'proxy.creds.reenter': 'Changing the name or type means typing the whole address again, username and password included. The stored address can only be kept under the name and type it was entered for.',
+  'proxy.creds.cleared': 'The address cannot be empty. Type a complete new address to replace the credential, or remove the outbound instead.',
+  'proxy.name.required': 'A name is required.',
+  'proxy.rename.refs': 'Renaming also rewrites the %s groups and %s rules that name it.',
+  'proxy.rename.blocked': 'These drives select it with proxy: %s. Point them somewhere else first — this page cannot rename it for them.',
+  'proxy.rules.hint': 'One rule per line, e.g. DOMAIN-SUFFIX,googleapis.com,auto. The last one is usually FINAL,direct.',
+  'proxy.explain.ph': 'A hostname, to see which route it takes', 'proxy.explain.go': 'Explain',
+  'proxy.explain.result': 'matched %s, outbound %s, resolved %s', 'proxy.explain.norule': 'no rule (the default applies)',
+  'proxy.explain.error': 'the outbound could not be resolved: %s',
+  'proxy.recheck': 'Probe all again', 'proxy.eyebrow': 'Network', 'proxy.local': 'this machine',
+  'proxy.healthy': 'reachable', 'proxy.unprobed': 'not probed', 'proxy.members': 'Members: ', 'proxy.default': 'Default outbound: ',
+  'diag.title': 'Diagnostics and services', 'diag.recheck': 'Check again', 'diag.fix': 'Fix',
+  'diag.eyebrow': 'Operations', 'diag.count.ok': 'ok', 'diag.count.warn': 'warnings', 'diag.count.fail': 'need attention',
+  'diag.fix.title': 'Run the fixes', 'diag.fix.body': 'doctor --fix runs journal recovery, purges old finished uploads and reclaims cache.',
+  'diag.fix.none': 'nothing needed fixing',
+  'confirm.type': 'Type %s to confirm', 'confirm.cancel': 'Cancel',
+  'restart.required': 'This change takes effect only after a daemon restart',
+  'diag.service': 'Start at login', 'diag.service.installed': 'installed and enabled',
+  'diag.service.absent': 'not installed', 'diag.service.unsupported': 'this platform has no login service',
+  'diag.service.install': 'Install and enable', 'diag.service.uninstall': 'Uninstall',
+  'diag.service.hint': 'Once installed, the mount comes up at login (a systemd / launchd user service).',
+  'diag.daemon': 'Daemon', 'diag.restart': 'Restart the daemon',
+  'diag.restart.confirm': 'A restart flushes uploads in flight to disk, drops the mount point briefly, then restarts in place and reconnects. Changed configuration takes effect after it.',
+  'diag.restart.progress': 'The daemon is restarting; the page reconnects on its own…',
+  'add.title': 'Add a drive', 'add.type': 'Drive type', 'add.name': 'Name (local identifier)',
+  'add.name.ph': 'for example my-aliyun; letters, digits, - and _ only', 'add.mount': 'Mount it as a folder too',
+  'add.create': 'Create', 'add.creating': 'Creating…', 'add.required': 'required',
+  'add.credstep': 'Credential step', 'add.credstep.value': 'Credential step: %s', 'add.next': 'Next: authorize',
+  'add.auth.url': 'Open the address below in a browser to authorize, then come back here:',
+  'add.auth.qr': "Scan the content below with the drive's phone app to authorize:",
+  'add.auth.term': 'This drive needs its credential entered in a terminal (a password, cookie or external token never travels through the browser):',
+  'add.auth.open': 'Open the authorization page', 'add.copy': 'Copy', 'add.copied': 'Copied',
+  'add.waiting': 'Waiting for the authorization…', 'add.done': 'Authorized', 'add.denied': 'Authorization was refused', 'add.denied.detail': 'Authorization was refused: %s',
+  'add.saved': 'Saved to the configuration. The drive works once the daemon restarts.',
+  'add.restart': 'Restart the daemon now', 'add.finish': 'Done',
+  'add.noconfig': 'This daemon has no configuration file, so a drive cannot be added',
+  'empty': 'Nothing here', 'loading': 'Loading…',
+  'page.more': 'Load more',
+  'transfers.flush': 'Flush the queue now', 'transfers.retryall': 'Retry every dead letter',
+  'toast.flushed': 'Flushed; %s still queued', 'toast.requeued': 'Requeued %s uploads', 'toast.dropped': 'Dropped the kernel cache for %s files',
+  'storage.drop': 'Drop kernel caches',
+  'storage.editconfig.help': 'A pin from the configuration comes from cache.pin in the file and cannot be removed here: the daemon reads it again at every start. Edit the file, then restart the daemon.',
+  'pool.rebuild': 'Rebuild the index', 'pool.rebuild.title': 'Rebuild the index of %s',
+  'pool.rebuild.body': 'Walks every member and rewrites the index. It takes a while and the pool is unavailable meanwhile. Files on the remotes are left alone.',
+  'pool.rebuilt': 'The index was rebuilt',
+  'pool.action.scrubpath': 'Scrub one path',
+  'pool.scrubpath.title': 'Scrub one path', 'pool.scrubpath.label': 'Path inside the pool',
+  'pool.join': 'Join an existing pool', 'pool.join.title': 'Join a pool from a remote marker',
+  'pool.join.remote': 'Remote connection', 'pool.join.root': 'Pool root',
+  'pool.join.note': 'Reads the pool marker on that remote and attaches this machine to the same pool. It rewrites this configuration and takes effect after a restart.',
+  'pool.join.nocandidates': 'No connection is available to join with',
+  'action.rename': 'Rename', 'action.preview': 'Preview', 'action.link': 'Download link',
+  'rename.title': 'Rename %s', 'rename.label': 'New name', 'rename.noslash': 'A name cannot contain a slash',
+  'toast.renamed': 'Renamed to %s',
+  'preview.binary': 'These bytes are binary and are not shown as text.', 'preview.empty': '(empty file)',
+  'link.title': 'Download link for %s', 'link.expires': 'Valid until %s', 'link.noexpiry': 'This link carries no stated expiry',
+  'link.headers': 'This link needs specific request headers; opening it directly in a browser may fail.', 'search.truncated': 'The results were truncated; narrow the search for a list you can trust',
+};
+
+// Exported so the catalogs can be compared against each other: identical key
+// sets, and the same number of %s per key. Nothing outside a test should read
+// them — t() is the way in.
+export const tables = { zh, en };
+
+// supported answers "is this one of our two languages" the only way that is
+// safe on a plain object: `tables[code]` is truthy for anything
+// Object.prototype provides, so ?lang=constructor used to pass and end up in
+// document.documentElement.lang and on every request's query string.
+function supported(code) {
+  return typeof code === 'string' && Object.prototype.hasOwnProperty.call(tables, code);
+}
+
+// LOCALES is what the language switch renders, in the order it offers them.
+export const LOCALES = [
+  { code: 'zh', label: '中文' },
+  { code: 'en', label: 'English' },
+];
+
+const STORAGE_KEY = 'cloudfs.lang';
+
+// detect prefers an explicit URL choice, then what the person chose here
+// before, then what the browser asks for, and falls back to Chinese. Keeping
+// the URL choice first also makes switching work when storage is unavailable.
+function detect() {
+  const explicit = new URLSearchParams(location.search).get('lang');
+  if (supported(explicit)) return explicit;
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (supported(saved)) return saved;
+  } catch (e) { /* private windows deny storage; the browser's language still works */ }
+  const wanted = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || '']);
+  for (const tag of wanted) {
+    const base = String(tag).toLowerCase().split('-')[0];
+    if (supported(base)) return base;
+  }
+  return 'zh';
+}
+
+let current = detect();
+if (document.documentElement) document.documentElement.lang = current === 'zh' ? 'zh-CN' : current;
+
+// locale is the language every t() and every API request currently uses.
+export function locale() { return current; }
+
+// setLocale switches language and reloads. A reload rather than a re-render is
+// deliberate: the daemon renders its own strings per request, so the page has
+// to ask for them again anyway, and a reload cannot leave half the screen in
+// the previous language.
+export function setLocale(code) {
+  if (!supported(code) || code === current) return;
+  try { localStorage.setItem(STORAGE_KEY, code); } catch (e) { /* the URL below persists it across reload */ }
+  current = code;
+  const next = new URL(location.href);
+  next.searchParams.set('lang', code);
+  location.replace(next.toString());
+}
+
 export function t(key, ...args) {
-  let s = zh[key] || key;
-  for (const a of args) s = s.replace('%s', a);
-  return s;
+  const table = tables[current] || zh;
+  let s = table[key];
+  if (s === undefined) s = zh[key];
+  if (s === undefined) s = key;
+  // One pass, with a function replacement. A string replacement is read for
+  // $&, $`, $' and $1, and the arguments here are provider error text, remote
+  // names and file paths — none of it written by us — so a path containing $'
+  // used to eat the rest of the sentence it was being placed into. Replacing
+  // once per argument had the same shape of problem one level up: an argument
+  // that itself contained %s swallowed the argument after it.
+  let i = 0;
+  return s.replace(/%s/g, () => (i < args.length ? String(args[i++]) : '%s'));
 }

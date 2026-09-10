@@ -156,6 +156,9 @@ func New(opt Options) (*Provider, error) {
 
 			ServerMove:   true,
 			ServerRename: true,
+			// An id is the path, so renaming or moving a directory changes
+			// the id of everything beneath it.
+			PathIDs: true,
 			// SSH has a copy-data extension, but it is not universal and
 			// pkg/sftp does not expose it; claiming it would make the VFS
 			// pick a path that fails on most servers.

@@ -16,7 +16,7 @@ func init() {
 		{Name: "client_id", Prompt: "OAuth client ID"},
 		{Name: "drive_id", Prompt: "Shared drive ID, blank for My Drive"},
 	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret", "access_token"},
-		Note: "a refresh token and client secret from the Google Cloud console"})
+		Note: "the client secret from the Google Cloud console; config auth then opens a browser for the rest"})
 }
 
 // Factory builds a Drive provider from its `remotes.<name>` config block.

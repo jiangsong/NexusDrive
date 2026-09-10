@@ -32,42 +32,55 @@ func (d *Doctor) checkPools(ctx context.Context) []Check {
 			continue
 		}
 		for _, m := range r.Members {
-			c := Check{Name: fmt.Sprintf("pool/%s/member/%s", name, m.Name), Level: LevelOK, Detail: string(m.State)}
+			c := Check{Name: fmt.Sprintf("pool/%s/member/%s", name, m.Name), Level: LevelOK}
+			c.passDetail(string(m.State))
 			switch m.State {
 			case provider.HealthOut:
-				c.Level, c.Detail = LevelFail, "out: down since "+m.DownSince.Format("2006-01-02 15:04")+"; its copies are being rebuilt elsewhere"
-				c.Fix = "bring the drive back, or drain and remove it: cloudfs pool drain " + name + " " + m.Name
+				c.Level = LevelFail
+				c.setDetail("doctor.pool.member.out", m.DownSince.Format("2006-01-02 15:04"))
+				c.setFix("doctor.pool.member.fix.out", name, m.Name)
 			case provider.HealthDown:
-				c.Level, c.Detail = LevelWarn, "down: "+m.LastError
+				c.Level = LevelWarn
+				c.setDetail("doctor.pool.member.down", m.LastError)
 			case provider.HealthDegraded:
-				c.Level, c.Detail = LevelWarn, "recent failures: "+m.LastError
+				c.Level = LevelWarn
+				c.setDetail("doctor.pool.member.recent", m.LastError)
 			case provider.HealthDisabled, provider.HealthDraining:
-				c.Level, c.Detail = LevelWarn, string(m.State)+" by the operator"
+				c.Level = LevelWarn
+				c.setDetail("doctor.pool.member.operator", string(m.State))
 			}
 			if m.PendingOps > 0 {
 				c.Level = maxLevel(c.Level, LevelWarn)
-				c.Detail += fmt.Sprintf("; %d tree operations wait to be replayed on it", m.PendingOps)
+				c.addDetail("doctor.pool.member.pending", m.PendingOps)
 			}
 			out = append(out, c)
 		}
-		rep := Check{Name: "pool/" + name + "/replicas", Level: LevelOK, Detail: fmt.Sprintf("%d files at %d replicas", r.Files-r.UnderReplicated, r.Target)}
+		rep := Check{Name: "pool/" + name + "/replicas", Level: LevelOK}
+		rep.setDetail("doctor.pool.replicas.ok", r.Files-r.UnderReplicated, r.Target)
 		switch {
 		case r.Unavailable > 0:
-			rep.Level, rep.Detail = LevelFail, fmt.Sprintf("%d files have no reachable replica; %d below target", r.Unavailable, r.UnderReplicated)
+			rep.Level = LevelFail
+			rep.setDetail("doctor.pool.replicas.lost", r.Unavailable, r.UnderReplicated)
 		case r.UnderReplicated > 0:
-			rep.Level, rep.Detail = LevelWarn, fmt.Sprintf("%d files below the target of %d (repair queue %d, %d waiting)", r.UnderReplicated, r.Target, r.Repair.Queued, r.Repair.Blocked)
-			rep.Fix = "cloudfs pool repair " + name
+			rep.Level = LevelWarn
+			rep.setDetail("doctor.pool.replicas.under", r.UnderReplicated, r.Target, r.Repair.Queued, r.Repair.Blocked)
+			rep.setFix("doctor.pool.replicas.fix", name)
 		}
 		if r.TargetCapped {
 			rep.Level = maxLevel(rep.Level, LevelWarn)
-			rep.Detail += fmt.Sprintf("; only %d members can hold copies, replicas: %d asks for more", r.Target, r.Replicas)
+			rep.addDetail("doctor.pool.replicas.capped", r.Target, r.Replicas)
 		}
 		out = append(out, rep)
 		if d.HoldMaxBytes > 0 && r.HoldsBytes > d.HoldMaxBytes {
-			out = append(out, Check{Name: "pool/" + name + "/holds", Level: LevelWarn, Detail: fmt.Sprintf("%d bytes held locally for replication, over the %d budget", r.HoldsBytes, d.HoldMaxBytes)})
+			hc := Check{Name: "pool/" + name + "/holds", Level: LevelWarn}
+			hc.setDetail("doctor.pool.holds", r.HoldsBytes, d.HoldMaxBytes)
+			out = append(out, hc)
 		}
 		if r.Divergences > 0 {
-			out = append(out, Check{Name: "pool/" + name + "/divergences", Level: LevelWarn, Detail: fmt.Sprintf("%d paths need a decision", r.Divergences), Fix: "cloudfs pool divergences"})
+			dc := Check{Name: "pool/" + name + "/divergences", Level: LevelWarn}
+			dc.setDetail("doctor.pool.divergences", r.Divergences)
+			dc.setFix("doctor.pool.divergences.fix")
+			out = append(out, dc)
 		}
 		for _, n := range r.Notices {
 			out = append(out, Check{Name: "pool/" + name + "/notice", Level: LevelWarn, Detail: n})
@@ -91,15 +104,19 @@ func (d *Doctor) checkMarkers(ctx context.Context, name string, p *pool.Pool, r 
 		if !ok {
 			continue
 		}
-		c := Check{Name: fmt.Sprintf("pool/%s/marker/%s", name, m.Name), Level: LevelOK, Detail: "marker present"}
+		c := Check{Name: fmt.Sprintf("pool/%s/marker/%s", name, m.Name), Level: LevelOK}
+		c.setDetail("doctor.pool.marker.ok")
 		marker, err := pool.ReadMarker(ctx, mp, m.Root)
 		switch {
 		case err != nil && strings.Contains(err.Error(), "no pool marker"):
-			c.Level, c.Detail = LevelWarn, "no .cloudfs-pool.json on the member yet; it is written when the pool starts"
+			c.Level = LevelWarn
+			c.setDetail("doctor.pool.marker.absent")
 		case err != nil:
-			c.Level, c.Detail = LevelWarn, "marker could not be read: "+SanitizeError(err)
+			c.Level = LevelWarn
+			c.setDetail("doctor.pool.marker.unreadable", SanitizeError(err))
 		case marker.PoolID != r.PoolID:
-			c.Level, c.Detail = LevelFail, fmt.Sprintf("the member carries the marker of another pool (%s, %q)", marker.PoolID, marker.PoolName)
+			c.Level = LevelFail
+			c.setDetail("doctor.pool.marker.foreign", marker.PoolID, marker.PoolName)
 		}
 		out = append(out, c)
 	}

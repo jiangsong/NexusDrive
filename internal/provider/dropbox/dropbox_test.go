@@ -46,6 +46,7 @@ type fakeDropbox struct {
 	deltaEntries  []map[string]any
 	deltaGen      int
 	resetCursor   bool
+	spaceUsage    any
 }
 
 func newFakeDropbox() *fakeDropbox {
@@ -112,6 +113,8 @@ func (f *fakeDropbox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.append(w, r)
 	case "/2/files/upload_session/finish":
 		f.finish(w, r)
+	case "/2/users/get_space_usage":
+		f.spaceUsageHandler(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -466,6 +469,24 @@ func (f *fakeDropbox) finish(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(f.sessions, arg.Cursor.SessionID)
 	writeJSON(w, f.storeFile(commitPath(arg.Commit), body))
+}
+
+// spaceUsageHandler answers /2/users/get_space_usage. The default is the
+// individual allocation every personal account reports; a test that wants
+// another allocation shape sets f.spaceUsage itself.
+func (f *fakeDropbox) spaceUsageHandler(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	body := f.spaceUsage
+	f.mu.Unlock()
+	if body == nil {
+		body = map[string]any{
+			"used": 1234,
+			"allocation": map[string]any{
+				".tag": "individual", "allocated": 2 << 30,
+			},
+		}
+	}
+	writeJSON(w, body)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -846,5 +867,67 @@ func decodeLimitedForTest(body string) (any, error) {
 func TestPartTokenLength(t *testing.T) {
 	if got := strconv.FormatInt(4, 10); got != "4" {
 		t.Fatal(got)
+	}
+}
+
+// TestDropboxReportsTheSpaceItsAccountHas pins the reason this driver
+// implements provider.Quotaer at all: a pool sorts members by free space and
+// ranks every member with a known figure ahead of every member without one,
+// so a Dropbox member that cannot answer loses placement decisions it should
+// have won.
+func TestDropboxReportsTheSpaceItsAccountHas(t *testing.T) {
+	fake := newFakeDropbox()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p := testProvider(t, srv.URL, 4)
+
+	q, ok, err := provider.QuotaOf(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("Dropbox does not implement provider.Quotaer")
+	}
+	if q.Total != 2<<30 || q.Used != 1234 {
+		t.Fatalf("quota = %+v, want total=%d used=1234", q, int64(2<<30))
+	}
+	if want := int64(2<<30) - 1234; q.Free() != want {
+		t.Fatalf("free = %d, want %d", q.Free(), want)
+	}
+}
+
+// TestDropboxReportsUnknownSpaceWhenTheAllocationIsOneItCannotRead covers the
+// team allocation, whose figures live under a different shape than the
+// individual one. Reporting a guess would be worse than reporting nothing:
+// the pool would place writes against a number that is not this account's,
+// so an unreadable allocation must come back as unknown (Total 0) and not as
+// an error either, since a mount whose quota call fails is noisier than one
+// that simply cannot say.
+func TestDropboxReportsUnknownSpaceWhenTheAllocationIsOneItCannotRead(t *testing.T) {
+	fake := newFakeDropbox()
+	fake.spaceUsage = map[string]any{
+		"used": 4096,
+		"allocation": map[string]any{
+			".tag":      "team",
+			"used":      4096,
+			"allocated": 8 << 30,
+		},
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p := testProvider(t, srv.URL, 4)
+
+	q, ok, err := provider.QuotaOf(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("Dropbox does not implement provider.Quotaer")
+	}
+	if q.Total != 0 {
+		t.Fatalf("team allocation reported total = %d, want 0 (unknown)", q.Total)
+	}
+	if q.Free() >= 0 {
+		t.Fatalf("free = %d, want a negative number meaning unknown", q.Free())
 	}
 }

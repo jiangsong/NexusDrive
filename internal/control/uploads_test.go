@@ -14,6 +14,8 @@ import (
 
 	"cloudfs/internal/journal"
 	"cloudfs/internal/upload"
+
+	"cloudfs/internal/i18n"
 )
 
 func TestUploadControlPagesAndDoesNotExposeSessions(t *testing.T) {
@@ -197,7 +199,7 @@ func TestUploadCancelControlReturnsRetainedState(t *testing.T) {
 	if _, online, err := CallUploads(ctx, p, "", UploadRequest{Action: "retry", ID: u.ID}); !online || err == nil {
 		t.Fatalf("cancelled retry bypass: %v %v", online, err)
 	}
-	st := f.coll.Collect(ctx)
+	st := f.coll.Collect(ctx, i18n.EN)
 	if st.Uploads.Cancelled != 1 || st.Uploads.RetainedBytes != 10 || len(st.Warnings) == 0 {
 		t.Fatalf("status hides retained task: %+v", st)
 	}

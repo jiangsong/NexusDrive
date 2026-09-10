@@ -103,6 +103,9 @@ func New(opt Options) (*Provider, error) {
 			RangeRead: true, StreamList: true,
 			PartSize: partSize, MaxParts: 10000, UploadParallel: 4, SinglePutMax: defaultSinglePutMax,
 			ServerMove: true, ServerRename: true, ServerCopy: true,
+			// An id is the object key, so renaming a prefix changes the id of
+			// every object beneath it.
+			PathIDs: true,
 			LinkTTL: 15 * time.Minute, LinkShareable: true,
 			QPS: provider.QPS{Meta: 20, Download: 16, Upload: 8}, MaxConnsPerHost: 16,
 			Tier: provider.TierOfficial,

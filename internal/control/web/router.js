@@ -2,13 +2,17 @@ import { set } from '/ui/store.js';
 // A hash router. Overlays (add-drive, connect) are state on top of the current
 // screen, not navigations, so the server needs no SPA fallback and the mux's
 // "exact path or 404" contract is untouched.
-const routes = {
+export const routes = {
   '#/connections': 'main-window',
   '#/pool': 'pool-view',
   '#/transfers': 'transfers-view',
+  '#/copies': 'copies-view',
   '#/storage': 'storage-view',
   '#/proxy': 'proxy-view',
   '#/diagnostics': 'diagnostics-view',
+  // Setup is reachable by hash but is not a nav item: it is a first-run flow
+  // someone is sent to, not a place to browse back to.
+  '#/setup': 'setup-view',
 };
 export function currentTag() {
   const base = (location.hash || '#/connections').split('?')[0];
@@ -23,6 +27,7 @@ export const navItems = [
   { hash: '#/connections', icon: 'cloud', key: 'nav.connections' },
   { hash: '#/pool', icon: 'db', key: 'nav.pool' },
   { hash: '#/transfers', icon: 'transfer', key: 'nav.transfers' },
+  { hash: '#/copies', icon: 'file', key: 'nav.copies' },
   { hash: '#/storage', icon: 'db', key: 'nav.storage' },
   { hash: '#/proxy', icon: 'globe', key: 'nav.proxy' },
   { hash: '#/diagnostics', icon: 'wrench', key: 'nav.diagnostics' },

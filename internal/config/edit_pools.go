@@ -79,33 +79,46 @@ func CreatePool(configPath, name string, members []PoolMember, replicas, minRepl
 // AddPoolMember appends a member to an existing pool.
 func AddPoolMember(configPath, pool string, m PoolMember) error {
 	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
-		if _, ok := c.Pools[pool]; !ok {
-			return fmt.Errorf("config: unknown pool %q", pool)
-		}
 		r, ok := c.Remotes[m.Remote]
 		if !ok {
 			return fmt.Errorf("config: unknown remote %q", m.Remote)
 		}
-		if r.Type == PoolType {
-			return fmt.Errorf("config: %q is a pool; pools do not nest", m.Remote)
-		}
-		for _, existing := range c.Pools[pool].Members {
-			if existing.Remote == m.Remote {
-				return fmt.Errorf("config: %q is already a member of pool %q", m.Remote, pool)
-			}
-		}
-		pn := poolNode(root, pool)
-		if pn == nil {
-			return fmt.Errorf("config: unknown pool %q", pool)
-		}
-		ms := mappingValue(pn, "members")
-		if ms == nil || ms.Kind != yaml.SequenceNode {
-			ms = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-			setNode(pn, "members", ms)
-		}
-		ms.Content = append(ms.Content, memberNode(m))
-		return nil
+		return appendPoolMember(root, c, pool, m, r.Type)
 	})
+}
+
+// appendPoolMember is the membership edit without a transaction of its own, so
+// a caller that must publish it together with another change can put both in
+// one. AddRemote is why that matters: creating an account and joining it to a
+// pool used to be two writes, and a failure between them left an account that
+// belonged to nothing.
+//
+// The member's type is a parameter because the remote being joined may not be
+// in c at all — when AddRemote calls this, c is the document as it was parsed
+// before the remote node was added.
+func appendPoolMember(root *yaml.Node, c *Config, pool string, m PoolMember, memberType string) error {
+	if _, ok := c.Pools[pool]; !ok {
+		return fmt.Errorf("config: unknown pool %q", pool)
+	}
+	if memberType == PoolType {
+		return fmt.Errorf("config: %q is a pool; pools do not nest", m.Remote)
+	}
+	for _, existing := range c.Pools[pool].Members {
+		if existing.Remote == m.Remote {
+			return fmt.Errorf("config: %q is already a member of pool %q", m.Remote, pool)
+		}
+	}
+	pn := poolNode(root, pool)
+	if pn == nil {
+		return fmt.Errorf("config: unknown pool %q", pool)
+	}
+	ms := mappingValue(pn, "members")
+	if ms == nil || ms.Kind != yaml.SequenceNode {
+		ms = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		setNode(pn, "members", ms)
+	}
+	ms.Content = append(ms.Content, memberNode(m))
+	return nil
 }
 
 // RemovePoolMember drops a member from a pool's configuration. It does not

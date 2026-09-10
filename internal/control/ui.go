@@ -92,7 +92,7 @@ func (s *Server) statusUI(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "use GET", http.StatusMethodNotAllowed)
+		httpErrorT(w, r, http.StatusMethodNotAllowed, "err.use_get")
 		return
 	}
 	h := w.Header()

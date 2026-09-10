@@ -21,6 +21,21 @@ func validMountPrefix(prefix string) error {
 	return nil
 }
 
+// sameMountPath reports whether two spellings name the same mount.
+//
+// The editors match against the raw YAML node, which holds whatever the person
+// wrote — the setup wizard's default is the literal "~/CloudFS". Parse expands
+// that path, so every caller that read the configuration hands back the
+// expanded form. Comparing the two directly finds nothing: SetLayout and
+// RemoveMount then report "no mount at /home/you/CloudFS" for a mount that is
+// right there, and AddMount, which creates on miss, appends a SECOND entry for
+// the same directory — and cloudfs mount only ever mounts Mounts[0], so the
+// drive just bound in the browser silently never appears. Canonicalizing both
+// sides fixes all three; the node keeps the ~ so the file stays portable.
+func sameMountPath(a, b string) bool {
+	return ExpandHome(a) == ExpandHome(b)
+}
+
 // upsertMountLayout finds the mount at mountPath — creating it when create is
 // set — and installs layout under prefix. replace says whether an existing
 // prefix is overwritten or refused. AddRemote, AddMount and SetLayout all go
@@ -40,7 +55,7 @@ func upsertMountLayout(root *yaml.Node, mountPath, prefix string, layout Layout,
 	}
 	for _, m := range mounts.Content {
 		p := mappingValue(m, "path")
-		if p == nil || p.Value != mountPath {
+		if p == nil || !sameMountPath(p.Value, mountPath) {
 			continue
 		}
 		ln := mappingValue(m, "layout")
@@ -131,7 +146,7 @@ func RemoveMount(configPath, mountPath, prefix string) error {
 		}
 		for i, m := range mounts.Content {
 			p := mappingValue(m, "path")
-			if p == nil || p.Value != mountPath {
+			if p == nil || !sameMountPath(p.Value, mountPath) {
 				continue
 			}
 			ln := mappingValue(m, "layout")

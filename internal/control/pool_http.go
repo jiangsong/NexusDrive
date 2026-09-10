@@ -38,6 +38,9 @@ type PoolMemberView struct {
 	Files        int     `json:"files"`
 	PendingOps   int     `json:"pending_ops"`
 	NamingDenied int     `json:"naming_denied_count"`
+	// PendingRestart is "add" or "remove" when the saved configuration and
+	// the running pool intentionally differ until the next daemon restart.
+	PendingRestart string `json:"pending_restart,omitempty"`
 }
 
 // PoolView is one pool.
@@ -96,6 +99,12 @@ type PoolCreateRequest struct {
 	Mount   string `json:"mount,omitempty"`
 	Prefix  string `json:"prefix,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// MemberCapacity gives a total size, in bytes, for members whose backend
+	// cannot report one. Placement ranks members with known free space ahead
+	// of members without, so a drive that answers nothing quietly stops
+	// receiving files; this is where someone setting a pool up can say how big
+	// it is. Members that report their own space are left out of this map.
+	MemberCapacity map[string]int64 `json:"member_capacity,omitempty"`
 }
 
 // PoolPathRequest is POST /pool/repair and /pool/scrub.
@@ -187,13 +196,45 @@ func poolView(ctx context.Context, name string, p *pool.Pool) (PoolView, error) 
 	return v, nil
 }
 
+// markPendingPoolMembers reconciles runtime truth (health, copies and space)
+// with desired configuration. A member edit takes effect only after restart,
+// so omitting this distinction made a successfully removed member look
+// removable again and made a newly added member disappear from the page.
+func markPendingPoolMembers(views []PoolView, cfg *config.Config) {
+	for pi := range views {
+		configured := map[string]config.PoolMember{}
+		if p, ok := cfg.Pools[views[pi].Name]; ok {
+			for _, member := range p.Members {
+				configured[member.Remote] = member
+			}
+		}
+		running := make(map[string]bool, len(views[pi].Members))
+		for mi := range views[pi].Members {
+			name := views[pi].Members[mi].Remote
+			running[name] = true
+			if _, ok := configured[name]; !ok {
+				views[pi].Members[mi].PendingRestart = "remove"
+			}
+		}
+		for _, member := range cfg.Pools[views[pi].Name].Members {
+			if running[member.Remote] {
+				continue
+			}
+			views[pi].Members = append(views[pi].Members, PoolMemberView{
+				Remote: member.Remote, Root: member.Root, Weight: member.Weight,
+				PendingRestart: "add",
+			})
+		}
+	}
+}
+
 // GET /pool/status
 func (s *Server) poolStatus(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		httpErrorT(w, r, http.StatusMethodNotAllowed, "err.get_only")
 		return
 	}
 	out := PoolStatusResponse{Pools: []PoolView{}, Candidates: []string{}}
@@ -210,8 +251,9 @@ func (s *Server) poolStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Pools = append(out.Pools, v)
 	}
-	if cfg := s.collector.Config; cfg != nil && cfg.SourcePath != "" {
+	if cfg := s.collector.ConfigView(); cfg != nil && cfg.SourcePath != "" {
 		out.Configurable = true
+		markPendingPoolMembers(out.Pools, cfg)
 		inPool := map[string]bool{}
 		for _, p := range cfg.Pools {
 			for _, m := range p.Members {
@@ -237,14 +279,18 @@ func (s *Server) poolCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, &in) {
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no config file to write to", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
 		return
 	}
 	var members []config.PoolMember
 	for _, m := range in.Members {
-		members = append(members, config.PoolMember{Remote: m})
+		member := config.PoolMember{Remote: m}
+		if size, ok := in.MemberCapacity[m]; ok && size > 0 {
+			member.Capacity = config.Size(size)
+		}
+		members = append(members, member)
 	}
 	if err := config.CreatePool(cfg.SourcePath, in.Name, members, in.Replicas, in.MinReplicas, ""); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -260,6 +306,7 @@ func (s *Server) poolCreate(w http.ResponseWriter, r *http.Request) {
 			detail = "pool written; mount not added: " + err.Error()
 		}
 	}
+	s.reloadConfigView()
 	writeJSON(w, PoolMutationResponse{Pool: in.Name, RestartRequired: true, Detail: detail})
 }
 
@@ -272,9 +319,9 @@ func (s *Server) poolMembers(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, &in) {
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no config file to write to", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
 		return
 	}
 	if in.Root != "" {
@@ -288,6 +335,7 @@ func (s *Server) poolMembers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.reloadConfigView()
 	writeJSON(w, PoolMutationResponse{Pool: in.Pool, RestartRequired: true})
 }
 
@@ -306,7 +354,7 @@ func (s *Server) poolMemberState(w http.ResponseWriter, r *http.Request) {
 		in.State = "draining"
 	}
 	if in.State == "draining" && !in.Confirm {
-		http.Error(w, "draining moves every file off the member; pass confirm=true", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.confirm_drain")
 		return
 	}
 	p, ok := s.poolByName(w, in.Pool)
@@ -331,19 +379,50 @@ func (s *Server) poolMemberRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !in.Confirm {
-		http.Error(w, "removing a member drops its copies from the pool; pass confirm=true", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.confirm_remove_member")
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no config file to write to", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
+		return
+	}
+	configuredPool, poolConfigured := cfg.Pools[in.Pool]
+	if !poolConfigured {
+		httpErrorT(w, r, http.StatusBadRequest, "err.pool_unknown", in.Pool)
+		return
+	}
+	// Removing a configured member is an idempotent desired-state change.
+	// Until restart, the running pool still contains it and an impatient retry
+	// must not turn the successful first request into a misleading 400.
+	configured := false
+	for _, member := range configuredPool.Members {
+		if member.Remote == in.Remote {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		if p, ok := s.collector.Pools[in.Pool]; ok {
+			for _, member := range p.Status() {
+				if member.Name == in.Remote {
+					writeJSON(w, PoolMutationResponse{Pool: in.Pool, RestartRequired: true})
+					return
+				}
+			}
+		}
+		httpErrorT(w, r, http.StatusBadRequest, "err.pool_member_not_configured", in.Remote, in.Pool)
+		return
+	}
+	if len(configuredPool.Members) == 1 {
+		httpErrorT(w, r, http.StatusConflict, "err.pool_last_member", in.Remote, in.Pool)
 		return
 	}
 	if p, ok := s.collector.Pools[in.Pool]; ok {
 		if _, empty, err := p.DrainOnce(r.Context()); err == nil && !empty {
 			for _, m := range p.Status() {
 				if m.Name == in.Remote && m.Health.State == provider.HealthDraining {
-					http.Error(w, "the member still holds copies; let the drain finish first", http.StatusConflict)
+					httpErrorT(w, r, http.StatusConflict, "err.member_holds_copies")
 					return
 				}
 			}
@@ -353,6 +432,7 @@ func (s *Server) poolMemberRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.reloadConfigView()
 	writeJSON(w, PoolMutationResponse{Pool: in.Pool, RestartRequired: true})
 }
 
@@ -406,7 +486,7 @@ func (s *Server) poolWork(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasSuffix(r.URL.Path, "/rebuild"):
 		if !in.Confirm {
-			http.Error(w, "rebuilding drops the index and re-lists every member; pass confirm=true", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.confirm_rebuild")
 			return
 		}
 		if err := p.Rebuild(ctx); err != nil {
@@ -471,12 +551,12 @@ func (s *Server) poolDivergences(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = p.ClearDivergence(r.Context(), in.Path, in.Member, in.Kind)
 		default:
-			http.Error(w, "action must be clear or relist", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.action_invalid")
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
 	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		httpErrorT(w, r, http.StatusMethodNotAllowed, "err.get_or_post")
 	}
 }
 
@@ -490,9 +570,9 @@ func (s *Server) poolJoin(w http.ResponseWriter, r *http.Request) {
 	if !decodeMutation(w, r, &in) {
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no config file to write to", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
 		return
 	}
 	p, ok := s.collector.Providers[in.Remote]
@@ -535,6 +615,7 @@ func (s *Server) poolJoin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.reloadConfigView()
 	detail := ""
 	if len(missing) > 0 {
 		detail = "members not configured here yet: " + strings.Join(missing, ", ")

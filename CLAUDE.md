@@ -7,10 +7,9 @@ Go 1.27，模块名 `cloudfs`，约 105k 行、41 个包目录、1141 个测试�
 
 ## 工具链与常用命令
 
-本机**没有系统级 Go**。仓库里的 `./gow` 包装脚本指向会话 scratchpad 里的工具链
-（`gow version` → go1.27.1）。若脚本里的 scratchpad 路径已被清理，需要重新下载 Go 并
-改写 `gow` 顶部的 `SP=` 路径（同时把 `GOMODCACHE`/`GOCACHE` 指到可写目录）。
-下面所有命令用 `./gow` 代替 `go`。
+仓库里的 `./gow` 包装脚本先用系统 Go（`command -v go`），没有才回退到会话 scratchpad 里的
+工具链。若两者都没有，需要重新下载 Go 并改写 `gow` 顶部的 `SP=` 路径（同时把
+`GOMODCACHE`/`GOCACHE` 指到可写目录）。下面所有命令用 `./gow` 代替 `go`。
 
 ```sh
 ./gow build ./...
@@ -28,8 +27,12 @@ Go 1.27，模块名 `cloudfs`，约 105k 行、41 个包目录、1141 个测试�
 ./gow test ./test/chaos/ -run TestConflict -race -v
 ```
 
-FUSE 相关测试需要 `/dev/fuse`（本机已就绪，`fusermount3` 存在）。缺少时测试会 `t.Skip`
-而不是失败——所以**看到 skip 要确认是不是环境问题，而不是当成通过**。
+FUSE 相关测试需要 `/dev/fuse`（Linux）或 macFUSE（macOS）。缺少时测试会 `t.Skip`
+而不是失败——所以**看到 skip 要确认是不是环境问题，而不是当成通过**。没装 macFUSE 的
+macOS 上，`internal/fusefs` 的 `TestFlushSurvivesAnInterruptedRequest` 与
+`test/conformance` 的 `TestCreateReadWriteMatchLocal` 会**挂住直到超时**（不是 skip），
+所以在那种机器上跑全量要把 `./internal/fusefs`、`./test/conformance`、`./test/e2e`
+排除掉再看结果。
 
 手工冒烟：写一份用 `type: fake` remote 的配置，`./cloudfs mount` 后台跑，再用普通
 shell 命令验证。真实内核路径能暴露单元测试发现不了的 FUSE 语义问题。
@@ -47,7 +50,8 @@ cmd/cloudfs ── fusefs (内核) ─┐
   一致性、上传的判断都属于 vfs；fusefs 只做 inode 身份、timeout、errno 映射。加功能时
   不要把逻辑写进适配层。
 - **`internal/provider` 的 `Caps` 能力矩阵是唯一的分支依据**。上层永远不按网盘名字特判，
-  新增行为差异要加 `Caps` 字段而不是 `if name == "quark"`。
+  新增行为差异要加 `Caps` 字段而不是 `if name == "quark"`。例如 `Caps.PathIDs` 表示"id 就是
+  路径"（sftp/webdav/s3/smb），改目录名后 vfs 据此重写子孙的 `remote_id`。
 - **`internal/provider/httpx` 是所有驱动共用的 HTTP 客户端**，代理路由 + 三维限流 + 熔断 +
   错误分类都在这一层。daemon 通过 `provider.ConfigHTTPClient`（`"_http_client"`）这个 cfg key
   把配好的 client 注入驱动工厂；驱动应调用 `httpx.HTTPClientFrom`，只有该 key 缺席
@@ -90,8 +94,8 @@ cmd/cloudfs ── fusefs (内核) ─┐
 `quark`、`tianyi`、`sftp`、`s3`、`dropbox`、`onedrive`、`gdrive`、`box`、`smb`，
 外加测试用的 `fake`。
 
-国内驱动的部分 API 细节尚未在真实账号上验证，代码里用 `UNVERIFIED:` 注释标注（当前 56 处），
-每处都写清楚要验证什么。**改这些地方时保留或更新标注，验证通过才删除**。`Caps.Tier` 为
+部分 API 与平台细节尚未在真实账号/真机上验证，代码里用 `UNVERIFIED:` 注释标注
+（当前 78 处，含 `internal/winfs` 的 10 处），每处都写清楚要验证什么。**改这些地方时保留或更新标注，验证通过才删除**。`Caps.Tier` 为
 `unofficial` 的驱动（quark）默认限流更保守，风控信号映射为 `provider.ErrRiskControl` 以触发
 熔断而不是重试进封号。各驱动的具体约束见 `docs/providers.md`。
 

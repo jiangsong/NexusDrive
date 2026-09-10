@@ -54,7 +54,11 @@ func TestProxyConfigRoundTripsAndRefusesCredentials(t *testing.T) {
 	}
 	withCreds := in
 	withCreds.Outbounds = []ProxyOutbound{{Name: "hk", Type: "socks5", Addr: "socks5://user:pw@127.0.0.1:7890"}}
-	if rr := accountRequest(t, srv, http.MethodPut, "/proxy/config", withCreds); rr.Code != 400 || !strings.Contains(rr.Body.String(), "credentials") {
+	// The refusal is rendered in the request's language, so this asserts the
+	// outcome — refused, naming the outbound, and never echoing the secret —
+	// rather than a phrase from one of the two catalogs.
+	if rr := accountRequest(t, srv, http.MethodPut, "/proxy/config", withCreds); rr.Code != 400 ||
+		!strings.Contains(rr.Body.String(), "hk") || strings.Contains(rr.Body.String(), "user:pw") {
 		t.Fatalf("proxy password through the API: %d %s", rr.Code, rr.Body)
 	}
 	after, _ := os.ReadFile(path)

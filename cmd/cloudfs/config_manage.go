@@ -70,7 +70,7 @@ func runConfig(ctx context.Context, args []string, c configIO) error {
 	bools := map[string]bool{}
 	switch action {
 	case "add":
-		for _, k := range []string{"type", "proxy", "mount", "prefix", "mount-root", "mode", "url", "host", "user", "username", "client-id", "root", "root-id", "drive-id", "base-url", "key-file", "known-hosts"} {
+		for _, k := range []string{"type", "proxy", "pool", "mount", "prefix", "mount-root", "mode", "url", "host", "user", "username", "client-id", "root", "root-id", "drive-id", "base-url", "key-file", "known-hosts"} {
 			allowed[k] = true
 		}
 	case "list":
@@ -181,7 +181,11 @@ func configAdd(path string, f *flags, sets map[string]string, c configIO) error 
 		}
 		r.Extra[key] = parsed
 	}
-	opt := config.AddRemoteOptions{MountPath: f.str("mount", ""), Prefix: f.str("prefix", ""), Root: f.str("mount-root", ""), Mode: config.Mode(f.str("mode", ""))}
+	// A shipped OAuth application, where one exists, is recorded now rather
+	// than resolved at authorization time: client_id is part of the account's
+	// effective binding, so filling it in later would move that binding.
+	daemon.FillBuiltinClientID(&r)
+	opt := config.AddRemoteOptions{MountPath: f.str("mount", ""), Prefix: f.str("prefix", ""), Root: f.str("mount-root", ""), Mode: config.Mode(f.str("mode", "")), Pool: f.str("pool", "")}
 	if opt.MountPath == "" && (opt.Prefix != "" || opt.Root != "" || opt.Mode != "") {
 		return errors.New("config add: --prefix, --mount-root and --mode require --mount")
 	}
@@ -189,6 +193,9 @@ func configAdd(path string, f *flags, sets map[string]string, c configIO) error 
 		return err
 	}
 	fmt.Fprintf(out, "added remote %q (%s); run cloudfs config auth %s --config %q\n", f.arg(1), typ, f.arg(1), path)
+	if opt.Pool != "" {
+		fmt.Fprintf(out, "  joined pool %q; it takes effect at the daemon's next start\n", opt.Pool)
+	}
 	if hint := credentialHint(typ); hint != "" {
 		fmt.Fprintf(out, "  it will ask for %s\n", hint)
 	}
@@ -396,7 +403,7 @@ func configAuth(ctx context.Context, cfg *config.Config, f *flags, c configIO) e
 			var value string
 			value, err = c.secret(ctx, field)
 			fields = map[string]string{field: value}
-		} else if r.Type == "aliyun" || r.Type == "baidu" {
+		} else if _, oauth := daemon.OAuthProfileFor(r.Type); oauth {
 			fields, err = browserAuthorize(ctx, cfg, name, r, f, c)
 		} else if r.Type == "pan115" {
 			// The 115 device flow saves the credential in the daemon helper,
@@ -418,7 +425,13 @@ func configAuth(ctx context.Context, cfg *config.Config, f *flags, c configIO) e
 			}
 			return nil
 		} else {
-			field := map[string]string{"webdav": "pass", "openlist": "pass", "sftp": "password", "quark": "cookie", "tianyi": "password", "pan123": "client_secret", "pan115": "refresh_token", "dropbox": "access_token", "onedrive": "access_token", "gdrive": "refresh_token", "box": "refresh_token", "smb": "password"}[r.Type]
+			// The one credential to ask for when there is no authorization
+			// server to ask instead. Every backend with an OAuth profile is
+			// handled above and must not appear here: dropbox once did, and
+			// the value it collected — an access token Dropbox expires in
+			// hours — is exactly the account that stops working the same
+			// afternoon.
+			field := map[string]string{"webdav": "pass", "openlist": "pass", "sftp": "password", "quark": "cookie", "tianyi": "password", "pan123": "client_secret", "onedrive": "access_token", "smb": "password"}[r.Type]
 			if field == "" {
 				return errors.New("config auth: use --stdin to import this provider's credential fields, or --check to validate existing settings")
 			}
@@ -495,56 +508,36 @@ func checkConfiguredAccount(ctx context.Context, cfg *config.Config, name string
 
 func browserAuthorize(ctx context.Context, cfg *config.Config, name string, r config.Remote, f *flags, c configIO) (map[string]string, error) {
 	get := func(key string) string { value, _ := r.Extra[key].(string); return value }
-	if get("client_id") == "" {
-		return nil, errors.New("config auth: client_id is required; set it in the remote configuration")
+	// The profile decides whether a secret is part of this authorization at
+	// all, so it has to be read before anything asks for one. A public client
+	// has none to give, and prompting for a value the app console never issued
+	// is worse than having no wizard.
+	profile, ok := daemon.OAuthProfileFor(r.Type)
+	if !ok {
+		return nil, fmt.Errorf("config auth: %q does not authorize through a browser", r.Type)
 	}
-	secret := get("client_secret")
-	if config.IsSecretReference(secret) {
-		var err error
-		secret, err = config.NewSecretStore(cfg).Get(secret)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if secret == "" {
-		var err error
-		secret, err = c.secret(ctx, "client_secret")
-		if err != nil {
-			return nil, err
-		}
-	}
-	if secret == "" {
-		return nil, errors.New("config auth: client_secret is required for this authorization mode")
+	// One resolver, shared with the daemon's control-API flow: which
+	// application an authorization runs as must not depend on whether it was
+	// started from a terminal or from a browser. This is the path that can ask
+	// for a missing secret, so it passes a prompt; the daemon passes none.
+	clientID, secret, err := daemon.ResolveOAuthClient(cfg, r, profile, func(label string) (string, error) {
+		return c.secret(ctx, label)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("config auth: %w", err)
 	}
 	client, closeHTTP, err := daemon.AuthorizationHTTP(cfg, name)
 	if err != nil {
 		return nil, err
 	}
 	defer closeHTTP()
-	o := auth.OAuthOptions{Client: client, ClientID: get("client_id"), ClientSecret: secret, RedirectURI: f.str("redirect-uri", get("oauth_redirect_uri")), RequireRefresh: true}
+	o := auth.OAuthOptions{Client: client, ClientID: clientID, ClientSecret: secret, RedirectURI: f.str("redirect-uri", get("oauth_redirect_uri")), RequireRefresh: true}
 	if o.RedirectURI == "" {
 		o.RedirectURI = "http://127.0.0.1:53682/callback"
 	}
-	if r.Type == "aliyun" {
-		o.AuthorizeURL = "https://openapi.alipan.com/oauth/authorize"
-		o.TokenURL = "https://openapi.alipan.com/oauth/access_token"
-		o.Scope = "user:base,file:all:read,file:all:write"
-		o.JSONToken = true
-		o.AuthParams = url.Values{"style": {"folder"}}
-	} else {
-		o.AuthorizeURL = "https://openapi.baidu.com/oauth/2.0/authorize"
-		o.TokenURL = "https://openapi.baidu.com/oauth/2.0/token"
-		o.Scope = "basic netdisk"
-	}
-	if value := get("oauth_authorize_url"); value != "" {
-		o.AuthorizeURL = value
-	}
-	if value := get("oauth_token_url"); value != "" {
-		o.TokenURL = value
-	}
-	if value := get("oauth_scope"); value != "" {
-		o.Scope = value
-	}
+	// One table, shared with the daemon's control-API flow, so a terminal
+	// login and a browser login cannot ask for different scopes.
+	profile.Apply(&o, r)
 	o.OpenURL = func(ctx context.Context, address string) error {
 		fmt.Fprintf(c.Out, "authorize in your browser (register this callback with the app): %s\n", o.RedirectURI)
 		fmt.Fprintln(c.Out, address)
@@ -573,6 +566,13 @@ func browserAuthorize(ctx context.Context, cfg *config.Config, name string, r co
 		return nil, err
 	}
 	// Persist the renewable credential. The first check obtains an access
-	// token through the existing refresh-and-persist path.
-	return map[string]string{"refresh_token": tokens.RefreshToken, "client_secret": secret}, nil
+	// token through the existing refresh-and-persist path. A public client has
+	// no secret to persist, and saveCredentials refuses an empty value — so
+	// including the key unconditionally would fail the save after a perfectly
+	// good authorization, naming a field the person never supplied.
+	saved := map[string]string{"refresh_token": tokens.RefreshToken}
+	if secret != "" {
+		saved["client_secret"] = secret
+	}
+	return saved, nil
 }

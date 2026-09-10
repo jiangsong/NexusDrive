@@ -48,7 +48,7 @@ func (s *Server) service(w http.ResponseWriter, r *http.Request) {
 	}
 	svc := s.collector.Service
 	if svc == nil {
-		http.Error(w, "this daemon does not manage a service", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.service_unmanaged")
 		return
 	}
 	switch r.URL.Path {
@@ -64,9 +64,7 @@ func (s *Server) service(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request, svc *ServiceControl) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodGet) {
 		return
 	}
 	out := ServiceStatusResponse{Supported: true}
@@ -80,7 +78,7 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request, svc *Serv
 	if svc.Installed != nil {
 		installed, err := svc.Installed()
 		if err != nil {
-			http.Error(w, "cannot determine service state", http.StatusInternalServerError)
+			httpErrorT(w, r, http.StatusInternalServerError, "err.service_state_unknown")
 			return
 		}
 		out.Installed = installed
@@ -96,9 +94,7 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request, svc *Serv
 }
 
 func (s *Server) serviceInstall(w http.ResponseWriter, r *http.Request, svc *ServiceControl) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	if svc.Supported != nil {
@@ -110,18 +106,18 @@ func (s *Server) serviceInstall(w http.ResponseWriter, r *http.Request, svc *Ser
 	if svc.Installed != nil {
 		installed, err := svc.Installed()
 		if err != nil {
-			http.Error(w, "cannot determine service state", http.StatusInternalServerError)
+			httpErrorT(w, r, http.StatusInternalServerError, "err.service_state_unknown")
 			return
 		}
 		if installed {
 			// Refuse rather than silently re-enable a service the user may
 			// have deliberately stopped.
-			http.Error(w, "the service is already installed; uninstall it first to reinstall", http.StatusConflict)
+			httpErrorT(w, r, http.StatusConflict, "err.service_installed")
 			return
 		}
 	}
 	if svc.Install == nil {
-		http.Error(w, "this daemon cannot install a service", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.service_install_unsupported")
 		return
 	}
 	if err := svc.Install(); err != nil {
@@ -132,18 +128,15 @@ func (s *Server) serviceInstall(w http.ResponseWriter, r *http.Request, svc *Ser
 }
 
 func (s *Server) serviceUninstall(w http.ResponseWriter, r *http.Request, svc *ServiceControl) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	confirm := r.URL.Query().Get("confirm") == "true"
-	if err := requireConfirm(confirm, "stops the service and detaches its mount"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !confirmed(w, r, confirm, "confirm.stop_service") {
 		return
 	}
 	if svc.Uninstall == nil {
-		http.Error(w, "this daemon cannot uninstall a service", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.service_uninstall_unsupported")
 		return
 	}
 	if err := svc.Uninstall(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"cloudfs/internal/config"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/provider"
 )
 
@@ -38,6 +39,11 @@ type AccountField struct {
 type AccountType struct {
 	Type   string         `json:"type"`
 	Fields []AccountField `json:"fields"`
+	// BrowserAuth says the daemon can obtain this backend's credential itself,
+	// so the page can offer a button instead of a command to copy. The answer
+	// comes from the daemon rather than from a list kept in the page: that
+	// list is exactly what went stale when gdrive, box and dropbox were added.
+	BrowserAuth bool `json:"browser_auth,omitempty"`
 	// Credentials is what `config auth` will ask for, in plain words.
 	Credentials string `json:"credentials,omitempty"`
 }
@@ -46,6 +52,10 @@ type AccountType struct {
 type AccountSummary struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
+	// HasCredentials says a credential is already stored for this account, so
+	// a setup flow interrupted halfway can tell which drives it still has to
+	// authorize without fetching each one in turn.
+	HasCredentials bool `json:"has_credentials,omitempty"`
 }
 
 // AccountsResponse is what GET /accounts returns.
@@ -86,14 +96,18 @@ type AddAccountResponse struct {
 	RestartRequired bool `json:"restart_required"`
 }
 
-func (c *Collector) accountTypes() []AccountType {
+// accountTypes describes every backend the page can offer, with its prompts
+// rendered in lang. A driver registers one prompt in whatever language its
+// author wrote; the catalog supplies the rest, and a driver with no catalog
+// entry still asks its own readable question.
+func (c *Collector) accountTypes(lang i18n.Lang) []AccountType {
 	types := provider.DescribedTypes()
 	out := make([]AccountType, 0, len(types))
 	for _, typ := range types {
-		entry := AccountType{Type: typ, Credentials: credentialSummary(typ)}
+		entry := AccountType{Type: typ, Credentials: credentialSummary(lang, typ)}
 		for _, f := range provider.Fields(typ) {
 			entry.Fields = append(entry.Fields, AccountField{
-				Name: f.Name, Prompt: f.Prompt, Required: f.Required,
+				Name: f.Name, Prompt: i18n.FieldPrompt(lang, typ, f.Name, f.Prompt), Required: f.Required,
 				Default: f.Default, Example: f.Example,
 			})
 		}
@@ -102,10 +116,26 @@ func (c *Collector) accountTypes() []AccountType {
 	return out
 }
 
-func credentialSummary(typ string) string {
+// hasStoredCredential reports whether anything secret has been saved for an
+// account. It reads only whether a value is present, never the value: an empty
+// field means the account was created but never authorized, which is the one
+// thing a resumed setup needs to know.
+func hasStoredCredential(r config.Remote) bool {
+	for k, v := range r.Extra {
+		if !config.IsSecretField(k) {
+			continue
+		}
+		if text, ok := v.(string); ok && text != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialSummary(lang i18n.Lang, typ string) string {
 	creds := provider.CredentialsFor(typ)
-	if creds.Note != "" {
-		return creds.Note
+	if note := i18n.CredentialNote(lang, typ, creds.Note); note != "" {
+		return note
 	}
 	return strings.Join(creds.Fields, " or ")
 }
@@ -116,18 +146,22 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		s.listAccounts(w)
+		s.listAccounts(w, r)
 	case http.MethodPost:
 		s.addAccount(w, r)
 	default:
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		allowMethod(w, r, http.MethodGet, http.MethodPost)
 	}
 }
 
-func (s *Server) listAccounts(w http.ResponseWriter) {
-	out := AccountsResponse{Types: s.collector.accountTypes()}
-	if cfg := s.collector.Config; cfg != nil && cfg.SourcePath != "" {
+func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
+	out := AccountsResponse{Types: s.collector.accountTypes(LangFrom(r))}
+	if s.auth != nil && s.auth.Supported != nil {
+		for i := range out.Types {
+			out.Types[i].BrowserAuth = s.auth.Supported(out.Types[i].Type)
+		}
+	}
+	if cfg := s.collector.ConfigView(); cfg != nil && cfg.SourcePath != "" {
 		out.Configurable, out.ConfigPath = true, cfg.SourcePath
 		names := make([]string, 0, len(cfg.Remotes))
 		for name := range cfg.Remotes {
@@ -135,16 +169,19 @@ func (s *Server) listAccounts(w http.ResponseWriter) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			out.Remotes = append(out.Remotes, AccountSummary{Name: name, Type: cfg.Remotes[name].Type})
+			out.Remotes = append(out.Remotes, AccountSummary{
+				Name: name, Type: cfg.Remotes[name].Type,
+				HasCredentials: hasStoredCredential(cfg.Remotes[name]),
+			})
 		}
 	}
 	writeJSON(w, out)
 }
 
 func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no configuration file to add a remote to", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_for_remote")
 		return
 	}
 	var in AddAccountRequest
@@ -152,13 +189,19 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remote, err := buildAccount(in)
+	if err == nil && s.auth != nil && s.auth.FillClientID != nil {
+		// Written now, while the account is being created, so its effective
+		// binding is complete from the start; resolving it later would move
+		// the binding and fence uploads already queued under the old one.
+		s.auth.FillClientID(&remote)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	opt := config.AddRemoteOptions{MountPath: in.Mount, Prefix: in.Prefix, Mode: config.Mode(in.Mode)}
+	opt := config.AddRemoteOptions{MountPath: in.Mount, Prefix: in.Prefix, Mode: config.Mode(in.Mode), Pool: in.Pool}
 	if opt.MountPath == "" && (opt.Prefix != "" || opt.Mode != "") {
-		http.Error(w, "prefix and mode require a mount path", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.prefix_needs_mount")
 		return
 	}
 	if in.Pool != "" {
@@ -167,23 +210,19 @@ func (s *Server) addAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The account and its membership are one edit: an account that exists and
+	// belongs to nothing is a state nobody asked for, and the reply used to
+	// have to admit to producing it.
 	if err := config.AddRemote(cfg.SourcePath, in.Name, remote, opt); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	joined := ""
-	if in.Pool != "" {
-		if err := config.AddPoolMember(cfg.SourcePath, in.Pool, config.PoolMember{Remote: in.Name}); err != nil {
-			http.Error(w, "remote written, but joining the pool failed: "+err.Error(), http.StatusConflict)
-			return
-		}
-		joined = in.Pool
-	}
+	joined := in.Pool
 	s.reloadConfigView()
 	writeJSON(w, AddAccountResponse{
 		Name: in.Name, Type: in.Type,
 		NextCommand:     fmt.Sprintf("cloudfs config auth %s --config %s", in.Name, cfg.SourcePath),
-		Credentials:     credentialSummary(in.Type),
+		Credentials:     credentialSummary(LangFrom(r), in.Type),
 		RestartRequired: true,
 		JoinedPool:      joined,
 	})

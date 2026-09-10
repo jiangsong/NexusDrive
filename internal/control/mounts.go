@@ -45,7 +45,7 @@ type MountMutationResponse struct {
 
 func (s *Server) mountViews() []MountView {
 	out := []MountView{}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil {
 		return out
 	}
@@ -100,9 +100,9 @@ func (s *Server) mounts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, MountMutationResponse{Mounts: s.mountViews()})
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no configuration file", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config")
 		return
 	}
 	switch r.Method {
@@ -127,12 +127,11 @@ func (s *Server) mounts(w http.ResponseWriter, r *http.Request) {
 		}
 	case http.MethodDelete:
 		q := r.URL.Query()
-		if err := requireConfirm(q.Get("confirm") == "true", "removes the mount layout from the configuration"); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !confirmed(w, r, q.Get("confirm") == "true", "confirm.remove_mount") {
 			return
 		}
 		if q.Get("path") == "" || q.Get("prefix") == "" {
-			http.Error(w, "path and prefix are required", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.path_prefix_required")
 			return
 		}
 		if err := config.RemoveMount(cfg.SourcePath, q.Get("path"), q.Get("prefix")); err != nil {
@@ -140,8 +139,7 @@ func (s *Server) mounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		w.Header().Set("Allow", "GET, POST, PATCH, DELETE")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		allowMethod(w, r, http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete)
 		return
 	}
 	s.reloadConfigView()

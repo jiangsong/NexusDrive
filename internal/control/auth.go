@@ -1,6 +1,7 @@
 package control
 
 import (
+	"cloudfs/internal/config"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -29,6 +30,12 @@ type AuthStarter struct {
 	Supported func(remoteType string) bool
 	OAuth     func(ctx context.Context, name string, present func(url string)) (redirect string, wait func(context.Context) error, err error)
 	Device    func(ctx context.Context, name string, present func(qr string), scanned func()) (wait func(context.Context) error, err error)
+	// FillClientID writes the shipped OAuth application's client id into a new
+	// account that names none. It is supplied rather than called directly
+	// because the table of applications belongs to the layer that performs
+	// authorizations, and this package sits below it. Leaving it nil means no
+	// application is shipped, which is exactly today's behaviour.
+	FillClientID func(r *config.Remote)
 }
 
 // authSession is one in-flight login. It is addressed by an unguessable id;
@@ -62,10 +69,27 @@ func (s *authSession) snapshot() (kind, value, state, errText string) {
 
 // authRegistry holds the running sessions, at most one per account so a second
 // start cannot open a second callback listener on the same port.
+//
+// inFlight goes further: the OAuth callback binds one fixed loopback port, and
+// a provider that requires an exactly-registered redirect URI leaves no room
+// for an ephemeral one, so the port is a process-wide lock rather than a
+// per-account one. Tracking it only per account meant two different accounts
+// authorizing at once raced for the listener and the loser failed with
+// "address already in use", which reached the page as a generic gateway error
+// naming nothing anyone could act on.
 type authRegistry struct {
 	mu       sync.Mutex
 	byID     map[string]*authSession
 	byRemote map[string]string
+	// inFlight is the id of the session holding the port, and inFlightRemote
+	// the account it belongs to, for the refusal the page shows. It is keyed
+	// by session rather than by account because the settle goroutine releases
+	// the port when its own flow ends: keyed by account, a goroutine winding
+	// down from a session that was already cancelled would release the lock a
+	// newer session for that same account is holding, and the next account
+	// would then race the live listener for the port.
+	inFlight       string
+	inFlightRemote string
 }
 
 func newAuthRegistry() *authRegistry {
@@ -78,6 +102,37 @@ func (r *authRegistry) get(id string) *authSession {
 	return r.byID[id]
 }
 
+// claim registers a session and takes the callback port for it. It reports the
+// account already on the port when it cannot, and whether the refusal is
+// "this account is already authorizing" rather than "somebody else has the
+// port" — the page says different things about the two.
+func (r *authRegistry) claim(id, remote string, sess *authSession) (holder string, inProgress bool, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, running := r.byRemote[remote]; running {
+		return remote, true, false
+	}
+	if r.inFlight != "" {
+		return r.inFlightRemote, false, false
+	}
+	r.byID[id] = sess
+	r.byRemote[remote] = id
+	r.inFlight, r.inFlightRemote = id, remote
+	return "", false, true
+}
+
+// releasePort gives the callback port back without retiring the session: the
+// result is still there to be polled, but nothing is listening any more. It
+// takes the session id, so a goroutine winding down from a flow that was
+// already replaced releases nothing.
+func (r *authRegistry) releasePort(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inFlight == id {
+		r.inFlight, r.inFlightRemote = "", ""
+	}
+}
+
 func (r *authRegistry) remove(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -86,8 +141,16 @@ func (r *authRegistry) remove(id string) {
 		if r.byRemote[s.remote] == id {
 			delete(r.byRemote, s.remote)
 		}
+		if r.inFlight == id {
+			r.inFlight, r.inFlightRemote = "", ""
+		}
 	}
 }
+
+// authPresentTimeout is how long a start waits for the authorization URL or QR
+// code before giving up on it. A variable so a test does not have to wait it
+// out in real time.
+var authPresentTimeout = 15 * time.Second
 
 func randomID() string {
 	var b [16]byte
@@ -95,11 +158,12 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// AuthStartRequest is POST /accounts/{name}/auth/start.
-type AuthStartRequest struct {
-	// RedirectURI overrides the OAuth callback the app is registered with.
-	RedirectURI string `json:"redirect_uri,omitempty"`
-}
+// AuthStartRequest is POST /accounts/{name}/auth/start. It carries nothing:
+// the callback the daemon listens on is the one the provider's application is
+// registered with, and letting a caller choose it would let any page that can
+// reach the control plane pick which local port the listener binds. The
+// response reports the redirect that was used.
+type AuthStartRequest struct{}
 
 // AuthStartResponse hands back what to present. Kind is "url" for OAuth or
 // "qr" for a device code; Value is the URL or the QR content string.
@@ -118,39 +182,41 @@ type AuthStatusResponse struct {
 
 func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) {
 	if s.auth == nil || s.auth.OAuth == nil {
-		http.Error(w, "authorization flows are not wired on this daemon", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.auth_unwired")
 		return
 	}
-	if _, ok := s.collector.Config.Remotes[name]; !ok {
+	remote, ok := s.collector.ConfigView().Remotes[name]
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	rtype := s.collector.Config.Remotes[name].Type
+	rtype := remote.Type
 	if s.auth.Supported == nil || !s.auth.Supported(rtype) {
-		http.Error(w, "this account's credential is set with `cloudfs config auth "+name+"`, not through a browser flow", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.auth_terminal_only", name)
 		return
 	}
 	var in AuthStartRequest
 	if r.ContentLength != 0 && !decodeMutation(w, r, &in) {
 		return
 	}
-	s.authReg.mu.Lock()
-	if existing, ok := s.authReg.byRemote[name]; ok {
-		s.authReg.mu.Unlock()
-		_ = existing
-		http.Error(w, "an authorization for this account is already in progress; cancel it first", http.StatusConflict)
-		return
-	}
 	id := randomID()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
 	sess := &authSession{remote: name, state: "pending", cancel: cancel, done: make(chan struct{}), created: time.Now()}
-	s.authReg.byID[id] = sess
-	s.authReg.byRemote[name] = id
-	s.authReg.mu.Unlock()
+	holder, inProgress, ok := s.authReg.claim(id, name, sess)
+	if !ok {
+		cancel()
+		if inProgress {
+			httpErrorT(w, r, http.StatusConflict, "err.auth_in_progress")
+			return
+		}
+		httpErrorT(w, r, http.StatusConflict, "err.auth_port_busy", holder)
+		return
+	}
 
 	shown := make(chan struct{})
 	var wait func(context.Context) error
 	var startErr error
+	var redirectURI string
 	if rtype == "pan115" {
 		sess.kind = "qr"
 		wait, startErr = s.auth.Device(ctx, name,
@@ -161,18 +227,15 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		var redirect string
 		redirect, wait, startErr = s.auth.OAuth(ctx, name,
 			func(url string) { sess.mu.Lock(); sess.value = url; sess.mu.Unlock(); closeOnce(shown) })
-		sess.mu.Lock()
-		_ = redirect
-		sess.mu.Unlock()
 		if startErr == nil {
 			// Wait for the URL to be presented before replying.
 			select {
 			case <-shown:
-			case <-time.After(15 * time.Second):
+			case <-time.After(authPresentTimeout):
 				startErr = errors.New("authorization did not start in time")
 			}
 		}
-		in.RedirectURI = redirect
+		redirectURI = redirect
 	}
 	if startErr != nil {
 		cancel()
@@ -182,21 +245,36 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		// before any URL is shown). Keep it server-side; the async path is
 		// already generic, and this one must be too.
 		log.Printf("control: authorization start for %q failed: %v", name, startErr)
-		http.Error(w, "could not start authorization; check the account settings and the daemon log", http.StatusBadGateway)
+		httpErrorT(w, r, http.StatusBadGateway, "err.auth_start_failed")
 		return
 	}
 	if rtype == "pan115" {
 		select {
 		case <-shown:
-		case <-time.After(15 * time.Second):
+		case <-time.After(authPresentTimeout):
 			cancel()
 			s.authReg.remove(id)
-			http.Error(w, "the device code did not arrive in time", http.StatusBadGateway)
+			// wait owns this attempt's cleanup — the HTTP client it built for
+			// the exchange, the proxy checker it started — and that cleanup
+			// runs only when wait returns. Abandoning the flow without calling
+			// it leaks both, once per timed-out attempt. The context is
+			// already cancelled, so it returns at once.
+			go func() {
+				defer close(sess.done)
+				defer s.authReg.releasePort(id)
+				_ = wait(ctx)
+			}()
+			httpErrorT(w, r, http.StatusBadGateway, "err.device_code_timeout")
 			return
 		}
 	}
 	go func() {
 		defer close(sess.done)
+		// The callback listener is gone the moment the flow settles, however
+		// it settled. Holding the process-wide lock until somebody polls or
+		// cancels would let a closed browser tab block every other account
+		// until the daemon restarted — and closing a tab sends nothing.
+		defer s.authReg.releasePort(id)
 		err := wait(ctx)
 		switch {
 		case err == nil:
@@ -212,7 +290,7 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		}
 	}()
 	kind, value, _, _ := sess.snapshot()
-	writeJSON(w, AuthStartResponse{Session: id, Kind: kind, Value: value, RedirectURI: in.RedirectURI})
+	writeJSON(w, AuthStartResponse{Session: id, Kind: kind, Value: value, RedirectURI: redirectURI})
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request, name string) {
@@ -254,23 +332,17 @@ func closeOnce(ch chan struct{}) {
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request, name, action string) {
 	switch action {
 	case "start":
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !allowMethod(w, r, http.MethodPost) {
 			return
 		}
 		s.authStart(w, r, name)
 	case "status":
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !allowMethod(w, r, http.MethodGet) {
 			return
 		}
 		s.authStatus(w, r, name)
 	case "cancel":
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !allowMethod(w, r, http.MethodPost) {
 			return
 		}
 		s.authCancel(w, r, name)

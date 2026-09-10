@@ -3,10 +3,36 @@ package config
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
+
+// RemoteMountedError says that removing a remote would leave a mount layout
+// pointing at nothing. Callers may use the fields to render the refusal in the
+// reader's language without parsing an English config error.
+type RemoteMountedError struct {
+	Remote string
+	Path   string
+	Prefix string
+}
+
+func (e *RemoteMountedError) Error() string {
+	return fmt.Sprintf("config: remote %q is still mounted at %s%s; remove that layout first", e.Remote, e.Path, e.Prefix)
+}
+
+// RemotePoolMemberError says that a pool still owns the remote. Removing the
+// account cannot silently remove the member: it may hold the pool's only copy
+// of data and must go through the explicit drain/remove workflow first.
+type RemotePoolMemberError struct {
+	Remote string
+	Pool   string
+}
+
+func (e *RemotePoolMemberError) Error() string {
+	return fmt.Sprintf("config: remote %q is still a member of pool %q; drain and remove it from the pool first", e.Remote, e.Pool)
+}
 
 // The editors in this file exist so that a settings page can change an
 // account without anyone opening the YAML in an editor over SSH. They all go
@@ -29,11 +55,11 @@ func (c *Config) egressNames() map[string]bool {
 	return names
 }
 
-// RemoveRemote deletes an account block. It refuses while a mount layout still
-// points at the remote, so the file can never be left describing a mount of
-// nothing. Credentials stored for the remote are not deleted here: they are
-// held under references unique to this authorization, and removing them is a
-// separate, visible step.
+// RemoveRemote deletes an account block. It refuses while a mount layout or a
+// storage pool still points at the remote, so the file can never be left with
+// a dangling reference. Credentials stored for the remote are not deleted
+// here: they are held under references unique to this authorization, and
+// removing them is a separate, visible step.
 func RemoveRemote(configPath, name string) error {
 	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
 		if _, ok := c.Remotes[name]; !ok {
@@ -42,7 +68,21 @@ func RemoveRemote(configPath, name string) error {
 		for _, m := range c.Mounts {
 			for prefix, l := range m.Layout {
 				if l.Remote == name {
-					return fmt.Errorf("config: remote %q is still mounted at %s%s; remove that layout first", name, m.Path, prefix)
+					return &RemoteMountedError{Remote: name, Path: m.Path, Prefix: prefix}
+				}
+			}
+		}
+		// Sort for deterministic refusals even if a malformed config somehow
+		// reaches this editor with the same member in more than one pool.
+		pools := make([]string, 0, len(c.Pools))
+		for pool := range c.Pools {
+			pools = append(pools, pool)
+		}
+		sort.Strings(pools)
+		for _, pool := range pools {
+			for _, member := range c.Pools[pool].Members {
+				if member.Remote == name {
+					return &RemotePoolMemberError{Remote: name, Pool: pool}
 				}
 			}
 		}

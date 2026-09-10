@@ -53,6 +53,14 @@ func TestWebAppIsExplicitAndReadOnly(t *testing.T) {
 		t.Errorf("index cache control = %q", got)
 	}
 
+	// statusUI advertises HEAD alongside GET. HEAD is a safe read and must not
+	// be rejected by the mutation-header guard before it reaches statusUI.
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, uiReq(http.MethodHead, "/"))
+	if rr.Code != http.StatusOK || rr.Body.Len() != 0 {
+		t.Fatalf("HEAD / = %d body=%q", rr.Code, rr.Body.String())
+	}
+
 	// Every embedded asset is served at its own path with the right type and
 	// an ETag; a made-up path is a 404, the contract the mux keeps.
 	for _, tc := range []struct{ path, contentType string }{
@@ -160,6 +168,15 @@ func TestWebAppNeverAsksForACredential(t *testing.T) {
 	// It does point people at the terminal for authorization.
 	if !strings.Contains(blob, "config auth") {
 		t.Fatal("the app does not tell the user where credentials are set")
+	}
+	if strings.Contains(blob, "prompt(") {
+		t.Fatal("the app uses a blocking browser prompt instead of an in-app dialog")
+	}
+	if strings.Contains(blob, "confirmDelete(t(") {
+		t.Fatal("the app still calls the typed-confirmation component with its obsolete positional signature")
+	}
+	if !strings.Contains(blob, "get, subscribe") {
+		t.Fatal("status-backed screens do not subscribe to the first live status update")
 	}
 }
 

@@ -1,13 +1,30 @@
 import { api } from '/ui/api.js';
-import { el, fill, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
-import { t } from '/ui/i18n.js';
+import { el, fill, iconEl, bytes, toast, confirmDelete, promptText, showPanel, moreRow, copyBtn } from '/ui/ui.js';
+import { t, locale } from '/ui/i18n.js';
+import { pageCursor, pageFailureMode } from '/ui/paged.js';
+import { linkExpiry } from '/ui/expiry.js';
 import { openAddDrive } from '/ui/add_drive.js';
+import { openConnection } from '/ui/connection.js';
 import { onFsChange } from '/ui/app.js';
 import { get, subscribe } from '/ui/store.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
 // control routes — the same VFS the mount and the agent see.
+
+// validName is what both the rename and the new-folder inputs mean by a
+// name: one component, no separator. "a/b" would put the result somewhere
+// other than the directory on screen, which is the kind of surprise a person
+// only notices later.
+function validName(name) {
+  if (!name.includes('/')) return true;
+  toast(t('rename.noslash'), 'bad');
+  return false;
+}
+
+// PREVIEW_BYTES is what the inspector asks for. The daemon caps a preview at
+// 1 MiB; a first screenful is what a person is actually looking at.
+const PREVIEW_BYTES = 8192;
 
 function stateCell(entry) {
   if (entry.is_dir) return el('span', { class: 'dim' }, el('span', { class: 'dot ok' }), ' ' + t('state.dir'));
@@ -23,6 +40,10 @@ function stateCell(entry) {
 export function renderMain(host) {
   let cwd = '/';
   let selected = null;
+  let selectedRow = null;
+  // True once the reader has asked for more than the first page of this
+  // directory.
+  let paged = false;
   const state = { remotes: [], config: null };
 
   const sidebar = el('div', { style: 'width:264px;flex-shrink:0;border-right:1px solid var(--border);background:var(--sidebar);display:flex;flex-direction:column' });
@@ -75,75 +96,150 @@ export function renderMain(host) {
     try {
       const a = await api.get('/accounts');
       state.config = a;
+      // The sidebar is rebuilt on the next line, so every dot in the map is
+      // about to be detached. Keeping them would leave the health subscriber
+      // writing to nodes nobody can see, forever — and clearing them *before*
+      // the fetch was the mirror of that fault: a failed /accounts left the
+      // old sidebar on screen with its dots orphaned from the map, so health
+      // stopped moving there until some later load happened to succeed.
+      dots.clear();
       fill(sidebar,
         el('div', { class: 'eyebrow', style: 'padding:18px 16px 10px' }, t('nav.connections')),
         el('div', { style: 'flex-grow:1;padding:0 8px;overflow:auto' },
           (a.remotes || []).map((r) => {
             const item = el('div', {
               style: 'display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;border:1px solid transparent',
-              onclick: () => selectRemote(r),
+              // Clicking a connection opens its settings: proxy, rate limits,
+              // extra fields, the reachability probe, and the mounts that point
+              // at it. Browsing is what the file table on the right is for.
+              onclick: () => openConnection(r.name, { onClose: loadAccounts }),
             }, el('span', { style: 'width:28px;height:28px;border-radius:8px;background:#16283d;display:flex;align-items:center;justify-content:center;color:var(--accent-text)' }, iconEl('cloud')),
               el('div', { style: 'flex-grow:1;min-width:0' }, el('div', { style: 'font-weight:600' }, r.name), el('div', { class: 'dim', style: 'font-size:11px' }, r.type)),
-              healthDot(r.name));
+              healthDot(r.name),
+              el('button', {
+                class: 'icon-btn remove', title: t('conn.remove'), 'aria-label': t('conn.remove') + ' ' + r.name,
+                onclick: (ev) => { ev.stopPropagation(); removeRemote(r.name); },
+              }, iconEl('trash')));
+            item.className = 'conn';
             return item;
           }),
-          (a.remotes || []).length ? null : el('div', { class: 'dim', style: 'padding:12px' }, t('empty'))),
+          // With nothing configured yet, the useful offer is the guided flow,
+          // not the word "empty": adding four drives one dialog at a time is
+          // exactly what it exists to do.
+          (a.remotes || []).length ? null : el('div', { style: 'padding:12px;display:grid;gap:9px' },
+            el('div', { class: 'dim' }, t('pool.none.title')),
+            el('a', { class: 'btn primary', href: '#/setup' }, t('setup.start')))),
         el('div', { style: 'border-top:1px solid var(--border);padding:10px 12px' },
-          el('button', { class: 'primary', style: 'width:100%', onclick: openAddDrive }, iconEl('plus'), t('action.add'))));
+          el('button', { class: 'primary', style: 'width:100%', onclick: () => openAddDrive({ onDone: loadAccounts }) }, iconEl('plus'), t('action.add'))));
     } catch (e) { toast(e.message, 'bad'); }
   }
 
-  function selectRemote(r) {
-    // A remote maps to a mount prefix; browse from its first configured mount,
-    // or the root if none is mounted here.
-    cwd = '/';
-    load();
+  // Deleting a connection edits the configuration; the daemon keeps serving
+  // the layout it started with until it restarts. config.RemoveRemote refuses
+  // while a mount or storage pool still points at the drive. Read both here so
+  // the reader sees the safe next step in their language before being asked to
+  // type a destructive confirmation. The server repeats these checks inside
+  // the atomic config edit; this preflight is only the friendlier fast path.
+  async function removeRemote(name) {
+    let mounted = [];
+    let pooled = [];
+    try {
+      const [m, p] = await Promise.all([
+        api.get('/mounts'),
+        api.get('/pool/status').catch(() => ({ pools: [] })),
+      ]);
+      mounted = (m.mounts || []).filter((x) => x.remote === name).map((x) => x.path + x.prefix);
+      pooled = (p.pools || []).filter((x) => (x.members || []).some((member) => member.remote === name && member.pending_restart !== 'remove')).map((x) => x.name);
+    } catch (e) { toast(e.message, 'bad'); return; }
+    if (mounted.length) { toast(t('conn.remove.mounted', name, mounted.join(', ')), 'bad'); return; }
+    if (pooled.length) { toast(t('conn.remove.pooled', name, pooled.join(', ')), 'bad'); return; }
+    const ok = await confirmDelete({
+      title: t('conn.remove.title', name), body: t('conn.remove.body'),
+      confirmToken: name, confirmLabel: t('action.delete'),
+    });
+    if (!ok) return;
+    try {
+      await api.del('/accounts/' + encodeURIComponent(name) + '?confirm=true');
+      toast(t('toast.conn.removed', name));
+      loadAccounts();
+    } catch (e) { toast(e.message, 'bad'); }
   }
 
-  async function load() {
-    fill(crumb, iconEl('folder'),
-      ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
-        const p = '/' + all.slice(0, i + 1).join('/');
-        return [el('span', { class: 'dim' }, iconEl('chevron')), el('a', { href: 'javascript:void 0', style: 'color:var(--detail);text-decoration:none', onclick: () => { cwd = p; load(); } }, seg)];
-      }));
-    if (cwd === '/') crumb.append(el('span', { class: 'detail' }, ' /'));
+  // A directory arrives one page at a time. The daemon returns next_cursor
+  // for exactly this, and dropping it showed the first 500 names as if they
+  // were all of them — data that is missing without looking missing.
+  async function load(cursor) {
+    // Every refresh path calls this, and one of them is an event handler.
+    // A cursor is a string the daemon issued; anything else means "the first
+    // page", never "encode this object into &cursor=".
+    cursor = pageCursor(cursor);
+    // True once the reader has asked for more than the first page: a change
+    // event must not then reload the directory from the top and take the
+    // pages they walked to with it.
+    paged = !!cursor;
+    // A continuation appends to what is already on screen; only a fresh load
+    // clears the table and redraws the breadcrumb, which cannot have changed.
+    if (!cursor) {
+      fill(rows);
+      fill(crumb, iconEl('folder'),
+        ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
+          const p = '/' + all.slice(0, i + 1).join('/');
+          return [el('span', { class: 'dim' }, iconEl('chevron')), el('a', { href: 'javascript:void 0', style: 'color:var(--detail);text-decoration:none', onclick: () => { cwd = p; load(); } }, seg)];
+        }));
+      if (cwd === '/') crumb.append(el('span', { class: 'detail' }, ' /'));
+    }
     try {
-      const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500');
-      fill(rows, ...(page.entries || []).map((e) => {
+      const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500'
+        + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      rows.append(...(page.entries || []).map((e) => {
         const tr = el('tr', { onclick: () => select(e, tr) },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' },
             el('span', { style: 'color:' + (e.is_dir ? 'var(--accent-text)' : 'var(--muted)') }, iconEl(e.is_dir ? 'folder' : 'file')), e.name)),
           el('td', { class: 'num dim' }, e.is_dir ? '—' : bytes(e.size)),
-          el('td', { class: 'detail', style: 'padding-left:20px' }, new Date(e.mtime).toLocaleDateString('zh-CN')),
+          el('td', { class: 'detail', style: 'padding-left:20px' }, new Date(e.mtime).toLocaleDateString(locale())),
           el('td', { style: 'padding-left:20px;font-size:13px' }, stateCell(e)));
         if (e.is_dir) tr.addEventListener('dblclick', () => { cwd = e.path; load(); });
         return tr;
       }));
-      if (!(page.entries || []).length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
-    } catch (e) { fill(rows, el('tr', {}, el('td', { colspan: '4' }, e.message))); }
+      if (!rows.children.length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
+      const next = page.next_cursor;
+      if (next) rows.append(moreRow(4, () => load(next)));
+    } catch (e) {
+      // A failed continuation must not take the pages already on screen with
+      // it: the rows being read cost nothing to keep.
+      const failed = el('tr', {}, el('td', { colspan: '4' }, e.message));
+      if (pageFailureMode(cursor) === 'append') rows.append(failed);
+      else fill(rows, failed);
+    }
   }
 
   function select(entry, tr) {
     selected = entry;
-    for (const r of rows.children) r.style.background = '';
+    if (selectedRow) selectedRow.style.background = '';
+    selectedRow = tr;
     tr.style.background = '#131c28';
     renderInspector();
   }
 
   function renderInspector() {
-    if (!selected) { fill(inspector, el('div', { class: 'eyebrow' }, '详情'), el('p', { class: 'dim' }, '选择一个文件')); return; }
+    if (!selected) { fill(inspector, el('div', { class: 'eyebrow' }, t('inspector.title')), el('p', { class: 'dim' }, t('inspector.empty'))); return; }
     const e = selected;
     fill(inspector,
-      el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, '详情'),
+      el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, t('inspector.title')),
       el('div', { style: 'font-weight:620;overflow-wrap:anywhere' }, e.name),
-      el('div', { class: 'dim', style: 'font-size:12px;margin-bottom:16px' }, e.is_dir ? '目录' : bytes(e.size)),
-      infoRow('虚拟路径', e.path),
-      infoRow('本地状态', e.local_only ? t('state.pending') : e.pinned ? t('state.pinned') : e.cached >= 1 ? t('state.cached') : e.cached > 0 ? `${Math.round(e.cached * 100)}%` : t('state.remote')),
-      e.availability ? infoRow('副本', `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}` + (e.degraded_reason ? `（${e.degraded_reason}）` : '')) : null,
+      el('div', { class: 'dim', style: 'font-size:12px;margin-bottom:16px' }, e.is_dir ? t('inspector.dir') : bytes(e.size)),
+      infoRow(t('inspector.path'), e.path),
+      infoRow(t('col.state'), e.local_only ? t('state.pending') : e.pinned ? t('state.pinned') : e.cached >= 1 ? t('state.cached') : e.cached > 0 ? `${Math.round(e.cached * 100)}%` : t('state.remote')),
+      e.availability ? infoRow(t('inspector.replicas'), e.degraded_reason
+        ? t('inspector.replicas.reason', t('avail.' + e.availability), e.replicas_live, e.replicas_target, e.degraded_reason)
+        : `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}`) : null,
       e.is_dir ? null : el('div', { class: 'progress' + (e.cached < 1 ? ' warn' : ''), style: 'margin:12px 0' }, el('span', { style: `width:${Math.round((e.cached || 0) * 100)}%` })),
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),
         e.is_dir ? el('button', { onclick: () => warm(e) }, iconEl('up'), t('action.warm')) : null,
+        el('button', { onclick: () => rename(e) }, t('action.rename')),
+        e.is_dir ? null : el('button', { onclick: () => preview(e) }, t('action.preview')),
+        e.is_dir ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
         el('button', { class: 'danger', onclick: () => remove(e) }, t('action.delete'))));
   }
   function infoRow(k, v) {
@@ -152,23 +248,87 @@ export function renderMain(host) {
   }
 
   async function pin(e) {
-    try { await api.post(e.pinned ? '/cache/unpin' : '/cache/pin', { path: e.path }); toast(e.pinned ? '已取消固定' : '已固定'); load(); }
+    try { await api.post(e.pinned ? '/cache/unpin' : '/cache/pin', { path: e.path }); toast(e.pinned ? t('toast.unpinned') : t('toast.pinned')); load(); }
     catch (err) { toast(err.message, 'bad'); }
   }
   async function warm(e) {
-    try { const r = await api.post('/cache/warm', { path: e.path }); toast(`预热了 ${r.directories || 0} 个目录`); }
+    try { const r = await api.post('/cache/warm', { path: e.path }); toast(t('toast.warmed', r.directories || 0)); }
     catch (err) { toast(err.message, 'bad'); }
   }
   async function remove(e) {
-    const ok = await confirmDelete({ title: '删除 ' + e.name, body: '这会同时删除远端上的文件。', confirmToken: e.name, confirmLabel: t('action.delete') });
+    const ok = await confirmDelete({ title: t('confirm.delete.title', e.name), body: t('confirm.delete.body'), confirmToken: e.name, confirmLabel: t('action.delete') });
     if (!ok) return;
-    try { await api.post('/fs/delete', { path: e.path, recursive: e.is_dir, confirm: true }); toast('已删除'); selected = null; renderInspector(); load(); }
+    try { await api.post('/fs/delete', { path: e.path, recursive: e.is_dir, confirm: true }); toast(t('toast.deleted')); selected = null; renderInspector(); load(); }
     catch (err) { toast(err.message, 'bad'); }
   }
 
+  // Rename moves within the same directory. Moving across directories is a
+  // drag of a path the table does not have yet; /fs/rename takes both, so the
+  // day the table grows one this call does not change.
+  async function rename(e) {
+    const next = await promptText({
+      title: t('rename.title', e.name), label: t('rename.label'),
+      initial: e.name, confirmLabel: t('action.rename'),
+    });
+    if (!next || next === e.name) return;
+    if (!validName(next)) return;
+    const parent = e.path.replace(/\/[^/]*$/, '');
+    try {
+      await api.post('/fs/rename', { from: e.path, to: (parent || '') + '/' + next });
+      toast(t('toast.renamed', next));
+      selected = null;
+      renderInspector();
+      load();
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  // Preview asks for the first bytes only; the daemon caps the range anyway.
+  // Bytes that are not text are named as such rather than painted into the
+  // document as replacement characters.
+  async function preview(e) {
+    let text;
+    try {
+      text = await api.get('/fs/preview?path=' + encodeURIComponent(e.path) + '&length=' + PREVIEW_BYTES);
+    } catch (err) { toast(err.message, 'bad'); return; }
+    const binary = /[\u0000-\u0008\u000e-\u001f\ufffd]/.test(text);
+    await showPanel({
+      title: e.name,
+      content: binary
+        ? el('div', { class: 'dim', style: 'font-size:12.5px' }, t('preview.binary'))
+        : el('pre', {
+          style: 'margin:0;max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:12.5px;background:#0a0f16;border:1px solid var(--hairline);border-radius:6px;padding:10px',
+        }, text || t('preview.empty')),
+    });
+  }
+
+  // A download link is signed and short-lived. It is copied on request rather
+  // than rendered into a page that may sit open for an hour, which is how a
+  // link becomes a stale one that fails with no explanation.
+  async function downloadLink(e) {
+    let link;
+    try {
+      link = await api.get('/fs/download-url?path=' + encodeURIComponent(e.path));
+    } catch (err) { toast(err.message, 'bad'); return; }
+    // expires_at is always present — see expiry.js — so the question is
+    // whether it names a real instant, not whether the field came back.
+    const expires = linkExpiry(link.expires_at);
+    await showPanel({
+      title: t('link.title', e.name),
+      content: el('div', { style: 'display:grid;gap:9px' },
+        el('div', { class: 'dim', style: 'font-size:12px' },
+          expires ? t('link.expires', new Date(expires).toLocaleString(locale())) : t('link.noexpiry')),
+        el('div', { style: 'font-family:ui-monospace,monospace;font-size:12px;word-break:break-all;background:#0a0f16;border:1px solid var(--hairline);border-radius:6px;padding:9px' }, link.url),
+        el('div', { class: 'row' }, copyBtn(link.url)),
+        link.headers && Object.keys(link.headers).length
+          ? el('div', { class: 'dim', style: 'font-size:11.5px' }, t('link.headers'))
+          : null),
+    });
+  }
+
   async function newFolder() {
-    const name = prompt('文件夹名');
+    const name = await promptText({ title: t('newfolder.title'), label: t('newfolder.label'), confirmLabel: t('newfolder.create') });
     if (!name) return;
+    if (!validName(name)) return;
     try { await api.post('/fs/mkdir', { path: (cwd === '/' ? '' : cwd) + '/' + name }); load(); }
     catch (err) { toast(err.message, 'bad'); }
   }
@@ -184,7 +344,10 @@ export function renderMain(host) {
         fill(rows, ...(r.results || []).map((hit) => el('tr', { onclick: () => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load(); } },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' }, iconEl('file'), hit.name)),
           el('td', { class: 'num dim' }, ''), el('td', { class: 'detail', style: 'padding-left:20px' }, hit.path), el('td', {}))));
-        if (!r.complete) toast('可能还有更多结果');
+        if (!(r.results || []).length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
+        // Truncation is a property of this result set, so it stays on screen
+        // with the rows instead of fading out of a toast.
+        if (!r.complete) rows.append(el('tr', {}, el('td', { colspan: '4', class: 'dim', style: 'text-align:center;padding:12px' }, t('search.truncated'))));
       } catch (err) { toast(err.message, 'bad'); }
     }, 250);
   });
@@ -192,14 +355,20 @@ export function renderMain(host) {
   main.append(
     el('div', { style: 'height:52px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 18px' },
       crumb, el('div', { class: 'grow' }), searchBox,
-      el('button', { onclick: newFolder }, iconEl('plus')),
-      el('button', { onclick: load }, iconEl('refresh'))),
+      el('button', { onclick: newFolder, 'aria-label': t('action.newfolder'), title: t('action.newfolder') }, iconEl('plus')),
+      el('button', { onclick: () => load(), 'aria-label': t('action.refresh'), title: t('action.refresh') }, iconEl('refresh'))),
     el('div', { style: 'flex-grow:1;overflow:auto' },
       el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, t('col.name')), el('th', { class: 'num' }, t('col.size')),
         el('th', { style: 'padding-left:20px' }, t('col.modified')), el('th', { style: 'padding-left:20px' }, t('col.state')))), rows)));
 
 
-  const off = onFsChange((c) => { if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) load(); });
+  // An upload finishing is not a reason to throw away the page the reader
+  // walked to: reloading from the top is what a directory of more than 500
+  // entries looked like snapping back to its first page mid-read.
+  const off = onFsChange((c) => {
+    if (paged) return;
+    if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) load();
+  });
   loadAccounts();
   load();
   renderInspector();

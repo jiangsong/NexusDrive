@@ -294,6 +294,13 @@ func Parse(b []byte) (*Config, error) {
 	}
 	c.Cache.Dir = ExpandHome(c.Cache.Dir)
 	c.Control.Socket = ExpandHome(c.Control.Socket)
+	// A mount path is a path like the two above, and a person writing one by
+	// hand has no reason to expect it to be the exception. Left unexpanded,
+	// "~/CloudFS" made the daemon create a directory literally named "~" in
+	// whatever it was started from, while ~/CloudFS in the shell stayed empty.
+	for i := range c.Mounts {
+		c.Mounts[i].Path = ExpandHome(c.Mounts[i].Path)
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -387,10 +394,21 @@ func (c *Config) Validate() error {
 	if err := c.validatePools(); err != nil {
 		return err
 	}
+	mountedAt := make(map[string]bool, len(c.Mounts))
 	for _, m := range c.Mounts {
 		if m.Path == "" {
 			return fmt.Errorf("config: mount without path")
 		}
+		// Two entries for one directory is never deliberate, and it fails
+		// silently: cloudfs mount takes Mounts[0], so everything bound under
+		// the second entry is invisible with nothing reported anywhere. The
+		// comparison is on the expanded path because ~/CloudFS and its
+		// expansion are the same directory written two ways.
+		canonical := ExpandHome(m.Path)
+		if mountedAt[canonical] {
+			return fmt.Errorf("config: %s is mounted twice; one mount entry per directory, with one layout holding every prefix", m.Path)
+		}
+		mountedAt[canonical] = true
 		for sub, l := range m.Layout {
 			if _, ok := c.Remotes[l.Remote]; !ok {
 				return fmt.Errorf("config: mount %s%s references unknown remote %q", m.Path, sub, l.Remote)

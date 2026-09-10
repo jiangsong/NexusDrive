@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"cloudfs/internal/i18n"
 )
 
 // Running owns the bound endpoints and their lifetime. Binding happens before
@@ -73,7 +75,7 @@ func (s *Server) Start(ctx context.Context, socket, tcp string) (_ *Running, err
 		s.enablePprof()
 	}
 	for _, l := range r.listeners {
-		srv := &http.Server{Handler: s.drainingGuard(s.mux), ReadHeaderTimeout: 5 * time.Second}
+		srv := &http.Server{Handler: s.serveHandler(), ReadHeaderTimeout: 5 * time.Second}
 		r.servers = append(r.servers, srv)
 		go srv.Serve(l)
 	}
@@ -91,6 +93,14 @@ func (s *Server) Start(ctx context.Context, socket, tcp string) (_ *Running, err
 // Missing listeners allow offline inspection; permissions and protocol errors
 // are surfaced instead of being disguised as an offline daemon.
 func FetchStatus(ctx context.Context, socket, tcp string) (Status, bool, error) {
+	return FetchStatusInLanguage(ctx, socket, tcp, "")
+}
+
+// FetchStatusInLanguage requests server-rendered status text in lang. Status
+// deliberately does not serialize the catalog keys behind warnings, so the
+// client has to negotiate the language before decoding rather than trying to
+// translate the returned strings afterwards.
+func FetchStatusInLanguage(ctx context.Context, socket, tcp string, lang i18n.Lang) (Status, bool, error) {
 	for _, endpoint := range []struct{ network, address string }{{"unix", socket}, {"tcp", tcp}} {
 		if endpoint.address == "" {
 			continue
@@ -103,7 +113,11 @@ func FetchStatus(ctx context.Context, socket, tcp string) (Status, bool, error) 
 			return d.DialContext(ctx, endpoint.network, endpoint.address)
 		}}
 		client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
-		req, _ := http.NewRequestWithContext(ctx, "GET", "http://cloudfs/status", nil)
+		target := "http://cloudfs/status"
+		if i18n.Valid(string(lang)) {
+			target += "?lang=" + string(lang)
+		}
+		req, _ := http.NewRequestWithContext(ctx, "GET", target, nil)
 		resp, err := client.Do(req)
 		if err != nil {
 			tr.CloseIdleConnections()

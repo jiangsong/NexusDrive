@@ -9,6 +9,8 @@ import (
 
 	"cloudfs/internal/journal"
 	"cloudfs/internal/upload"
+
+	"cloudfs/internal/i18n"
 )
 
 func TestPendingUploadCleanupIsVisibleWithoutExposingPrivateIntent(t *testing.T) {
@@ -21,7 +23,7 @@ func TestPendingUploadCleanupIsVisibleWithoutExposingPrivateIntent(t *testing.T)
 	if _, err := f.j.BeginUploadCleanup(ctx, u.ID, "private-metadata-identity"); err != nil {
 		t.Fatal(err)
 	}
-	st := f.coll.Collect(ctx)
+	st := f.coll.Collect(ctx, i18n.EN)
 	if st.Uploads.Purging != 1 || st.Uploads.RetainedBytes != 7 || !strings.Contains(strings.Join(st.Warnings, " "), "unfinished local cleanup") {
 		t.Fatalf("hidden cleanup status: %+v", st)
 	}

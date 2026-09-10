@@ -62,6 +62,39 @@ func TestAccountDetailShowsPublicSettingsAndCapsAndNeverASecret(t *testing.T) {
 	}
 }
 
+// Clearing a box in the connection settings sends JSON null for that field,
+// which is the only way the page can remove a setting: an empty scalar and an
+// absent key mean the same thing to a driver, so the wire form has to be the
+// deletion. This locks the contract the overlay depends on.
+func TestAccountPatchWithANullFieldRemovesIt(t *testing.T) {
+	srv, _, path := accountsServer(t)
+	if rr := accountRequest(t, srv, http.MethodPatch, "/accounts/existing", AccountPatch{
+		Fields: map[string]*string{"timeout": str("30s")},
+	}); rr.Code != 200 {
+		t.Fatalf("setting the field: %d %s", rr.Code, rr.Body)
+	}
+	rr := accountRequest(t, srv, http.MethodPatch, "/accounts/existing", AccountPatch{
+		Fields: map[string]*string{"timeout": nil},
+	})
+	if rr.Code != 200 {
+		t.Fatalf("clearing the field: %d %s", rr.Code, rr.Body)
+	}
+	var out AccountMutationResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Detail == nil {
+		t.Fatal("no detail in the reply")
+	}
+	if _, still := out.Detail.Fields["timeout"]; still {
+		t.Errorf("the cleared field is still in the reply: %v", out.Detail.Fields)
+	}
+	after, _ := os.ReadFile(path)
+	if strings.Contains(string(after), "timeout") {
+		t.Errorf("the cleared field is still in the file:\n%s", after)
+	}
+}
+
 func TestAccountPatchEditsAndRefusesSecrets(t *testing.T) {
 	srv, _, path := accountsServer(t)
 	rr := accountRequest(t, srv, http.MethodPatch, "/accounts/existing", AccountPatch{Fields: map[string]*string{"pass": str("x")}})
@@ -131,6 +164,35 @@ func TestAccountDeleteNeedsConfirmAndRefusesWhileMounted(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path); strings.Contains(string(b), "existing") {
 		t.Fatalf("file still names the remote: %s", b)
+	}
+}
+
+func TestAccountDeleteRefusesPoolMemberInTheRequestedLanguage(t *testing.T) {
+	srv, _, path := accountsServer(t)
+	if err := config.AddRemote(path, "other", config.Remote{Type: "webdav", Extra: map[string]any{"url": "https://other.local/dav"}}, config.AddRemoteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.CreatePool(path, "home", []config.PoolMember{{Remote: "existing"}, {Remote: "other"}}, 2, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	srv.reloadConfigView()
+	before, _ := os.ReadFile(path)
+
+	for _, tc := range []struct {
+		lang string
+		want string
+	}{
+		{lang: "zh", want: "仍是存储池 \"home\" 的成员"},
+		{lang: "en", want: "still a member of pool \"home\""},
+	} {
+		rr := accountRequest(t, srv, http.MethodDelete, "/accounts/existing?confirm=true&lang="+tc.lang, nil)
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), tc.want) || strings.Contains(rr.Body.String(), "unknown remote") {
+			t.Errorf("%s refusal: %d %s", tc.lang, rr.Code, rr.Body)
+		}
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatalf("a refused HTTP deletion changed the configuration:\n%s", after)
 	}
 }
 

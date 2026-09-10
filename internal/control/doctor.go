@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +11,7 @@ import (
 
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
@@ -40,11 +40,22 @@ type Check struct {
 	Fix    string `json:"fix,omitempty"`
 	// Fixable marks checks `doctor --fix` can repair on its own.
 	Fixable bool `json:"fixable"`
+	// detail and fix are what Detail and Fix were rendered from: catalog
+	// keys with their arguments, so the same check can be answered in another
+	// language at the HTTP boundary. They are empty for text that came from
+	// an error or a remote, which has no translation and is passed through
+	// unchanged. A check may add a second fragment; they join with "; ".
+	detail []message
+	fix    []message
 }
 
 // Doctor runs environment and state checks.
 type Doctor struct {
-	Config *config.Config
+	// Config reads the configuration as it is now. It is a function because
+	// the control plane republishes a copy after every edit: a Doctor holding
+	// the pointer it was built with would report on the accounts the daemon
+	// started with and silently omit every drive added since.
+	Config func() *config.Config
 	// Passthrough reports whether FUSE passthrough is actually usable here,
 	// with the reason when it is not. nil falls back to a kernel version test.
 	Passthrough func() (bool, string)
@@ -66,6 +77,15 @@ type Doctor struct {
 	HoldMaxBytes    int64
 }
 
+// config reads the published configuration, tolerating both a Doctor built
+// without one and a hook that answers nil.
+func (d *Doctor) config() *config.Config {
+	if d.Config == nil {
+		return nil
+	}
+	return d.Config()
+}
+
 // Run performs every check.
 func (d *Doctor) Run(ctx context.Context) []Check {
 	var out []Check
@@ -75,9 +95,9 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkJournal(ctx)...)
 	out = append(out, d.checkProxy(ctx)...)
 	out = append(out, d.checkPools(ctx)...)
-	if d.Config != nil {
-		for name, r := range d.Config.Remotes {
-			level, detail := LevelOK, "credentials use the system keyring"
+	if cfg := d.config(); cfg != nil {
+		for name, r := range cfg.Remotes {
+			level, detailKey := LevelOK, "doctor.creds.keyring"
 			has := false
 			for field, value := range r.Extra {
 				if !config.IsSecretField(field) {
@@ -90,14 +110,16 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 				has = true
 				if strings.HasPrefix(s, "secretfile:") {
 					if level == LevelOK {
-						level, detail = LevelWarn, "credentials use private 0600 files (keyring fallback)"
+						level, detailKey = LevelWarn, "doctor.creds.secretfile"
 					}
 				} else if !strings.HasPrefix(s, "keyring:") {
-					level, detail = LevelWarn, "configuration contains plaintext credentials"
+					level, detailKey = LevelWarn, "doctor.creds.plaintext"
 				}
 			}
 			if has {
-				out = append(out, Check{Name: "credentials/" + name, Level: level, Detail: detail, Fix: "cloudfs config auth " + name})
+				c := Check{Name: "credentials/" + name, Level: level, Fix: "cloudfs config auth " + name}
+				c.setDetail(detailKey)
+				out = append(out, c)
 			}
 		}
 	}
@@ -106,24 +128,23 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 
 func (d *Doctor) checkPlatform() []Check {
 	var out []Check
-	out = append(out, Check{
-		Name:   "platform",
-		Level:  LevelOK,
-		Detail: fmt.Sprintf("%s/%s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version()),
-	})
+	plat := Check{Name: "platform", Level: LevelOK}
+	plat.setDetail("doctor.platform", runtime.GOOS, runtime.GOARCH, runtime.Version())
+	out = append(out, plat)
 
 	if d.FUSESupported != nil {
 		ok, why := d.FUSESupported()
 		c := Check{Name: "fuse"}
 		if ok {
-			c.Level, c.Detail = LevelOK, "the kernel FUSE device is present and usable"
+			c.Level = LevelOK
+			c.setDetail("doctor.fuse.ok")
 		} else {
 			c.Level, c.Detail = LevelFail, why
 			switch runtime.GOOS {
 			case "linux":
-				c.Fix = "install the fuse3 package and make sure your user can open /dev/fuse (usually by joining the 'fuse' group or running as root)"
+				c.setFix("doctor.fuse.fix.linux")
 			case "darwin":
-				c.Fix = "install macFUSE from https://macfuse.io and approve the system extension in System Settings, then reboot"
+				c.setFix("doctor.fuse.fix.darwin")
 			}
 		}
 		out = append(out, c)
@@ -140,30 +161,41 @@ func (d *Doctor) checkPlatform() []Check {
 			}
 			c := Check{Name: "allow_other"}
 			if allowed {
-				c.Level, c.Detail = LevelOK, "other users may access the mount when allow_other is set"
+				c.Level = LevelOK
+				c.setDetail("doctor.allow_other.ok")
 			} else {
 				c.Level = LevelWarn
-				c.Detail = "user_allow_other is not enabled, so only your own user can read the mount"
-				c.Fix = "add the line 'user_allow_other' to /etc/fuse.conf if another user or a container needs the mount"
+				c.setDetail("doctor.allow_other.warn")
+				c.setFix("doctor.allow_other.fix")
 			}
 			out = append(out, c)
 		}
 		if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 			rel := strings.TrimSpace(string(b))
-			c := Check{Name: "kernel", Detail: "kernel " + rel}
-			ok, why := false, "kernel older than 6.9"
+			c := Check{Name: "kernel"}
+			// reason is the platform probe's own words, which are
+			// pass-through text like any provider error. Our own "kernel is
+			// too old" reason is a key instead: rendering it here would
+			// freeze one language into an argument that Localize cannot
+			// reach.
+			ok, reason := false, ""
 			if d.Passthrough != nil {
-				ok, why = d.Passthrough()
+				ok, reason = d.Passthrough()
 			} else if kernelAtLeast(rel, 6, 9) {
 				ok = true
 			}
-			if ok {
+			switch {
+			case ok:
 				c.Level = LevelOK
-				c.Detail += "; experimental passthrough is eligible; successful kernel negotiation is still required"
-			} else {
+				c.setDetail("doctor.kernel.ok", rel)
+			case reason != "":
 				c.Level = LevelWarn
-				c.Detail += "; FUSE passthrough is off (" + why + "); cached reads use the normal VFS path"
-				c.Fix = "keep experimental passthrough disabled for normal workloads until mixed IO modes are validated"
+				c.setDetail("doctor.kernel.warn", rel, reason)
+				c.setFix("doctor.kernel.fix")
+			default:
+				c.Level = LevelWarn
+				c.setDetail("doctor.kernel.warn_old", rel)
+				c.setFix("doctor.kernel.fix")
 			}
 			out = append(out, c)
 		}
@@ -177,11 +209,12 @@ func (d *Doctor) checkPlatform() []Check {
 		}
 		c := Check{Name: "macfuse"}
 		if fs != "" {
-			c.Level, c.Detail = LevelOK, "found "+fs
+			c.Level = LevelOK
+			c.setDetail("doctor.macfuse.ok", fs)
 		} else {
 			c.Level = LevelFail
-			c.Detail = "neither macFUSE nor Fuse-T is installed"
-			c.Fix = "install macFUSE from https://macfuse.io, or Fuse-T from https://www.fuse-t.org for a kext-free option"
+			c.setDetail("doctor.macfuse.absent")
+			c.setFix("doctor.macfuse.fix")
 		}
 		out = append(out, c)
 	}
@@ -196,20 +229,20 @@ func (d *Doctor) checkCacheDir() []Check {
 	c := Check{Name: "cache_dir"}
 	if err := os.MkdirAll(d.CacheDir, 0o700); err != nil {
 		c.Level = LevelFail
-		c.Detail = fmt.Sprintf("cannot create %s: %v", d.CacheDir, err)
-		c.Fix = "point cache.dir at a writable location"
+		c.setDetail("doctor.cache.mkdir_failed", d.CacheDir, err)
+		c.setFix("doctor.cache.fix.location")
 		return append(out, c)
 	}
 	probe := filepath.Join(d.CacheDir, ".doctor-probe")
 	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
 		c.Level = LevelFail
-		c.Detail = fmt.Sprintf("%s is not writable: %v", d.CacheDir, err)
-		c.Fix = "fix the permissions on the cache directory or choose another one"
+		c.setDetail("doctor.cache.unwritable", d.CacheDir, err)
+		c.setFix("doctor.cache.fix.perms")
 		return append(out, c)
 	}
 	os.Remove(probe)
 	c.Level = LevelOK
-	c.Detail = d.CacheDir + " is writable"
+	c.setDetail("doctor.cache.writable", d.CacheDir)
 	out = append(out, c)
 
 	if d.FreeSpace != nil {
@@ -218,20 +251,20 @@ func (d *Doctor) checkCacheDir() []Check {
 		switch {
 		case err != nil:
 			fc.Level = LevelWarn
-			fc.Detail = fmt.Sprintf("cannot measure free space: %v", err)
+			fc.setDetail("doctor.free.unmeasurable", err)
 		case d.MinFree > 0 && free < d.MinFree:
 			fc.Level = LevelFail
-			fc.Detail = fmt.Sprintf("%s free, below the configured minimum of %s; writes will fail with ENOSPC", humanBytes(free), humanBytes(d.MinFree))
-			fc.Fix = "free disk space, lower cache.min_free, or run 'cloudfs cache gc'"
+			fc.setDetail("doctor.free.below_min", humanBytes(free), humanBytes(d.MinFree))
+			fc.setFix("doctor.free.fix.below_min")
 			fc.Fixable = true
 		case free < 1<<30:
 			fc.Level = LevelWarn
-			fc.Detail = fmt.Sprintf("only %s free on the cache filesystem", humanBytes(free))
-			fc.Fix = "free disk space or run 'cloudfs cache gc'"
+			fc.setDetail("doctor.free.low", humanBytes(free))
+			fc.setFix("doctor.free.fix.low")
 			fc.Fixable = true
 		default:
 			fc.Level = LevelOK
-			fc.Detail = humanBytes(free) + " free"
+			fc.setDetail("doctor.free.ok", humanBytes(free))
 		}
 		out = append(out, fc)
 	}
@@ -246,7 +279,7 @@ func (d *Doctor) checkMeta(ctx context.Context) []Check {
 	if err := d.Meta.Vacuum(ctx); err != nil {
 		c.Level = LevelFail
 		c.Detail = err.Error()
-		c.Fix = "stop cloudfs and delete the metadata database; it is a cache and will rebuild from the remotes"
+		c.setFix("doctor.meta.fix")
 		return []Check{c}
 	}
 	st, err := d.Meta.Stats(ctx)
@@ -256,7 +289,7 @@ func (d *Doctor) checkMeta(ctx context.Context) []Check {
 		return []Check{c}
 	}
 	c.Level = LevelOK
-	c.Detail = fmt.Sprintf("integrity ok, %d entries cached across %d directories", st.Nodes, st.CompleteDs)
+	c.setDetail("doctor.meta.ok", st.Nodes, st.CompleteDs)
 	return []Check{c}
 }
 
@@ -273,37 +306,39 @@ func (d *Doctor) checkJournal(ctx context.Context) []Check {
 	switch {
 	case st.Dead > 0:
 		c.Level = LevelFail
-		c.Detail = fmt.Sprintf("%d uploads failed permanently; their data is still on local disk", st.Dead)
-		c.Fix = "run 'cloudfs uploads list' to see why, then 'cloudfs uploads retry' once the cause is fixed"
+		c.setDetail("doctor.queue.dead", st.Dead)
+		c.setFix("doctor.queue.fix.dead")
 		c.Fixable = true
 	case st.Purging > 0:
 		c.Level = LevelWarn
-		c.Detail = fmt.Sprintf("%d uploads have unfinished local cleanup; remote results are not reconciled", st.Purging)
-		c.Fix = "inspect 'cloudfs uploads list'; coordinated local cleanup is required, not upload retry or doctor --fix"
+		c.setDetail("doctor.queue.purging", st.Purging)
+		c.setFix("doctor.queue.fix.purging")
 	case st.Cancelled+st.Cancelling > 0:
 		c.Level = LevelWarn
-		c.Detail = fmt.Sprintf("%d uploads stopping, %d cancelled; local content retained, remote effects not reconciled", st.Cancelling, st.Cancelled)
-		c.Fix = "inspect 'cloudfs uploads list'; cancellation is not remote rollback and cannot be reset by doctor --fix"
+		c.setDetail("doctor.queue.cancelled", st.Cancelling, st.Cancelled)
+		c.setFix("doctor.queue.fix.cancel")
 	case st.OldestAge > 30*time.Minute:
 		c.Level = LevelWarn
-		c.Detail = fmt.Sprintf("%d uploads queued, the oldest waiting %s", st.Pending+st.Uploading, st.OldestAge.Round(time.Second))
-		c.Fix = "check the remote's health and rate limits with 'cloudfs status'"
+		c.setDetail("doctor.queue.slow", st.Pending+st.Uploading, st.OldestAge.Round(time.Second))
+		c.setFix("doctor.queue.fix.slow")
 	case st.Pending+st.Uploading > 0:
 		c.Level = LevelOK
-		c.Detail = fmt.Sprintf("%d uploads in flight, %s queued", st.Pending+st.Uploading, humanBytes(st.Bytes))
+		c.setDetail("doctor.queue.inflight", st.Pending+st.Uploading, humanBytes(st.Bytes))
 	default:
 		c.Level = LevelOK
-		c.Detail = "no queued uploads"
+		c.setDetail("doctor.queue.idle")
 	}
 	out = append(out, c)
 	switch d.Journal.Durability() {
 	case journal.DurabilityCrash:
-		out = append(out, Check{Name: "durability", Level: LevelWarn,
-			Detail: "crash: close() returns before data is fsynced; a power loss can lose the last seconds of writes (they are reported as dead letters)",
-			Fix:    "set journal.durability: power if that trade is not wanted"})
+		dc := Check{Name: "durability", Level: LevelWarn}
+		dc.setDetail("doctor.durability.crash")
+		dc.setFix("doctor.durability.fix")
+		out = append(out, dc)
 	default:
-		out = append(out, Check{Name: "durability", Level: LevelOK,
-			Detail: "power: close() returns only once the data is fsynced to local disk"})
+		dc := Check{Name: "durability", Level: LevelOK}
+		dc.setDetail("doctor.durability.power")
+		out = append(out, dc)
 	}
 
 	// Payloads no row names. Normally none: they appear when a crash lands
@@ -312,24 +347,19 @@ func (d *Doctor) checkJournal(ctx context.Context) []Check {
 	// and these bytes are in no other report, being outside the cache budget
 	// and outside the queued total.
 	if n, held, err := d.Journal.OrphanObjects(ctx); err == nil && n > 0 {
-		out = append(out, Check{
-			Name:   "queue_objects",
-			Level:  LevelWarn,
-			Detail: fmt.Sprintf("%d upload payloads (%s) are on disk with no queue entry naming them", n, humanBytes(held)),
-			Fix:    "restart the daemon; startup recovery reclaims them, and they are not counted against cache.max_size",
-		})
+		oc := Check{Name: "queue_objects", Level: LevelWarn}
+		oc.setDetail("doctor.queue.orphans", n, humanBytes(held))
+		oc.setFix("doctor.queue.fix.orphans")
+		out = append(out, oc)
 	}
 
 	// Orphan staging files mean a crash left partial writes behind.
 	entries, err := os.ReadDir(d.Journal.StagingDir())
 	if err == nil && len(entries) > 0 {
-		out = append(out, Check{
-			Name:    "staging_files",
-			Level:   LevelWarn,
-			Detail:  fmt.Sprintf("%d incomplete staging files from an earlier run", len(entries)),
-			Fix:     "run 'cloudfs doctor --fix' to remove them; they are writes that never reached a commit",
-			Fixable: true,
-		})
+		sc := Check{Name: "staging_files", Level: LevelWarn, Fixable: true}
+		sc.setDetail("doctor.staging.orphans", len(entries))
+		sc.setFix("doctor.staging.fix")
+		out = append(out, sc)
 	}
 	return out
 }
@@ -340,43 +370,48 @@ func (d *Doctor) checkProxy(ctx context.Context) []Check {
 	}
 	health := d.Proxy.CheckNow(ctx)
 	if len(health) == 0 {
-		return []Check{{Name: "proxy", Level: LevelOK, Detail: "no proxy groups configured; all traffic is direct"}}
+		pc := Check{Name: "proxy", Level: LevelOK}
+		pc.setDetail("doctor.proxy.none")
+		return []Check{pc}
 	}
 	var out []Check
 	for _, h := range health {
 		c := Check{Name: "proxy/" + h.Name}
 		if h.Healthy {
 			c.Level = LevelOK
-			c.Detail = fmt.Sprintf("reachable, %dms", h.Latency.Milliseconds())
+			c.setDetail("doctor.proxy.ok", h.Latency.Milliseconds())
 		} else {
 			c.Level = LevelFail
 			c.Detail = h.Err
-			c.Fix = "check that the proxy is running and reachable; remotes routed through it will fail until it is"
+			c.setFix("doctor.proxy.fix")
 		}
 		out = append(out, c)
 	}
 	return out
 }
 
-// Fix repairs what it safely can and reports what it did.
-func (d *Doctor) Fix(ctx context.Context) []string {
+// Fix repairs what it safely can and reports what it did, in lang: the
+// report goes straight to a person, in the UI toast or the terminal, so it is
+// the one place in the doctor where the language is an argument rather than a
+// post-processing step.
+func (d *Doctor) Fix(ctx context.Context, lang i18n.Lang) []string {
 	var done []string
 	if d.Journal != nil {
 		// Remove staging files with no journal row: they are writes that never
 		// reached a commit and can never be completed.
 		if rec, err := d.Journal.Recover(ctx); err == nil {
 			if n := len(rec.OrphanStaging); n > 0 {
-				done = append(done, fmt.Sprintf("removed %d incomplete staging files", n))
+				done = append(done, i18n.T(lang, "fix.staging_removed", n))
 			}
 			if n := len(rec.Requeued); n > 0 {
-				done = append(done, fmt.Sprintf("requeued %d uploads interrupted by a restart", n))
+				done = append(done, i18n.T(lang, "fix.requeued", n))
 			}
 			if n := len(rec.Lost); n > 0 {
-				done = append(done, fmt.Sprintf("dead-lettered %d uploads whose local data is gone", n))
+				done = append(done, i18n.T(lang, "fix.dead_lettered", n))
 			}
 		}
 		if n, err := d.Journal.Purge(ctx, 24*time.Hour); err == nil && n > 0 {
-			done = append(done, fmt.Sprintf("purged %d completed uploads older than a day", n))
+			done = append(done, i18n.T(lang, "fix.purged", n))
 		}
 	}
 	if d.Cache != nil {
@@ -384,17 +419,17 @@ func (d *Doctor) Fix(ctx context.Context) []string {
 		if err := d.Cache.GC(); err == nil {
 			after := d.Cache.Stats()
 			if freed := before.Bytes - after.Bytes; freed > 0 {
-				done = append(done, fmt.Sprintf("evicted %s from the block cache", humanBytes(freed)))
+				done = append(done, i18n.T(lang, "fix.evicted", humanBytes(freed)))
 			}
 		}
 	}
 	if d.Meta != nil {
 		if err := d.Meta.Vacuum(ctx); err == nil {
-			done = append(done, "checkpointed the metadata database")
+			done = append(done, i18n.T(lang, "fix.checkpointed"))
 		}
 	}
 	if len(done) == 0 {
-		done = append(done, "nothing needed fixing")
+		done = append(done, i18n.T(lang, "fix.nothing"))
 	}
 	return done
 }

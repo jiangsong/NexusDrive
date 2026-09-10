@@ -116,13 +116,30 @@ delta 可以推进游标；之后的外部现状仍由 TTL 列举及上传冲突
 
   调用方的退避重试保留（5 次、约 0.25 秒上限），现在只服务硬围栏。
 
-- **仍未做：远端内容变更仍走硬围栏**。`ApplyRemoteNode` 在 `next != nil` 的纯属性更新
-  （同一父目录、同一名字、不是目录替换）上也推硬围栏，于是一次远端改文件会拒掉并发的
-  父目录列举——而父目录的名字集合根本没变。改成软围栏是对的方向，但那样一来"列举不会
-  覆盖 delta 刚写的属性"就从 meta 自身的保证退化为**依赖调用方传入的 `protect` 谓词**
-  （VFS 传了，`protect == nil` 的调用方没有）。要么把"不覆盖列举开始之后更新过的子项"
-  提升为 meta 层的无条件不变量，要么保持现状。前者会改变一批现有列举语义，**没有真实
-  网盘验证不动**。生产轮询间隔 60 秒，撞上的窗口本来就窄。
+- **远端纯属性更新改走软围栏**（2026-09-07）：`ApplyRemoteNode` 在 `next != nil` 且不是
+  目录替换时（同一父目录、同一名字——函数开头的守卫本来就禁止改名或换父目录）只推
+  `stale_generation`。父目录的名字集合没变，在途快照仍然真实，所以照常发布、
+  `complete` 留 0。删除与目录替换仍走硬围栏。
+
+  之前不敢改，是因为"列举不会覆盖 delta 刚写的属性"会退化成依赖调用方传的 `protect`
+  谓词。现在它是 meta 层的无条件不变量，`protect == nil` 也成立：schema v11 给 `nodes`
+  加了 `applied_gen`，变更流写完一个节点后把**父目录当时的 `generation`** 记在上面
+  （`stampAppliedGenerationTx`）。`DirListing` 在 `BeginDirListing` 时就取了自己的
+  `generation`，于是 `applied_gen >= 本次列举的 generation` 就等价于"这次写发生在本次
+  列举开始之后"，`mergeStaged` 与 `removeMissing` 都跳过这样的条目，收尾那条批量刷新
+  `fetched_at` 的语句也跳过。保护会自己过期：下一次列举拿到更高的 `generation`，
+  条目重新归它所有，不会被永久钉住。
+
+  回归：`internal/meta/remote_attribute_fence_test.go` 的
+  `TestARemoteAttributeUpdatePublishesThroughAConcurrentListing`（并发列举照常发布、
+  发布为 incomplete、属性不被写回；把 `applied_gen` 判断去掉即失败）、
+  `TestAListingStartedAfterTheUpdateStillOwnsTheEntry`（保护不是永久的）、
+  `TestAppliedGenerationMigratesAnExistingDatabase`（v10 库升级后老节点 `applied_gen=0`，
+  列举照常更新它）。`TestRemoteNodeChangeFencesParentAndDirectoryListings` 相应收窄为
+  只覆盖 delete 与 replace。
+
+  **仍未真实网盘验证**：生产轮询间隔 60 秒，撞上的窗口本来就窄，这一条的收益要到
+  真实 delta 流上才能测量。
 
 - **保护窗口是秒级的**：过期列表保护比较条目的 `fetched_at` 与本次列举的开始时刻，
   而这两个时间戳是秒分辨率。于是一个刚刚被列举过的子目录，在同一秒内发起的父目录

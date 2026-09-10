@@ -746,6 +746,46 @@ func (p *Provider) Delete(ctx context.Context, id string) error {
 	return p.apiJSON(ctx, "/2/files/delete_v2", map[string]string{"path": apiPath(id)}, nil, ratelimit.Meta, false)
 }
 
+// pathSpaceUsage reports the account's space. It takes no argument, so the
+// call goes out with no body at all — Dropbox rejects a JSON content type on
+// its argument-less endpoints.
+const pathSpaceUsage = "/2/users/get_space_usage"
+
+// Quota implements provider.Quotaer. A pool ranks its members by free space
+// and puts every member that can report a figure ahead of every member that
+// cannot, so a driver that stays silent here loses placement decisions rather
+// than merely going unsorted — which is why this exists even though Dropbox
+// accounts are rarely the tight ones in a pool.
+//
+// Only the individual allocation is readable: its "allocated" is the whole
+// account's total, and the top-level "used" is what is consumed. Any other
+// allocation shape reports unknown (Total 0), which Quota.Free turns into a
+// negative number, rather than a guess — placing writes against a number that
+// is not this account's is worse than placing them unsorted.
+//
+// UNVERIFIED: the team allocation's real field names and semantics. Dropbox
+// documents team_space_allocation with per-user and team-wide figures whose
+// relationship to what this mount may actually write is unclear, so it is
+// deliberately reported as unknown. Verify against a real Dropbox Business
+// account which of those figures bounds a single member's writes before
+// teaching this method to read it.
+func (p *Provider) Quota(ctx context.Context) (provider.Quota, error) {
+	var usage struct {
+		Used       int64 `json:"used"`
+		Allocation struct {
+			Tag       string `json:".tag"`
+			Allocated int64  `json:"allocated"`
+		} `json:"allocation"`
+	}
+	if err := p.apiJSON(ctx, pathSpaceUsage, nil, &usage, ratelimit.Meta, true); err != nil {
+		return provider.Quota{}, err
+	}
+	if usage.Allocation.Tag != "individual" {
+		return provider.Quota{}, nil
+	}
+	return provider.Quota{Total: usage.Allocation.Allocated, Used: usage.Used}, nil
+}
+
 func readExact(r io.Reader, n int64) ([]byte, error) {
 	if n < 0 || n > maxRequestBody {
 		return nil, errors.New("dropbox: request body size is outside the supported range")

@@ -135,6 +135,12 @@ type Caps struct {
 	ServerRename bool
 	ServerCopy   bool
 
+	// PathIDs is true when an entry's id is its path, so renaming or moving
+	// a directory changes the id of everything beneath it. sftp, webdav, s3
+	// and smb are addressed this way; a drive that hands out an opaque id
+	// keeps it across a move and leaves this false.
+	PathIDs bool
+
 	// Delta is true when the backend implements ChangeLister.
 	Delta bool
 

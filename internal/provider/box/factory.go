@@ -14,7 +14,7 @@ func init() {
 	provider.RegisterFields("box", []provider.Field{
 		{Name: "client_id", Prompt: "Box app client ID"},
 	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret"},
-		Note: "a refresh token and client secret; Box rotates the refresh token on every use"})
+		Note: "the client secret from the Box developer console; config auth then opens a browser for the rest, and Box rotates the refresh token on every use"})
 }
 
 // Factory builds a Box provider from its `remotes.<name>` config block.

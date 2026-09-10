@@ -1,12 +1,14 @@
 // The add-drive modal: create a connection entirely in the UI. It picks a
 // backend, collects the public (non-credential) fields, POSTs /accounts, then
 // runs the credential step in place — a daemon-driven browser/QR authorization
-// where the backend supports it (aliyun, baidu, 115), or the exact terminal
-// command where the secret cannot travel through a browser. It never renders a
-// field for a password, cookie or token: that boundary is the whole point.
+// where the backend supports it, or the exact terminal command where the secret
+// cannot travel through a browser. Which backends support which is the API's
+// answer at runtime, not a list kept here. It never renders a field for a
+// password, cookie or token: that boundary is the whole point.
 import { api, ApiError } from '/ui/api.js';
-import { el, fill, toast } from '/ui/ui.js';
+import { el, fill, toast, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
+import { startAuthorization } from '/ui/auth_step.js';
 
 export async function openAddDrive(opts = {}) {
   let meta, mounts, pools;
@@ -19,7 +21,7 @@ export async function openAddDrive(opts = {}) {
     return;
   }
   if (!meta.configurable) {
-    toast('这个守护进程没有配置文件，无法添加网盘', 'bad');
+    toast(t('add.noconfig'), 'bad');
     return;
   }
   const types = (meta.types || []).slice().sort((a, b) => a.type.localeCompare(b.type));
@@ -27,15 +29,41 @@ export async function openAddDrive(opts = {}) {
   const poolNames = (pools.pools || []).map((p) => p.name);
   const defaultPool = opts.pool || poolNames[0] || '';
 
-  const opener = document.activeElement;
-  const app = document.getElementById('app');
+  // One shell for every modal in the app: scrim, dialog semantics, focus
+  // trap, focus restore, Escape. This sheet replaces its own body as the
+  // flow advances, so it renders into a container rather than a fixed tree.
   const body = el('div');
-  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', style: 'width:min(600px,calc(100% - 32px))' }, body);
-  const scrim = el('div', { class: 'scrim' }, sheet);
-  const close = () => { scrim.remove(); if (app) app.inert = false; if (opener && opener.focus) opener.focus(); };
-  scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-  document.getElementById('modal-root').append(scrim);
-  if (app) app.inert = true;
+  const dismiss = openPanel({
+    title: t('add.title'), content: body, width: 600,
+    onEscape: () => close(),
+  });
+  let pending = null; // { name, session }
+  let created = false;
+  // Closed before the session arrived. POST /auth/start is a round trip, and
+  // the sheet can be dismissed while it is in the air: the cancel below then
+  // found no session to cancel, and the session turned up a moment later and
+  // was stored on a sheet nobody could see. The flow kept the one loopback
+  // callback port until it timed out, and the next drive could not start.
+  let closed = false;
+
+  // cancelSession gives the daemon back the callback listener or device-code
+  // poll it is holding for this flow. There is one per account at a time, so
+  // an abandoned one is what the next attempt meets as a 409.
+  function cancelSession({ name, session }) {
+    api.post('/accounts/' + encodeURIComponent(name) + '/auth/cancel?session=' + encodeURIComponent(session), {}).catch(() => {});
+  }
+
+  function close() {
+    closed = true;
+    if (pending) {
+      const p = pending;
+      pending = null;
+      cancelSession(p);
+    }
+    dismiss();
+    // The list behind the sheet is stale the moment an account is written.
+    if (created && opts.onDone) opts.onDone();
+  }
 
   renderForm();
 
@@ -52,6 +80,16 @@ export async function openAddDrive(opts = {}) {
     const poolWrap = el('label', { style: 'display:flex;align-items:center;gap:9px;font-size:13px' });
     const poolChk = el('input', { type: 'checkbox' });
     const poolSel = el('select', { style: 'flex-grow:1' }, ...poolNames.map((n) => el('option', { value: n }, n)));
+    // Joining a pool does not mean the first write lands in `replicas` places:
+    // one member takes it, repair fills the rest in afterwards. Say it here
+    // rather than let the checkbox imply otherwise.
+    const poolNote = el('div', { class: 'detail', style: 'font-size:12px;margin-left:27px' });
+    function refreshPoolNote() {
+      const sel = (pools.pools || []).find((x) => x.name === poolSel.value);
+      poolNote.textContent = poolChk.checked && sel ? t('pool.protect.async', Math.max((sel.replicas || 1) - 1, 0)) : '';
+    }
+    poolChk.addEventListener('change', refreshPoolNote);
+    poolSel.addEventListener('change', refreshPoolNote);
     if (defaultPool) { poolChk.checked = true; poolSel.value = defaultPool; }
     if (mountPath && !defaultPool) mountChk.checked = true;
     const prefixInput = el('input', { type: 'text', style: 'flex-grow:1' });
@@ -68,7 +106,7 @@ export async function openAddDrive(opts = {}) {
           inp,
           f.prompt ? el('div', { class: 'dim', style: 'font-size:11.5px;margin-top:3px' }, f.prompt) : null);
       }));
-      credNote.textContent = tp.credentials ? (t('add.credstep') + '：' + tp.credentials) : '';
+      credNote.textContent = tp.credentials ? t('add.credstep.value', tp.credentials) : '';
       if (!prefixInput.dataset.touched) prefixInput.value = '/' + (nameInput.value || tp.type);
     }
     typeSel.addEventListener('change', refreshType);
@@ -84,16 +122,17 @@ export async function openAddDrive(opts = {}) {
     poolWrap.append(poolChk, el('span', {}, t('add.pool')), poolSel);
 
     fill(body,
-      el('h3', {}, t('add.title')),
       el('div', { style: 'display:grid;gap:12px' },
         labeled(t('add.type'), typeSel),
         labeled(t('add.name'), nameInput),
         fieldsHost,
         credNote,
         poolNames.length ? poolWrap : null,
+        poolNames.length ? poolNote : null,
         mountPath ? mountWrap : null),
       el('div', { class: 'row', style: 'margin-top:18px;justify-content:flex-end' }, cancel, create));
     refreshType();
+    refreshPoolNote();
     nameInput.focus();
   }
 
@@ -109,6 +148,7 @@ export async function openAddDrive(opts = {}) {
     btn.disabled = true; const label = btn.textContent; btn.textContent = t('add.creating');
     try {
       const res = await api.post('/accounts', payload);
+      created = true;
       await authStep(name, type, res);
     } catch (e) {
       btn.disabled = false; btn.textContent = label;
@@ -117,73 +157,33 @@ export async function openAddDrive(opts = {}) {
   }
 
   async function authStep(name, type, created) {
-    const parts = [el('h3', {}, t('add.next'))];
-    const status = el('div', { class: 'dim', style: 'font-size:12.5px' });
-    let started = null;
-    try {
-      started = await api.post('/accounts/' + encodeURIComponent(name) + '/auth/start', {});
-    } catch (e) {
-      started = null; // not a browser-drivable type; fall through to the terminal command
-    }
-    if (started && started.kind === 'url') {
-      parts.push(el('p', { class: 'detail' }, t('add.auth.url')));
-      parts.push(linkRow(started.value));
-      parts.push(status);
-      pollAuth(name, started.session, status);
-    } else if (started && started.kind === 'qr') {
-      parts.push(el('p', { class: 'detail' }, t('add.auth.qr')));
-      parts.push(codeBox(started.value));
-      parts.push(status);
-      pollAuth(name, started.session, status);
-    } else {
-      parts.push(el('p', { class: 'detail' }, t('add.auth.term')));
-      parts.push(codeBox(created.next_command || ('cloudfs config auth ' + name)));
-      if (created.credentials) parts.push(el('div', { class: 'dim', style: 'font-size:12px' }, created.credentials));
-    }
-    parts.push(el('div', { class: 'detail', style: 'margin-top:14px;padding-top:12px;border-top:1px solid var(--hairline)' }, t('add.saved')));
+    const header = el('h3', {}, t('add.next'));
+    const authHost = el('div', {});
+    const { parts } = await startAuthorization({
+      name, created,
+      alive: () => body.isConnected,
+      onPending: (p) => {
+        // Arriving after the sheet went away: cancel it now rather than store
+        // it where nothing will ever look again.
+        if (closed) { cancelSession(p); return; }
+        pending = p;
+      },
+      onSettled: () => { pending = null; },
+    });
+    fill(authHost, ...parts);
     const restart = el('button', { class: 'danger', onclick: doRestart }, t('add.restart'));
     const finish = el('button', { class: 'primary', onclick: () => { close(); } }, t('add.finish'));
-    parts.push(el('div', { class: 'row', style: 'margin-top:14px;justify-content:flex-end' }, restart, finish));
-    fill(body, ...parts);
-  }
-
-  async function pollAuth(name, session, statusEl) {
-    statusEl.textContent = t('add.waiting');
-    for (let i = 0; i < 150; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!document.body.contains(scrim)) return; // sheet closed
-      let st;
-      try { st = await api.get('/accounts/' + encodeURIComponent(name) + '/auth/status?session=' + encodeURIComponent(session)); }
-      catch (_) { continue; }
-      if (st.state === 'done') { statusEl.textContent = '✓ ' + t('add.done'); statusEl.style.color = 'var(--ok)'; return; }
-      if (st.state === 'denied' || st.state === 'error') { statusEl.textContent = '✕ ' + t('add.denied') + (st.error ? '：' + st.error : ''); statusEl.style.color = 'var(--danger-text)'; return; }
-    }
+    fill(body, header, authHost,
+      el('div', { class: 'detail', style: 'margin-top:14px;padding-top:12px;border-top:1px solid var(--hairline)' }, t('add.saved')),
+      el('div', { class: 'row', style: 'margin-top:14px;justify-content:flex-end' }, restart, finish));
   }
 
   async function doRestart() {
-    try { await api.post('/daemon/restart?confirm=true', {}); toast('守护进程正在重启…'); close(); }
-    catch (e) { if (e.status) toast(e.message, 'bad'); else { toast('守护进程正在重启…'); close(); } }
+    try { await api.post('/daemon/restart?confirm=true', {}); toast(t('toast.restarting')); close(); }
+    catch (e) { if (e.status) toast(e.message, 'bad'); else { toast(t('toast.restarting')); close(); } }
   }
 
   function labeled(label, control) {
     return el('div', {}, el('div', { style: 'font-size:12px;margin-bottom:4px' }, label), control);
-  }
-  function linkRow(url) {
-    const a = el('a', { href: url, target: '_blank', rel: 'noopener', style: 'color:var(--accent-text);word-break:break-all' }, url);
-    return el('div', { style: 'display:flex;gap:9px;align-items:center;flex-wrap:wrap' },
-      el('a', { href: url, target: '_blank', rel: 'noopener', class: 'btn' }, t('add.auth.open')), copyBtn(url), a);
-  }
-  function codeBox(text) {
-    return el('div', { style: 'display:flex;gap:9px;align-items:flex-start' },
-      el('div', { style: 'flex-grow:1;font-family:ui-monospace,monospace;font-size:12px;background:#0a0f16;border:1px solid var(--hairline);border-radius:6px;padding:9px;word-break:break-all' }, text),
-      copyBtn(text));
-  }
-  function copyBtn(text) {
-    const b = el('button', {}, t('add.copy'));
-    b.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(text); b.textContent = t('add.copied'); setTimeout(() => { b.textContent = t('add.copy'); }, 1500); }
-      catch (_) { toast(text); }
-    });
-    return b;
   }
 }

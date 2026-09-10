@@ -299,9 +299,74 @@
 - **未做（有意）**：SFTP 会话池（BDP 不需要）、异步 unlink（无门禁，P2）、Store 级内存节点
   缓存（`cloudfs warm/pin` 跨进程写库会让它过期，先靠 SQL 精简）、cgo SQLite。
 
+## 上手路径（2026-09-09）
+
+### [x] T-27 第一次使用走不通：无配置进不了控制台，Dropbox 没有浏览器授权（2026-09-09）
+
+四个网盘账号合成一个池、挂到一个目录，这条路上的门槛逐条清掉。分两期做完，全部带测试。
+
+**一期 — 让路径可行**
+
+- **Dropbox 浏览器授权。** `daemon.OAuthProfile` 加 `PKCE` 字段并在 `Apply` 透传；新增
+  dropbox profile（`token_access_type=offline`，PKCE 公共客户端，scope 按驱动实际调用取）。
+  `internal/auth/oauth.go` 本来就实现了 PKCE，只是 profile 没有透出这个字段。
+  `SupportsDaemonAuth("dropbox")` 由 profile 推导，Web UI 的浏览器流随之打开。
+  退掉 `config_manage.go` 单字段回退表里所有有 profile 的类型 —— dropbox 那条收的是
+  几小时就过期的 access token，正是要修的缺陷本身。
+- **三处只有无密钥 profile 才会暴露的 guard。** `oauthOptions` 与 `browserAuthorize` 在
+  secret 为空时报错/提示；更要命的是两处都无条件把 `client_secret` 放进要保存的 map，
+  而 `saveCredentials` 拒绝空值（`internal/config/edit.go:218`）—— PKCE 授权会先对着
+  Dropbox 成功，再死在保存这一步，报一个用户从没填过的字段。
+  回归测试 `TestAPublicClientAuthorizationSavesOnlyTheRefreshToken` 专抓这条。
+- **内置 OAuth 应用 + 用户覆盖。** `internal/daemon/oauth_apps.go`：`BuiltinOAuthAppFor` 与
+  `ResolveOAuthClient`，账号自己的 `client_id` 完胜内置；内置的 id 与 secret 成对使用。
+  **表先留空**，填值是维护者一行编辑，空表时行为与之前完全一致（有测试断言）。
+  新建账号时把内置 id 落进 YAML（`FillBuiltinClientID`），因为 `client_id` 在
+  `EffectiveAccountBinding` 的哈希里，事后再填会移动 binding、栅栏在途上传。
+- **Dropbox 配额。** 驱动实现 `provider.Quotaer`（`/2/users/get_space_usage`），team 空间
+  形状读不了就报未知、不猜。混合池里 Dropbox 成员不再因为"空间未知"而在放置时垫底。
+- **加账号与入池合成一个事务。** `AddRemoteOptions.Pool` + 抽出的 `appendPoolMember`，
+  一次 `editConfig` 写完；`internal/control/accounts.go` 的两段式与那句
+  `remote written, but joining the pool failed` 一并删掉。CLI 补上 `config add --pool`。
+- **授权端口全局守卫。** `authRegistry` 只按 remote 记会话，两个不同账号同时授权撞
+  53682 端口，压成一个莫名其妙的 502。加 `inFlight` 与 `err.auth_port_busy`（中英）。
+- **副本诚实性。** `docs/pool.md` 三处把 `min_replicas` 说成 `close()` 前必须落地的份数 ——
+  代码里没有任何写路径消费它。改文档，`pool.js` 无条件渲染 `pool.protect.async`：
+  新文件先写到一个网盘就算保存成功，其余由后台补齐。**行为不变，是措辞在撒谎。**
+
+**二期 — 引导流程**
+
+- **`cloudfs setup`**（`cmd/cloudfs/setup.go`）。真正的第一堵墙是 `loadConfig`
+  （`main.go:269`）在没有配置时让人去读 `docs/DESIGN.md` 第 6 节 —— 而所有引导都在
+  Web UI 里，Web UI 要守护进程先跑，守护进程要配置先存在。setup 写一份起步配置
+  （`config.WriteStarter`，刻意不放占位 mount），起一个**只有控制面**的 server
+  （不挂 FUSE、不占 journal 锁），打开浏览器；重启时 re-exec 成 `cloudfs mount`。
+- **服务端四个字段**：`AccountSummary.has_credentials`（续做时知道还差哪个）、
+  `AccountType.browser_auth`（哪些能点浏览器，由守护进程回答而不是页面里存一份名单）、
+  `AccountCheckResponse` 的 `total/used/free`（授权完当场显示剩余空间）、
+  `PoolCreateRequest.member_capacity`（不报配额的成员当场给个容量）。
+- **前端**：`auth_step.js` 把授权那段从 `add_drive.js` 抽出共用；`setup_plan.js`
+  （零 import 纯逻辑，20 个 node 测试）从服务端状态推断该停在第几步 ——
+  localStorage 只存意图，真相一律来自 `/accounts`、`/pool/status`、`/mounts`，
+  所以"关了浏览器"、"守护进程重启了"、"有人在终端 config add"是同一种情况；
+  `screens/setup.js` 五步界面，**一次只offer一个网盘授权**（端口是进程级的锁）。
+- **文档**：新增 `docs/getting-started.md`（向导版 + 命令行版）与 `docs/README.md` 索引，
+  从 `README.md` 与 `docs/pool.md` 链过去。
+
+验收：`./gow test` 全绿（排除三个需要 macFUSE 的包），`./gow vet` 干净，
+改动包 `-race` 无告警，`cloudfs setup` 手工冒烟走通（写配置、起控制面、`/accounts` 与
+三个新前端模块都是 200）。
+
+**已知遗留**：内置应用表是空的 —— 注册 Dropbox 应用（Full Dropbox、PKCE、回调
+`http://127.0.0.1:53682/callback`、申请 Production）是维护者的活；gdrive 的
+`.../auth/drive` 是 restricted scope，发布要 OAuth 品牌验证加每年一次的第三方 CASA
+评估，值不值得投由人来定。另外 Dropbox 的 App Console 是否接受字面 IP 回调
+（`internal/auth/oauth.go:100` 明确拒绝 `localhost` 这个名字）必须在真实控制台上验一次，
+它卡着整条 Dropbox 授权路径。
+
 ## P0 — 正确性
 
-### [~] T-00h delta 批量与并发目录列举：软围栏不再拒绝，远端内容变更仍会（2026-09-06）
+### [x] T-00h delta 批量与并发目录列举：软/硬围栏拆分完成（2026-09-06，2026-09-07 收尾）
 
 `-race` 下跑全量时发现：1000 部影片的媒体库扫描偶尔只找到 998 部，**没有报错**——
 丢的总是相邻的一对（如 `Film 0947`/`Film 0948`），事后再读那两个目录又是完整的。
@@ -338,14 +403,21 @@
   `fenceDirListingTx` 立刻失败）；`internal/vfs/refresh_listing_race_test.go` 由"允许被拒"
   收紧为**断言零拒绝**。schema v9 → v10（`ALTER TABLE ... ADD COLUMN stale_generation`）。
 
-- **仍开放：远端内容变更仍走硬围栏。** `ApplyRemoteNode` 在 `next != nil` 的纯属性更新上
-  也推硬围栏——父目录的名字集合没变（顶部的守卫已经禁止这条路径改名字或换父目录），
-  却会拒掉并发的父目录列举。改软是对的方向，但代价是"列举不会覆盖 delta 刚写的属性"
-  从 meta 自身的保证退化成**依赖调用方传的 `protect` 谓词**：VFS 传了
-  （`internal/vfs/vfs.go:738`，`fetched_at >= 列举开始时刻`），`protect == nil` 的调用方没有。
-  要做就得把这条提升为 meta 层的无条件不变量，那会改动一批现有列举语义（一批 meta 测试
-  依赖"列举可以更新同一秒内 upsert 的节点"）。**没有真实网盘验证不动**，生产轮询 60 秒，
-  窗口本来就窄。写在这里而不是悄悄改掉。
+- **远端纯属性更新已改软围栏（2026-09-07）**：`ApplyRemoteNode` 只在"拿走了一个名字"时
+  （`next == nil` 的删除，或 `directoryReplacement`）推硬围栏；纯属性更新推
+  `stale_generation`，父目录的并发列举照常发布、`complete` 留 0。
+  之前不敢改的理由——"列举不覆盖 delta 刚写的属性"会退化成依赖调用方的 `protect`——
+  已经消除：schema **v10 → v11** 给 `nodes` 加了 `applied_gen`，变更流写完节点后把父目录
+  当时的 `generation` 记上（`stampAppliedGenerationTx`）；`DirListing` 在 `BeginDirListing`
+  取的正是同一个计数器，于是 `applied_gen >= 本次列举的 generation` 精确等价于"这次写发生在
+  本次列举开始之后"。`mergeStaged`、`removeMissing` 与收尾的批量 `fetched_at` 刷新都跳过
+  这样的条目，`protect == nil` 也成立。保护会自己过期：下一次列举拿到更高的 generation。
+  用的是每目录的既有计数器，不是时钟，所以不受 `fetched_at` 秒级分辨率的影响。
+  回归：`internal/meta/remote_attribute_fence_test.go` 三条（并发列举照常发布且属性不被写回、
+  之后开始的列举重新拥有该条目、v10 库升级后老节点 `applied_gen=0` 仍可被列举更新）；
+  去掉 `applied_gen` 判断第一条立刻失败。`TestRemoteNodeChangeFencesParentAndDirectoryListings`
+  收窄为只覆盖 delete 与 replace。
+  **仍未真实网盘验证**：生产轮询 60 秒，窗口本来就窄，收益要到真实 delta 流上才能测量。
 - **顺带**：媒体库成本断言改为在 `NoBackground` 下测量——后台的 delta 轮询与预取本身
   也会产生 provider 调用，把它们算进"遍历的成本"是在量错东西。
 
@@ -512,8 +584,30 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
     毁掉目标位置的无关文件。读路径带引用计数的句柄缓存，断链只重试一次并强制重新挂载。
     通过 `ConfigDialer` / `ConfigLimiters` 继承代理与限流（SMB 不走 HTTP，拿不到共享 client）。
     38 个测试用内存共享复现了"改名不覆盖""非空目录不可删""短读"三条服务端行为。
-  - **仍缺**：三者都没有浏览器 OAuth 向导；gdrive / box 没有真实账号验收；**smb 没有在
-    任何真实 SMB 服务器上跑过**，内存共享测试不等于真机验收。因此 T-02 保持部分完成。
+  - **浏览器 OAuth 向导已补齐（2026-09-07）**：gdrive 与 box 现在和 aliyun / baidu 走同一条
+    路径。`cloudfs config auth <account>` 起本地回环回调、开浏览器、自己换 token、自己写进
+    安全存储；控制面 / Web UI 的 `POST /accounts/<name>/auth/start` 因为按
+    `daemon.SupportsDaemonAuth` 分派，自动跟着支持。
+    - 端点表从 CLI 与 daemon 两份重复实现收成一份：`daemon.OAuthProfileFor(type)` 返回
+      `OAuthProfile{AuthorizeURL, TokenURL, Scope, JSONToken, FormToken, AuthParams}`，
+      `Apply` 再让账号自己的 `oauth_authorize_url` / `oauth_token_url` / `oauth_scope`
+      覆盖端点与 scope。换 token 的报文形状是协议属性，不给账号覆盖。
+    - 新增 `auth.OAuthOptions.FormToken`：RFC 6749 的表单 POST。Google 与 Box 只接受这种，
+      而此前只有 aliyun 的 JSON POST 和 baidu 的 GET query——GET 会把授权码和 client secret
+      放进 URL，代理和服务端日志都会留下。
+    - gdrive 的授权请求带 `access_type=offline` 与 `prompt=consent`：少任何一个，Google 都
+      不下发 refresh token，账号一小时后就停摆。scope 用 `https://www.googleapis.com/auth/drive`，
+      box 用 `root_readwrite`。
+    - `gdrive` / `box` 的 `provider.Credentials.Note` 相应改写：`config add` 之后提示的是
+      "浏览器会替你完成"，不再叫用户自己去别处铸一个 refresh token。
+    - 回归：`cmd/cloudfs/config_oauth_gdrive_test.go`（两家各跑一遍完整授权：授权 URL 的参数、
+      表单 POST 的字段、凭据落到安全存储、输出不含任何 `private-` 值；以及"凡有 OAuth profile
+      的类型，提示必须指向浏览器"）、`internal/auth/form_token_test.go`（表单 POST，且 URL 里
+      不出现授权码与 secret）、`internal/daemon/oauth_profile_test.go`（四家 profile 齐全、
+      gdrive 的 offline/consent、box 走表单；pan115 与 smb 明确没有 profile）。
+  - **仍缺**：gdrive / box 没有真实账号验收（授权流程只在本地 httptest 服务器上跑通）；
+    **smb 没有在任何真实 SMB 服务器上跑过**，内存共享测试不等于真机验收；smb 的凭据是密码，
+    没有授权服务器可谈，仍走 `config auth --stdin`。因此 T-02 保持部分完成。
 - **进展（2026-09-02）**：`internal/provider/sftp/` 已实现并注册，通过真实
   SSH 服务器验证（挂载、读写、改名、递归删除、断线重连）。同时补上了
   `internal/net/proxy/dial.go` 的 `Manager.DialContext`，让不走 HTTP 的后端
@@ -564,7 +658,7 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   - Range 读的字节正确性用与 `httpx.RangeBody` 相同的属性测试覆盖
     （服务端忽略 Range 时不能污染块缓存）。
 
-### [~] T-03 MCP Resources：慢客户端隔离已做，SDK 侧空容器与真实规模仍开放
+### [~] T-03 MCP Resources：慢客户端已完全隔离，SDK 侧空容器与真实规模仍开放
 
 - **2026-09-06 慢客户端隔离**：SDK 的 `ResourceUpdated` 逐个通知订阅者且自带 10 秒超时，
   一个传输卡住的客户端会占住这次调用。原来它在合并循环里内联执行——那段时间**服务器完全
@@ -572,11 +666,24 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   中间是有界队列（256）：满了不丢通知（watch 仍 dirty，下一个 tick 重投），同一 URI 不堆
   重复项。3 个回归：队列填满后仍接收并记录新变更、重复 tick 不堆积、12 轮会话反复连断后
   `sessions`/`streams`/`count`/队列全部归零。把入队改回内联，前两个立刻失败。
-- **仍开放（其中一条是上游的）**：订阅者之间的投递仍串行——SDK 没有按会话投递的入口，
-  所以卡住的客户端仍会延迟**其他订阅者**，只是不再延迟变更检测。`go-sdk v1.7.0` 的
-  `Server.disconnect` 只删内层 map 里的会话，**不删随之变空的外层 URI 条目**，长期运行
-  下按历史订阅过的 URI 数量增长；这在 SDK 内部，cloudfs 只能把自己这侧证明干净，不假装
-  修好了它。TEMP 空间预算、大事务写锁延迟与真实规模性能不变。
+- **2026-09-07 按会话投递**：上一条"投递仍串行"已修。投递从"一条队列一个 goroutine"改成
+  **每个会话一条队列、一个发送 goroutine**。SDK 仍然没有按会话投递的入口，定向靠一个
+  `resourceWatch.claimed` 标记：发送者在调用 `ResourceUpdated` 之前先在自己那条 watch 上
+  claim，发送中间件只放行被 claim 的那条，其余会话在碰到各自传输之前就被丢弃，由它们自己的
+  发送者投递。于是一次广播只写进一个传输，卡住的客户端只占住自己那条队列。
+  回归 `TestOneStalledSubscriberDoesNotDelayAnother`：一个会话的传输永久阻塞时，另一个会话
+  仍在 5 秒内收到自己的通知；把所有会话改回共用一个发送者立刻失败。
+  会话churn 回归相应从"投递队列归零"改为"`senders` 归零"。
+- **仍开放（本项目侧，已知边界）**：权限只在**订阅时**校验。`reserve` 逐个 URI 走
+  `parseResource`（允许列表 + 挂载归属），但 `run`/`deliver`/`send` 都不再调 `checkPath`，
+  所以订阅期间改 `--allow` 或改挂载不会被重新验证——投递只检查"这个 URI 是不是这个会话
+  注册过的"。另外 `Options.Allow` 是**服务器全局**的，包里没有任何按会话/按身份的权限模型，
+  因此"这个会话能看到的路径"等价于"这个会话注册过的 URI"。多租户场景要靠一个进程一份
+  allowlist 来隔离，不能靠订阅。
+- **仍开放（上游）**：`go-sdk v1.7.0` 的 `Server.disconnect` 只删内层 map 里的会话，
+  **不删随之变空的外层 URI 条目**，长期运行下按历史订阅过的 URI 数量增长；这在 SDK 内部，
+  cloudfs 只能把自己这侧证明干净，不假装修好了它。TEMP 空间预算、大事务写锁延迟与真实规模
+  性能不变。
 
 - **2026-09-05 SFTP 生产流式接线**：独立 v3 读取器已接入专用 SSH 连接池、
   认证/主机密钥/代理/限流与 VFS TEMP，StreamList 已宣告。新增
@@ -617,8 +724,12 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   长期回收、大目录分页内存优化和真实 FUSE/网盘长期验收；不据本轮协议测试标为全部完成。
 
 - **事件流接线补充**：VFS 已有独立 `WatchChanges`，覆盖本地提交、内核来源、改名/
-  删除、复制可读版本及远端 delta/目录刷新，队列有界且溢出转重查提示。会话订阅、
-  取消/断连、权限过滤和通知合并尚未完成，不能据此把 T-03 标成完成。见 `docs/vfs-changes.md`。
+  删除、复制可读版本及远端 delta/目录刷新，队列有界且溢出转重查提示。见 `docs/vfs-changes.md`。
+  （原文接着写"会话订阅、取消/断连、权限过滤和通知合并尚未完成"——那已经是历史状态，
+  四项都在 `internal/mcpsrv/subscriptions.go` 里实现并有回归：取消见 `receive` 的
+  `resources/unsubscribe` 分支与 `release`，断连见 `session.Wait()` 的清理 goroutine，
+  权限见 `reserve` 里逐个 URI 的 `parseResource`，合并见 per-watch `dirty` + 25ms tick +
+  `queued`。2026-09-07 删掉该句，避免再被当成待办读。）
 
 - **2026-09-05 当前进展**：已注册允许列表内的资源入口和模板，支持 `resources/read`
   的文本/二进制/空文件、有界字节范围及目录分页；URI 包含 remote 和完整虚拟路径，
@@ -957,23 +1068,26 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 
 ## 验证缺口（需要外部资源或长时间运行）
 
-### [ ] T-11 56 处 `UNVERIFIED` 待真实账号核对
+### [ ] T-11 78 处 `UNVERIFIED` 待真实账号核对
 
-按协议资料推断、未在真实账号上跑通的细节。2026-09-06 非测试源码计数为 56
-（比 09-05 的 51 多 5 处：新增的 gdrive/box 驱动如实标注了自己的未验证假设，
-这是按约定加的，不是退步）。不能在实际核验前笼统断言这些未确认行为只影响
-可用性、绝不影响数据正确性。
+按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **78 处 / 25 个文件**，
+不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
+从来没有进过这张表，驱动侧的计数也偏低。下表按当前实测重列。不能在实际核验前笼统
+断言这些未确认行为只影响可用性、绝不影响数据正确性。
 
-| 驱动 | 处数 | 集中位置 |
+| 模块 | 处数 | 集中位置 |
 |---|---:|---|
-| tianyi | 17 | `tianyi.go` 5 · `upload.go` 3 · `files.go` 3 · `auth.go` 3 · `api.go` 3 |
-| pan115 | 13 | `upload.go` 4 · `pan115.go` 3 · `api.go` 3 · `auth.go` 2 · `oss.go` 1 |
-| quark | 12 | `upload.go` 4 · `files.go` 4 · `api.go` 3 · `quark.go` 1 |
-| aliyun | 4 | `aliyun.go` 4 |
+| tianyi | 18 | `tianyi.go` 6 · `upload.go` 3 · `files.go` 3 · `auth.go` 3 · `api.go` 3 |
+| quark | 14 | `upload.go` 4 · `files.go` 4 · `api.go` 3 · `quark.go` 3（另 `quark_test.go` 1） |
+| pan115 | 11 | `upload.go` 4 · `pan115.go` 4 · `api.go` 3 · `auth.go` 2 · `oss.go` 1 |
+| winfs | 10 | `winfs.go` 7 · `fsop.go` 2 · `naming.go` 1 —— 需要 Windows 真机，属于 T-21 |
+| aliyun | 6 | `aliyun.go` 6 |
 | gdrive | 4 | 修订下载端点、resumable session URI 是否需要 bearer、403 的 reason 取值、orderBy 跨页稳定性 |
-| pan123 | 3 | `pan123.go` 3 |
-| baidu | 2 | `baidu.go` 2 |
+| pan123 | 4 | `pan123.go` 4 |
+| baidu | 4 | `baidu.go` 4 |
 | box | 1 | content 端点的 `version` 查询参数 |
+| cloudfs-desktop | 1 | `link_windows.go` |
 
 **建议顺序**：从待确认项最少的 baidu(2) 与 pan123(3) 开始，
 两者都有官方开放平台文档，核对成本最低；tianyi 与 quark 放到最后。
@@ -1080,6 +1194,15 @@ CloudFS 在"不出事"这一条上**已经明显强于所有竞品**（三维 AI
 ### [x] T-17 图形控制面：完整 Web 应用已交付（8 屏全操作，凭据仍只走终端），真机视觉验收待补
 
 > 2026-09-06：从只读状态页扩为覆盖所有 CLI 操作的桌面式 Web 应用 + 可选原生壳，详见 T-24/T-25。
+>
+> 2026-09-08：逐条核对控制面路由与界面调用，补齐界面够不到的后端能力（`docs/ui-plan.md` 阶段 E）：
+> 连接删除与连接设置浮层（编辑 proxy/qps/upload_workers/公开字段、测连通性、挂载绑定与解除）、
+> 代理编辑（`PUT /proxy/config` 此前零调用者，界面注释却写着会保存生效）、目录与队列分页、
+> 文件重命名/预览/下载链接、复制任务屏、批量维护动作（冲刷队列、重试全部死信、释放内核缓存、
+> 池重建/按路径校验/加入已有池）、授权会话取消。顺带修一个数据丢失缺口：代理配置 GET 会脱敏
+> 出口地址里的密码，界面原样 PUT 回去会把密码从配置里抹掉；现在视图带 `has_credentials`，
+> 写入需 `keep_credentials`，脱敏形态原样回传直接 400。
+>
 > 以下为最初的 M5 只读版验收记录。
 
 - **证据**：`internal/control/metrics.go:24-27` 只注册了 `/healthz` `/readyz` `/status`
@@ -1406,12 +1529,29 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 冷目录按持有者计费、修复 N 文件 N 次上传）、`test/e2e/TestPoolEndToEndThroughFUSE`。
 真实账号验证缺口见 `docs/pool.md` 末节。
 
-### [ ] T-27 路径式 id 的后端改目录名后子孙失联（既有 bug，存储池设计时发现）
+### [x] T-27 路径式 id 的后端改目录名后子孙失联（既有 bug，2026-09-07 修复）
 
-`internal/vfs/write.go` 的 `Rename/Move` 丢弃 provider 返回的 Entry，`internal/meta/store.go` 的 `Store.Rename`
-只改 `parent_ino/name`、从不重写 `remote_id`，也不重写子孙。webdav/sftp/s3/smb 的 id 就是路径：目录改名后
-`dir_ttl` 内读子孙必失败（旧路径）。存储池用不透明稳定 id 绕开了它。
-验收：fake 以 path-id 模式运行，改名目录后立刻读子孙成功；回退即失败。
+- **原因**：`internal/vfs/write.go` 的 `rename` 丢弃 provider `Move`/`Rename` 返回的 Entry，
+  `internal/meta/store.go` 的 `Store.Rename` 只改 `parent_ino/name`、从不重写 `remote_id`，
+  更不重写子孙。webdav/sftp/s3/smb 的 id 就是路径，所以目录改名后 `dir_ttl` 内读子孙必然
+  拿旧路径去问后端。存储池用不透明稳定 id 绕开了它，普通挂载没有。
+- **能力矩阵先说清楚**：新增 `provider.Caps.PathIDs`——"id 就是路径，改目录名会改掉下面
+  所有 id"。sftp/webdav/s3/smb 四家宣告它（`openlist` 是 webdav 的别名，跟着继承）。
+  上层不按网盘名字特判，这条差异同样走 `Caps`。
+- **修法**：`rename` 保留 provider 返回的 id（先 `Move` 后 `Rename`，逐步跟着变），
+  与原 id 不同就调用新的 `meta.Store.Retarget(ctx, ino, newID, descendants)`。
+  `descendants` 取 `caps.PathIDs`：只有路径式 id 才会把"新 id + `/`"接到子孙上，
+  不透明 id 变了只说明它自己变了，说不了子孙。子孙用递归 CTE 限定在子树内，再按
+  "旧 id + `/`" 前缀匹配，前缀比较交给 SQLite 的 `substr`/`length` 做（按字符而非字节，
+  非 ASCII 名字才不会错位）。因此 `cloudfs-local:` 占位的待上传文件与 `/projector`
+  这种只是字符相同的兄弟都不会被改到。
+- **回归**：`internal/vfs/rename_path_ids_test.go`（path-id 后端改名/移动目录后子孙 id
+  正确且立刻可读，不透明 id 后端子孙 id 不变）、`internal/meta/retarget_test.go`
+  （子树前缀重写、不动待上传占位、`descendants=false` 只改自己）、四个驱动各自
+  capabilities 测试断言 `PathIDs`。去掉 `Retarget` 调用后前两条立刻失败。
+- **代价**：子孙的 `remote_id` 变了，缓存键（`FileKey{Remote,RemoteID,Version}`）随之改变，
+  改名后这些块要重新下载。此前它们是**读不到**的，所以这是净改善；真要保留热缓存需要
+  一个缓存改键接口，那是另一件事。
 
 ### [x] T-28 `provider.Instrument` 在后端实现 ChangeLister 或 ServerCopier 时丢掉 SinglePutter（既有 bug，2026-09-06）
 

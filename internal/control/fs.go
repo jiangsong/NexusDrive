@@ -145,13 +145,11 @@ func (s *Server) fsReady(w http.ResponseWriter, r *http.Request, method string) 
 	if !privateRequest(w, r) {
 		return false
 	}
-	if r.Method != method {
-		w.Header().Set("Allow", method)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, method) {
 		return false
 	}
 	if s.collector.FS == nil {
-		http.Error(w, "no filesystem is mounted on this daemon", http.StatusServiceUnavailable)
+		httpErrorT(w, r, http.StatusServiceUnavailable, "err.no_filesystem")
 		return false
 	}
 	return true
@@ -169,19 +167,26 @@ func (s *Server) fsPath(w http.ResponseWriter, raw string) (string, bool) {
 // decodeMutation reads one JSON object and nothing else, the way the other
 // mutating routes do.
 func decodeMutation(w http.ResponseWriter, r *http.Request, into any) bool {
+	return decodeMutationLimit(w, r, into, 16<<10)
+}
+
+// decodeMutationLimit is decodeMutation with the body cap named. Routes that
+// take a small fixed request — an id and a confirmation — cap tighter; the
+// 415/400/400 sequence is the same one, in one place.
+func decodeMutationLimit(w http.ResponseWriter, r *http.Request, into any, max int64) bool {
 	if r.Header.Get("Content-Type") != "application/json" {
-		http.Error(w, "use application/json", http.StatusUnsupportedMediaType)
+		httpErrorT(w, r, http.StatusUnsupportedMediaType, "err.use_json")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, max)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
-		http.Error(w, "invalid JSON request", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.invalid_json")
 		return false
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
-		http.Error(w, "expected one JSON object", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.one_json_object")
 		return false
 	}
 	return true
@@ -200,14 +205,14 @@ func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > fsPageMax {
-			http.Error(w, fmt.Sprintf("limit must be 1..%d", fsPageMax), http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.limit_range", fsPageMax)
 			return
 		}
 		limit = n
 	}
 	opt, err := vfs.ParseDirectoryCursor(r.URL.Query().Get("cursor"), limit)
 	if err != nil {
-		http.Error(w, "invalid cursor", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.invalid_cursor")
 		return
 	}
 	page, err := s.collector.FS.ReadDirPagePath(r.Context(), p, opt)
@@ -258,7 +263,7 @@ func (s *Server) fsPreview(w http.ResponseWriter, r *http.Request) {
 	if raw := q.Get("offset"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n < 0 {
-			http.Error(w, "offset must be a non-negative integer", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.offset_invalid")
 			return
 		}
 		offset = n
@@ -266,7 +271,7 @@ func (s *Server) fsPreview(w http.ResponseWriter, r *http.Request) {
 	if raw := q.Get("length"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n < 1 || n > previewMax {
-			http.Error(w, fmt.Sprintf("length must be 1..%d", previewMax), http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.length_range", previewMax)
 			return
 		}
 		length = n
@@ -331,7 +336,7 @@ func (s *Server) fsMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p == "/" {
-		http.Error(w, "the root already exists", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.root_exists")
 		return
 	}
 	parent, err := s.collector.FS.StatPath(r.Context(), path.Dir(p))
@@ -365,11 +370,11 @@ func (s *Server) fsRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if from == "/" || to == "/" {
-		http.Error(w, "the root cannot be renamed", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.root_rename")
 		return
 	}
 	if to == from || strings.HasPrefix(to, from+"/") {
-		http.Error(w, "cannot move a directory into itself", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.move_into_self")
 		return
 	}
 	src, err := s.collector.FS.StatPath(r.Context(), path.Dir(from))
@@ -411,11 +416,10 @@ func (s *Server) fsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p == "/" {
-		http.Error(w, "refusing to delete the mount root", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.delete_mount_root")
 		return
 	}
-	if err := requireConfirm(q.Confirm, "deletes "+p+" on the remote as well"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !confirmed(w, r, q.Confirm, "confirm.delete_path", p) {
 		return
 	}
 	parent, err := s.collector.FS.StatPath(r.Context(), path.Dir(p))

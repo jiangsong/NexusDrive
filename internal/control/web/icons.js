@@ -14,6 +14,7 @@ export const icons = {
   refresh: svg('<path d="M20 11A8 8 0 0 0 6 6.3L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14 4.7l2-1.7"/><path d="M20 20v-4h-4"/>'),
   pin: svg('<path d="M15 3.5 20.5 9 17 12.5l-1-1-4 4 .5 4.5-2-2-4.5 4.5L5 20.5 9.5 16l-2-2 4.5-.5 4-4-1-1z"/>'),
   chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+  trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>'),
   close: svg('<path d="m6 6 12 12M18 6 6 18"/>'),
   warn: svg('<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>'),
 };

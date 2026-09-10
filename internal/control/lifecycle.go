@@ -46,25 +46,22 @@ func (s *Server) daemonRestart(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	life := s.collector.Lifecycle
 	if life == nil || life.Restart == nil {
-		http.Error(w, "this process cannot restart itself; restart it the way it was started", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.cannot_self_restart")
 		return
 	}
 	confirm := r.URL.Query().Get("confirm") == "true"
-	if err := requireConfirm(confirm, "detaches the mount and restarts the daemon"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !confirmed(w, r, confirm, "confirm.restart_daemon") {
 		return
 	}
 	// From here the process is going down. Refuse further mutations so a
 	// second request cannot start changing state a restart is about to drop.
 	if !s.draining.CompareAndSwap(false, true) {
-		http.Error(w, "a restart is already in progress", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.restart_in_progress")
 		return
 	}
 	writeJSON(w, RestartResponse{Mode: RestartReexec, Restarting: true})

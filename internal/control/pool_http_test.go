@@ -130,6 +130,56 @@ func TestPoolStatusShowsMembersAndSpaceWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestPoolMemberEditsShowPendingRestartAndRemovalIsIdempotent(t *testing.T) {
+	f := newPoolFixture(t)
+
+	w := f.do(t, http.MethodPost, "/pool/members", `{"pool":"home","remote":"c"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("add c = %d %s", w.Code, w.Body.String())
+	}
+	w = f.do(t, http.MethodPost, "/pool/members/drain", `{"pool":"home","remote":"b","confirm":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("drain b = %d %s", w.Code, w.Body.String())
+	}
+	w = f.do(t, http.MethodPost, "/pool/members/remove", `{"pool":"home","remote":"b","confirm":true}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"restart_required":true`) {
+		t.Fatalf("remove b = %d %s", w.Code, w.Body.String())
+	}
+
+	// The in-memory configuration view must follow the saved desired state,
+	// while the running pool deliberately keeps b and lacks c until restart.
+	configured := f.srv.collector.ConfigView().Pools["home"].Members
+	if len(configured) != 2 || configured[0].Remote != "a" || configured[1].Remote != "c" {
+		t.Fatalf("configured members = %+v", configured)
+	}
+	w = f.do(t, http.MethodGet, "/pool/status", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", w.Code, w.Body.String())
+	}
+	var out PoolStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	pending := map[string]string{}
+	for _, member := range out.Pools[0].Members {
+		pending[member.Remote] = member.PendingRestart
+	}
+	if pending["a"] != "" || pending["b"] != "remove" || pending["c"] != "add" {
+		t.Fatalf("pending member changes = %+v", pending)
+	}
+
+	// A repeated click/request before restart asks for the same desired state;
+	// it is a success, not a false "not a member" error.
+	w = f.do(t, http.MethodPost, "/pool/members/remove", `{"pool":"home","remote":"b","confirm":true}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"restart_required":true`) {
+		t.Fatalf("repeat remove b = %d %s", w.Code, w.Body.String())
+	}
+	w = f.do(t, http.MethodPost, "/pool/members/remove?lang=zh", `{"pool":"home","remote":"ghost","confirm":true}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"ghost" 不是存储池 "home" 的成员`) {
+		t.Fatalf("localized missing member = %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestFsListReportsAvailability(t *testing.T) {
 	f := newPoolFixture(t)
 	f.a.Seed("/both.txt", []byte("x"))

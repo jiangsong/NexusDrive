@@ -47,13 +47,26 @@ func (s *Store) ApplyRemoteNode(ctx context.Context, expected Node, next *Node, 
 		if current != observed {
 			return ErrNodeChanged
 		}
-		if next == nil || directoryReplacement(current, *next) {
+		removesAName := next == nil || directoryReplacement(current, *next)
+		if removesAName {
 			retained, err := prepareDirectoryReplacementTx(ctx, tx, current, protect)
 			if err != nil || retained {
 				return err
 			}
 		}
-		if err := fenceDirListingTx(ctx, tx, current.ParentIno, current.Ino); err != nil {
+		// A deletion or a replaced directory takes a name away, so an older
+		// snapshot still listing it has to be refused. A plain attribute
+		// update takes nothing away — the guard above already refuses to move
+		// a name — so an older snapshot is still truthful and is published,
+		// leaving the directory incomplete. What stops that snapshot writing
+		// the previous attributes back is applied_gen, recorded below and
+		// honoured by DirListing; the protection is this layer's, not the
+		// caller's to remember.
+		if removesAName {
+			if err := fenceDirListingTx(ctx, tx, current.ParentIno, current.Ino); err != nil {
+				return err
+			}
+		} else if err := markDirStaleTx(ctx, tx, current.ParentIno, current.Ino); err != nil {
 			return err
 		}
 		if next != nil {
@@ -64,6 +77,9 @@ func (s *Store) ApplyRemoteNode(ctx context.Context, expected Node, next *Node, 
 			fillMode(&result)
 			result.Ino, err = s.upsertNodeTx(ctx, tx, result)
 			if err != nil {
+				return err
+			}
+			if err := stampAppliedGenerationTx(ctx, tx, result.Ino, current.ParentIno); err != nil {
 				return err
 			}
 		}
@@ -81,4 +97,16 @@ func (s *Store) ApplyRemoteNode(ctx context.Context, expected Node, next *Node, 
 		}
 	}
 	return result, changed, nil
+}
+
+// stampAppliedGenerationTx records the parent's current listing generation on
+// a node the change feed just wrote. A listing that began at or before that
+// generation is older than this write and must leave the node alone; a listing
+// that begins afterwards gets a higher generation and owns the entry again, so
+// the protection expires on its own instead of pinning the node forever.
+func stampAppliedGenerationTx(ctx context.Context, tx *sql.Tx, ino, parent uint64) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE nodes SET applied_gen = IFNULL((SELECT generation FROM directory_refresh_generation WHERE ino=?), 0) WHERE ino=?`,
+		parent, ino)
+	return err
 }

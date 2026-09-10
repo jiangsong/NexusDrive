@@ -12,8 +12,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"cloudfs/internal/i18n"
 )
 
 // Server exposes health, status and metrics over HTTP. It binds to a loopback
@@ -29,6 +32,10 @@ type Server struct {
 	// guard turns away every mutation so nothing changes state the imminent
 	// teardown is about to drop.
 	draining atomic.Bool
+	// reloadMu serializes the read-modify-write in reloadConfigView, so two
+	// edits landing together cannot publish a view that is missing one of
+	// them.
+	reloadMu sync.Mutex
 }
 
 // NewServer builds the control HTTP server.
@@ -160,11 +167,11 @@ func (s *Server) dropCaches(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "use POST", http.StatusMethodNotAllowed)
+		httpErrorT(w, r, http.StatusMethodNotAllowed, "err.use_post")
 		return
 	}
 	if s.collector.DropCaches == nil {
-		http.Error(w, "cache dropping is not wired on this daemon", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.drop_unwired")
 		return
 	}
 	n, err := s.collector.DropCaches(r.Context())
@@ -176,15 +183,33 @@ func (s *Server) dropCaches(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"files_dropped": n})
 }
 
-// Handler exposes the mux for tests and embedding.
-func (s *Server) Handler() http.Handler { return s.drainingGuard(s.mux) }
+// Handler exposes the mux for tests and embedding. Every path that serves
+// this server goes through serveHandler, so a test reaching Handler() sees
+// the same chain the daemon does.
+func (s *Server) Handler() http.Handler { return s.serveHandler() }
+
+// serveHandler is the one chain the daemon serves. Start, ListenAndServe and
+// Handler must not assemble their own: a middleware added to one and missed by
+// the others is invisible until a request in production behaves differently
+// from the same request in a test.
+func (s *Server) serveHandler() http.Handler {
+	return s.languageBoundary(s.drainingGuard(s.mux))
+}
+
+// languageBoundary resolves the reader's language once and removes the
+// parameter that carried it, so no handler has to know the page appends one.
+func (s *Server) languageBoundary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, resolveLang(r))
+	})
+}
 
 // drainingGuard turns away mutations once a restart has been accepted. Reads
 // still answer, so the UI can show that the daemon is on its way down.
 func (s *Server) drainingGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.draining.Load() && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "the daemon is restarting", http.StatusServiceUnavailable)
+			httpErrorT(w, r, http.StatusServiceUnavailable, "err.daemon_restarting")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -199,7 +224,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if os.Getenv("CLOUDFS_PPROF") == "1" && loopbackAddr(addr) {
 		s.enablePprof()
 	}
-	s.srv = &http.Server{Addr: addr, Handler: s.drainingGuard(s.mux), ReadHeaderTimeout: 5 * time.Second}
+	s.srv = &http.Server{Addr: addr, Handler: s.serveHandler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -220,7 +245,9 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 // readyz reports whether the daemon can actually serve: the metadata store
 // answers, the cache directory is writable and no remote is fully broken.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
-	st := s.collector.Collect(r.Context())
+	// Read by a probe, not a person: the language never reaches anyone, and
+	// English is what a log or an alert rule will be read against.
+	st := s.collector.Collect(r.Context(), i18n.EN)
 	w.Header().Set("Content-Type", "text/plain")
 	if s.collector.FS == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -239,7 +266,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	st := s.collector.Collect(r.Context())
+	st := s.collector.Collect(r.Context(), LangFrom(r))
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -256,7 +283,7 @@ type metric struct {
 }
 
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	st := s.collector.Collect(r.Context())
+	st := s.collector.Collect(r.Context(), i18n.EN)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	writeMetrics(w, st)
 }

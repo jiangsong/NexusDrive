@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 10
+const schemaVersion = 11
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -132,4 +132,12 @@ END;`,
 	// see listing_fence.go for why conflating them refused listings that
 	// were perfectly safe to publish.
 	`ALTER TABLE directory_refresh_generation ADD COLUMN stale_generation INTEGER NOT NULL DEFAULT 0;`,
+	// v10 -> v11: applied_gen records the parent's listing generation at the
+	// moment a change feed wrote this node's attributes. A listing skips any
+	// child whose applied_gen is at least its own generation — that write
+	// happened after the listing began, so the snapshot is older than it and
+	// must not put the previous values back. It is what lets a pure attribute
+	// update use the soft fence instead of refusing the listing outright; see
+	// listing_fence.go.
+	`ALTER TABLE nodes ADD COLUMN applied_gen INTEGER NOT NULL DEFAULT 0;`,
 }

@@ -171,6 +171,9 @@ func New(opt Options) (*Provider, error) {
 			SinglePutMax: partSize,
 
 			ServerMove: true, ServerRename: true,
+			// An id is the path within the share, so renaming or moving a
+			// directory changes the id of everything beneath it.
+			PathIDs: true,
 			// SMB2 has FSCTL_SRV_COPYCHUNK, but the client library does not
 			// expose it; claiming server copy would make the VFS choose a
 			// path that cannot run.

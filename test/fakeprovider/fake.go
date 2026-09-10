@@ -84,6 +84,13 @@ type Fake struct {
 	// hideNaming keeps the naming rules out of Capabilities while still
 	// enforcing them, the way a drive that documents nothing behaves.
 	hideNaming bool
+	// rootID is the id of the root directory. Opaque-id backends use the
+	// RootID constant; a path-id backend uses "/".
+	rootID string
+	// pathIDs makes an entry's id its slash path, the way sftp, webdav, s3
+	// and smb address things. Renaming or moving a directory then changes
+	// the id of everything beneath it.
+	pathIDs bool
 }
 
 // RootID is the id of the root directory.
@@ -116,11 +123,64 @@ func New(name string) *Fake {
 			Tier:            provider.TierOfficial,
 		},
 	}
-	f.nodes[RootID] = &node{
-		entry:    provider.Entry{ID: RootID, Name: "", Kind: provider.KindDir, ModTime: time.Now()},
+	f.rootID = RootID
+	f.nodes[f.rootID] = &node{
+		entry:    provider.Entry{ID: f.rootID, Name: "", Kind: provider.KindDir, ModTime: time.Now()},
 		children: map[string]string{},
 	}
 	return f
+}
+
+// NewPathIDs returns an empty Fake that addresses entries by path instead of
+// by an opaque id, the way sftp, webdav, s3 and smb do. Renaming or moving a
+// directory rewrites the id of every entry beneath it, which is the behaviour
+// the tree has to survive.
+func NewPathIDs(name string) *Fake {
+	f := New(name)
+	delete(f.nodes, f.rootID)
+	f.rootID = "/"
+	f.pathIDs = true
+	f.caps.PathIDs = true
+	f.nodes[f.rootID] = &node{
+		entry:    provider.Entry{ID: f.rootID, Name: "", Kind: provider.KindDir, ModTime: time.Now()},
+		children: map[string]string{},
+	}
+	return f
+}
+
+// childID is the id a child of parent takes. With opaque ids it is a fresh
+// counter; with path ids it is the parent's path joined with the name.
+func (f *Fake) childID(parent, name string) string {
+	if !f.pathIDs {
+		f.nextID++
+		return "n" + strconv.Itoa(f.nextID)
+	}
+	if parent == "/" {
+		return "/" + name
+	}
+	return parent + "/" + name
+}
+
+// rekeyLocked rewrites the id of n and of everything beneath it after its
+// path changed. Only a path-id backend needs it; an opaque id survives a
+// rename untouched.
+func (f *Fake) rekeyLocked(oldID, newID string) {
+	n, ok := f.nodes[oldID]
+	if !ok {
+		return
+	}
+	delete(f.nodes, oldID)
+	n.entry.ID = newID
+	f.nodes[newID] = n
+	for name, cid := range n.children {
+		childNew := newID + "/" + name
+		if newID == "/" {
+			childNew = "/" + name
+		}
+		f.nodes[cid].entry.ParentID = newID
+		f.rekeyLocked(cid, childNew)
+		n.children[name] = childNew
+	}
 }
 
 // Calls returns how many times op was invoked ("List", "ReadRange", …).
@@ -150,7 +210,7 @@ func (f *Fake) Seed(path string, data []byte) provider.Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	segs := splitPath(path)
-	parent := RootID
+	parent := f.rootID
 	for _, s := range segs[:len(segs)-1] {
 		if id, ok := f.nodes[parent].children[s]; ok {
 			parent = id
@@ -167,8 +227,7 @@ func (f *Fake) Seed(path string, data []byte) provider.Entry {
 }
 
 func (f *Fake) newNode(parent, name string, kind provider.Kind, data []byte) provider.Entry {
-	f.nextID++
-	id := "n" + strconv.Itoa(f.nextID)
+	id := f.childID(parent, name)
 	e := provider.Entry{ID: id, ParentID: parent, Name: name, Kind: kind, ModTime: time.Now()}
 	if kind == provider.KindFile {
 		e.Size = int64(len(data))
@@ -294,13 +353,13 @@ func (f *Fake) Tree() []string {
 			}
 		}
 	}
-	walk(RootID, "/")
+	walk(f.rootID, "/")
 	return out
 }
 
 // lookupLocked resolves a slash path to an id. Caller holds the lock.
 func (f *Fake) lookupLocked(path string) (string, bool) {
-	id := RootID
+	id := f.rootID
 	for _, s := range splitPath(path) {
 		n, ok := f.nodes[id]
 		if !ok {
@@ -357,7 +416,7 @@ func (f *Fake) Name() string { return f.name }
 // through this interface (daemon/account.go); without it a fake remote mounted
 // via a config would list from "/" and 404. Exposing it makes `fake` a usable
 // empty drive for a running daemon, which is what the dev/demo setup needs.
-func (f *Fake) RootID() string { return RootID }
+func (f *Fake) RootID() string { return f.rootID }
 
 // Capabilities returns the capability matrix. It takes the lock because
 // tests change the matrix while the daemon is running.
@@ -645,7 +704,7 @@ func (f *Fake) Rename(ctx context.Context, id, newName string) (provider.Entry, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n, ok := f.nodes[id]
-	if !ok || id == RootID {
+	if !ok || id == f.rootID {
 		return provider.Entry{}, provider.ErrNotFound
 	}
 	p := f.nodes[n.entry.ParentID]
@@ -656,10 +715,15 @@ func (f *Fake) Rename(ctx context.Context, id, newName string) (provider.Entry, 
 		return provider.Entry{}, err
 	}
 	delete(p.children, n.entry.Name)
-	p.children[newName] = id
 	n.entry.Name = newName
-	e := n.entry
-	f.record(provider.Change{Op: provider.ChangeUpsert, ID: id, ParentID: e.ParentID, Entry: &e})
+	newID := id
+	if f.pathIDs {
+		newID = f.childID(n.entry.ParentID, newName)
+		f.rekeyLocked(id, newID)
+	}
+	p.children[newName] = newID
+	e := f.nodes[newID].entry
+	f.record(provider.Change{Op: provider.ChangeUpsert, ID: newID, ParentID: e.ParentID, Entry: &e})
 	return e, nil
 }
 
@@ -670,7 +734,7 @@ func (f *Fake) Move(ctx context.Context, id, newParentID string) (provider.Entry
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n, ok := f.nodes[id]
-	if !ok || id == RootID {
+	if !ok || id == f.rootID {
 		return provider.Entry{}, provider.ErrNotFound
 	}
 	np, ok := f.nodes[newParentID]
@@ -681,10 +745,15 @@ func (f *Fake) Move(ctx context.Context, id, newParentID string) (provider.Entry
 		return provider.Entry{}, provider.ErrExists
 	}
 	delete(f.nodes[n.entry.ParentID].children, n.entry.Name)
-	np.children[n.entry.Name] = id
 	n.entry.ParentID = newParentID
-	e := n.entry
-	f.record(provider.Change{Op: provider.ChangeUpsert, ID: id, ParentID: newParentID, Entry: &e})
+	newID := id
+	if f.pathIDs {
+		newID = f.childID(newParentID, n.entry.Name)
+		f.rekeyLocked(id, newID)
+	}
+	np.children[f.nodes[newID].entry.Name] = newID
+	e := f.nodes[newID].entry
+	f.record(provider.Change{Op: provider.ChangeUpsert, ID: newID, ParentID: newParentID, Entry: &e})
 	return e, nil
 }
 
@@ -695,7 +764,7 @@ func (f *Fake) Delete(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n, ok := f.nodes[id]
-	if !ok || id == RootID {
+	if !ok || id == f.rootID {
 		return provider.ErrNotFound
 	}
 	f.deleteLocked(id, n)

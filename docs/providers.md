@@ -39,7 +39,8 @@ S3 没有原子 rename。文件和目录移动遵循先 CopyObject、确认完�
 freshness 失效。Range body 交付前会核对响应元数据的路径和 revision，临时链接约四小时有效。
 小文件单次上传，大文件的顺序 upload session 可跨 journal/进程恢复；服务端报告的
 `incorrect_offset` 只有精确落在本 part 末端时才作为幂等确认。Dropbox `content_hash` 不是普通
-SHA-256，所以不冒充通用哈希。当前没有浏览器 OAuth 向导和真实账号验收，详见
+SHA-256，所以不冒充通用哈希。`cloudfs config auth` 已可用浏览器完成授权；Dropbox 以 PKCE
+公共客户端授权，**不需要 client secret**。真实账号验收尚未完成，详见
 [Dropbox 驱动](dropbox.md)。
 
 **OneDrive**：Graph `DriveItem.id` 用作稳定身份，文件版本优先取 `cTag`，并接受官方 SHA-1。
@@ -64,7 +65,7 @@ delta 过期会换基线并让目录 freshness 全局失效。预认证下载/up
 写入路径会先查同名子项：命中就更新该文件（多段或 resumable 都走 `PATCH`），否则创建，避免
 自己制造出上面那种同名冲突。`changes` feed 提供 upsert/delete，页令牌失效换基线。私有内容
 只对带凭据的请求可读，所以 `DownloadURL` 返回 `ErrUnsupported`、`Caps.LinkShareable` 为假。
-浏览器 OAuth 向导和真实账号验收尚未完成。
+`cloudfs config auth` 已可用浏览器完成授权，真实账号验收尚未完成。
 
 **Box**：Box 的文件与文件夹是两套独立编号，同一个数字可以既是文件又是文件夹，且端点不同。
 provider ID 因此带类型前缀（`f:12345` / `d:12345`），根是 `d:0`；上层只把它当不透明 ID。
@@ -74,8 +75,8 @@ provider ID 因此带类型前缀（`f:12345` / `d:12345`），根是 `d:0`；�
 单次上传，因此 `SinglePutMax` 正好取在这个分界上，中间没有无法上传的区间。同名上传由 409
 的 `context_info.conflicts` 给出既有 id，转为该文件的新版本而不是创建第二个同名文件。
 commit 返回 202 表示服务端仍在组装，映射为 `ErrTransient` 让上传队列重试（commit 幂等）。
-Box 的事件流是账号级 feed 而非目录 delta，`Caps.Delta` 为假，目录按 TTL 刷新。浏览器 OAuth
-向导和真实账号验收尚未完成。
+Box 的事件流是账号级 feed 而非目录 delta，`Caps.Delta` 为假，目录按 TTL 刷新。
+`cloudfs config auth` 已可用浏览器完成授权，真实账号验收尚未完成。
 
 **SMB**：面向 NAS 与 Windows 共享。与 SFTP 一样没有文件 id、没有内容哈希、没有变更流，
 路径即身份，版本回退到 size+mtime 指纹。一处关键差异塑造了写路径：go-smb2 的 `Rename`
@@ -215,7 +216,8 @@ grep -rn 'UNVERIFIED:' internal/provider/
 | baidu / pan115 / pan123 / quark / tianyi | 未实现（放置不按空间优先，可配 `capacity`） | Windows 类禁字符集（UNVERIFIED） |
 | onedrive | 未实现 | 大小写不敏感，禁 `<>:"|?*\`，保留名，不能以点/空格结尾 |
 | smb | 未实现 | 大小写不敏感，Windows 保留名与禁字符 |
-| dropbox / box | 未实现 | 大小写不敏感，不能以点/空格结尾 |
+| dropbox | `/2/users/get_space_usage`，individual 配额取 `allocation.allocated`；team 空间形状不同、当前读不了，一律报告为未知（不猜测，UNVERIFIED） | 大小写不敏感，不能以点/空格结尾 |
+| box | 未实现 | 大小写不敏感，不能以点/空格结尾 |
 | sftp / s3 | 未实现 | 255 字节名 / 1024 字节键 |
 
 驱动没声明的规则，存储池会在成员实际拒绝时学习下来（`member_naming` 表），之后不再往那个成员放同类名字。

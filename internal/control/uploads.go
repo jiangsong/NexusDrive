@@ -172,11 +172,11 @@ func privateRequest(w http.ResponseWriter, r *http.Request) bool {
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	origin := r.Header.Get("Origin")
 	if (host != "cloudfs" && host != "localhost" && (ip == nil || !ip.IsLoopback())) || (origin != "" && !sameControlOrigin(origin, r.Host)) || (r.Header.Get("Sec-Fetch-Site") != "" && r.Header.Get("Sec-Fetch-Site") != "none" && r.Header.Get("Sec-Fetch-Site") != "same-origin") {
-		http.Error(w, "local native control clients only", http.StatusForbidden)
+		httpErrorT(w, r, http.StatusForbidden, "err.local_clients_only")
 		return false
 	}
-	if r.Method != http.MethodGet && r.Header.Get("X-CloudFS-Control") != "1" {
-		http.Error(w, "X-CloudFS-Control: 1 is required", http.StatusForbidden)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-CloudFS-Control") != "1" {
+		httpErrorT(w, r, http.StatusForbidden, "err.control_header")
 		return false
 	}
 	return true
@@ -200,9 +200,7 @@ func (s *Server) uploads(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != method {
-		w.Header().Set("Allow", method)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, method) {
 		return
 	}
 	if q.Action == "list" {
@@ -210,18 +208,18 @@ func (s *Server) uploads(w http.ResponseWriter, r *http.Request) {
 		if l := r.URL.Query().Get("limit"); l != "" {
 			n, err := strconv.Atoi(l)
 			if err != nil || n < 1 {
-				http.Error(w, "invalid limit", http.StatusBadRequest)
+				httpErrorT(w, r, http.StatusBadRequest, "err.invalid_limit")
 				return
 			}
 			q.Limit = n
 		}
 	} else {
 		if q.Action == "drop" && r.URL.RawQuery != "" {
-			http.Error(w, "drop parameters belong in one JSON object", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.drop_params")
 			return
 		}
 		if r.Header.Get("Content-Type") != "application/json" {
-			http.Error(w, "use application/json", http.StatusUnsupportedMediaType)
+			httpErrorT(w, r, http.StatusUnsupportedMediaType, "err.use_json")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
@@ -234,11 +232,11 @@ func (s *Server) uploads(w http.ResponseWriter, r *http.Request) {
 			decodeErr = dec.Decode(&q)
 		}
 		if decodeErr != nil {
-			http.Error(w, "invalid JSON request", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.invalid_json")
 			return
 		}
 		if err := dec.Decode(new(any)); err != io.EOF {
-			http.Error(w, "expected one JSON object", http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.one_json_object")
 			return
 		}
 	}

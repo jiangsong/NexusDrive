@@ -121,7 +121,7 @@ func TestUIAPIEndToEnd(t *testing.T) {
 
 	// Doctor on the live daemon, as the diagnostics page would call it.
 	col := s.d.Collector()
-	col.Doctor = s.d.Doctor(nil)
+	col.Doctor = s.d.Doctor(col.ConfigView, nil)
 	if w := uiCall(t, control.NewServer(col).Handler(), "POST", "/doctor/run", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"upload_queue"`) {
 		t.Fatalf("doctor: %d %s", w.Code, w.Body.String())
 	}

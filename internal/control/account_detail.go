@@ -84,6 +84,15 @@ type AccountCheckResponse struct {
 	Name  string `json:"name"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Total, Used and Free are the account's own figures, when the backend
+	// reports any. They are omitted rather than zeroed when it does not:
+	// dropbox-style backends answer nothing, which is a fact about the
+	// backend and not a failure of the account, and a pool needs to know the
+	// difference — a member with unknown space is placed after every member
+	// with known space.
+	Total int64 `json:"total,omitempty"`
+	Used  int64 `json:"used,omitempty"`
+	Free  int64 `json:"free,omitempty"`
 }
 
 func capsView(c provider.Caps) *CapsView {
@@ -110,7 +119,7 @@ func capsView(c provider.Caps) *CapsView {
 // accountDetail assembles the view from the configuration and, when the
 // remote is live in this daemon, its capabilities.
 func (s *Server) accountDetail(name string) (AccountDetail, bool) {
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil {
 		return AccountDetail{}, false
 	}
@@ -167,12 +176,12 @@ func (s *Server) accountByName(w http.ResponseWriter, r *http.Request) {
 	name, tail, _ := strings.Cut(rest, "/")
 	action, sub, _ := strings.Cut(tail, "/")
 	if !safeRemoteName(name) {
-		http.Error(w, "invalid remote name", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.invalid_remote_name")
 		return
 	}
-	cfg := s.collector.Config
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
-		http.Error(w, "this daemon has no configuration file", http.StatusConflict)
+		httpErrorT(w, r, http.StatusConflict, "err.no_config")
 		return
 	}
 	switch action {
@@ -190,8 +199,7 @@ func (s *Server) accountByName(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			s.deleteAccount(w, r, name)
 		default:
-			w.Header().Set("Allow", "GET, PATCH, DELETE")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			allowMethod(w, r, http.MethodGet, http.MethodPatch, http.MethodDelete)
 		}
 	case "check":
 		s.checkAccount(w, r, name)
@@ -221,11 +229,12 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, name strin
 			return
 		}
 	}
-	if _, ok := s.collector.Config.Remotes[name]; !ok {
+	cfg := s.collector.ConfigView()
+	if _, ok := cfg.Remotes[name]; !ok {
 		http.NotFound(w, r)
 		return
 	}
-	err := config.SetRemoteField(s.collector.Config.SourcePath, name, config.SetRemoteFieldOptions{
+	err := config.SetRemoteField(cfg.SourcePath, name, config.SetRemoteFieldOptions{
 		Fields: q.Fields, Proxy: q.Proxy, QPS: q.QPS, UploadWorkers: q.UploadWorkers,
 	})
 	if err != nil {
@@ -238,20 +247,29 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request, name strin
 }
 
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, name string) {
-	if err := requireConfirm(r.URL.Query().Get("confirm") == "true", "removes the account from the configuration"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !confirmed(w, r, r.URL.Query().Get("confirm") == "true", "confirm.remove_account") {
 		return
 	}
-	if _, ok := s.collector.Config.Remotes[name]; !ok {
+	cfg := s.collector.ConfigView()
+	if _, ok := cfg.Remotes[name]; !ok {
 		http.NotFound(w, r)
 		return
 	}
-	if err := config.RemoveRemote(s.collector.Config.SourcePath, name); err != nil {
-		status := http.StatusConflict
-		if errors.Is(err, errConfirmRequired) {
-			status = http.StatusBadRequest
+	if err := config.RemoveRemote(cfg.SourcePath, name); err != nil {
+		// These are deterministic configuration conflicts, so render them in
+		// the requested language. Unknown filesystem/config failures retain
+		// their exact diagnostic text for bug reports.
+		var mounted *config.RemoteMountedError
+		if errors.As(err, &mounted) {
+			httpErrorT(w, r, http.StatusConflict, "err.remote_mounted", mounted.Remote, mounted.Path+mounted.Prefix)
+			return
 		}
-		http.Error(w, err.Error(), status)
+		var pooled *config.RemotePoolMemberError
+		if errors.As(err, &pooled) {
+			httpErrorT(w, r, http.StatusConflict, "err.remote_pool_member", pooled.Remote, pooled.Pool)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	s.reloadConfigView()
@@ -259,16 +277,14 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request, name stri
 }
 
 func (s *Server) checkAccount(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	if s.collector.CheckAccount == nil {
-		http.Error(w, "account checks are not wired on this daemon", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.checks_unwired")
 		return
 	}
-	if _, ok := s.collector.Config.Remotes[name]; !ok {
+	if _, ok := s.collector.ConfigView().Remotes[name]; !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -276,6 +292,16 @@ func (s *Server) checkAccount(w http.ResponseWriter, r *http.Request, name strin
 	if err := s.collector.CheckAccount(r.Context(), name); err != nil {
 		// Already sanitised by the daemon; still, never the raw provider text.
 		out.OK, out.Error = false, err.Error()
+	}
+	if out.OK && s.collector.AccountQuota != nil {
+		// A backend that cannot answer, or answers with an error, is not a
+		// broken account: the check has already succeeded by this point.
+		if q, known, err := s.collector.AccountQuota(r.Context(), name); err == nil && known && q.Total > 0 {
+			out.Total, out.Used = q.Total, q.Used
+			if free := q.Total - q.Used; free > 0 {
+				out.Free = free
+			}
+		}
 	}
 	writeJSON(w, out)
 }
@@ -285,7 +311,14 @@ func (s *Server) checkAccount(w http.ResponseWriter, r *http.Request, name strin
 // that is what restart_required tells the caller — but the page should not
 // have to guess what the file now says.
 func (s *Server) reloadConfigView() {
-	cfg := s.collector.Config
+	// Read-modify-write, so it is serialized: two edits landing together
+	// otherwise interleave as A-writes, A-reloads, B-writes, B-reloads,
+	// B-publishes, A-publishes — and the view then lacks B's edit until
+	// something else republishes, which is the exact staleness the published
+	// view exists to prevent.
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	cfg := s.collector.ConfigView()
 	if cfg == nil || cfg.SourcePath == "" {
 		return
 	}
@@ -293,9 +326,14 @@ func (s *Server) reloadConfigView() {
 	if err != nil {
 		return
 	}
-	// Only the sections the editors touch; the rest of the running
-	// configuration stays what the daemon started with.
-	cfg.Remotes = fresh.Remotes
-	cfg.Mounts = fresh.Mounts
-	cfg.Proxy = fresh.Proxy
+	// A copy, published whole. Rewriting the sections in place let a reader
+	// that had already taken the pointer see one section from before the
+	// edit and another from after it — and one of those sections decides
+	// whether a credential is preserved.
+	next := *cfg
+	next.Remotes = fresh.Remotes
+	next.Mounts = fresh.Mounts
+	next.Pools = fresh.Pools
+	next.Proxy = fresh.Proxy
+	s.collector.publishConfigView(&next)
 }

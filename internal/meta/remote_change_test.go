@@ -70,8 +70,13 @@ func TestRemoteNodeSnapshotCannotOverwriteConcurrentChanges(t *testing.T) {
 	}
 }
 
+// Only the changes that take a name away refuse an older snapshot: a delete,
+// and a directory replaced by something that is not a directory, which takes
+// away everything inside it. A plain attribute update removes nothing, so it
+// uses the soft fence instead — see
+// TestARemoteAttributeUpdatePublishesThroughAConcurrentListing.
 func TestRemoteNodeChangeFencesParentAndDirectoryListings(t *testing.T) {
-	for _, action := range []string{"delete", "replace", "update"} {
+	for _, action := range []string{"delete", "replace"} {
 		t.Run(action, func(t *testing.T) {
 			s, _ := openTest(t)
 			ctx := context.Background()

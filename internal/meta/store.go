@@ -1120,34 +1120,7 @@ func (s *Store) Rename(ctx context.Context, ino, newParent uint64, newName strin
 	var oldParent uint64
 	var oldName string
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRow(`SELECT parent_ino, name FROM nodes WHERE ino = ?`, ino).Scan(&oldParent, &oldName)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("meta: rename: %w", err)
-		}
-		if oldParent != newParent || oldName != newName {
-			if err := fenceDirListingTx(ctx, tx, oldParent, newParent); err != nil {
-				return err
-			}
-		}
-		var victim uint64
-		err = tx.QueryRow(`SELECT ino FROM nodes WHERE parent_ino = ? AND name = ?`, newParent, newName).Scan(&victim)
-		if err == nil && victim != ino {
-			if err := removeSubtreeTx(tx, victim); err != nil {
-				return err
-			}
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("meta: rename: %w", err)
-		}
-		if _, err := tx.Exec(`UPDATE nodes SET parent_ino = ?, name = ? WHERE ino = ?`, newParent, newName, ino); err != nil {
-			return fmt.Errorf("meta: rename: %w", err)
-		}
-		if err := reindexTx(tx, ino, newName); err != nil {
-			return err
-		}
-		return nil
+		return renameTx(ctx, tx, ino, newParent, newName, &oldParent, &oldName)
 	})
 	if err != nil {
 		return err
@@ -1155,6 +1128,38 @@ func (s *Store) Rename(ctx context.Context, ino, newParent uint64, newName strin
 	s.clearAbsent(newParent, newName)
 	s.markAbsent(oldParent, oldName, defaultNegativeTTL)
 	return nil
+}
+
+// renameTx is the move itself, without a transaction of its own, so it can be
+// committed together with a change that must land with it. It reports the
+// names it moved away from through oldParent and oldName, which the caller
+// needs for the negative-entry bookkeeping that follows the commit.
+func renameTx(ctx context.Context, tx *sql.Tx, ino, newParent uint64, newName string, oldParent *uint64, oldName *string) error {
+	err := tx.QueryRow(`SELECT parent_ino, name FROM nodes WHERE ino = ?`, ino).Scan(oldParent, oldName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("meta: rename: %w", err)
+	}
+	if *oldParent != newParent || *oldName != newName {
+		if err := fenceDirListingTx(ctx, tx, *oldParent, newParent); err != nil {
+			return err
+		}
+	}
+	var victim uint64
+	err = tx.QueryRow(`SELECT ino FROM nodes WHERE parent_ino = ? AND name = ?`, newParent, newName).Scan(&victim)
+	if err == nil && victim != ino {
+		if err := removeSubtreeTx(tx, victim); err != nil {
+			return err
+		}
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("meta: rename: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE nodes SET parent_ino = ?, name = ? WHERE ino = ?`, newParent, newName, ino); err != nil {
+		return fmt.Errorf("meta: rename: %w", err)
+	}
+	return reindexTx(tx, ino, newName)
 }
 
 // Invalidate marks a directory listing stale so the next readdir refetches.

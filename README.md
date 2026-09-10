@@ -15,6 +15,10 @@
 
 ## 快速开始
 
+第一次使用，跑 `./cloudfs setup`：它会写一份最小配置、在本机开一个控制台，
+在浏览器里一步步加网盘、建池、挂载。完整走法见 [从零开始](docs/getting-started.md)，
+文档索引见 [docs/](docs/README.md)。下面是手写配置的路子。
+
 ```sh
 go build -o cloudfs ./cmd/cloudfs
 
@@ -98,9 +102,11 @@ remotes:
   # 长驻服务导入 refresh_token（及机密 client_secret）；临时测试也可单独导入 access_token
 
   gdrive: { type: gdrive, client_id: CLIENT_ID }
-  # 可选 drive_id 指定共享云端硬盘；同名子项会让该目录报错，需要先在 Drive 里改名
+  # config auth 打开浏览器完成授权；可选 drive_id 指定共享云端硬盘
+  # 同名子项会让该目录报错，需要先在 Drive 里改名
 
   work: { type: box, client_id: CLIENT_ID }
+  # config auth 打开浏览器完成授权
   # Box 每次刷新都会轮换 refresh_token，务必让 config auth 写进安全存储
 
   p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1 } }
@@ -177,8 +183,10 @@ cloudfs uploads flush --timeout 30m        # 等待延迟重试和正在上传�
 不可用时采用独立的 0600 文件；`secrets.dir` 可指定文件目录，默认位于配置文件旁的
 `secrets/`。配置中使用 `keyring:<key>` 或 `secretfile:<key>` 引用，`doctor` 会提示
 明文配置或文件降级。阿里、百度、115 刷新 token 时会保存新值；已有明文 refresh token
-在首次轮换时转为引用。`config add/auth/list` 已可用：阿里/百度走浏览器授权，115 走终端
-二维码；其他账号可隐藏输入或通过 stdin 导入。授权与系统 keyring 的真实账号验收仍待完成。
+在首次轮换时转为引用。`config add/auth/list` 已可用：**凡是有 OAuth profile 的后端**
+（`daemon.OAuthProfileFor` 那张表，`cloudfs config auth <名字>` 自己据此判断）走浏览器授权，
+115 走终端二维码；其他账号可隐藏输入或通过 stdin 导入。授权与系统 keyring 的真实账号验收
+仍待完成。
 
 ```sh
 cloudfs config add nas                  # 终端下会逐项询问：先选后端类型，再问该驱动需要的字段
@@ -195,7 +203,9 @@ cloudfs config auth nas --check         # 检查已有凭据
 直接报出缺哪几个，脚本不会卡在一个没人回答的问题上。
 
 以上 `add` 示例用于尚未配置的账号，不会覆盖已有同名配置。浏览器授权需要开放平台的
-`client_id` / `client_secret`，默认回调为 `http://127.0.0.1:53682/callback`，需在应用侧允许。
+`client_id`；以 PKCE 公共客户端授权的后端（当前是 Dropbox）**不需要 `client_secret`**，其余
+后端缺 `client_secret` 时由命令询问并写进安全存储。默认回调为
+`http://127.0.0.1:53682/callback`，需在应用侧允许。
 `--no-browser` 可打印授权链接后等待回调；授权成功后先保存凭据再检查账号，检查失败不会
 丢弃已经获取或轮换的 token。重新授权后需重启使用该账号的 daemon；重启后旧授权代次下
 尚未完成的上传会停在死信中，不会通过新账号发送，核对后可显式取消/恢复。
@@ -253,7 +263,7 @@ mounts:
       /: {remote: home}
 ```
 
-一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；详见 `docs/pool.md`。
+一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；第一次使用见 [从零开始](docs/getting-started.md)，配置项与内部机制见 [存储池](docs/pool.md)。
 
 ## 命令
 
@@ -301,6 +311,12 @@ CSP 收紧为 `script-src 'self'; style-src 'self'`，页面资源按内容哈�
 进程代跑，秘密值不进浏览器）。`control.ui: false` 只关闭 `/` 与 `/ui/`，不改变 `/status`、
 `/metrics` 或 Unix socket。control TCP 仍只接受回环地址。浏览器请求须同源并携带
 `X-CloudFS-Control`，跨站 Origin、DNS rebinding Host 与简单表单请求会被拒绝。
+
+界面与守护进程都支持中文和英文。页面右上角的语言选择保存在浏览器里，没选过时按浏览器的
+`Accept-Language` 判断；选定后每个请求都带 `?lang=`，所以诊断结论、网盘配置项提示、状态告警
+这些由守护进程生成的句子也跟着换语言。命令行与桌面壳读 `CLOUDFS_LANG`（其次 `LC_ALL`、
+`LC_MESSAGES`、`LANG`），例如 `CLOUDFS_LANG=en cloudfs doctor`。没有对应译文时回落到中文，
+两张表都缺的键会原样显示键名——这是有意的：宁可看见 `doctor.cache.writable` 也不要空白。
 
 想要一个原生窗口而不是浏览器标签，可另外构建桌面壳
 `go build -tags desktop ./cmd/cloudfs-desktop`（cgo，依赖系统 WebView：Linux 的 WebKitGTK、
@@ -391,14 +407,19 @@ FUSE 测试需要 `/dev/fuse`（Linux 装 `fuse3`，macOS 装 macFUSE）；缺�
 - S3 已通过 SigV4 HTTP 回放和 VFS 读取，但尚未用 AWS、MinIO、R2、OSS 等真实服务验收；
   目录移动由多次 CopyObject 后删除源对象组成，不具备对象存储本身不存在的原子 rename。
 - Dropbox 已通过状态化 HTTP 回放和 VFS 读取，但尚未用个人/团队/App Folder 真实账号验收；
-  changes cursor/reset 已接入，CLI 仍没有浏览器 OAuth 向导，团队 namespace 也未验证。
+  changes cursor/reset 已接入，团队 namespace 未验证。`cloudfs config auth` 会打开浏览器完成
+  授权：Dropbox 以 PKCE 公共客户端授权，**不需要 client secret**，配置里填好 client_id
+  （App key）即可。
 - OneDrive 已通过状态化 Graph/CDN 回放和 VFS 读取/增量刷新，但尚未用个人、组织或 SharePoint
   真实账号验收；CLI 尚无 Microsoft 浏览器 OAuth 向导，详见 [docs/onedrive.md](docs/onedrive.md)。
 - FUSE passthrough 默认关闭：共享 backing 的缓存租约已修复，读写混用和版本切换仍未完成。`CLOUDFS_EXPERIMENTAL_PASSTHROUGH=1` 仅用于隔离验收，不应用于正常写入工作负载；见 [passthrough 状态](docs/fuse-passthrough.md)。
-- Google Drive 已通过状态化 HTTP 回放验收，但尚未用真实账号验证；CLI 无浏览器 OAuth 向导。
+- Google Drive 已通过状态化 HTTP 回放验收，但尚未用真实账号验证。`cloudfs config auth` 会打开
+  浏览器完成授权（授权请求带 `access_type=offline` 与 `prompt=consent`，否则 Google 不下发
+  refresh token）；只需先在配置里填好 client_id，client_secret 由命令询问并写进安全存储。
   Drive 允许一个目录里存在同名文件，文件系统不能表示，遇到时该目录会明确报错而不是隐藏其中一个；
   Google Docs 等 Workspace 文档没有字节流，不会出现在挂载里。详见 [docs/providers.md](docs/providers.md)。
-- Box 已通过状态化 HTTP 回放验收，尚未用真实账号验证；CLI 无浏览器 OAuth 向导。
+- Box 已通过状态化 HTTP 回放验收，尚未用真实账号验证。`cloudfs config auth` 会打开浏览器完成
+  授权，请求 `root_readwrite` 权限；client_secret 由命令询问并写进安全存储。
   Box 没有目录级变更流，所以目录按 TTL 刷新而不是 delta。
 - SMB **尚未在任何真实服务器上验收**，当前只有内存共享的行为复现测试。
   SMB 的改名不覆盖已存在的目标，因此发布上传时会先删除目标，中间存在一个"名字暂时不存在"的窗口。

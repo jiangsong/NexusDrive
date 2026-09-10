@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -97,27 +96,11 @@ func (s *Server) manageCache(w http.ResponseWriter, r *http.Request) {
 	if q.Action == "stats" || q.Action == "pins" {
 		method = http.MethodGet
 	}
-	if r.Method != method {
-		w.Header().Set("Allow", method)
-		http.Error(w, "method not allowed", 405)
+	if !allowMethod(w, r, method) {
 		return
 	}
-	if method == http.MethodPost {
-		if r.Header.Get("Content-Type") != "application/json" {
-			http.Error(w, "use application/json", 415)
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, 8192)
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&q); err != nil {
-			http.Error(w, "invalid JSON request", 400)
-			return
-		}
-		if err := dec.Decode(new(any)); err != io.EOF {
-			http.Error(w, "expected one JSON object", 400)
-			return
-		}
+	if method == http.MethodPost && !decodeMutationLimit(w, r, &q, 8192) {
+		return
 	}
 	if err := q.Validate(); err != nil {
 		http.Error(w, err.Error(), 400)

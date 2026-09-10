@@ -30,16 +30,14 @@ func (s *Server) doctorRun(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	if s.collector.Doctor == nil {
-		http.Error(w, "diagnostics are not wired on this daemon", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.doctor_unwired")
 		return
 	}
-	checks := s.collector.Doctor.Run(r.Context())
+	checks := LocalizeChecks(s.collector.Doctor.Run(r.Context()), LangFrom(r))
 	ok, warn, fail := Summary(checks)
 	if checks == nil {
 		checks = []Check{}
@@ -55,22 +53,19 @@ func (s *Server) doctorFix(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	if s.collector.Doctor == nil {
-		http.Error(w, "diagnostics are not wired on this daemon", http.StatusNotImplemented)
+		httpErrorT(w, r, http.StatusNotImplemented, "err.doctor_unwired")
 		return
 	}
 	var q DoctorFixRequest
 	if !decodeMutation(w, r, &q) {
 		return
 	}
-	if err := requireConfirm(q.Confirm, "runs journal recovery, purges completed uploads and evicts from the cache"); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !confirmed(w, r, q.Confirm, "confirm.doctor_fix") {
 		return
 	}
-	writeJSON(w, DoctorFixResponse{Done: s.collector.Doctor.Fix(r.Context())})
+	writeJSON(w, DoctorFixResponse{Done: s.collector.Doctor.Fix(r.Context(), LangFrom(r))})
 }

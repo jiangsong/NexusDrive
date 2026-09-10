@@ -4,6 +4,8 @@
 
 和市面上「一个网盘挂一个路径」的产品不同,它是一层放在现有 remote 之上的**复合后端**(`type: pool`),对 vfs/缓存/日志/上传队列而言就是普通的一个 remote。
 
+第一次使用、还没有账号和配置，先看 [从零开始](getting-started.md);下面是配置文件长什么样。
+
 ## 一分钟上手
 
 ```yaml
@@ -20,7 +22,7 @@ pools:
       - {remote: gd, root: /cloudfs}  # 池的目录树镜像在这个网盘的 /cloudfs 之下
       - {remote: nas, root: /pool, capacity: 2TiB}
     replicas: 3                       # 目标副本数(默认 3)
-    min_replicas: 1                   # close() 返回前必须落地的份数(默认 1)
+    min_replicas: 1                   # 预留,写路径尚未使用;副本由修复异步补齐(默认 1)
 
 mounts:
   - path: /mnt/cloud
@@ -37,7 +39,7 @@ mounts:
 
 **读。** 列目录 = 对持有该目录的成员并行列举后按名字取并集;同名不同内容以 mtime 最新者为准,败者以 `name (conflict 2026-09-06 nas).ext` 的稳定名字露出,读路径永远不改成员上的任何东西。读文件从最健康、最快的副本读,失败自动切换到下一副本;成员不可达时用索引里的快照顶上,目录绝不因为一个网盘掉线而变空。
 
-**写。** 上传流式直送一个主成员(现有的断点续传、进度、秒传都保留),目录树只在 `CompleteUpload` 时提交;其余 N-1 份由修复 worker 从本地暂存(hold,上传时对 blob 的一个硬链接,受 `hold_max_bytes`/`hold_max_age` 约束)复制过去,不用重新下载。`strict` 模式的含义是 `min_replicas` 份落地。
+**写。** 上传流式直送一个主成员(现有的断点续传、进度、秒传都保留),目录树只在 `CompleteUpload` 时提交;其余 N-1 份由修复 worker 从本地暂存(hold,上传时对 blob 的一个硬链接,受 `hold_max_bytes`/`hold_max_age` 约束)复制过去,不用重新下载。`close()` 返回只保证数据进了本地日志(`writeback`),或已上传到**一个**成员(`strict`);其余副本由修复 worker 在随后的几秒到几分钟里补齐,这段窗口里文件只有一份。`min_replicas` 目前只是写进池标记文件供多机比对,**写路径并不等它**——补齐进度看存储池那一屏的欠副本数,或 `cloudfs pool status`。
 
 **改名 / 移动 / 删除。** 对所有持有该条目的成员扇出;一个成员成功即返回。不可达的成员得到一条 **op-log**,回来后按「目标状态」幂等重放:改名目的地已在 → 完成;删除的对象已不在 → 完成;**内容在此期间被改过 → 拒绝删除并记录分歧**(永不删陌生内容)。超过 `op_ttl` 的记录被丢弃,该成员改做一次全量核对。
 
@@ -77,7 +79,7 @@ mounts:
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `replicas` | 3 | 目标副本数;成员数不足时按可用成员数封顶并在状态里标 `target_capped` |
-| `min_replicas` | 1 | `CompleteUpload` 返回前必须落地的份数(`strict` 模式等到这个数) |
+| `min_replicas` | 1 | **尚未在写路径实现**:目前只记录进池标记文件供多机比对,写入不会等待它 |
 | `out_after` | 10m | down 持续多久判定 out,触发再复制 |
 | `probe_interval` | 30s | down 的成员多久被试一次 |
 | `op_ttl` | 7d | op-log 保留多久,超过即丢弃并全量核对 |

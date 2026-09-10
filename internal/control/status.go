@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
@@ -142,7 +144,13 @@ type Collector struct {
 	// Config, when set, is the configuration this daemon was started from.
 	// The accounts endpoint needs its path to add a remote; nothing else here
 	// reads it, and no credential is ever served from it.
+	//
+	// The editing routes republish it after every write, so a handler must
+	// take it through ConfigView rather than read the field: the value is
+	// replaced whole, never mutated in place, and cfgMu makes the swap and
+	// the read agree on which whole.
 	Config   *config.Config
+	cfgMu    sync.RWMutex
 	Version  string
 	Started  time.Time
 	FS       *vfs.FS
@@ -179,6 +187,11 @@ type Collector struct {
 	// CheckAccount performs one sanitised root listing of a configured
 	// remote; nil means the daemon does not offer it.
 	CheckAccount func(ctx context.Context, name string) error
+	// AccountQuota reports one account's own space, and whether the backend
+	// could say. It is separate from CheckAccount because a backend that
+	// reports no quota is working perfectly well; conflating the two would
+	// turn "dropbox does not publish a figure" into "this drive is broken".
+	AccountQuota func(ctx context.Context, name string) (provider.Quota, bool, error)
 	// ReloadProxy applies a saved proxy section to the running daemon. nil
 	// means a proxy change needs a restart to take effect.
 	ReloadProxy func(p config.Proxy) error
@@ -198,8 +211,32 @@ type Collector struct {
 	Now     func() time.Time
 }
 
+// ConfigView returns the configuration as it stands now. The returned value
+// is never modified afterwards, so a caller may hold it for the length of a
+// request without holding a lock.
+func (c *Collector) ConfigView() *config.Config {
+	c.cfgMu.RLock()
+	defer c.cfgMu.RUnlock()
+	return c.Config
+}
+
+// publishConfigView swaps in a new configuration view.
+func (c *Collector) publishConfigView(next *config.Config) { c.PublishConfigView(next) }
+
+// PublishConfigView replaces the published configuration whole. It is exported
+// because the daemon has to be able to hand a reloaded configuration in, and
+// because everything that reads one — the account check, the authorization
+// hooks, the quota probe — must read it through ConfigView rather than capture
+// the pointer it was built with. Capturing is how an account added through the
+// API became invisible to the very next call about it.
+func (c *Collector) PublishConfigView(next *config.Config) {
+	c.cfgMu.Lock()
+	c.Config = next
+	c.cfgMu.Unlock()
+}
+
 // Collect builds a Status snapshot.
-func (c *Collector) Collect(ctx context.Context) Status {
+func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
@@ -302,8 +339,10 @@ func (c *Collector) Collect(ctx context.Context) Status {
 	}
 	sort.Slice(s.Remotes, func(i, j int) bool { return s.Remotes[i].Remote < s.Remotes[j].Remote })
 
-	s.Warnings = warnings(s)
+	warnings(&s, lang)
 	if c.FS != nil {
+		// These arrive as prose from the filesystem: no catalog entry, so
+		// they are shown exactly as they came.
 		if warning := c.FS.PinWarning(); warning != "" {
 			s.Warnings = append(s.Warnings, warning)
 		}
@@ -314,40 +353,45 @@ func (c *Collector) Collect(ctx context.Context) Status {
 	return s
 }
 
-// warnings turns the snapshot into the short list an operator should act on.
-func warnings(s Status) []string {
-	var w []string
+// warnings turns the snapshot into the short list an operator should act on,
+// rendered in lang. Status carries the finished sentences and not the catalog
+// keys behind them, so the language has to be decided before Collect runs —
+// FetchStatusInLanguage negotiates it rather than translating strings back.
+func warnings(s *Status, lang i18n.Lang) {
+	add := func(key string, args ...any) {
+		s.Warnings = append(s.Warnings, i18n.T(lang, key, args...))
+	}
 	if s.Uploads.Purging > 0 {
-		w = append(w, fmt.Sprintf("%d uploads have unfinished local cleanup; do not retry or infer remote completion", s.Uploads.Purging))
+		add("status.purging", s.Uploads.Purging)
 	}
 	if s.Uploads.Cancelled+s.Uploads.Cancelling > 0 {
-		w = append(w, fmt.Sprintf("%d uploads stopping, %d cancelled; local contents retained, remote changes not reconciled", s.Uploads.Cancelling, s.Uploads.Cancelled))
+		add("status.cancelled", s.Uploads.Cancelling, s.Uploads.Cancelled)
 	}
 	if s.Uploads.Dead > 0 {
-		w = append(w, fmt.Sprintf("%d uploads failed permanently; their data is still on disk. Run 'cloudfs uploads list' to see them and 'cloudfs uploads retry' to requeue", s.Uploads.Dead))
+		add("status.dead", s.Uploads.Dead)
 	}
 	for _, r := range s.Remotes {
 		if r.BreakerOpen {
-			w = append(w, fmt.Sprintf("remote %s is paused until %s after repeated risk-control responses; it is read-only until then", r.Remote, r.BreakerUntil))
+			add("status.breaker_open", r.Remote, r.BreakerUntil)
 		}
 	}
 	if s.Uploads.OldestAgeNS > int64(30*time.Minute) {
-		w = append(w, fmt.Sprintf("the oldest queued upload has been waiting %s; check remote health", s.Uploads.OldestAge))
+		add("status.queue_slow", s.Uploads.OldestAge)
 	}
 	if s.Cache.MaxBytes > 0 && s.Cache.Bytes > s.Cache.MaxBytes*9/10 {
-		w = append(w, fmt.Sprintf("cached payload is at %s of its %s budget; pending writes, pins and open complete-file leases cannot be evicted", humanBytes(s.Cache.Bytes), humanBytes(s.Cache.MaxBytes)))
+		add("status.cache_budget", humanBytes(s.Cache.Bytes), humanBytes(s.Cache.MaxBytes))
 	}
 	if s.Cache.FreeBytes > 0 && s.Cache.FreeBytes < 1<<30 {
-		w = append(w, fmt.Sprintf("only %s free on the cache filesystem; writes will start failing with ENOSPC", humanBytes(s.Cache.FreeBytes)))
+		add("status.free_low", humanBytes(s.Cache.FreeBytes))
 	}
 	for _, p := range s.Proxies {
 		if !p.Healthy {
-			w = append(w, fmt.Sprintf("proxy outbound %s is unhealthy: %s", p.Name, p.Error))
+			add("status.proxy_unhealthy", p.Name, p.Error)
 		}
 	}
-	return w
 }
 
+// humanBytes renders a byte count at the largest unit that keeps it readable.
 func humanBytes(b int64) string {
 	switch {
 	case b >= 1<<40:

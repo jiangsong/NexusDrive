@@ -167,7 +167,7 @@ func TestAuthFlowRefusesTerminalOnlyProviders(t *testing.T) {
 // SupportsDaemonAuthLike mirrors the daemon's own decision, for the test.
 func SupportsDaemonAuthLike(remoteType string) bool {
 	switch remoteType {
-	case "aliyun", "baidu", "pan115":
+	case "aliyun", "baidu", "gdrive", "box", "pan115":
 		return true
 	}
 	return false

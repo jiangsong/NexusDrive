@@ -84,8 +84,11 @@ func New(opt Options) (*Provider, error) {
 			ServerMove:     true,
 			ServerRename:   true,
 			ServerCopy:     true,
-			Delta:          false,
-			LinkTTL:        0,
+			// An id is the server-relative path, so renaming or moving a
+			// collection changes the id of everything beneath it.
+			PathIDs: true,
+			Delta:   false,
+			LinkTTL: 0,
 			// The URL needs the same credentials this process holds, so it is
 			// not usable by an unrelated process.
 			LinkShareable:   false,

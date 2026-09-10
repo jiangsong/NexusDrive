@@ -117,10 +117,16 @@ func SafeExtraFieldName(name string) bool {
 }
 
 // AddRemote creates an account without overwriting an existing one. MountPath
-// optionally attaches it to a mount in the same atomic configuration edit.
+// optionally attaches it to a mount, and Pool optionally joins it to a storage
+// pool, both in the same atomic configuration edit — an account that exists
+// but belongs to nothing is a state nobody asked for.
 type AddRemoteOptions struct {
 	MountPath, Prefix, Root string
 	Mode                    Mode
+	// Pool names an existing storage pool to join. Creating the pool is not
+	// part of adding an account: a pool decides how many copies of every file
+	// its members hold, which is a choice of its own.
+	Pool string
 }
 
 func AddRemote(configPath, name string, r Remote, opt AddRemoteOptions) error {
@@ -147,6 +153,13 @@ func AddRemote(configPath, name string, r Remote, opt AddRemoteOptions) error {
 		if _, exists := c.Remotes[name]; exists {
 			return fmt.Errorf("config: remote %q already exists", name)
 		}
+		if opt.Pool != "" {
+			// Checked before anything is written, so a typo reads as a
+			// refusal rather than as a half-finished account.
+			if _, ok := c.Pools[opt.Pool]; !ok {
+				return fmt.Errorf("config: unknown pool %q", opt.Pool)
+			}
+		}
 		remotes := mappingValue(root, "remotes")
 		if remotes == nil || remotes.Tag == "!!null" {
 			remotes = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
@@ -167,6 +180,11 @@ func AddRemote(configPath, name string, r Remote, opt AddRemoteOptions) error {
 				mode = ModeWriteback
 			}
 			if err := upsertMountLayout(root, opt.MountPath, prefix, Layout{Remote: name, Root: opt.Root, Mode: mode}, true, false); err != nil {
+				return err
+			}
+		}
+		if opt.Pool != "" {
+			if err := appendPoolMember(root, c, opt.Pool, PoolMember{Remote: name}, r.Type); err != nil {
 				return err
 			}
 		}

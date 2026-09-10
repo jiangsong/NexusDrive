@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"cloudfs/internal/provider"
+
+	"cloudfs/internal/i18n"
 )
 
 type unreachableProvider struct {
@@ -30,7 +32,7 @@ func TestStatusReportsRemoteReachability(t *testing.T) {
 		_, _ = p.Stat(context.Background(), "x")
 	}
 	c := &Collector{Version: "t", Remotes: []string{"nas", "quiet"}, CallStats: map[string]*provider.Stats{"nas": st}}
-	s := c.Collect(context.Background())
+	s := c.Collect(context.Background(), i18n.EN)
 	byName := map[string]RemoteStatus{}
 	for _, r := range s.Remotes {
 		byName[r.Remote] = r
@@ -43,7 +45,7 @@ func TestStatusReportsRemoteReachability(t *testing.T) {
 	}
 	up.err = nil
 	_, _ = p.Stat(context.Background(), "x")
-	s = c.Collect(context.Background())
+	s = c.Collect(context.Background(), i18n.EN)
 	for _, r := range s.Remotes {
 		if r.Remote == "nas" && (r.State != "up" || r.LastOK == "") {
 			t.Fatalf("after a success: %+v", r)

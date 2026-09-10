@@ -13,9 +13,9 @@ export function renderDiagnostics(host) {
     try {
       const r = await api.post('/doctor/run', {});
       fill(counts,
-        el('span', { style: 'color:var(--ok)' }, el('span', { class: 'dot ok' }), ' 正常 ' + (r.ok || 0)),
-        el('span', { style: 'color:var(--warn-text)' }, el('span', { class: 'dot warn' }), ' 提醒 ' + (r.warn || 0)),
-        el('span', { style: 'color:var(--danger-text)' }, el('span', { class: 'dot bad' }), ' 需处理 ' + (r.fail || 0)));
+        el('span', { style: 'color:var(--ok)' }, el('span', { class: 'dot ok' }), ' ' + t('diag.count.ok') + ' ' + (r.ok || 0)),
+        el('span', { style: 'color:var(--warn-text)' }, el('span', { class: 'dot warn' }), ' ' + t('diag.count.warn') + ' ' + (r.warn || 0)),
+        el('span', { style: 'color:var(--danger-text)' }, el('span', { class: 'dot bad' }), ' ' + t('diag.count.fail') + ' ' + (r.fail || 0)));
       fill(list, ...(r.checks || []).map(checkRow));
     } catch (e) { toast(e.message, 'bad'); }
   }
@@ -31,9 +31,9 @@ export function renderDiagnostics(host) {
       c.fixable ? el('button', { class: 'primary', style: 'flex-shrink:0', onclick: fix }, t('diag.fix')) : null);
   }
   async function fix() {
-    const ok = await confirmDelete({ title: '运行修复', body: 'doctor --fix 会跑日志恢复、清理旧完成上传、回收缓存。', confirmToken: 'fix', confirmLabel: t('diag.fix'), danger: false });
+    const ok = await confirmDelete({ title: t('diag.fix.title'), body: t('diag.fix.body'), confirmToken: 'fix', confirmLabel: t('diag.fix'), danger: false });
     if (!ok) return;
-    try { const r = await api.post('/doctor/fix', { confirm: true }); toast((r.done || []).join('；') || '无需修复'); run(); }
+    try { const r = await api.post('/doctor/fix', { confirm: true }); toast((r.done || []).join('; ') || t('diag.fix.none')); run(); }
     catch (e) { toast(e.message, 'bad'); }
   }
 
@@ -60,6 +60,8 @@ export function renderDiagnostics(host) {
     fill(svcPanel, ...rows);
   }
   async function installService() {
+    const ok = await confirmDelete({ title: t('diag.service.install'), body: t('diag.service.hint'), confirmToken: 'install', confirmLabel: t('diag.service.install'), danger: false });
+    if (!ok) return;
     try { await api.post('/service/install', {}); toast(t('diag.service.installed')); loadService(); }
     catch (e) { toast(e.message, 'bad'); }
   }
@@ -91,7 +93,7 @@ export function renderDiagnostics(host) {
 
   host.append(
     el('div', { class: 'pad', style: 'display:flex;align-items:end;justify-content:space-between' },
-      el('div', {}, el('div', { class: 'eyebrow' }, '运维'), el('h2', { class: 'section', style: 'margin:6px 0 0' }, t('diag.title'))),
+      el('div', {}, el('div', { class: 'eyebrow' }, t('diag.eyebrow')), el('h2', { class: 'section', style: 'margin:6px 0 0' }, t('diag.title'))),
       el('button', { onclick: run }, iconEl('refresh'), t('diag.recheck'))),
     el('div', { style: 'padding:0 20px 12px' }, counts),
     el('div', { style: 'padding:0 20px 20px' }, list),

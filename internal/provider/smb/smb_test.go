@@ -934,6 +934,9 @@ func TestCapabilitiesMatchWhatSMBCanActuallyDo(t *testing.T) {
 	if caps.ServerCopy {
 		t.Fatal("the client library exposes no server-side copy")
 	}
+	if !caps.PathIDs {
+		t.Fatal("an SMB id is a path, so renaming a directory changes every id beneath it; the VFS needs to be told")
+	}
 	if caps.LinkShareable {
 		t.Fatal("an SMB URL would carry this process's session")
 	}

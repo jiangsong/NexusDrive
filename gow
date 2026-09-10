@@ -1,5 +1,8 @@
 #!/bin/bash
-# Local wrapper: this machine has no system Go; the toolchain lives in the session scratchpad.
+# Local wrapper: prefer the system toolchain when present, else a scratchpad copy.
+if command -v go >/dev/null 2>&1; then
+  exec "$(command -v "${GOBIN_NAME:-go}")" "$@"
+fi
 SP=/tmp/claude-1000/-home-work-workspace-fs/2e1b8a92-077c-42f9-9ded-d2ac36d25c42/scratchpad
 export PATH=$SP/gotool/go/bin:$PATH GOMODCACHE=$SP/gomod GOCACHE=$SP/gocache
 exec "$SP/gotool/go/bin/$(basename ${GOBIN_NAME:-go})" "$@"

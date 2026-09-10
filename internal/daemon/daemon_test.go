@@ -15,6 +15,8 @@ import (
 	"cloudfs/test/fakeprovider"
 
 	_ "cloudfs/internal/provider/webdav"
+
+	"cloudfs/internal/i18n"
 )
 
 const baseConfig = `
@@ -290,14 +292,14 @@ func TestCollectorAndDoctorAreWired(t *testing.T) {
 	}
 	defer d.Close()
 
-	st := d.Collector().Collect(ctx)
+	st := d.Collector().Collect(ctx, i18n.EN)
 	if st.Version != "wired" || len(st.Mounts) != 2 {
 		t.Fatalf("collector = %+v", st)
 	}
 	if len(st.Remotes) != 2 {
 		t.Fatalf("the collector should report both remotes: %+v", st.Remotes)
 	}
-	checks := d.Doctor(func() (bool, string) { return true, "" }).Run(ctx)
+	checks := d.Doctor(nil, func() (bool, string) { return true, "" }).Run(ctx)
 	names := map[string]bool{}
 	for _, c := range checks {
 		names[c.Name] = true

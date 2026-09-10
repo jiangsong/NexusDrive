@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,6 +155,32 @@ func TestRemoveRemoteRefusesWhileMountedThenRemoves(t *testing.T) {
 	mustContain(t, p, "# my notes: keep this line", "# the work drive")
 	if err := RemoveRemote(p, "nas"); err == nil {
 		t.Fatal("removing twice succeeded")
+	}
+}
+
+func TestRemoveRemoteRefusesWhilePoolStillReferencesIt(t *testing.T) {
+	p := editable(t)
+	if err := RemoveMount(p, "/mnt/cloud", "/nas"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreatePool(p, "home", []PoolMember{{Remote: "gd"}, {Remote: "nas"}}, 2, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(p)
+	err := RemoveRemote(p, "nas")
+	var pooled *RemotePoolMemberError
+	if !errors.As(err, &pooled) || pooled.Remote != "nas" || pooled.Pool != "home" {
+		t.Fatalf("pool reference was not reported precisely: %#v", err)
+	}
+	after, _ := os.ReadFile(p)
+	if string(after) != string(before) {
+		t.Fatalf("a refused removal changed the configuration:\n%s", after)
+	}
+	if err := RemovePoolMember(p, "home", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveRemote(p, "nas"); err != nil {
+		t.Fatalf("remote was not removable after its references were removed: %v", err)
 	}
 }
 

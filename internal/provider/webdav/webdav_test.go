@@ -502,6 +502,9 @@ func TestCapabilities(t *testing.T) {
 	if c.Delta {
 		t.Error("WebDAV has no change feed")
 	}
+	if !c.PathIDs {
+		t.Error("a WebDAV id is a path, so renaming a collection changes every id beneath it; the VFS needs to be told")
+	}
 	if c.LinkShareable {
 		t.Error("WebDAV URLs need this process's credentials and must not be advertised as shareable")
 	}

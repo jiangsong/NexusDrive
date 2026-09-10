@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 
@@ -51,29 +50,15 @@ func (s *Server) mutateCopy(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", 405)
+	if !allowMethod(w, r, http.MethodPost) {
 		return
 	}
 	if r.URL.RawQuery != "" {
-		http.Error(w, "query parameters are not accepted", 400)
+		httpErrorT(w, r, 400, "err.no_query_params")
 		return
 	}
-	if r.Header.Get("Content-Type") != "application/json" {
-		http.Error(w, "use application/json", 415)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	q := CopyMutationRequest{Action: action}
-	if err := dec.Decode(&q); err != nil {
-		http.Error(w, "invalid JSON request", 400)
-		return
-	}
-	if err := dec.Decode(new(any)); err != io.EOF {
-		http.Error(w, "expected one JSON object", 400)
+	if !decodeMutationLimit(w, r, &q, 4096) {
 		return
 	}
 	if err := q.Validate(); err != nil {
@@ -81,7 +66,7 @@ func (s *Server) mutateCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.collector.FS == nil || s.collector.Journal == nil {
-		http.Error(w, "copy management unavailable", 503)
+		httpErrorT(w, r, 503, "err.copy_admin_unavailable")
 		return
 	}
 	var err error
@@ -114,7 +99,7 @@ func (s *Server) mutateCopy(w http.ResponseWriter, r *http.Request) {
 		out, err = InspectCopies(r.Context(), s.collector.Journal, CopiesRequest{ID: q.ID})
 	}
 	if err != nil {
-		http.Error(w, "copy state changed but inspection failed; do not replay automatically", 500)
+		httpErrorT(w, r, 500, "err.copy_state_unverified")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

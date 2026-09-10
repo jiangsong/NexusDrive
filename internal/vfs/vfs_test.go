@@ -45,6 +45,9 @@ type envOpt struct {
 	readAheadBlocks int
 	prefetchDepth   int
 	dirTTL          time.Duration
+	// pathIDs runs the backend with path-shaped ids (sftp, webdav, s3, smb)
+	// instead of opaque ones.
+	pathIDs bool
 }
 
 func newEnv(t *testing.T, o envOpt) *env {
@@ -82,6 +85,9 @@ func newEnv(t *testing.T, o envOpt) *env {
 	t.Cleanup(func() { j.Close() })
 
 	fake := fakeprovider.New("ali")
+	if o.pathIDs {
+		fake = fakeprovider.NewPathIDs("ali")
+	}
 	var backend provider.Provider = fake
 	if o.wrapProvider != nil {
 		backend = o.wrapProvider(fake)
@@ -91,7 +97,7 @@ func newEnv(t *testing.T, o envOpt) *env {
 		DefaultDirTTL: o.dirTTL, AttrTTL: time.Minute, NegativeTTL: 5 * time.Second,
 		ReadAheadBlocks: o.readAheadBlocks, PrefetchDepth: o.prefetchDepth,
 		Mounts: []Mount{{
-			Prefix: "/ali", Remote: "ali", RootID: fakeprovider.RootID,
+			Prefix: "/ali", Remote: "ali", RootID: fake.RootID(),
 			Provider: backend, Mode: o.mode, DirTTL: o.dirTTL,
 		}},
 	})

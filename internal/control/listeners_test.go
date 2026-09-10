@@ -2,10 +2,14 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"cloudfs/internal/i18n"
 )
 
 func socketPath(t *testing.T) string {
@@ -90,5 +94,28 @@ func TestControlStatusFallsBackToTCP(t *testing.T) {
 	got, online, err := FetchStatus(context.Background(), socketPath(t), r.listeners[0].Addr().String())
 	if err != nil || !online || got.Version != "test" {
 		t.Fatalf("fallback status: %+v %v %v", got, online, err)
+	}
+}
+
+func TestFetchStatusCarriesTheRequestedLanguage(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("lang"); got != "en" {
+			t.Errorf("status language = %q, want en", got)
+		}
+		_ = json.NewEncoder(w).Encode(Status{Version: "localized"})
+	})}
+	go srv.Serve(l)
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = l.Close()
+	})
+
+	got, online, err := FetchStatusInLanguage(context.Background(), "", l.Addr().String(), i18n.EN)
+	if err != nil || !online || got.Version != "localized" {
+		t.Fatalf("localized status: %+v online=%v err=%v", got, online, err)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	webview "github.com/webview/webview_go"
 
 	"cloudfs/internal/config"
+	"cloudfs/internal/i18n"
 )
 
 func main() {
@@ -34,6 +35,10 @@ func main() {
 	}
 	defer inst.release()
 
+	// The shell's own two strings are rendered in the shell's language; the
+	// page it then navigates to negotiates its own.
+	lang := i18n.FromEnv()
+
 	cfg, _ := config.Load(*configPath) // a missing config surfaces below as a launch error
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,7 +52,7 @@ func main() {
 	w.SetTitle("CloudFS")
 	w.SetSize(1140, 760, webview.HintNone)
 	w.SetSize(760, 520, webview.HintMin)
-	w.SetHtml(placeholderHTML("正在连接 CloudFS 守护进程…", ""))
+	w.SetHtml(placeholderHTML(i18n.T(lang, "desktop.connecting"), ""))
 
 	// A second launch pings the focus socket; raise the window when it does.
 	inst.onFocus(func() { w.Dispatch(func() { raiseWindow(w) }) })
@@ -63,7 +68,7 @@ func main() {
 		target, err := sh.Resolve(resolveCtx)
 		w.Dispatch(func() {
 			if err != nil {
-				w.SetHtml(placeholderHTML("无法连接守护进程", err.Error()))
+				w.SetHtml(placeholderHTML(i18n.T(lang, "desktop.no_daemon"), err.Error()))
 				return
 			}
 			w.Navigate(target)

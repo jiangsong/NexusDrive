@@ -347,6 +347,9 @@ func TestCapabilitiesAreHonest(t *testing.T) {
 	if c.ServerCopy {
 		t.Fatal("pkg/sftp exposes no server-side copy")
 	}
+	if !c.PathIDs {
+		t.Fatal("an sftp id is a path, so renaming a directory changes every id beneath it; the VFS needs to be told")
+	}
 	if !c.RangeRead {
 		t.Fatal("sftp supports ranged reads")
 	}

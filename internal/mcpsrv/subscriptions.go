@@ -30,6 +30,17 @@ type resourceWatch struct {
 	dirty bool
 }
 
+const resourceNotificationTargetKey = "cloudfs.dev/resource-notification-target"
+
+// resourceNotificationTarget is an in-process routing envelope. The SDK's
+// public ResourceUpdated API broadcasts, so one sender attaches its intended
+// session and the sending middleware drops every other leg before transport.
+// The envelope is stripped before JSON encoding and never reaches a client.
+type resourceNotificationTarget struct {
+	session   *mcp.ServerSession
+	delivered bool
+}
+
 type resourceSubscriptions struct {
 	server *Server
 	// Serializes legacy subscribe/unsubscribe through the SDK's map update.
@@ -46,21 +57,34 @@ type resourceSubscriptions struct {
 	wake           chan struct{}
 	wg             sync.WaitGroup
 
-	// deliveries carries URIs from the coalescing loop to the sender. The SDK
-	// broadcasts a resource update to its subscribers one after another, under
-	// a ten-second deadline of its own, so a client whose transport has stalled
-	// holds that call. Doing it inline would stop this server noticing further
-	// changes at all for as long as that lasts — one stuck reader freezing
-	// every other client's view of the tree. Handing the send to a separate
-	// goroutine keeps change intake and coalescing running regardless.
-	deliveries chan string
-	// queued names the URIs already handed to the sender, so a slow send does
-	// not accumulate duplicates of the same notification behind it.
-	queued map[string]bool
+	// senders carries URIs from the coalescing loop to one sender goroutine
+	// per session. The SDK broadcasts a resource update to its subscribers one
+	// after another, under a ten-second deadline of its own, so a client whose
+	// transport has stalled holds that call. Sending inline would stop this
+	// server noticing changes at all while that lasted; sending from one
+	// shared goroutine kept detection alive but still made every other
+	// subscriber wait in line behind the stuck one. A queue and a goroutine
+	// per session make a stall cost only the client that is stalling.
+	senders map[*mcp.ServerSession]*sessionSender
+	// notify performs one delivery. It is a field so a test can stall one
+	// session's transport without stalling the others. Its result reports
+	// whether the intended session accepted the notification; a disappeared
+	// SDK subscription leaves the watch dirty for a later retry.
+	notify func(*mcp.ServerSession, string) bool
 }
 
-// deliveryQueue bounds what can be waiting on a stalled client. Overflow is
-// not a loss: the watch stays dirty and the next tick offers it again.
+// sessionSender is one client's delivery queue and the goroutine draining it.
+type sessionSender struct {
+	uris chan string
+	// queued names the URIs already handed to this sender, so a slow send does
+	// not accumulate duplicates of the same notification behind it.
+	queued map[string]bool
+	done   chan struct{}
+}
+
+// deliveryQueue bounds what can be waiting on one stalled client; each session
+// has its own. Overflow is not a loss: the watch stays dirty and the next tick
+// offers it again.
 const deliveryQueue = 256
 
 func (r *resourceSubscriptions) init(server *Server) {
@@ -68,7 +92,37 @@ func (r *resourceSubscriptions) init(server *Server) {
 	r.sessions = make(map[*mcp.ServerSession]map[string]*resourceWatch)
 	r.streams = make(map[*subscriptionToken]struct{})
 	r.done, r.wake = make(chan struct{}), make(chan struct{}, 1)
-	r.deliveries, r.queued = make(chan string, deliveryQueue), make(map[string]bool)
+	r.senders = make(map[*mcp.ServerSession]*sessionSender)
+	r.notify = func(session *mcp.ServerSession, uri string) bool {
+		target := &resourceNotificationTarget{session: session}
+		_ = r.server.mcp.ResourceUpdated(context.Background(), &mcp.ResourceUpdatedNotificationParams{
+			URI:  uri,
+			Meta: mcp.Meta{resourceNotificationTargetKey: target},
+		})
+		return target.delivered
+	}
+}
+
+// startSenderLocked gives a session its own queue and sender goroutine. The
+// caller holds r.mu.
+func (r *resourceSubscriptions) startSenderLocked(session *mcp.ServerSession) {
+	if _, ok := r.senders[session]; ok {
+		return
+	}
+	s := &sessionSender{uris: make(chan string, deliveryQueue), queued: map[string]bool{}, done: make(chan struct{})}
+	r.senders[session] = s
+	r.wg.Add(1)
+	go r.deliver(session, s)
+}
+
+// stopSenderLocked releases a session's sender. The caller holds r.mu.
+func (r *resourceSubscriptions) stopSenderLocked(session *mcp.ServerSession) {
+	s, ok := r.senders[session]
+	if !ok {
+		return
+	}
+	delete(r.senders, session)
+	close(s.done)
 }
 
 func subscriptionError(message string) error {
@@ -114,6 +168,7 @@ func (r *resourceSubscriptions) reserve(token *subscriptionToken, uris []string)
 	if !tracked {
 		watches = make(map[string]*resourceWatch)
 		r.sessions[token.session] = watches
+		r.startSenderLocked(token.session)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
@@ -124,15 +179,15 @@ func (r *resourceSubscriptions) reserve(token *subscriptionToken, uris []string)
 				r.count--
 			}
 			delete(r.sessions, token.session)
+			r.stopSenderLocked(token.session)
 			r.mu.Unlock()
 		}()
 	}
 	if !r.running {
 		changes, cancel := r.server.opt.FS.WatchChanges()
 		r.unwatch, r.running = cancel, true
-		r.wg.Add(2)
+		r.wg.Add(1)
 		go r.run(changes)
-		go r.deliver()
 	}
 	for uri, p := range paths {
 		watches[uri] = &resourceWatch{path: p, token: token}
@@ -294,23 +349,43 @@ func (r *resourceSubscriptions) send(next mcp.MethodHandler) mcp.MethodHandler {
 			return next(ctx, method, req)
 		}
 		params := req.GetParams().(*mcp.ResourceUpdatedNotificationParams)
+		target, targeted := params.Meta[resourceNotificationTargetKey].(*resourceNotificationTarget)
+		if !targeted {
+			return next(ctx, method, req)
+		}
 		// This is a server-to-client request, whose Session is a server session.
 		session, _ := req.GetSession().(*mcp.ServerSession)
+		if target.session != session {
+			return nil, nil
+		}
 		r.mu.Lock()
 		w := r.sessions[session][params.URI]
-		if r.closed || w == nil || !w.ready || !w.dirty {
+		if r.closed || w == nil || !w.ready {
 			r.mu.Unlock()
 			return nil, nil
 		}
-		w.dirty = false
 		r.mu.Unlock()
-		out, err := next(ctx, method, req)
+		// The SDK also injects its modern listen-request ID into Meta. Copy all
+		// of that metadata while removing only our private routing value.
+		clean := *params
+		clean.Meta = make(mcp.Meta, len(params.Meta)-1)
+		for key, value := range params.Meta {
+			if key != resourceNotificationTargetKey {
+				clean.Meta[key] = value
+			}
+		}
+		out, err := next(ctx, method, &mcp.ServerRequest[*mcp.ResourceUpdatedNotificationParams]{
+			Session: session,
+			Params:  &clean,
+		})
 		if err != nil {
 			r.mu.Lock()
 			if r.sessions[session][params.URI] == w {
 				w.dirty = true
 			}
 			r.mu.Unlock()
+		} else {
+			target.delivered = true
 		}
 		return out, err
 	}
@@ -345,27 +420,26 @@ func (r *resourceSubscriptions) run(changes <-chan vfs.Change) {
 			// changes only after SDK registration/acknowledgment completed.
 		case <-ticker.C:
 			r.mu.Lock()
-			uris := map[string]bool{}
-			for _, watches := range r.sessions {
-				for uri, w := range watches {
-					if w.ready && w.dirty {
-						uris[uri] = true
-					}
-				}
-			}
-			for uri := range uris {
-				if r.queued[uri] {
+			for session, watches := range r.sessions {
+				sender := r.senders[session]
+				if sender == nil {
 					continue
 				}
-				select {
-				case r.deliveries <- uri:
-					r.queued[uri] = true
-				case <-r.done:
-					r.mu.Unlock()
-					return
-				default:
-					// The sender is behind. The watch is still dirty, so the
-					// next tick offers this URI again; nothing is dropped.
+				for uri, w := range watches {
+					if !w.ready || !w.dirty || sender.queued[uri] {
+						continue
+					}
+					select {
+					case sender.uris <- uri:
+						sender.queued[uri] = true
+					case <-r.done:
+						r.mu.Unlock()
+						return
+					default:
+						// This session's sender is behind. The watch is still
+						// dirty, so the next tick offers the URI again;
+						// nothing is dropped, and no other session waits.
+					}
 				}
 			}
 			r.mu.Unlock()
@@ -373,19 +447,35 @@ func (r *resourceSubscriptions) run(changes <-chan vfs.Change) {
 	}
 }
 
-// deliver sends the coalesced notifications. It is deliberately the only
-// goroutine that calls into the SDK's broadcast, so the cost of a stalled
-// client is bounded to the delivery queue rather than to change detection.
-func (r *resourceSubscriptions) deliver() {
+// deliver sends one session's coalesced notifications. Every session has its
+// own, so the cost of a stalled client is bounded to that client's queue: it
+// delays neither change detection nor another subscriber's notifications.
+func (r *resourceSubscriptions) deliver(session *mcp.ServerSession, sender *sessionSender) {
 	defer r.wg.Done()
 	for {
 		select {
 		case <-r.done:
 			return
-		case uri := <-r.deliveries:
-			_ = r.server.mcp.ResourceUpdated(context.Background(), &mcp.ResourceUpdatedNotificationParams{URI: uri})
+		case <-sender.done:
+			return
+		case uri := <-sender.uris:
 			r.mu.Lock()
-			delete(r.queued, uri)
+			w := r.sessions[session][uri]
+			if w == nil || !w.ready || !w.dirty {
+				delete(sender.queued, uri)
+				r.mu.Unlock()
+				continue
+			}
+			w.dirty = false
+			r.mu.Unlock()
+
+			delivered := r.notify(session, uri)
+
+			r.mu.Lock()
+			delete(sender.queued, uri)
+			if r.sessions[session][uri] == w && !delivered {
+				w.dirty = true
+			}
 			r.mu.Unlock()
 		}
 	}
@@ -399,6 +489,9 @@ func (r *resourceSubscriptions) stop() {
 	}
 	r.closed = true
 	close(r.done)
+	for session := range r.senders {
+		r.stopSenderLocked(session)
+	}
 	if r.unwatch != nil {
 		r.unwatch()
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cloudfs/internal/vfs"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // waitFor polls until cond holds, so these tests do not depend on the 25 ms
@@ -49,11 +50,14 @@ func TestAStalledSubscriberDoesNotStopChangeDetection(t *testing.T) {
 		watched = append(watched, w)
 	}
 	r.sessions[nil] = uris
+	// A queue with no sender draining it: this is the stalled client,
+	// permanently.
+	stalled := &sessionSender{uris: make(chan string, deliveryQueue), queued: map[string]bool{}, done: make(chan struct{})}
+	r.senders[nil] = stalled
 
 	changes := make(chan vfs.Change)
 	r.wg.Add(1)
 	go r.run(changes)
-	// No deliver goroutine: this is the stalled client, permanently.
 	defer func() {
 		r.stop()
 		r.wg.Wait()
@@ -65,7 +69,7 @@ func TestAStalledSubscriberDoesNotStopChangeDetection(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the coalescing loop did not accept a change")
 	}
-	waitFor(t, "the delivery queue to fill", func() bool { return len(r.deliveries) == deliveryQueue })
+	waitFor(t, "the delivery queue to fill", func() bool { return len(stalled.uris) == deliveryQueue })
 
 	// The queue is full and nothing is draining it. A further change must
 	// still be accepted and still be recorded against its watch: the loop
@@ -94,7 +98,7 @@ func TestAStalledSubscriberDoesNotStopChangeDetection(t *testing.T) {
 			stillDirty++
 		}
 	}
-	queued := len(r.queued)
+	queued := len(stalled.queued)
 	r.mu.Unlock()
 	if queued != deliveryQueue {
 		t.Fatalf("%d URIs are queued, want the queue's %d", queued, deliveryQueue)
@@ -113,6 +117,8 @@ func TestTheDeliveryQueueDoesNotAccumulateDuplicates(t *testing.T) {
 	r.init(&Server{})
 	w := &resourceWatch{path: "/work/hot.txt", ready: true, token: idleToken()}
 	r.sessions[nil] = map[string]*resourceWatch{"cloudfs://demo/work/hot.txt": w}
+	stalled := &sessionSender{uris: make(chan string, deliveryQueue), queued: map[string]bool{}, done: make(chan struct{})}
+	r.senders[nil] = stalled
 
 	changes := make(chan vfs.Change)
 	r.wg.Add(1)
@@ -129,10 +135,10 @@ func TestTheDeliveryQueueDoesNotAccumulateDuplicates(t *testing.T) {
 			t.Fatal("the coalescing loop stopped accepting changes")
 		}
 	}
-	waitFor(t, "the URI to be queued", func() bool { return len(r.deliveries) == 1 })
+	waitFor(t, "the URI to be queued", func() bool { return len(stalled.uris) == 1 })
 	// Several ticks pass with the sender still stuck.
 	time.Sleep(150 * time.Millisecond)
-	if n := len(r.deliveries); n != 1 {
+	if n := len(stalled.uris); n != 1 {
 		t.Fatalf("the queue holds %d entries for one URI; repeated ticks must not stack duplicates", n)
 	}
 }
@@ -171,6 +177,130 @@ func TestRepeatedSessionChurnReleasesEverythingThisServerHolds(t *testing.T) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		return len(r.sessions) == 0 && len(r.streams) == 0 && r.count == 0 &&
-			len(r.queued) == 0 && len(r.deliveries) == 0
+			len(r.senders) == 0
 	})
+}
+
+// TestOneStalledSubscriberDoesNotDelayAnother: change detection was already
+// isolated from a stuck client, but delivery was not. One goroutine drained a
+// single queue and handed every notification to the SDK, which writes to its
+// subscribers one after another under a ten-second deadline. So a client whose
+// transport had stalled still held up *other* clients' notifications — the
+// stall stopped being everyone's blind spot and became everyone's delay.
+//
+// Delivery is therefore per session. A stalled session owns its own queue and
+// its own sender, and nobody waits behind it.
+func TestOneStalledSubscriberDoesNotDelayAnother(t *testing.T) {
+	r := &resourceSubscriptions{}
+	r.init(&Server{})
+
+	stalled, healthy := new(mcp.ServerSession), new(mcp.ServerSession)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	delivered := make(chan string, 8)
+	r.notify = func(session *mcp.ServerSession, uri string) bool {
+		if session == stalled {
+			close(started)
+			<-block // This client's transport never drains.
+			return true
+		}
+		delivered <- uri
+		return true
+	}
+
+	stalledWatch := &resourceWatch{path: "/work/stalled.txt", ready: true, token: idleToken()}
+	healthyWatch := &resourceWatch{path: "/work/healthy.txt", ready: true, token: idleToken()}
+	r.mu.Lock()
+	r.sessions[stalled] = map[string]*resourceWatch{"cloudfs://demo/work/stalled.txt": stalledWatch}
+	r.sessions[healthy] = map[string]*resourceWatch{"cloudfs://demo/work/healthy.txt": healthyWatch}
+	r.startSenderLocked(stalled)
+	r.startSenderLocked(healthy)
+	r.mu.Unlock()
+
+	changes := make(chan vfs.Change)
+	r.wg.Add(1)
+	go r.run(changes)
+	defer func() {
+		// Release the stalled transport first: waiting on a sender that is
+		// still blocked in a send would hang the test, not the server.
+		close(block)
+		r.stop()
+		r.wg.Wait()
+	}()
+
+	// The stalled client's file changes first, so its sender is already stuck
+	// when the healthy client's file changes.
+	select {
+	case changes <- vfs.Change{Paths: []string{"/work/stalled.txt"}}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the coalescing loop did not accept a change")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled sender did not pick its notification up")
+	}
+	select {
+	case changes <- vfs.Change{Paths: []string{"/work/healthy.txt"}}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the coalescing loop did not accept a change")
+	}
+
+	select {
+	case uri := <-delivered:
+		if uri != "cloudfs://demo/work/healthy.txt" {
+			t.Fatalf("delivered %q", uri)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a healthy subscriber waited behind a stalled one")
+	}
+}
+
+// Two per-session senders can broadcast the same URI concurrently. Routing
+// must travel with the individual notification: a mutable claim on the watch
+// lets one broadcast consume the other session's claim and misdeliver it.
+func TestResourceNotificationTargetCannotBeConsumedByAnotherSession(t *testing.T) {
+	r := &resourceSubscriptions{}
+	r.init(&Server{})
+	stalled, healthy := new(mcp.ServerSession), new(mcp.ServerSession)
+	uri := "cloudfs://demo/work/shared.txt"
+	r.sessions[stalled] = map[string]*resourceWatch{uri: {ready: true, token: idleToken()}}
+	r.sessions[healthy] = map[string]*resourceWatch{uri: {ready: true, token: idleToken()}}
+
+	var sent []*mcp.ServerSession
+	handler := r.send(func(_ context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if method == "notifications/resources/updated" {
+			session, _ := req.GetSession().(*mcp.ServerSession)
+			sent = append(sent, session)
+			params := req.GetParams().(*mcp.ResourceUpdatedNotificationParams)
+			if _, leaked := params.Meta[resourceNotificationTargetKey]; leaked {
+				t.Fatal("private notification target reached the transport")
+			}
+		}
+		return nil, nil
+	})
+	target := &resourceNotificationTarget{session: stalled}
+	params := &mcp.ResourceUpdatedNotificationParams{
+		URI: uri,
+		Meta: mcp.Meta{
+			resourceNotificationTargetKey: target,
+			mcp.MetaKeySubscriptionID:     "listen-7",
+		},
+	}
+
+	// The SDK happens to visit the other subscriber first for this broadcast.
+	_, err := handler(context.Background(), "notifications/resources/updated", &mcp.ServerRequest[*mcp.ResourceUpdatedNotificationParams]{Session: healthy, Params: params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.delivered || len(sent) != 0 {
+		t.Fatal("another session consumed the targeted notification")
+	}
+	_, err = handler(context.Background(), "notifications/resources/updated", &mcp.ServerRequest[*mcp.ResourceUpdatedNotificationParams]{Session: stalled, Params: params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !target.delivered || len(sent) != 1 || sent[0] != stalled {
+		t.Fatalf("target delivery = %v, sessions = %v", target.delivered, sent)
+	}
 }

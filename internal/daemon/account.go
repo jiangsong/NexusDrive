@@ -58,6 +58,27 @@ func CheckAccount(ctx context.Context, cfg *config.Config, name string) error {
 	return err
 }
 
+// AccountQuota reports one account's own space. The second return says
+// whether the backend could answer at all: gdrive publishes a figure, dropbox
+// now does too, box does not, and "cannot say" is a different fact from "zero
+// bytes free". A pool needs the distinction — a member whose space is unknown
+// is placed after every member whose space is known — and a person adding a
+// drive deserves to be told which of the two they just added.
+func AccountQuota(ctx context.Context, cfg *config.Config, name string) (provider.Quota, bool, error) {
+	p, closeAccount, err := OpenAccount(cfg, name)
+	if err != nil {
+		return provider.Quota{}, false, err
+	}
+	defer closeAccount()
+	q, supported, err := provider.QuotaOf(ctx, p)
+	if !supported || err != nil {
+		// Not being able to say is not an error worth surfacing: the account
+		// works, it just does not publish a figure.
+		return provider.Quota{}, false, nil
+	}
+	return q, q.Total > 0, nil
+}
+
 // providerRoot is the id or path a provider lists its root from; both the
 // account check and the mount builder resolve it the same way, so a remote
 // that checks out is one that mounts.

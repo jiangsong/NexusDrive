@@ -32,7 +32,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := strings.TrimSpace(q.Get("q"))
 	if query == "" {
-		http.Error(w, "q is required", http.StatusBadRequest)
+		httpErrorT(w, r, http.StatusBadRequest, "err.q_required")
 		return
 	}
 	root := "/"
@@ -47,7 +47,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if raw := q.Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > searchMax {
-			http.Error(w, "limit must be 1.."+strconv.Itoa(searchMax), http.StatusBadRequest)
+			httpErrorT(w, r, http.StatusBadRequest, "err.limit_range", searchMax)
 			return
 		}
 		limit = n

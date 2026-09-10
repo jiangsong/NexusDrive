@@ -40,8 +40,11 @@ printf '%s\n' 'refresh_token: "..."' 'client_secret: "..."' | \
 
 access token 过期返回 401 时，驱动只刷新一次；并发请求共享同一次刷新结果。Dropbox refresh
 token 不按每次 exchange 轮换，短期 access token 只保存在内存，不把它写回配置覆盖 offline
-grant。当前 CLI 还没有 Dropbox 浏览器 OAuth 向导，用户须从自己的 OAuth 流程或 App Console
-取得 token。生产凭据不要交给命令行参数或明文 YAML。
+grant。`cloudfs config auth db` 会打开浏览器完成授权：Dropbox 以 PKCE 公共客户端授权，
+**不需要 client secret**，只要配置里填好 `client_id`（App key）即可；授权请求带
+`token_access_type=offline`，否则拿到的只是几小时就过期的 access token。上面的 `--stdin`
+形式仍然可用，适合从自己的 OAuth 流程或 App Console 取得 token 的场景。生产凭据不要交给
+命令行参数或明文 YAML。
 
 `api_base`、`content_base` 和 `oauth_url` 仅供兼容网关/测试使用；前两项必须是无 path、userinfo、
 query、fragment 的 HTTP(S) origin，OAuth URL 不允许 userinfo、query 或 fragment。

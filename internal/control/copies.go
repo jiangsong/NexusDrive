@@ -122,36 +122,35 @@ func (s *Server) copies(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", 405)
+	if !allowMethod(w, r, http.MethodGet) {
 		return
 	}
 	params, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
-		http.Error(w, "invalid query", 400)
+		httpErrorT(w, r, 400, "err.invalid_query")
 		return
 	}
 	for key, values := range params {
 		if (key != "id" && key != "cursor" && key != "limit") || len(values) != 1 || values[0] == "" {
-			http.Error(w, "invalid or duplicate query parameter", 400)
+			httpErrorT(w, r, 400, "err.invalid_query_param")
 			return
 		}
 	}
 	q := CopiesRequest{ID: params.Get("id"), Cursor: params.Get("cursor")}
 	if raw := params.Get("limit"); raw != "" {
-		q.Limit, err = strconv.Atoi(raw)
-		if err != nil || q.Limit < 1 {
-			http.Error(w, "invalid limit", 400)
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			httpErrorT(w, r, 400, "err.invalid_limit")
 			return
 		}
+		q.Limit = n
 	}
 	if err := q.Validate(); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
 	if s.collector.Journal == nil {
-		http.Error(w, "copy journal unavailable", 503)
+		httpErrorT(w, r, 503, "err.copy_journal_unavailable")
 		return
 	}
 	out, err := InspectCopies(r.Context(), s.collector.Journal, q)
@@ -161,7 +160,7 @@ func (s *Server) copies(w http.ResponseWriter, r *http.Request) {
 			status = 404
 		}
 		// Database errors can contain filesystem paths; do not expose them.
-		http.Error(w, "copy inspection failed", status)
+		httpErrorT(w, r, status, "err.copy_inspect_failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

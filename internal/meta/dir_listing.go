@@ -282,7 +282,11 @@ func (l *DirListing) Commit(ctx context.Context, childTTL time.Duration, protect
 	if err := l.removeMissing(ctx, tx, protect); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET fetched_at=?,ttl_s=? WHERE parent_ino=? AND ino!=? AND dirty=0`, now.Unix(), int64(childTTL.Seconds()), current.Ino, RootIno); err != nil {
+	// Entries the change feed wrote after this snapshot began are not part of
+	// what it confirmed, so it does not get to call them freshly fetched
+	// either; the next read goes back to the backend for them.
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET fetched_at=?,ttl_s=? WHERE parent_ino=? AND ino!=? AND dirty=0 AND applied_gen<?`,
+		now.Unix(), int64(childTTL.Seconds()), current.Ino, RootIno, l.generation); err != nil {
 		return err
 	}
 	complete, dirty := 1, 0
@@ -369,9 +373,20 @@ func (l *DirListing) mergeStaged(ctx context.Context, tx *sql.Tx, now time.Time,
 		if err != nil {
 			return err
 		}
+		applied, err := l.appliedAfterStartTx(ctx, tx, batch)
+		if err != nil {
+			return err
+		}
 		var inserts []Node
 		for _, n := range batch {
 			previous, exists := old[n.Name]
+			// The change feed wrote this entry after the snapshot began, so
+			// the snapshot is the older of the two and does not get to undo
+			// it. This holds without a protect predicate: it is the store's
+			// invariant, not an agreement with the caller.
+			if exists && applied[n.Name] {
+				continue
+			}
 			if exists && protect != nil && protect(previous) {
 				continue
 			}
@@ -443,7 +458,17 @@ AND NOT EXISTS(SELECT 1 FROM temp.listing_nodes s WHERE s.name=nodes.name) ORDER
 			break
 		}
 		after = batch[len(batch)-1].Name
+		applied, err := l.appliedAfterStartTx(ctx, tx, batch)
+		if err != nil {
+			return err
+		}
 		for _, n := range batch {
+			// Written by the change feed after this snapshot began: the
+			// snapshot simply predates the entry, and removing it would undo
+			// a newer write.
+			if applied[n.Name] {
+				continue
+			}
 			if protect != nil && protect(n) {
 				continue
 			}
@@ -574,4 +599,33 @@ func (l *DirListing) Summary(ctx context.Context) (count int, removed bool, err 
 (SELECT MIN(129,COALESCE(SUM(CASE kind WHEN 'replace' THEN 3 ELSE 1 END),0)) FROM (SELECT kind FROM temp.listing_changes LIMIT 129)),
 EXISTS(SELECT 1 FROM temp.listing_changes WHERE kind IN ('remove','replace'))`).Scan(&count, &removed)
 	return
+}
+
+// appliedAfterStartTx names the entries in batch that the change feed wrote
+// after this listing began. applied_gen carries the parent's generation at the
+// time of that write, and this listing's generation was taken when it started,
+// so "at least ours" means "not older than us".
+func (l *DirListing) appliedAfterStartTx(ctx context.Context, tx *sql.Tx, batch []Node) (map[string]bool, error) {
+	if len(batch) == 0 {
+		return nil, nil
+	}
+	args := []any{l.parent.Ino, RootIno, l.generation}
+	for _, n := range batch {
+		args = append(args, n.Name)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM nodes WHERE parent_ino=? AND ino!=? AND applied_gen>=? AND name IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	applied := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		applied[name] = true
+	}
+	return applied, rows.Err()
 }

@@ -31,14 +31,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !allowMethod(w, r, http.MethodGet) {
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming is not supported here", http.StatusInternalServerError)
+		httpErrorT(w, r, http.StatusInternalServerError, "err.no_streaming")
 		return
 	}
 	var changes <-chan vfs.Change
@@ -52,6 +50,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	lang := LangFrom(r)
 	send := func(event string, body any) bool {
 		data, err := json.Marshal(body)
 		if err != nil {
@@ -63,7 +62,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return true
 	}
-	if !send("status", s.collector.Collect(r.Context())) {
+	if !send("status", s.collector.Collect(r.Context(), lang)) {
 		return
 	}
 	ticker := time.NewTicker(statusTick)
@@ -81,7 +80,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
-			if !send("status", s.collector.Collect(r.Context())) {
+			if !send("status", s.collector.Collect(r.Context(), lang)) {
 				return
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cloudfs/internal/cache"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
@@ -96,7 +97,7 @@ func TestCollectReportsState(t *testing.T) {
 	f.cache.Get(cache.FileKey{Remote: "ali", RemoteID: "1", Version: "v"}, 0)
 	f.cache.Get(cache.FileKey{Remote: "ali", RemoteID: "1", Version: "v"}, 9)
 
-	st := f.coll.Collect(ctx)
+	st := f.coll.Collect(ctx, i18n.EN)
 	if st.Version != "test" || st.UptimeStr == "" {
 		t.Fatalf("status = %+v", st)
 	}
@@ -129,7 +130,7 @@ func TestWarningsAreActionable(t *testing.T) {
 	}
 	f.reg.Breaker("ali", "").Trip()
 
-	st := f.coll.Collect(ctx)
+	st := f.coll.Collect(ctx, i18n.EN)
 	joined := strings.Join(st.Warnings, "\n")
 	if !strings.Contains(joined, "failed permanently") || !strings.Contains(joined, "uploads retry") {
 		t.Fatalf("dead-letter warning should name the recovery command: %q", joined)
@@ -139,7 +140,7 @@ func TestWarningsAreActionable(t *testing.T) {
 	}
 	// A healthy system has no warnings.
 	f2 := newFixture(t)
-	if w := f2.coll.Collect(ctx).Warnings; len(w) != 0 {
+	if w := f2.coll.Collect(ctx, i18n.EN).Warnings; len(w) != 0 {
 		t.Fatalf("clean system produced warnings: %v", w)
 	}
 }
@@ -150,7 +151,7 @@ func TestCacheNearBudgetWarns(t *testing.T) {
 	for i := int64(0); i < 240; i++ {
 		f.cache.Put(cache.FileKey{Remote: "ali", RemoteID: "big", Version: "v"}, i, make([]byte, 4096), 1<<30)
 	}
-	st := f.coll.Collect(context.Background())
+	st := f.coll.Collect(context.Background(), i18n.EN)
 	joined := strings.Join(st.Warnings, "\n")
 	if !strings.Contains(joined, "budget") {
 		t.Fatalf("expected a cache budget warning, got %q", joined)
@@ -160,7 +161,7 @@ func TestCacheNearBudgetWarns(t *testing.T) {
 func TestLowFreeSpaceWarns(t *testing.T) {
 	f := newFixture(t)
 	f.coll.FreeSpace = func(string) (int64, error) { return 100 << 20, nil }
-	st := f.coll.Collect(context.Background())
+	st := f.coll.Collect(context.Background(), i18n.EN)
 	joined := strings.Join(st.Warnings, "\n")
 	if !strings.Contains(joined, "ENOSPC") {
 		t.Fatalf("low disk should warn about ENOSPC: %q", joined)
@@ -260,7 +261,7 @@ func TestCompleteFileAndWriteReservationsReachStatusAndMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	st := f.coll.Collect(context.Background())
+	st := f.coll.Collect(context.Background(), i18n.EN)
 	if st.Cache.Bytes != 7 || st.Cache.WholeBytes != 7 || st.Cache.LeasedBytes != 7 || st.Cache.WriteReservedBytes != 99 {
 		t.Fatalf("status: %+v", st.Cache)
 	}
@@ -322,7 +323,7 @@ func TestDoctorReportsAndFixes(t *testing.T) {
 	}
 
 	// --fix cleans up the orphan.
-	done := d.Fix(ctx)
+	done := d.Fix(ctx, i18n.EN)
 	if len(done) == 0 {
 		t.Fatal("fix reported nothing")
 	}

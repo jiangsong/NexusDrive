@@ -852,6 +852,11 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 	}
 
 	caps := srcMount.Provider.Capabilities()
+	// The backend answers with the entry as it now stands. On a path-id
+	// backend that answer carries a different id than the one we asked
+	// about, and so does every descendant's — dropping it is how a renamed
+	// directory's children end up addressed by a path that no longer exists.
+	movedID := n.RemoteID
 	if n.RemoteID != "" {
 		if oldParent != newParent {
 			if !caps.ServerMove {
@@ -865,30 +870,51 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 			if targetID == "" {
 				targetID = dstMount.RootID
 			}
-			if _, err := srcMount.Provider.Move(ctx, n.RemoteID, targetID); err != nil {
+			moved, err := srcMount.Provider.Move(ctx, movedID, targetID)
+			if err != nil {
 				return mapProviderErr(err)
+			}
+			if moved.ID != "" {
+				movedID = moved.ID
 			}
 		}
 		if oldName != newName {
 			if !caps.ServerRename {
 				return provider.ErrUnsupported
 			}
-			if _, err := srcMount.Provider.Rename(ctx, n.RemoteID, newName); err != nil {
+			renamed, err := srcMount.Provider.Rename(ctx, movedID, newName)
+			if err != nil {
 				return mapProviderErr(err)
+			}
+			if renamed.ID != "" {
+				movedID = renamed.ID
 			}
 		}
 	}
-	if err := f.meta.Rename(ctx, n.Ino, newParent, newName); err != nil {
-		return err
+	// The backend has already moved the entry. Whatever the tree does now,
+	// what is cached about both directories describes the old shape, so the
+	// invalidation runs even on the error paths below — leaving stale
+	// dentries behind is how a failed rename keeps answering with names the
+	// backend no longer has.
+	defer func() {
+		f.dropPaths()
+		f.invalidateFrom(ctx, oldParent)
+		f.invalidateFrom(ctx, newParent)
+		// Both names: the old one is now a stale positive dentry, and the new
+		// one may be a cached negative lookup from before the move.
+		f.invalidateEntryFrom(ctx, oldParent, oldName)
+		f.invalidateEntryFrom(ctx, newParent, newName)
+	}()
+	if movedID != n.RemoteID {
+		// Descendants follow only where the id is a path. An opaque id that
+		// changed says nothing about the ids beneath it. The new name and the
+		// new ids are one fact about the tree: committed separately, a reader
+		// in between finds the directory under its new name with its children
+		// still addressed by a path the backend no longer has, and a crash
+		// there makes that permanent.
+		return f.meta.RenameAndRetarget(ctx, n.Ino, newParent, newName, movedID, caps.PathIDs)
 	}
-	f.dropPaths()
-	f.invalidateFrom(ctx, oldParent)
-	f.invalidateFrom(ctx, newParent)
-	// Both names: the old one is now a stale positive dentry, and the new
-	// one may be a cached negative lookup from before the move.
-	f.invalidateEntryFrom(ctx, oldParent, oldName)
-	f.invalidateEntryFrom(ctx, newParent, newName)
-	return nil
+	return f.meta.Rename(ctx, n.Ino, newParent, newName)
 }
 
 // localIDPrefix marks a node whose only copy is the locally committed blob.

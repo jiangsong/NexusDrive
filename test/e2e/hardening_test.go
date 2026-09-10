@@ -22,6 +22,8 @@ import (
 	"cloudfs/internal/fusefs"
 	"cloudfs/internal/journal"
 	"cloudfs/test/fakeprovider"
+
+	"cloudfs/internal/i18n"
 )
 
 // TestConcurrentGoWritersNeverSeeEINTR is the pressure form of the close(2)
@@ -194,7 +196,7 @@ func TestReadOnlyCommandsDuringUploadsLeaveTheQueueAlone(t *testing.T) {
 			d2.Close()
 			t.Fatal("a second process must not own the live queue")
 		}
-		_ = d2.Collector().Collect(ctx)
+		_ = d2.Collector().Collect(ctx, i18n.EN)
 		d2.Close()
 		opens++
 		time.Sleep(10 * time.Millisecond)

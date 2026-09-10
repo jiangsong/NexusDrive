@@ -368,22 +368,19 @@ func (d *Daemon) Collector() *control.Collector {
 		flush = d.Uploader.Flush
 		cancelUpload = d.Uploader.Cancel
 	}
-	return &control.Collector{
+	col := &control.Collector{
 		Config:  d.Config,
 		Version: d.version, Started: d.started,
 		FS: d.FS, Journal: d.Journal, Cache: d.Cache,
 		Proxy: d.Proxy, Limiters: d.Limiters, Remotes: remotes,
 		Providers: d.Providers,
 		Pools:     d.Pools,
-		CheckAccount: func(ctx context.Context, name string) error {
-			return SanitizeAccountError(CheckAccount(ctx, d.Config, name))
-		},
+
 		// A saved proxy section takes effect without a restart: every
 		// provider's client asks the manager per request.
 		ReloadProxy: func(p config.Proxy) error {
 			return d.Proxy.Reload(control.ProxyManagerOptions(p))
 		},
-		Auth:          d.authStarter(),
 		CallStats:     d.CallStats,
 		DropCaches:    d.DropCaches,
 		FlushUploads:  flush,
@@ -392,11 +389,42 @@ func (d *Daemon) Collector() *control.Collector {
 		DiscardUpload: d.FS.DiscardUpload,
 		CacheMaxBytes: int64(d.Config.Cache.MaxSize),
 		FreeSpace:     cache.FreeSpace,
-		// The runner without a FUSE probe: the mounting process, which knows
-		// the kernel, replaces it with d.Doctor(fusefs.Supported).
-		Doctor:  d.Doctor(nil),
-		Service: d.serviceControl(),
 	}
+	// Everything that reads the configuration reads it through the collector's
+	// published view, never through the pointer this function was called with.
+	// The control plane republishes a copy after every edit, so a hook that
+	// captured the pointer would answer "unknown remote" for the account that
+	// had just been added through the API — which is the add-a-drive flow. The
+	// same applies to the hooks that read mounts rather than accounts: the
+	// diagnostics and the service installer are built here, after the view
+	// exists, for exactly that reason.
+	view := func() *config.Config { return col.ConfigView() }
+	// The runner without a FUSE probe: the mounting process, which knows the
+	// kernel, replaces it with d.Doctor(col.ConfigView, fusefs.Supported).
+	col.Doctor = d.Doctor(view, nil)
+	col.Service = d.serviceControl(view)
+	col.Auth = AuthStarterFor(view)
+	col.AccountQuota = func(ctx context.Context, name string) (provider.Quota, bool, error) {
+		return AccountQuota(ctx, view(), name)
+	}
+	col.CheckAccount = func(ctx context.Context, name string) error {
+		return SanitizeAccountError(CheckAccount(ctx, view(), name))
+	}
+	return col
+}
+
+// serviceRuntime builds the Runtime the service hooks drive. It is a variable
+// so a test can hand back a Runtime whose Run, Mounted and Unmount are captured
+// instead of the machine's real service manager.
+var serviceRuntime = func(out io.Writer) (service.Runtime, error) {
+	rt, err := service.Real()
+	if err != nil {
+		return service.Runtime{}, err
+	}
+	if out != nil {
+		rt.Out = out
+	}
+	return rt, nil
 }
 
 // serviceControl adapts internal/service to the control plane, so the settings
@@ -405,21 +433,19 @@ func (d *Daemon) Collector() *control.Collector {
 // `cloudfs mount` against exactly that file. The daemon may install and
 // uninstall as well as report status — a person who reached the dashboard has
 // already shown they can reach the machine.
-func (d *Daemon) serviceControl() *control.ServiceControl {
-	if d.Config == nil || d.Config.SourcePath == "" || len(d.Config.Mounts) == 0 {
+func (d *Daemon) serviceControl(view func() *config.Config) *control.ServiceControl {
+	if view == nil {
+		started := d.Config
+		view = func() *config.Config { return started }
+	}
+	cfg := view()
+	if cfg == nil || cfg.SourcePath == "" || len(cfg.Mounts) == 0 {
 		return nil
 	}
-	configPath := d.Config.SourcePath
-	newRuntime := func(out io.Writer) (service.Runtime, error) {
-		rt, err := service.Real()
-		if err != nil {
-			return service.Runtime{}, err
-		}
-		if out != nil {
-			rt.Out = out
-		}
-		return rt, nil
-	}
+	// The file a unit points at cannot change under a running daemon; the
+	// mount inside it can, so every use below reads view() rather than cfg.
+	configPath := cfg.SourcePath
+	newRuntime := serviceRuntime
 	return &control.ServiceControl{
 		Supported: func() (bool, string) {
 			rt, err := service.Real()
@@ -451,23 +477,33 @@ func (d *Daemon) serviceControl() *control.ServiceControl {
 			if err != nil {
 				return err
 			}
-			return rt.Install(d.Config, configPath)
+			return rt.Install(view(), configPath)
 		},
 		Uninstall: func() error {
 			rt, err := newRuntime(io.Discard)
 			if err != nil {
 				return err
 			}
-			return rt.Uninstall(d.Config, configPath)
+			return rt.Uninstall(view(), configPath)
 		},
 	}
 }
 
 // Doctor builds the diagnostic runner for this daemon.
-func (d *Daemon) Doctor(fuseSupported func() (bool, string)) *control.Doctor {
+//
+// view is how the runner reads the configuration. It is a function rather than
+// the pointer this daemon started with because the control plane republishes a
+// copy after every edit: a runner holding the original would check the accounts
+// that existed at start-up and report a clean bill of health for the drives
+// added since, never having looked at them.
+func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, string)) *control.Doctor {
 	cacheDir := d.Config.Cache.Dir
+	if view == nil {
+		started := d.Config
+		view = func() *config.Config { return started }
+	}
 	return &control.Doctor{
-		Config:          d.Config,
+		Config:          view,
 		CacheDir:        filepath.Join(cacheDir, "blocks"),
 		Journal:         d.Journal,
 		Meta:            d.Meta,
@@ -500,14 +536,27 @@ func buildProxy(cfg *config.Config) (*proxy.Manager, error) {
 // authStarter adapts the daemon's authorization flows to the control server's
 // AuthStarter, so the control package need not import daemon. The daemon saves
 // the credential in every flow; nothing about a token reaches the caller.
-func (d *Daemon) authStarter() *control.AuthStarter {
-	if d.Config == nil || d.Config.SourcePath == "" {
+// AuthStarterFor builds the control plane's authorization hooks from a
+// configuration alone. It takes no daemon because none is needed: adding and
+// authorizing accounts is what someone does *before* there is a filesystem to
+// mount, and the setup flow serves the control plane with nothing else running.
+//
+// It takes a function rather than a configuration because the control plane
+// republishes the configuration after every edit, as a copy. A hook that
+// captured the pointer would answer "unknown remote" for the account that had
+// just been added through the API — which is the add-a-drive flow itself.
+func AuthStarterFor(view func() *config.Config) *control.AuthStarter {
+	if view == nil {
+		return nil
+	}
+	if cfg := view(); cfg == nil || cfg.SourcePath == "" {
 		return nil
 	}
 	return &control.AuthStarter{
-		Supported: SupportsDaemonAuth,
+		Supported:    SupportsDaemonAuth,
+		FillClientID: FillBuiltinClientID,
 		OAuth: func(ctx context.Context, name string, present func(url string)) (string, func(context.Context) error, error) {
-			p, wait, err := StartOAuthFlow(ctx, d.Config, name, "", func(_ context.Context, url string) error {
+			p, wait, err := StartOAuthFlow(ctx, view(), name, "", func(_ context.Context, url string) error {
 				present(url)
 				return nil
 			})
@@ -517,7 +566,7 @@ func (d *Daemon) authStarter() *control.AuthStarter {
 			return p.RedirectURI, wait, nil
 		},
 		Device: func(ctx context.Context, name string, present func(qr string), scanned func()) (func(context.Context) error, error) {
-			return StartDevice115Flow(ctx, d.Config, name, func(_ context.Context, qr string) error {
+			return StartDevice115Flow(ctx, view(), name, func(_ context.Context, qr string) error {
 				present(qr)
 				return nil
 			}, scanned)
