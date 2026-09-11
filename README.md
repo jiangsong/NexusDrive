@@ -265,6 +265,20 @@ mounts:
 
 一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；第一次使用见 [从零开始](docs/getting-started.md)，配置项与内部机制见 [存储池](docs/pool.md)。
 
+**规划中（未实现）**：带宽融合（一个 3 副本文件从 3 个网盘并行读）、目录读序小文件预取、`cloudfs export` 导出到移动硬盘、按路径的放置规则与 rebalance，见 [存储池 v2](docs/pool-v2.md)。届时配置形如：
+
+```yaml
+pools:
+  home:
+    rules:                                   # 规划中
+      - {prefix: /photos, replicas: 2, prefer: [nas]}
+    failure_domain: account
+    read_fanout: auto
+export:                                      # 规划中
+  transfers: 4
+  streams: 4
+```
+
 ## 命令
 
 ```
@@ -285,6 +299,9 @@ cp <source> <dest>        复制单个文件，可跨 remote；恢复与竞争�
 copies list | show <id>    查询复制准备状态、检查点及关联上传；list 支持 --limit/--cursor
 copies retry|cancel <id>   重试或取消准备任务，保留内容；不能取消已交接的上传
 copies forget <id> --confirm 清理无引用的准备内容和记录；不删除本地/远端文件
+export <vpath>... <dir>   【规划中，T-32】把虚拟路径批量导出到本地/移动硬盘：多文件多流并发、续传、拔盘暂停、校验
+exports list|show|pause|resume|cancel|forget <id>  【规划中，T-32】导出作业管理
+pool rebalance <pool>     【规划中，T-33】按目标偏斜在成员间搬迁副本；加盘后 backfill
 warm <path> [depth]       预列目录，使后续查找本地化
 pin <path>                完整下载并钉住，读取与内容搜索变本地操作
 unpin <path>              移除一条固定规则，不删除内容

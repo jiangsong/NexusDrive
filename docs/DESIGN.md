@@ -58,6 +58,10 @@ CloudFS 是一个单机守护进程，把国内外主流网盘挂载为本地目
 | CloudDrive2 | WinFsp / FUSE 挂载为本地盘；写入先在内存算 hash 尝试秒传，再落缓存目录上传；目录缓存默认 40 s，Pro 版可持久化；115 推荐 `MaxQueriesPerSecond=1` | 先算 hash 再落盘、目录缓存持久化、115 保守 QPS | 缓存无背压，会把磁盘写满；挂载容量标称云端容量误导用户；闭源 |
 | JuiceFS | 元数据引擎（Redis / TiKV / SQL / SQLite）与对象存储分离；文件 → 64 MiB chunk → slice → 4 MiB block；`--writeback` 本地落盘即返回；`--prefetch`、`--verify-cache-checksum`；企业版 cache group 一致性哈希 | 元数据 / 数据分离、4 MiB 固定块、writeback、块校验 | 假设后端是强一致对象存储；网盘无此保证 |
 | macOS File Provider / Windows Cloud Files API | 系统持有占位符，打开时 hydrate，`Keep Offline` 钉住，磁盘压力下自动 dataless | 占位符心智模型、pin 语义 | 平台私有 API，二期再做 |
+| Ceph | CRUSH 按权重与故障域放置、规则按 pool；OSD 加入触发 backfill；客户端并行读多个 OSD；RBD 条带 | 按路径放置规则、故障域 = 账号/网盘类型、加盘 backfill、目标偏斜 rebalance、副本并行读（`docs/pool-v2.md`） | 无 monitor/MDS（成员是共享真相，索引可重建）；不做条带/纠删码：网盘无对象级强一致，条带后官方 App 不可读、任一成员丢失即整文件丢失 |
+| mergerfs / rclone union | create policy（mfs/lfs/epff）、`minfreespace`、`moveonenospc`、读最快分支 | 配额满换盘重放、按剩余空间放置、读最快副本 | 只有一份数据、无修复 |
+| Alluxio / JuiceFS warmup | 目录级预取、`distributedLoad`、`warmup --threads`、小文件整文件缓存 | 目录读序检测 → 兄弟文件整文件预取；导出作业的并发模型 | 分布式 worker、独立元数据引擎 |
+| SeaweedFS | haystack 小文件打包；volume 按 tag 放置 | 成员 `class` 标签 → 规则 `prefer/require/avoid` | 打包 bundle：官方 App 看不到原始文件、与镜像树/scrub 冲突、需要 GC |
 | MCP 官方 filesystem server | 14 个工具（`read_text_file` head/tail、`edit_file` dryRun、`search_files`、`directory_tree` 等）；`validatePath` 解析符号链接后校验白名单；支持 Roots 与 ToolAnnotations | 工具语义、白名单校验、只读 / 破坏性注解 | 无分页、无字节范围读、无索引搜索；Claude Code 默认拒绝 >25k tokens 的工具结果 |
 
 结论：**复用 rclone 的后端，不复用它的 VFS**；自研 VFS 让国内自研驱动与 rclone 后端共享同一套缓存与可靠性保障。
@@ -576,6 +580,8 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 控制面:`/pool/status|create|members|members/state|members/drain|members/remove|repair|scrub|rebuild|divergences|join`,`/fs/list` 与 `/fs/stat` 的条目带 `availability`、`replicas_live/target`、`degraded_reason`;`/status.remotes[].state` 对所有 remote 报告可达性。
 
+**v2（设计稿，未实现）**：带宽融合（副本块级扇出、请求合并、`Transfer` 令牌类、目录读序预取）、`cloudfs export` 导出作业、CRUSH-lite 放置（按路径规则、成员 class、故障域、配额满换盘、rebalance/backfill、`min_replicas` 诚实化）见 `docs/pool-v2.md`，对应 `TODO.md` T-29 ~ T-33。
+
 ## 5. 可靠性场景矩阵
 
 | 场景 | 行为 |
@@ -858,6 +864,8 @@ FUSE 相关测试在没有 `/dev/fuse` 或 macFUSE 的机器上自动跳过而�
 | macFUSE 需 kext，FSKit 后端不完整 | 一期以 macFUSE 为准，FSKit 作试验开关 |
 | MCP 规范 2026-07-28 为无状态版本，Roots 已 deprecated | 锁定 SDK 版本；白名单以 `--allow` 为主 |
 | SQLite 单写者 | 元数据与 journal 分库；写事务短小；WAL 模式读不阻塞 |
+| 存储池副本扇出对国内网盘的风控反应未知（`docs/pool-v2.md` §4.5） | 每成员保留自己的 `(remote, account, class)` 限流器；`Tier=unofficial` 默认同文件单流；`pools.<n>.read_fanout: off` 可关 |
+| `Transfer` 令牌类（CDN 字节流与 API 分桶）的默认值未经真实账号验证（`docs/pool-v2.md` §4.2） | 0 = 回退到 `Download` 桶即旧行为；默认值保守；并入 T-13 真实账号验证 |
 
 ---
 

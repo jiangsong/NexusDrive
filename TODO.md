@@ -1063,6 +1063,10 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   - 现有 fusefs、conformance、chaos 三套测试在开启后全绿。
   - 4 KiB 粒度顺序写 1 MiB，FUSE write opcode 次数较现状下降。
   - 写后立即读（read-your-writes）仍然返回正确内容与大小。
+- **2026-09-11 补充**：writeback_cache 只影响写路径，对读负载不适用；go-fuse v2.11 没有协商它的开关，
+  且内核在 writeback_cache 开启时会关闭 passthrough。读侧的内核选项（`FOPEN_KEEP_CACHE`、`MaxReadAhead`、
+  `MaxBackground`、splice）另立 T-29。建议本条只保留 splice 与「是否值得为写吞吐放弃 passthrough」的决策，
+  见 `docs/pool-v2.md` §4.6。
 
 ---
 
@@ -1562,6 +1566,103 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 回归：`TestInstrumentKeepsTheOneRequestUploadBesideTheOthers` 覆盖五种组合，并断言 `Unwrap`、`RangeReaderAt`、
 `StreamLister` 仍可达；回退实现即失败。
 
+### [ ] T-29 读路径便宜项：内核缓存、请求合并、`Transfer` 令牌类、`MaxConnsPerHost` 接线（`docs/pool-v2.md` 阶段 A）
+
+- **证据**：只读 open 返回 flags `0`（`internal/fusefs/fs.go` `Open`），内核每次 open 丢页缓存；`platform_linux.go`
+  `MaxReadAhead = 1MiB`，`MountOptions.MaxBackground` 用 go-fuse 默认 12；`maybeReadAhead` 为窗口内每个块各发一个
+  4 MiB 请求；CDN 字节 GET 与取直链 API 记同一个 `Download` 桶（`internal/provider/aliyun/aliyun.go` 的 ranged GET、
+  `quark/files.go`），吞吐上限 ≈ QPS × 4 MiB；`net/proxy/dialer.go` 的 `transportFor` 只设 `MaxIdleConnsPerHost: 8`，
+  `Caps.MaxConnsPerHost` 除 `pool.go` 求和外无人消费。
+- **做法**：`FOPEN_KEEP_CACHE`；`MaxReadAhead 4MiB` + `MaxBackground 64`；macOS `iosize=1048576`；`flight.Reserve` +
+  窗口内连续块合并成 `readahead_request`（默认 16 MiB）一次 range；`ratelimit.Transfer` 类（`provider.QPS.Transfer`，
+  0 = 回退 Download），aliyun/quark/pan115/tianyi/baidu 的 OSS 流改记它；`Manager.ClientWithLimit` + `remotes.<n>.max_conns`。
+- **验收**：
+  - `test/perf` 的 `TestSequentialReadUsesWholeBlocks` 改为接受 `wantBlocks / coalesce` 次 `ReadRange`，其余基线不变。
+  - `internal/fusefs`：同一文件通过挂载点读两遍，第二遍 `OpStats().opRead` 增量为 0。
+  - `internal/net/proxy`：`setConns(3)` 后 transport 的 `MaxConnsPerHost == 3`；`max_conns: 2` 的 remote 经 caps 报告 2。
+  - `qps.transfer: 0` 时 aliyun 的字节 GET 仍记入 `Download` 桶（回退路径有测试）。
+
+### [ ] T-30 目录读序预取与 `cache.policy` 按前缀预设（`docs/pool-v2.md` §3、§7，阶段 B）
+
+- **证据**：读路径没有跨文件预取；`cp -r` 一万个小文件 = 一万次串行 open/read/close，受 provider QPS 约束；
+  `FS.Pin` 是唯一的整子树下载且落缓存不落目标；小文件先写块文件、10 s 后 hydration 再拷一遍。
+- **做法**：`internal/vfs/read_dir_ahead.go`——句柄第一次 `Read` 时用 `meta.ChildrenPage` 判定是否按列表顺序读，
+  3 次起窗，前方保持 `dir_readahead`（默认 32）个 ≤ `small_file_threshold`（默认 4 MiB）的文件，整文件一次 range →
+  新 `cache.PutWhole` 直接落 `hydrated/`；每 remote 槽位 `clamp(round(QPS.Download), 2, MaxConnsPerHost) − 1`，
+  与块级 readahead 共用；前台不占槽，`blockFlight.Reserve` 让前台 miss 加入等待；`invalidateListing/dropPaths` 取消。
+  `cache.policy{preset, small_file_threshold, dir_readahead, readahead_max, readahead_request, readahead_lead}`
+  全局 + `layout.<prefix>.cache` 覆盖，preset `media|photos|code|none`。
+- **验收**（`test/perf`，fake 计数）：
+  - `TestDirectoryReadaheadMakesSiblingReadsFree`：64 个小文件按名序读 3 个后等待，再读 `file003..010` 时 `ReadRange` 增量 == 0。
+  - `TestRandomOrderReadsDoNotTriggerDirectoryReadahead`：乱序读 10 个，`ReadRange == 10`。
+  - `TestDirectoryReadaheadIsBoundedByRemoteSlots`：`QPS.Download=2, MaxConnsPerHost=3` 时 `Fake.MaxInflight() ≤ 2`。
+  - `TestDirectoryReadaheadSkipsLargeFiles`：超阈值文件的块不被预取。
+  - `TestDirectoryReadaheadStopsOnListingChange`：`Refresh` 后不再有超出已认领范围的 `ReadRange`。
+  - `internal/config`：preset 解析、显式键覆盖 preset、校验错误；两个不同策略的 mount 得到不同窗口。
+
+### [ ] T-31 大文件：速率窗口、全局在途预算、池副本扇出、稀疏整文件布局（`docs/pool-v2.md` §4，阶段 C + F）
+
+- **证据**：readahead 窗口固定 16 块 = 64 MiB，不看文件大小与读者速率（`daemon.go` `readAheadBlocks`）；
+  `PutAsync` 超 write-behind 预算时静默退化为同步 `Put`；池读在延迟相同时永远打声明顺序第一个副本
+  （`internal/pool/read.go` `sortReplicas`），3 副本文件只得到 1 个网盘的速率；≥ 4 MiB 文件冷读本地写两遍（块文件 + hydration）。
+- **做法**：`target = clamp(R × readahead_lead, 2 块, readahead_max)` 且只在 stall 时增长；`Σ 在途块 ≤ cache.WriteBehindBudget()`；
+  `pool.member` 加 `inflight/served/EWMA`，`pickReplica` 按在途数与延迟选副本，`ReadRange/ReadRangeAt/DownloadURL` 改 pick，
+  `pools.<n>.read_fanout: off|auto|all`（unofficial 层默认同文件单流），`resolveFile` 结果 5 s 缓存，`tryReplicas`
+  遇 404 先 `Stat` 再标 missing；`cache.Options.WholeLayoutMin`（64 MiB）以上按偏移直接写 `hydrated/<fh>.part` + 位图，
+  写满 rename；已 hydrate 文件 `Read` 返回 `fuse.ReadResultFd`；`FileLseeker`；挂载内 `NodeCopyFileRanger`。
+- **验收**：
+  - `internal/pool`：`TestReadFanoutSpreadsBlocks`（12 块、窗口 8 → 每成员 `ReadRange` 4 ± 1）、`TestReadFanoutSkipsDownMember`、
+    `TestReadFanoutPrefersFast`；`test/perf`：`TestPoolReadFanoutAddsBandwidth`（20 ms 延迟、48 MiB、3 成员 < 0.5× 单成员）。
+  - 假设读全落成员 0 的旧基线（`TestPoolWriteThenReadIsLocal` 等）按新语义更新且仍断言总调用数。
+  - 两个句柄同时顺序读时在途块总数不超过预算；5 MiB/s 的模拟读者窗口稳定在 ≈ 40 MiB 而不是 64 MiB。
+  - 冷读一个 256 MiB 文件，本地磁盘写入字节 == 文件大小（不再 2×）；`reload` 后 `.part` 带有效位图可继续读。
+  - `internal/fusefs`（Linux）：`cp --sparse=auto` 不再产生 `ENOTSUP`；已 hydrate 文件的读走 `ReadResultFd`。
+
+### [ ] T-32 `cloudfs export`：把虚拟路径批量导出到本地/移动硬盘（`docs/pool-v2.md` §5，阶段 D）
+
+- **证据**：没有任何导出/同步/拉取命令。`cloudfs cp` 只支持虚拟路径 → 虚拟路径单文件（`internal/vfs/copy.go`）；
+  `cloudfs pin` 落缓存不落目标目录；`cp -r` 走内核单文件串行 READ，无跨文件并行、无续传、拔盘即失败。
+- **做法**：新包 `internal/export` + 独立 `<cache.dir>/exports.db`（不复用 `copy_jobs`：那是上传侧语义），
+  从 meta 规划（暖态 0 远端调用）、`transfers` × `streams` 并发、直读 `mount.Provider.(RangeReaderAt)`（不经 `FS.Read`）、
+  `<rel>.cloudfs-part` + 已完成 range 位图续传、哈希/size+mtime 校验、`--mirror` 需既有标记、拔盘（`st_dev` 变化）与
+  `ENOSPC` → `paused(disk)` 自动恢复、`fs.Busy()` 让路；已缓存文件从 `OpenWhole` 拷字节（绝不硬链接缓存对象到用户目录）。
+  控制面 `/export`、`/exports*`；CLI `export` / `exports list|show|pause|resume|cancel|forget`；MCP `export`（限 `mcp.export_roots`）；
+  UI `#/exports`。
+- **验收**（`internal/export`，复用 `test/perf/pool_test.go` 的池 harness）：
+  - 30 文件、3 成员、3 副本 → 每成员 `Calls("ReadRange")` 在 `N/3 ± 2`；`ReadBytes()` 总和 == Σ size。
+  - 已 pin/hydrate 或 `cloudfs-local:` 的文件 → 每成员 `ReadRange == 0`。
+  - k 块后崩溃、重开、恢复 → 成员 `ReadBytes()` 增量 == 剩余块。
+  - 注入 `ENOSPC` 或 `st_dev` 变化 → 作业 `paused(disk)`、条目 `pending`，`resume` 后完成。
+  - 无标记的 `--mirror` 被拒绝；有标记只删多余项。
+  - 哈希不符 → 重试 2 次后 `failed`，作业继续，CLI 退出码 1。
+  - 暖态规划：成员 `List == 0`。
+  - `test/perf/export_test.go`：20 ms 延迟下 3 成员导出墙钟 ≤ 单成员 0.5×（唯一看时间的断言，断言的是并行度）。
+  - 路由守卫、JSON 契约、CLI 与 web i18n 覆盖测试全绿。
+
+### [ ] T-33 放置 v2：按路径规则、成员 class、故障域、配额满换盘、修复服务端复制、rebalance（`docs/pool-v2.md` §6，阶段 E）
+
+- **证据**：`replicas` 是池级一个整数，无按路径策略、无故障域（两份副本可能落在同一账号的两个 remote 上）；
+  `repair.go` 的 `repairTarget` 是与 `placement.go` `candidates()` 不一致的第二套策略；provider 无配额哨兵，
+  网盘 507/403 经 `retry.Classify` 退避到死信而不是换盘；修复只走本机字节拷，同账号也不用 `ServerCopier`；
+  无 rebalance/backfill，加盘只影响新写；`min_replicas` 无人消费（T-27 已把文档改诚实）；`TrimOnce` 按声明顺序最后裁；
+  `health.go` 串行跑 repair/replay/drain 且忽略 `repair_concurrency`。
+- **做法**：`pools.<n>.rules[{prefix, replicas, prefer, avoid, require}]`、`members[].class`、`failure_domain: account|provider|member`，
+  `targetFor(path)` 取代 `replicaTarget()` 全部调用点，`repairTarget` 合并进 `candidates()`；`provider.ErrQuotaExceeded` +
+  `retry.ClassQuota` + `ErrRestartUpload`，池 `markFull(10m)` 换候选、uploader 清 session 立即重试；新表 `member_usage`；
+  `copyReplica` 同域优先 `ServerCopier.Copy`，模糊失败先 `ScrubPath` 再采纳；`write_mode: relaxed`（`min_replicas` = 告警阈值）
+  | `strict`（同步补齐、超时仍成功）；`pool/rebalance.go` + `rebalance_queue`，`PlanRebalance(target_skew)`、`RebalanceOnce`
+  独立 goroutine + `Pool.SetBusy`、`auto_backfill`；`TrimOnce` 改裁放置分数最差的副本；`dropReplica` 与 drain/trim 共用。
+  CLI `pool rebalance [--target-skew] [--dry-run] --confirm`；控制面 `POST /pool/rebalance`；UI 填充条。
+- **验收**：
+  - `placement_test`：最长前缀规则；`prefer`/`require`/`avoid` 语义；同账号两成员 + 另一账号一成员时第二份落到另一账号；
+    配额错误 → 下一候选，`fullUntil` 内 `free()` 不重查。
+  - `write_test`：`UploadPart` 返回配额错误 → session 清空、重新放置到另一成员、最终 1 个成功上传（fake 加 `QuotaAfterBytes`）。
+  - `repair_test`：同域且 `ServerCopy` 时 `Calls("Copy") == 1` 且 `UploadPart == 0`；模糊失败后先 scrub、不重复拷；配额 → 换成员、不记分歧。
+  - `rebalance_test`：3 成员、2 副本、30 文件在 a/b，加 c → 计划 ≈ 1/3，完成后 `skew ≤ target`；先拷后删；busy 为真不推进；裁剪不碰新副本。
+  - `test/perf/pool_test.go`：`TestRebalanceCostIsOneUploadPlusOneDeletePerMove`、`TestPlacementSpreadsAcrossDomains`。
+  - `test/chaos`：rebalance 中途成员失联 → 队列条目退避、无副本丢失；两机同时 rebalance 同一文件 → 内容相同即良性。
+  - `cloudfs doctor` 列出 `below min_replicas` 与 rebalance 积压。
+
 ## 明确不在当前范围内
 
 以下是设计文档中标注为二期或预留的部分，列在这里是为了避免被误当作遗漏：
@@ -1714,6 +1815,9 @@ T-03（慢客户端隔离）、T-06（交互式向导）、T-17（Web 加账号�
 9. **T-04**（跨盘复制/秒传：底层去重能力已经写好，只差接出来，性价比最高）
 10. **T-19**（对外 WebDAV / 直链输出：进入 Emby / Jellyfin / OpenList 生态的唯一通路）
 11. **T-20**（媒体库场景：STRM、跳播友好的预取；依赖 T-19）
+12. **T-29 → T-30 → T-32 → T-31 → T-33**（存储池 v2，`docs/pool-v2.md`：先做便宜的内核/合并/限流项，
+    再做小文件目录预取，然后导出作业（用户可见价值最高、不碰读路径核心），之后视频扇出，最后放置 v2——
+    它改索引 schema 与多机标记，放最后）
 
 **阶段 3 — 扩边界**
 
