@@ -399,18 +399,13 @@ func (f *file) PassthroughFd() (int, bool) {
 	if f.released {
 		return 0, false
 	}
-	if f.pass != nil {
-		return f.root.backings.fd(f.pass)
-	}
-	if !f.root.passthrough {
+	// A splice read may already have leased this handle; reuse it. Only
+	// when there is no lease yet does the experimental opt-in gate whether
+	// one is created here.
+	if f.pass == nil && !f.root.passthrough {
 		return 0, false
 	}
-	pf, err := f.root.opt.FS.OpenLocal(f.handle)
-	if err != nil {
-		return 0, false
-	}
-	f.pass = f.root.backings.offer(pf)
-	return f.root.backings.fd(f.pass)
+	return f.leaseFdLocked()
 }
 
 func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -610,6 +605,9 @@ func formatPercent(f float64) string {
 func (f *file) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	f.root.count(opRead)
 	f.root.countRead(len(dest))
+	if res, ok := f.spliceRead(ctx, off, len(dest)); ok {
+		return res, 0
+	}
 	n, err := f.root.opt.FS.Read(ctx, f.handle, dest, off)
 	if err != nil && n == 0 {
 		if isEOF(err) {
