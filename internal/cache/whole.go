@@ -210,9 +210,41 @@ func (c *Cache) installWhole(k FileKey, src string, size int64, adopt, pinned bo
 	if info.Size() != size {
 		return errors.New("cache: source changed size during import")
 	}
+	if err := c.installTemp(k, name, size, pinned); err != nil {
+		return err
+	}
+	if adopt && src != c.hydratedPath(fh) {
+		if err := os.Remove(src); err != nil {
+			return fmt.Errorf("cache: installed copy but could not remove source: %w", err)
+		}
+	}
+	return nil
+}
+
+// installTemp publishes tmpPath — which must already hold exactly size bytes
+// of file content, created inside the "hydrated" directory so the rename
+// below is same-filesystem and atomic — as the hydrated cache entry for k.
+// It is the tail installWhole and PutWhole share: stat validation, the
+// publishing rename, fileState upsert, whole-object attachment, and
+// dropping (and unaccounting) any block-cache entries the whole file now
+// supersedes. Pinned state is preserved (or applied) rather than overwritten.
+//
+// The caller must hold admitMu across both its admission check and this call
+// so that a concurrent Put/installWhole/Hydrate for the same key cannot
+// interleave with publication; installTemp itself takes c.mu only for the
+// bookkeeping below.
+func (c *Cache) installTemp(k FileKey, tmpPath string, size int64, pinned bool) error {
+	info, err := os.Stat(tmpPath)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return errors.New("cache: install source has wrong type or size")
+	}
+	fh := k.hash()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := os.Rename(name, c.hydratedPath(fh)); err != nil {
+	if err := os.Rename(tmpPath, c.hydratedPath(fh)); err != nil {
 		return err
 	}
 	fs := c.files[fh]
@@ -226,11 +258,42 @@ func (c *Cache) installWhole(k FileKey, src string, size int64, adopt, pinned bo
 	fs.whole.lastAccess = c.opt.Now()
 	fs.generation++
 	c.removeFileBlocksLocked(fh, fs)
-	if adopt && src != c.hydratedPath(fh) {
-		if err := os.Remove(src); err != nil {
-			return fmt.Errorf("cache: installed copy but could not remove source: %w", err)
-		}
+	return nil
+}
+
+// PutWhole streams r — which must yield exactly size bytes — directly into
+// the cache as a hydrated object for k, skipping the block-file-then-hydrate
+// double write that a fetch-then-Put-per-block-then-Hydrate sequence needs.
+// A short (or long) read is an error and nothing is installed. A concurrent
+// Put of a block for the same key cannot interleave: both hold admitMu for
+// their whole call.
+func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
+	if size < 0 {
+		return errors.New("cache: negative complete-file size")
 	}
+	c.admitMu.Lock()
+	defer c.admitMu.Unlock()
+	if err := c.makeRoomFor(size, 1, size, nil); err != nil {
+		return err
+	}
+	// Same naming convention as installWhole's temporaries: reload's orphan
+	// sweep recognises the ".install-" prefix and reclaims it after a crash.
+	out, err := os.CreateTemp(filepath.Join(c.opt.Dir, "hydrated"), ".install-*")
+	if err != nil {
+		return err
+	}
+	name := out.Name()
+	defer func() { out.Close(); c.discardTemp(name) }()
+	if err := copyWhole(out, r, size); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := c.installTemp(k, name, size, false); err != nil {
+		return err
+	}
+	c.rememberKey(k)
 	return nil
 }
 
