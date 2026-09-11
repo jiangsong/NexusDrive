@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
 	"cloudfs/internal/cache"
@@ -221,14 +220,20 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	if opt.NoBackground {
 		prefetch = 0
 	}
+	readaheadReq, err := readaheadRequest()
+	if err != nil {
+		d.Close()
+		return nil, err
+	}
 	fsys, err := vfs.New(vfs.Options{
 		Meta: store, Cache: ca, Mounts: mounts,
-		DefaultDirTTL:   5 * time.Minute,
-		AttrTTL:         30 * time.Second,
-		NegativeTTL:     5 * time.Second,
-		ReadAheadBlocks: readAheadBlocks(),
-		PrefetchDepth:   prefetch,
-		WriteSettle:     2 * time.Second,
+		DefaultDirTTL:    5 * time.Minute,
+		AttrTTL:          30 * time.Second,
+		NegativeTTL:      5 * time.Second,
+		ReadAheadBlocks:  readAheadBlocks(),
+		ReadaheadRequest: readaheadReq,
+		PrefetchDepth:    prefetch,
+		WriteSettle:      2 * time.Second,
 	})
 	if err != nil {
 		d.Close()
@@ -776,24 +781,3 @@ func EnsureDir(p string) error {
 	return nil
 }
 
-// readAheadBlocks is the sequential prefetch window in blocks; the
-// CLOUDFS_READAHEAD_BLOCKS environment variable overrides it for experiments.
-func readAheadBlocks() int {
-	if v := os.Getenv("CLOUDFS_READAHEAD_BLOCKS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 16
-}
-
-// prefetchDepth is how many directory levels below a listed directory are
-// listed ahead of time; CLOUDFS_PREFETCH_DEPTH overrides it for experiments.
-func prefetchDepth() int {
-	if v := os.Getenv("CLOUDFS_PREFETCH_DEPTH"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return 2
-}

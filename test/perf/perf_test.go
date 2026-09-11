@@ -33,6 +33,13 @@ type harness struct {
 }
 
 func newHarness(t *testing.T, blockSize int64, readAhead, prefetchDepth int) *harness {
+	return newHarnessOpt(t, blockSize, readAhead, prefetchDepth, 0)
+}
+
+// newHarnessOpt is newHarness with an explicit ReadaheadRequest, so a test
+// that cares about readahead coalescing does not depend on the mount
+// provider's default capabilities to derive it.
+func newHarnessOpt(t *testing.T, blockSize int64, readAhead, prefetchDepth int, readaheadRequest int64) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
@@ -56,6 +63,7 @@ func newHarness(t *testing.T, blockSize int64, readAhead, prefetchDepth int) *ha
 		Meta: store, Cache: ca,
 		AttrTTL: time.Hour, DefaultDirTTL: time.Hour, NegativeTTL: time.Minute,
 		ReadAheadBlocks: readAhead, PrefetchDepth: prefetchDepth,
+		ReadaheadRequest: readaheadRequest,
 		Mounts: []vfs.Mount{{
 			Prefix: "/", Remote: "ali", RootID: fakeprovider.RootID,
 			Provider: fake, Mode: config.ModeWriteback, DirTTL: time.Hour,
@@ -249,6 +257,127 @@ func TestReadAheadReducesLatencyStalls(t *testing.T) {
 	}
 	have, total := h.fs.Cache().Present(key)
 	t.Fatalf("read-ahead did not run: %d/%d blocks cached after three sequential reads", have, total)
+}
+
+// TestReadaheadCoalescesContiguousBlocks checks that a sequential read groups
+// the readahead window's contiguous missing blocks into range requests sized
+// by ReadaheadRequest, instead of one ReadRange call per block.
+func TestReadaheadCoalescesContiguousBlocks(t *testing.T) {
+	const blockSize = 64 << 10
+	const readaheadRequest = 256 << 10 // 4 blocks per range request
+	h := newHarnessOpt(t, blockSize, 32, 0, readaheadRequest)
+	ctx := context.Background()
+	const size = 2 << 20 // 2 MiB
+	h.fake.Seed("big.bin", bytes.Repeat([]byte("x"), size))
+	if _, err := h.fs.ReadDirPath(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	before := h.fake.Calls("ReadRange")
+
+	node, err := h.fs.Meta().Resolve(ctx, "/big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := h.fs.Open(ctx, node.Ino, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read in 4 KiB pieces, the way an application would; this leaves the
+	// background prefetch runs time to land between calls, matching the
+	// granularity TestSequentialReadUsesWholeBlocks uses for the same reason.
+	buf := make([]byte, 4096)
+	for off := int64(0); off < int64(size); off += 4096 {
+		if _, err := h.fs.Read(ctx, handle, buf, off); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := cache.FileKey{Remote: node.Remote, RemoteID: node.RemoteID, Version: node.Version}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if have, total := h.fs.Cache().Present(key); have == total {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := h.fs.Release(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	fetches := h.fake.Calls("ReadRange") - before
+	want := int(size/readaheadRequest) + 3
+	if fetches > want {
+		t.Fatalf("2 MiB sequential read with a %d KiB readahead request cost %d ReadRange calls, want <= %d",
+			readaheadRequest>>10, fetches, want)
+	}
+	t.Logf("2 MiB read coalesced into %d ReadRange calls (bound %d)", fetches, want)
+}
+
+// TestShortRangeDisablesCoalescingForRemote checks that when a coalesced
+// multi-block range comes back short — a server that caps request size below
+// what readahead asked for — the run recovers by fetching that stretch one
+// block at a time, and the remote is remembered as "never coalesce" for the
+// rest of the process: a later file on the same remote costs one ReadRange
+// call per block, with no further attempt at a multi-block request.
+func TestShortRangeDisablesCoalescingForRemote(t *testing.T) {
+	const blockSize = 64 << 10
+	h := newHarnessOpt(t, blockSize, 32, 0, 256<<10) // 4 blocks per request
+	ctx := context.Background()
+	const size = blockSize * 16
+	content := bytes.Repeat([]byte("a"), size)
+	h.fake.Seed("first.bin", content)
+	h.fake.Seed("second.bin", content)
+	if _, err := h.fs.ReadDirPath(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	// Every ReadRange answer is capped at one block, the way a server that
+	// refuses request sizes above its own block would behave.
+	h.fake.SetFaults(func(ft *fakeprovider.Faults) { ft.ShortRead = blockSize })
+
+	readSequential := func(name string) {
+		t.Helper()
+		node, err := h.fs.Meta().Resolve(ctx, "/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := h.fs.Open(ctx, node.Ino, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, blockSize)
+		for off := int64(0); off < int64(size); off += blockSize {
+			if _, err := h.fs.Read(ctx, handle, buf, off); err != nil {
+				t.Fatal(err)
+			}
+		}
+		key := cache.FileKey{Remote: node.Remote, RemoteID: node.RemoteID, Version: node.Version}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if have, total := h.fs.Cache().Present(key); have == total {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err := h.fs.Release(ctx, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	readSequential("first.bin")
+	got, err := h.fs.ReadFileRange(ctx, "/first.bin", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("read-back after a short coalesced range is corrupted")
+	}
+
+	// A second file on the same remote must never retry a multi-block
+	// request: every block should cost its own ReadRange call.
+	before := h.fake.Calls("ReadRange")
+	readSequential("second.bin")
+	wantBlocks := size / blockSize
+	if calls := h.fake.Calls("ReadRange") - before; calls < wantBlocks {
+		t.Fatalf("second file cost %d ReadRange calls for %d blocks; coalescing should be disabled for this remote after the short range", calls, wantBlocks)
+	}
 }
 
 // TestPrefetchMakesFindLocal checks background prefetching turns a recursive

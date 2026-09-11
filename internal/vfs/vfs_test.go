@@ -43,8 +43,12 @@ type envOpt struct {
 	subBlockSize    int64
 	mode            config.Mode
 	readAheadBlocks int
-	prefetchDepth   int
-	dirTTL          time.Duration
+	// readaheadRequest, when set, pins how many bytes a coalesced readahead
+	// range request may cover; tests that count individual per-block
+	// ReadRange calls set it to blockSize to keep coalescing out of the way.
+	readaheadRequest int64
+	prefetchDepth    int
+	dirTTL           time.Duration
 	// pathIDs runs the backend with path-shaped ids (sftp, webdav, s3, smb)
 	// instead of opaque ones.
 	pathIDs bool
@@ -95,7 +99,7 @@ func newEnv(t *testing.T, o envOpt) *env {
 	fs, err := New(Options{
 		Meta: store, Cache: ca, Now: c.now,
 		DefaultDirTTL: o.dirTTL, AttrTTL: time.Minute, NegativeTTL: 5 * time.Second,
-		ReadAheadBlocks: o.readAheadBlocks, PrefetchDepth: o.prefetchDepth,
+		ReadAheadBlocks: o.readAheadBlocks, ReadaheadRequest: o.readaheadRequest, PrefetchDepth: o.prefetchDepth,
 		Mounts: []Mount{{
 			Prefix: "/ali", Remote: "ali", RootID: fake.RootID(),
 			Provider: backend, Mode: o.mode, DirTTL: o.dirTTL,

@@ -94,7 +94,10 @@ func TestRandomReadsDoNotArmReadAhead(t *testing.T) {
 // around the abandoned position before they consume bytes or cache space.
 func TestMediaSeekCancelsOldReadAhead(t *testing.T) {
 	const block, sub, blocks = 4096, 512, 100
-	e := newEnv(t, envOpt{blockSize: block, subBlockSize: sub, readAheadBlocks: 8})
+	// This test counts individual per-block ReadRange calls to observe the
+	// old read-ahead's flight directly; pin the readahead request to one
+	// block so coalescing does not merge them and change the count.
+	e := newEnv(t, envOpt{blockSize: block, subBlockSize: sub, readAheadBlocks: 8, readaheadRequest: block})
 	ctx := context.Background()
 	size := block * blocks
 	e.fake.Seed("movie.mkv", bytes.Repeat([]byte("m"), size))

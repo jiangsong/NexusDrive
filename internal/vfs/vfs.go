@@ -71,6 +71,13 @@ type Options struct {
 	NegativeTTL time.Duration
 	// ReadAheadBlocks caps the sequential prefetch window (0 disables it).
 	ReadAheadBlocks int
+	// ReadaheadRequest caps how many contiguous missing blocks a readahead
+	// run merges into one range request, in bytes. Zero means "derive it
+	// per mount": 16 MiB when the mount's provider allows range reads and
+	// recommends 16 QPS or fewer for downloads (a request budget worth
+	// spending on fewer, larger requests), otherwise one block. A non-zero
+	// value must be a positive multiple of the cache's block size.
+	ReadaheadRequest int64
 	// PrefetchDepth is how deep readdir warms subdirectories (0 disables it).
 	PrefetchDepth int
 	// WriteSettle holds a committed write back from the upload queue for this
@@ -149,6 +156,12 @@ type FS struct {
 	prefetching inflight
 	blockFlight flight[blockKey, []byte]
 	subFlight   flight[subKey, []byte]
+	// readaheadDisabled remembers, per mount remote name, that a coalesced
+	// multi-block readahead run once came back short on that remote (a
+	// server that caps request size below what was asked). Once set,
+	// readahead on that remote never coalesces again for the life of the
+	// process. Presence is the signal; the value is unused.
+	readaheadDisabled sync.Map
 	// invalidateFn is the kernel-notification hook. It is installed after
 	// the FS is already serving (the mount comes later), so it is read and
 	// written atomically rather than through opt.
@@ -207,6 +220,10 @@ func newFS(opt Options, cleanupOnly bool) (*FS, error) {
 	}
 	if opt.WriteSettle < 0 {
 		opt.WriteSettle = 0
+	}
+	if opt.ReadaheadRequest < 0 || (opt.ReadaheadRequest > 0 && opt.ReadaheadRequest%opt.Cache.BlockSize() != 0) {
+		return nil, fmt.Errorf("vfs: ReadaheadRequest (%d) must be a positive multiple of the cache block size (%d)",
+			opt.ReadaheadRequest, opt.Cache.BlockSize())
 	}
 	f := &FS{
 		meta:    opt.Meta,
