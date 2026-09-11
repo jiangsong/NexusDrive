@@ -156,13 +156,9 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		if setter, ok := p.(provider.TokenPersistenceSetter); ok && cfg.SourcePath != "" {
 			setter.SetTokenPersister(config.TokenPersister(cfg, name))
 		}
-		// The caps every upper layer reads must agree with the transport
-		// buildProvider already bounded, so this wraps with the same
-		// effectiveConns buildProvider computed and applied via setConns —
-		// never re-derive the override/declared-cap/8 fallback here, or a
-		// driver that leaves MaxConnsPerHost undeclared could end up with
-		// Capabilities() and the real transport limit disagreeing. It goes
-		// on before Instrument so both wrappers' interfaces compose.
+		// Caps must agree with the transport buildProvider already bounded,
+		// so this reuses its effectiveConns rather than re-deriving the
+		// fallback here. Goes before Instrument so both wrappers compose.
 		p = provider.WithMaxConns(p, effectiveConns)
 		st := provider.NewStats()
 		d.CallStats[name] = st
