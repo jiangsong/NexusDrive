@@ -234,7 +234,8 @@ func NewWithOptions(name string, opt Options) (*Tianyi, error) {
 		// but the account is still a consumer account and sustained bursts draw
 		// throttling, so the driver starts conservative and lets AIMD find the
 		// ceiling.
-		QPS:             provider.QPS{Meta: 2, Download: 2, Upload: 1},
+		// UNVERIFIED: CDN request-rate threshold before risk control.
+		QPS:             provider.QPS{Meta: 2, Download: 2, Upload: 1, Transfer: 4},
 		MaxConnsPerHost: 4,
 		Tier:            provider.TierOfficial,
 	}

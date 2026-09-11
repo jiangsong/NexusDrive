@@ -583,10 +583,8 @@ func AuthStarterFor(view func() *config.Config) *control.AuthStarter {
 // its capability matrix, then a conservative built-in default.
 //
 // capsFor is consulted lazily, because a bucket is created on first use and
-// the providers exist by then. Reading the matrix matters: a backend on the
-// local network recommends tens of requests per second, and holding it to the
-// default meant for a rate-limited public drive turns a directory walk into
-// seconds of pure waiting.
+// the providers exist by then: holding a fast local backend to the default
+// meant for a rate-limited public drive turns a directory walk into a wait.
 func buildLimiters(cfg *config.Config, capsFor func(remote string) (provider.Caps, bool)) *ratelimit.Registry {
 	overrides := map[string]config.QPS{}
 	for name, r := range cfg.Remotes {
@@ -604,7 +602,7 @@ func buildLimiters(cfg *config.Config, capsFor func(remote string) (provider.Cap
 			}
 		}
 		if q, ok := overrides[k.Remote]; ok {
-			if r := qpsForClass(provider.QPS{Meta: q.Meta, Download: q.Download, Upload: q.Upload}, k.Class); r > 0 {
+			if r := qpsForClass(provider.QPS{Meta: q.Meta, Download: q.Download, Upload: q.Upload, Transfer: q.Transfer}, k.Class); r > 0 {
 				rate = r
 			}
 		}
@@ -621,6 +619,8 @@ func qpsForClass(q provider.QPS, c ratelimit.Class) float64 {
 		return q.Download
 	case ratelimit.Upload:
 		return q.Upload
+	case ratelimit.Transfer:
+		return q.Transfer
 	}
 	return 0
 }
@@ -633,6 +633,8 @@ func defaultRate(c ratelimit.Class) float64 {
 		return 8
 	case ratelimit.Upload:
 		return 2
+	case ratelimit.Transfer:
+		return 0 // the built-in default: alias onto Download (ratelimit.Registry.Limiter)
 	}
 	return 4
 }

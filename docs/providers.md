@@ -4,22 +4,30 @@
 
 ## 总览
 
-| 驱动 | 接口来源 | 秒传 | 分片 | 服务端移动/改名 | 直链可外传 | 默认 QPS（meta/下载/上传） | 层级 |
-|---|---|---|---|---|---|---|---|
-| `webdav` / `openlist` | 标准 WebDAV | 无 | 单次 PUT | 是 | 否（需本进程凭据） | 8 / 8 / 4 | official |
-| `aliyun` | 阿里云盘开放平台 | pre_hash + SHA1 + proof | 是 | 是 | 是 | 4 / 4 / 2 | official |
-| `baidu` | 百度网盘开放平台 | MD5 + 前 256 KiB MD5 | 是 | 是 | 是（需特定 UA） | 2 / 2 / 1 | official |
-| `pan115` | 115 开放平台 | SHA1 + 区间签名 | OSS 分片 | 是 | 是（UA 绑定） | 1 / 2 / 1 | official |
-| `pan123` | 123 云盘开放平台 | MD5 | 是 | 是 | 是 | 4 / 4 / 2 | official |
-| `quark` | 逆向 cookie 接口 | MD5 + SHA1 | 是 | 是 | 是 | 1 / 2 / 1 | **unofficial** |
-| `tianyi` | 天翼云盘 | MD5 | 是 | 是 | 是 | 2 / 2 / 1 | official |
-| `sftp` | SSH 文件传输子系统 | 无 | 是（按偏移写） | 是 | 否（需本进程凭据） | 8192 / 8192 / 4096 | official |
-| `s3` | S3 API（MinIO Go SDK） | 无 | 是（multipart） | 是（copy + delete） | 是（预签名） | 20 / 16 / 8 | official |
-| `dropbox` | Dropbox HTTP API v2 | 无 | 是（upload session） | 是 | 是（4 小时临时链接） | 12 / 12 / 6 | official |
-| `onedrive` | Microsoft Graph v1.0 | SHA-1 校验 | 是（upload session） | 是 | 是（预认证链接，保守 15 分钟） | 12 / 12 / 6 | official |
-| `gdrive` | Google Drive API v3 | 无 | 是（resumable session） | 是 | 否（仅认证请求可读） | 10 / 10 / 4 | official |
-| `box` | Box Content API v2 | 无 | 是（upload session，需整文件 SHA-1） | 是 | 否（302 只对本进程有效） | 8 / 8 / 4 | official |
-| `smb` | SMB2/3（go-smb2） | 无 | 是（按偏移写） | 是 | 否（需本进程会话） | 4096 / 4096 / 2048 | official |
+| 驱动 | 接口来源 | 秒传 | 分片 | 服务端移动/改名 | 直链可外传 | 默认 QPS（meta/下载/上传） | CDN 传输 QPS | 层级 |
+|---|---|---|---|---|---|---|---|---|
+| `webdav` / `openlist` | 标准 WebDAV | 无 | 单次 PUT | 是 | 否（需本进程凭据） | 8 / 8 / 4 | 共用下载 | official |
+| `aliyun` | 阿里云盘开放平台 | pre_hash + SHA1 + proof | 是 | 是 | 是 | 4 / 4 / 2 | 16 | official |
+| `baidu` | 百度网盘开放平台 | MD5 + 前 256 KiB MD5 | 是 | 是 | 是（需特定 UA） | 2 / 2 / 1 | 4 | official |
+| `pan115` | 115 开放平台 | SHA1 + 区间签名 | OSS 分片 | 是 | 是（UA 绑定） | 1 / 2 / 1 | 4 | official |
+| `pan123` | 123 云盘开放平台 | MD5 | 是 | 是 | 是 | 4 / 4 / 2 | 共用下载 | official |
+| `quark` | 逆向 cookie 接口 | MD5 + SHA1 | 是 | 是 | 是 | 1 / 2 / 1 | 4 | **unofficial** |
+| `tianyi` | 天翼云盘 | MD5 | 是 | 是 | 是 | 2 / 2 / 1 | 4 | official |
+| `sftp` | SSH 文件传输子系统 | 无 | 是（按偏移写） | 是 | 否（需本进程凭据） | 8192 / 8192 / 4096 | 共用下载 | official |
+| `s3` | S3 API（MinIO Go SDK） | 无 | 是（multipart） | 是（copy + delete） | 是（预签名） | 20 / 16 / 8 | 共用下载 | official |
+| `dropbox` | Dropbox HTTP API v2 | 无 | 是（upload session） | 是 | 是（4 小时临时链接） | 12 / 12 / 6 | 共用下载 | official |
+| `onedrive` | Microsoft Graph v1.0 | SHA-1 校验 | 是（upload session） | 是 | 是（预认证链接，保守 15 分钟） | 12 / 12 / 6 | 共用下载 | official |
+| `gdrive` | Google Drive API v3 | 无 | 是（resumable session） | 是 | 否（仅认证请求可读） | 10 / 10 / 4 | 共用下载 | official |
+| `box` | Box Content API v2 | 无 | 是（upload session，需整文件 SHA-1） | 是 | 否（302 只对本进程有效） | 8 / 8 / 4 | 共用下载 | official |
+| `smb` | SMB2/3（go-smb2） | 无 | 是（按偏移写） | 是 | 否（需本进程会话） | 4096 / 4096 / 2048 | 共用下载 | official |
+
+`CDN 传输 QPS` 是 `internal/net/ratelimit.Transfer`：字节流的 ranged GET（走 CDN 直链）单独计
+额度，不再与解析直链的元数据调用（`getDownloadUrl` 之类，仍计入下载 QPS）挤同一个令牌桶。
+"共用下载"表示该驱动的 `Caps.QPS.Transfer` 为 0（默认值），此时 Transfer 请求直接落在
+Download 的令牌桶和 AIMD 状态上，行为与引入这个分类之前完全一致；数值列出的五个国内网盘
+驱动已经拆出独立的传输额度，均为 `// UNVERIFIED: CDN request-rate threshold before risk
+control` ——真实阈值需要在真机账号上验证。`remotes.<name>.qps.transfer` 可覆盖任何驱动的
+默认值，同样遵循"配置 > Caps 推荐 > 内置默认"的优先级。
 
 `Tier` 为 `unofficial` 的驱动默认采用更保守的限流，因为接口随时可能变化，且异常调用模式更容易触发封号。
 

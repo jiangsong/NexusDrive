@@ -16,6 +16,12 @@ const (
 	Meta Class = iota
 	Download
 	Upload
+	// Transfer governs a CDN byte-stream GET (a ranged read against the
+	// direct link), as opposed to the API call that resolves the link
+	// itself, which stays on Download. A remote whose effective Transfer
+	// rate resolves to 0 has no bucket of its own: Registry.Limiter aliases
+	// it onto Download so behaviour is unchanged until a caller opts in.
+	Transfer
 )
 
 func (c Class) String() string {
@@ -26,6 +32,8 @@ func (c Class) String() string {
 		return "download"
 	case Upload:
 		return "upload"
+	case Transfer:
+		return "transfer"
 	}
 	return "unknown"
 }
@@ -292,14 +300,33 @@ func NewRegistry(defaults func(Key) Options, bopts BreakerOptions) *Registry {
 }
 
 // Limiter returns (creating if needed) the limiter for k.
+//
+// A Transfer key whose defaults resolve to rate <= 0 has no dedicated
+// bucket: it is aliased onto the Download limiter for the same
+// remote/account, so a request classed Transfer draws tokens from, and any
+// throttle signal it receives reduces, the very same *Limiter as Download.
+// This is what lets a provider adopt the Transfer class without changing
+// behaviour until it also sets a positive Transfer rate.
 func (r *Registry) Limiter(k Key) *Limiter {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	l, ok := r.limiters[k]
-	if !ok {
-		l = New(r.defaults(k))
-		r.limiters[k] = l
+	if l, ok := r.limiters[k]; ok {
+		return l
 	}
+	if k.Class == Transfer {
+		if opt := r.defaults(k); opt.Rate <= 0 {
+			dk := Key{Remote: k.Remote, Account: k.Account, Class: Download}
+			dl, ok := r.limiters[dk]
+			if !ok {
+				dl = New(r.defaults(dk))
+				r.limiters[dk] = dl
+			}
+			r.limiters[k] = dl
+			return dl
+		}
+	}
+	l := New(r.defaults(k))
+	r.limiters[k] = l
 	return l
 }
 

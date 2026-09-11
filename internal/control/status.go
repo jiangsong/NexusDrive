@@ -113,11 +113,15 @@ type ProxyStatus struct {
 
 // RemoteStatus reports per-remote rate limiting and circuit-breaker state.
 type RemoteStatus struct {
-	Remote      string  `json:"remote"`
-	MetaRate    float64 `json:"meta_rate"`
-	DownRate    float64 `json:"download_rate"`
-	UpRate      float64 `json:"upload_rate"`
-	BreakerOpen bool    `json:"breaker_open"`
+	Remote   string  `json:"remote"`
+	MetaRate float64 `json:"meta_rate"`
+	DownRate float64 `json:"download_rate"`
+	UpRate   float64 `json:"upload_rate"`
+	// TransferRate is the CDN byte-stream bucket's current adaptive rate.
+	// When a remote has not opted a Transfer class in (see ratelimit.Class),
+	// this mirrors DownRate, since the two share one bucket.
+	TransferRate float64 `json:"transfer_rate"`
+	BreakerOpen  bool    `json:"breaker_open"`
 	// BreakerUntil says when the remote becomes usable again.
 	BreakerUntil string `json:"breaker_until,omitempty"`
 	// State is the remote's reachability as seen from the calls made to
@@ -311,6 +315,7 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 			rs.MetaRate = c.Limiters.Limiter(ratelimit.Key{Remote: r, Class: ratelimit.Meta}).Rate()
 			rs.DownRate = c.Limiters.Limiter(ratelimit.Key{Remote: r, Class: ratelimit.Download}).Rate()
 			rs.UpRate = c.Limiters.Limiter(ratelimit.Key{Remote: r, Class: ratelimit.Upload}).Rate()
+			rs.TransferRate = c.Limiters.Limiter(ratelimit.Key{Remote: r, Class: ratelimit.Transfer}).Rate()
 			b := c.Limiters.Breaker(r, "")
 			rs.BreakerOpen = b.Open()
 			if until := b.OpenUntil(); !until.IsZero() {

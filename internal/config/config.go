@@ -133,6 +133,9 @@ type QPS struct {
 	Meta     float64 `yaml:"meta"`
 	Download float64 `yaml:"download"`
 	Upload   float64 `yaml:"upload"`
+	// Transfer overrides the CDN byte-stream GET rate. Zero (the default)
+	// means it shares the Download bucket instead of getting its own.
+	Transfer float64 `yaml:"transfer"`
 }
 
 // Remote is one backend account. Unknown keys are kept in Extra and handed to

@@ -183,7 +183,7 @@ func TestCapabilities(t *testing.T) {
 	if c.Tier != provider.TierUnofficial {
 		t.Errorf("Tier = %v, want unofficial", c.Tier)
 	}
-	if c.QPS != (provider.QPS{Meta: 1, Download: 2, Upload: 1}) {
+	if c.QPS != (provider.QPS{Meta: 1, Download: 2, Upload: 1, Transfer: 4}) {
 		t.Errorf("QPS = %+v", c.QPS)
 	}
 	if c.Delta {

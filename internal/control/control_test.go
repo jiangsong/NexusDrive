@@ -119,6 +119,9 @@ func TestCollectReportsState(t *testing.T) {
 	if st.Remotes[0].MetaRate != 8 {
 		t.Fatalf("meta rate = %v", st.Remotes[0].MetaRate)
 	}
+	if st.Remotes[0].TransferRate != 8 {
+		t.Fatalf("transfer rate = %v", st.Remotes[0].TransferRate)
+	}
 }
 
 func TestWarningsAreActionable(t *testing.T) {
@@ -227,6 +230,7 @@ func TestMetricsFormat(t *testing.T) {
 		"cloudfs_uploads_pending 1",
 		"cloudfs_uploads_queued_bytes 2048",
 		`cloudfs_remote_rate_limit{class="meta",remote="ali"} 8`,
+		`cloudfs_remote_rate_limit{class="transfer",remote="ali"} 8`,
 		`cloudfs_remote_breaker_open{remote="gdrive"} 1`,
 		`cloudfs_remote_breaker_open{remote="ali"} 0`,
 	} {

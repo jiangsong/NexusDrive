@@ -466,6 +466,43 @@ func TestLimiterSeedsFromTheCapabilityMatrix(t *testing.T) {
 	}
 }
 
+// TestTransferQPSFollowsTheSamePrecedenceAndFallsBackToDownload: Transfer
+// resolves through the same config > Caps.QPS > built-in precedence as every
+// other class, except its built-in default is 0 ("share Download") rather
+// than a conservative constant.
+func TestTransferQPSFollowsTheSamePrecedenceAndFallsBackToDownload(t *testing.T) {
+	caps := map[string]provider.Caps{
+		// aliyun-shaped: an explicit CDN rate.
+		"cdn": {QPS: provider.QPS{Download: 4, Transfer: 16}},
+		// a backend that has not opted in: Transfer defaults to 0 in Caps,
+		// so reads should keep sharing Download.
+		"nocdn": {QPS: provider.QPS{Download: 4}},
+	}
+	cfg := &config.Config{Remotes: map[string]config.Remote{
+		"cdn":   {Type: "fake"},
+		"nocdn": {Type: "fake"},
+		// A config override still wins over Caps.
+		"pinned": {Type: "fake", QPS: &config.QPS{Download: 4, Transfer: 8}},
+	}}
+	caps["pinned"] = provider.Caps{QPS: provider.QPS{Download: 4, Transfer: 16}}
+	reg := buildLimiters(cfg, func(remote string) (provider.Caps, bool) {
+		c, ok := caps[remote]
+		return c, ok
+	})
+
+	if got := reg.Limiter(ratelimit.Key{Remote: "cdn", Class: ratelimit.Transfer}).Rate(); got != 16 {
+		t.Errorf("cdn transfer rate = %v, want 16", got)
+	}
+	if got := reg.Limiter(ratelimit.Key{Remote: "pinned", Class: ratelimit.Transfer}).Rate(); got != 8 {
+		t.Errorf("pinned transfer rate = %v, want the config override 8", got)
+	}
+	down := reg.Limiter(ratelimit.Key{Remote: "nocdn", Class: ratelimit.Download})
+	xfer := reg.Limiter(ratelimit.Key{Remote: "nocdn", Class: ratelimit.Transfer})
+	if down != xfer {
+		t.Error("a backend with no Transfer recommendation should share the Download bucket")
+	}
+}
+
 // TestCollectorCarriesTheCacheDropHook: the benchmark's cold mode depends on
 // POST /cache/drop, which answers 501 when the collector is built without the
 // hook — as happened once after a formatting change moved the field.

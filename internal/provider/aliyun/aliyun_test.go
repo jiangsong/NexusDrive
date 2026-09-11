@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/net/ratelimit"
 	"cloudfs/internal/net/retry"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/provider/httpx"
@@ -366,6 +367,58 @@ func TestReadRangeSendsRangeHeaderAndCachesLink(t *testing.T) {
 	}
 	if r := cd.seenRanges(); len(r) != 2 || r[1] != "bytes=0-3" {
 		t.Fatalf("Range headers = %v", r)
+	}
+}
+
+// TestReadRangeUsesTransferClassNotDownload: the CDN byte-stream GET must be
+// metered on the Transfer bucket, distinct from the Download bucket that
+// getDownloadUrl (the link-resolving API call) draws from. It is proven by
+// draining a single-token Download bucket and showing a second ranged read,
+// which resolves the link from cache and so only performs the byte-stream
+// GET, still completes well inside the test's deadline.
+func TestReadRangeUsesTransferClassNotDownload(t *testing.T) {
+	blob := []byte("0123456789abcdefghij")
+	_, cdnSrv := newCDN(t, blob)
+	s, hs := newServer(t)
+	s.json(pathDownloadURL, fmt.Sprintf(`{"url":%q,"expiration":"2026-09-02T12:15:00.000Z","method":"GET"}`, cdnSrv.URL+"/blob"))
+
+	reg := ratelimit.NewRegistry(func(k ratelimit.Key) ratelimit.Options {
+		if k.Class == ratelimit.Download {
+			// One token, refilling so slowly that a second request drawing
+			// from this bucket would block far past the test's deadline.
+			return ratelimit.Options{Rate: 0.0001, Burst: 1}
+		}
+		return ratelimit.Options{Rate: 100, Burst: 100}
+	}, ratelimit.BreakerOptions{})
+
+	cli := httpx.New(httpx.Options{
+		Remote:   "ali-test",
+		Limiters: reg,
+		Policy:   retry.Policy{Backoff: retry.Backoff{Base: time.Millisecond, Max: 2 * time.Millisecond}, MaxAttempts: 1},
+	})
+	p := newProvider(t, hs, func(o *Options) { o.Client = cli })
+
+	// Resolves the link (spends the one Download token) and reads the first
+	// range (spends a Transfer token); the link is now cached.
+	rc, err := p.ReadRange(context.Background(), "f1", "", 0, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+
+	// This second read hits the link cache, so only the ranged GET fires. If
+	// it drew from the drained, near-frozen Download bucket instead of
+	// Transfer, it would block past the deadline below.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	rc, err = p.ReadRange(ctx, "f1", "", 4, 6)
+	if err != nil {
+		t.Fatalf("ranged GET should draw from the Transfer bucket, not the drained Download bucket: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(got) != "456789" {
+		t.Fatalf("read %q, want 456789", got)
 	}
 }
 
@@ -891,7 +944,7 @@ func TestCapabilities(t *testing.T) {
 	if !c.RangeRead || !c.ServerMove || !c.ServerRename || !c.ServerCopy {
 		t.Errorf("caps = %+v", c)
 	}
-	if c.QPS != (provider.QPS{Meta: 4, Download: 4, Upload: 2}) {
+	if c.QPS != (provider.QPS{Meta: 4, Download: 4, Upload: 2, Transfer: 16}) {
 		t.Errorf("qps = %+v", c.QPS)
 	}
 	if c.Tier != provider.TierOfficial {

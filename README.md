@@ -109,9 +109,11 @@ remotes:
   # config auth 打开浏览器完成授权
   # Box 每次刷新都会轮换 refresh_token，务必让 config auth 写进安全存储
 
-  p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1 }, max_conns: 2 }
+  p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1, transfer: 4 }, max_conns: 2 }
   # max_conns 覆盖该网盘的 Caps.MaxConnsPerHost（同时限制传输层的连接数）；
   # 115 是非官方接口，调低比驱动自带的默认值更保守，能进一步降低风控概率
+  # qps.transfer 单独限制 CDN 字节流的 ranged GET，不再挤占 download 桶；
+  # 省略或设为 0 表示不单独限流，与 download 共用一个令牌桶（旧行为）
 
 mounts:
   - path: /mnt/cloud

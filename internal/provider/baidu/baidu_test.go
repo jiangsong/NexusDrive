@@ -853,7 +853,7 @@ func TestCapabilities(t *testing.T) {
 	if c.LinkHeaders["User-Agent"] != DownloadUserAgent {
 		t.Errorf("link headers = %v; MCP's get_download_url has to pass the UA on", c.LinkHeaders)
 	}
-	if c.QPS != (provider.QPS{Meta: 2, Download: 2, Upload: 1}) {
+	if c.QPS != (provider.QPS{Meta: 2, Download: 2, Upload: 1, Transfer: 4}) {
 		t.Errorf("qps = %+v", c.QPS)
 	}
 	if c.Tier != provider.TierOfficial {

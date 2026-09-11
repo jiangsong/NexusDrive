@@ -243,8 +243,9 @@ func (q *Quark) Capabilities() provider.Caps {
 		// Quark's CDN requires the account Cookie on the download request, so
 		// a link cannot be handed to an unrelated process (an external player,
 		// the MCP get_download_url tool) and still work.
-		LinkShareable:   false,
-		QPS:             provider.QPS{Meta: 1, Download: 2, Upload: 1},
+		LinkShareable: false,
+		// UNVERIFIED: CDN request-rate threshold before risk control.
+		QPS:             provider.QPS{Meta: 1, Download: 2, Upload: 1, Transfer: 4},
 		MaxConnsPerHost: 4,
 		Tier:            provider.TierUnofficial,
 	}

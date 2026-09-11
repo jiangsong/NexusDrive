@@ -346,6 +346,7 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 				labels: map[string]string{"remote": r.Remote, "class": "meta"}, value: r.MetaRate},
 			metric{name: "cloudfs_remote_rate_limit", labels: map[string]string{"remote": r.Remote, "class": "download"}, value: r.DownRate},
 			metric{name: "cloudfs_remote_rate_limit", labels: map[string]string{"remote": r.Remote, "class": "upload"}, value: r.UpRate},
+			metric{name: "cloudfs_remote_rate_limit", labels: map[string]string{"remote": r.Remote, "class": "transfer"}, value: r.TransferRate},
 			metric{name: "cloudfs_remote_breaker_open", help: "Whether a remote is circuit-broken after risk control", typ: "gauge",
 				labels: map[string]string{"remote": r.Remote}, value: open},
 			metric{name: "cloudfs_remote_calls_total", help: "Backend requests made, by operation", typ: "counter",

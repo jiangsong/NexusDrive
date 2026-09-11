@@ -255,9 +255,10 @@ func (p *Pan115) Capabilities() provider.Caps {
 		Delta:   false,
 		LinkTTL: 2 * time.Hour,
 		// A 115 download URL only serves the User-Agent that requested it.
-		LinkHeaders:     map[string]string{"User-Agent": p.ua},
-		LinkShareable:   true,
-		QPS:             provider.QPS{Meta: 1, Download: 2, Upload: 1},
+		LinkHeaders:   map[string]string{"User-Agent": p.ua},
+		LinkShareable: true,
+		// UNVERIFIED: CDN request-rate threshold before risk control.
+		QPS:             provider.QPS{Meta: 1, Download: 2, Upload: 1, Transfer: 4},
 		MaxConnsPerHost: 4,
 		Tier:            provider.TierOfficial,
 	}
@@ -617,7 +618,7 @@ func (p *Pan115) fetch(ctx context.Context, l provider.Link, off, n int64) (io.R
 	resp, err := p.http.Do(ctx, httpx.Request{
 		Method:       "GET",
 		URL:          l.URL,
-		Class:        ratelimit.Download,
+		Class:        ratelimit.Transfer,
 		Header:       h,
 		Stream:       true,
 		ExpectStatus: []int{http.StatusOK, http.StatusPartialContent},

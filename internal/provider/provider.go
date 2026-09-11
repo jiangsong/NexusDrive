@@ -108,6 +108,11 @@ type QPS struct {
 	Meta     float64
 	Download float64
 	Upload   float64
+	// Transfer recommends the rate for a CDN byte-stream GET (the ranged
+	// read against a resolved direct link), separate from the API call that
+	// resolves the link, which stays on Download. Zero means "share the
+	// Download bucket" — see ratelimit.Registry.Limiter.
+	Transfer float64
 }
 
 // Caps is the capability matrix. Upper layers never special-case a backend by

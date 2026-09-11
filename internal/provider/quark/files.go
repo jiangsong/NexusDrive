@@ -371,7 +371,7 @@ func (q *Quark) ReadRange(ctx context.Context, id, version string, off, n int64)
 	resp, err := q.cli.Do(ctx, httpx.Request{
 		Method:       http.MethodGet,
 		URL:          raw,
-		Class:        ratelimit.Download,
+		Class:        ratelimit.Transfer,
 		Header:       q.requestHeader(header),
 		Stream:       true,
 		ExpectStatus: []int{http.StatusOK, http.StatusPartialContent},

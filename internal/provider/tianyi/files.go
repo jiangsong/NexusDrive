@@ -372,7 +372,7 @@ func (t *Tianyi) readRangeOnce(ctx context.Context, id string, off, n int64) (io
 	resp, err := t.cli.Do(ctx, httpx.Request{
 		Method:       http.MethodGet,
 		URL:          u,
-		Class:        ratelimit.Download,
+		Class:        ratelimit.Transfer,
 		Header:       hdr,
 		Stream:       true,
 		ExpectStatus: []int{http.StatusOK, http.StatusPartialContent},

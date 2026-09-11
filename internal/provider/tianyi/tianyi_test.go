@@ -109,7 +109,7 @@ func TestRegisteredInRegistry(t *testing.T) {
 	if caps.Tier != provider.TierOfficial || caps.PartSize != 8<<20 {
 		t.Errorf("caps = %+v", caps)
 	}
-	if caps.QPS != (provider.QPS{Meta: 2, Download: 2, Upload: 1}) {
+	if caps.QPS != (provider.QPS{Meta: 2, Download: 2, Upload: 1, Transfer: 4}) {
 		t.Errorf("QPS = %+v", caps.QPS)
 	}
 	if len(caps.RapidUpload) != 1 || caps.RapidUpload[0] != provider.HashMD5 {

@@ -57,6 +57,7 @@ export async function openConnection(name, opts = {}) {
     const meta = numberInput(qps.meta);
     const down = numberInput(qps.download);
     const up = numberInput(qps.upload);
+    const xfer = numberInput(qps.transfer);
     const workers = numberInput(detail.upload_workers, '1');
     const fieldInputs = new Map();
     const fieldNames = Object.keys(detail.fields || {}).sort();
@@ -77,8 +78,8 @@ export async function openConnection(name, opts = {}) {
       const patch = {};
       const proxy = proxyInput.value.trim();
       if (proxy !== (detail.proxy || '')) patch.proxy = proxy;
-      const nextQPS = { meta: numberOf(meta), download: numberOf(down), upload: numberOf(up) };
-      if (nextQPS.meta !== (qps.meta || 0) || nextQPS.download !== (qps.download || 0) || nextQPS.upload !== (qps.upload || 0)) patch.qps = nextQPS;
+      const nextQPS = { meta: numberOf(meta), download: numberOf(down), upload: numberOf(up), transfer: numberOf(xfer) };
+      if (nextQPS.meta !== (qps.meta || 0) || nextQPS.download !== (qps.download || 0) || nextQPS.upload !== (qps.upload || 0) || nextQPS.transfer !== (qps.transfer || 0)) patch.qps = nextQPS;
       const w = numberOf(workers);
       if (w !== (detail.upload_workers || 0)) patch.upload_workers = w;
       const fields = {};
@@ -101,8 +102,9 @@ export async function openConnection(name, opts = {}) {
 
       section(t('conn.settings'),
         labeled(t('conn.proxy'), proxyInput),
-        el('div', { style: 'display:grid;grid-template-columns:repeat(3,1fr);gap:10px' },
-          labeled(t('conn.qps.meta'), meta), labeled(t('conn.qps.download'), down), labeled(t('conn.qps.upload'), up)),
+        el('div', { style: 'display:grid;grid-template-columns:repeat(4,1fr);gap:10px' },
+          labeled(t('conn.qps.meta'), meta), labeled(t('conn.qps.download'), down), labeled(t('conn.qps.upload'), up),
+          labeled(t('conn.qps.transfer'), xfer)),
         labeled(t('conn.workers'), workers),
         el('div', { class: 'dim', style: 'font-size:11.5px' }, t('conn.zero')),
         el('div', { class: 'row', style: 'gap:9px;align-items:center' }, save, checkBtn, checkOut)),

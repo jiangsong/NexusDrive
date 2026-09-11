@@ -183,8 +183,8 @@ func TestRegisteredInRegistry(t *testing.T) {
 func TestCapabilitiesAreConservative(t *testing.T) {
 	p, _, _ := newTest(t, func(w http.ResponseWriter, r *http.Request) {})
 	c := p.Capabilities()
-	if c.QPS != (provider.QPS{Meta: 1, Download: 2, Upload: 1}) {
-		t.Errorf("QPS = %+v, want {1 2 1}: 115 bans clients above ~3 req/s", c.QPS)
+	if c.QPS != (provider.QPS{Meta: 1, Download: 2, Upload: 1, Transfer: 4}) {
+		t.Errorf("QPS = %+v, want {1 2 1 4}: 115 bans clients above ~3 req/s", c.QPS)
 	}
 	if c.Tier != provider.TierOfficial {
 		t.Errorf("Tier = %q", c.Tier)

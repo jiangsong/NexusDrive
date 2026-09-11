@@ -27,7 +27,7 @@ proxy:
 remotes:
   gdrive: { type: gdrive, proxy: proxy, client_id: abc }
   ali:    { type: aliyun }
-  p115:   { type: pan115, qps: { meta: 1, download: 2, upload: 1 } }
+  p115:   { type: pan115, qps: { meta: 1, download: 2, upload: 1, transfer: 4 } }
 mounts:
   - path: /mnt/cloud
     layout:
@@ -55,7 +55,7 @@ func TestParseExample(t *testing.T) {
 	if c.Remotes["gdrive"].Extra["client_id"] != "abc" {
 		t.Fatalf("extra keys not preserved: %+v", c.Remotes["gdrive"])
 	}
-	if q := c.Remotes["p115"].QPS; q == nil || q.Meta != 1 || q.Download != 2 {
+	if q := c.Remotes["p115"].QPS; q == nil || q.Meta != 1 || q.Download != 2 || q.Transfer != 4 {
 		t.Fatalf("qps = %+v", q)
 	}
 	if c.Remotes["ali"].MaxConns != 0 {

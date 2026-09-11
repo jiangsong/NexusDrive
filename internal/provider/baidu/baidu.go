@@ -210,7 +210,8 @@ func New(opt Options) (*Provider, error) {
 			LinkShareable: true,
 			// Non-SVIP accounts are throttled hard; start conservative and let
 			// AIMD find the ceiling.
-			QPS:             provider.QPS{Meta: 2, Download: 2, Upload: 1},
+			// UNVERIFIED: CDN request-rate threshold before risk control.
+			QPS:             provider.QPS{Meta: 2, Download: 2, Upload: 1, Transfer: 4},
 			MaxConnsPerHost: 4,
 			Tier:            provider.TierOfficial,
 		},
@@ -842,7 +843,7 @@ func (p *Provider) getRange(ctx context.Context, link provider.Link, off, n int6
 	resp, err := p.client.Do(ctx, httpx.Request{
 		Method: http.MethodGet,
 		URL:    link.URL,
-		Class:  ratelimit.Download,
+		Class:  ratelimit.Transfer,
 		Header: h,
 		// The dlink answers 302 to a pcs host; following it keeps the Range
 		// and UA headers, which Go's client does for us.
