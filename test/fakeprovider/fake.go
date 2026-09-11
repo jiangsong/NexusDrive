@@ -43,6 +43,10 @@ type Faults struct {
 	// a state, which is what "this drive is gone" needs. Calls refused this
 	// way are counted under "down", not under their own op.
 	Down bool
+	// MaxConcurrent, when > 0, serves at most this many calls at once; the
+	// rest wait their turn, the way a drive's connection budget caps its
+	// throughput. Set it before calls start.
+	MaxConcurrent int
 }
 
 type node struct {
@@ -80,7 +84,11 @@ type Fake struct {
 	// for" without inspecting individual calls.
 	maxReadLen int64
 	total      int
-	Faults    Faults
+	// sem, active and peak belong to admit (concurrency.go).
+	sem    chan struct{}
+	active int
+	peak   int
+	Faults Faults
 	// noHashes hides content hashes from every Entry, the way a backend
 	// without a hash API (sftp, webdav) reports files.
 	noHashes bool
@@ -414,6 +422,11 @@ func (f *Fake) enter(ctx context.Context, op string) error {
 	}
 	f.mu.Unlock()
 
+	done, err := f.admit(ctx, faults.MaxConcurrent)
+	if err != nil {
+		return err
+	}
+	defer done()
 	if faults.Latency > 0 {
 		select {
 		case <-time.After(faults.Latency):

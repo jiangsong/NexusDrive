@@ -152,7 +152,7 @@ func (p *Pool) TrimOnce(ctx context.Context) (int, error) {
 			if err != nil {
 				continue
 			}
-			_, _ = p.db.ExecContext(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, r.path, r.member)
+			_, _ = p.execIndex(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, r.path, r.member)
 			live = append(live[:i], live[i+1:]...)
 			trimmed++
 		}

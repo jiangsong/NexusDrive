@@ -151,8 +151,11 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// tx runs fn in one immediate transaction.
+// tx runs fn in one immediate transaction. Whatever it changed, answers
+// resolved from the index before it are stale: the replica cache is
+// invalidated once the transaction is over (replicaCache).
 func (p *Pool) tx(ctx context.Context, fn func(*sql.Tx) error) error {
+	defer p.resolveCache.invalidate()
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("pool: %w", err)
@@ -162,6 +165,14 @@ func (p *Pool) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// execIndex runs one statement that changes replicas, entries or ids outside
+// a transaction, and invalidates the replica cache as tx does.
+func (p *Pool) execIndex(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	res, err := p.db.ExecContext(ctx, query, args...)
+	p.resolveCache.invalidate()
+	return res, err
 }
 
 func (p *Pool) metaGet(ctx context.Context, k string) (string, error) {

@@ -233,10 +233,22 @@ type Pool struct {
 	RepairConcurrency int           `yaml:"repair_concurrency"`
 	ScrubInterval     time.Duration `yaml:"scrub_interval"`
 	ScrubSample       float64       `yaml:"scrub_sample"`
+	// ReadFanout decides how block reads of one file spread across its
+	// replicas: off (one ordered stream, the v1 behaviour), auto (spread by
+	// load and latency, but a member on an unofficial API serves at most
+	// one stream per file) or all (spread with no tier restriction).
+	ReadFanout string `yaml:"read_fanout"`
 }
 
 // PoolType is the remote type that exposes a Pool as a backend.
 const PoolType = "pool"
+
+// Values of Pool.ReadFanout.
+const (
+	ReadFanoutOff  = "off"
+	ReadFanoutAuto = "auto"
+	ReadFanoutAll  = "all"
+)
 
 // PoolOf returns the pool a remote refers to, or "" when it is not a pool.
 func (r Remote) PoolOf() string {
@@ -530,6 +542,13 @@ func (c *Config) validatePools() error {
 		}
 		if p.ScrubSample < 0 || p.ScrubSample > 1 {
 			return fmt.Errorf("config: pool %q scrub_sample must be within [0, 1]", name)
+		}
+		switch p.ReadFanout {
+		case "":
+			p.ReadFanout = ReadFanoutAuto
+		case ReadFanoutOff, ReadFanoutAuto, ReadFanoutAll:
+		default:
+			return fmt.Errorf("config: pool %q read_fanout must be off, auto or all (got %q)", name, p.ReadFanout)
 		}
 		c.Pools[name] = p
 	}

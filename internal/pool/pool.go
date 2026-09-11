@@ -75,6 +75,16 @@ type Pool struct {
 	// two merges of the same directory must not interleave.
 	mu sync.Mutex
 
+	// readFanout is the read_fanout mode. pickMu guards replica picks and
+	// streams, the ranges in flight per (member, file) for members whose
+	// streams are limited (limitsStreams).
+	readFanout fanoutMode
+	pickMu     sync.Mutex
+	streams    map[streamKey]int
+	// resolveCache keeps resolveFile's answers; every index change
+	// invalidates it.
+	resolveCache *replicaCache
+
 	bg     sync.WaitGroup
 	stopBG chan struct{}
 	bgMu   sync.Mutex
@@ -91,6 +101,10 @@ func New(opt Options) (*Pool, error) {
 	if len(opt.Members) == 0 {
 		return nil, fmt.Errorf("pool %q: no members", opt.Name)
 	}
+	fanout, err := parseFanout(opt.Settings.ReadFanout)
+	if err != nil {
+		return nil, fmt.Errorf("pool %q: %w", opt.Name, err)
+	}
 	dbPath := ":memory:"
 	if opt.StateDir != "" {
 		dbPath = filepath.Join(opt.StateDir, "pool-"+opt.Name+".db")
@@ -99,10 +113,12 @@ func New(opt Options) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Pool{name: opt.Name, settings: opt.Settings, db: db, stateDir: opt.StateDir, byName: map[string]*member{}, now: opt.Now}
+	p := &Pool{name: opt.Name, settings: opt.Settings, db: db, stateDir: opt.StateDir, byName: map[string]*member{}, now: opt.Now,
+		readFanout: fanout, streams: map[streamKey]int{}}
 	if p.now == nil {
 		p.now = time.Now
 	}
+	p.resolveCache = newReplicaCache(replicaCacheTTL, replicaCacheMax, p.now)
 	for i, m := range opt.Members {
 		if m.Provider == nil {
 			db.Close()
@@ -121,8 +137,13 @@ func New(opt Options) (*Pool, error) {
 			db.Close()
 			return nil, fmt.Errorf("pool %q: member %q: %w", opt.Name, m.Name, err)
 		}
+		caps := m.Provider.Capabilities()
 		mm := &member{name: m.Name, p: m.Provider, root: root, weight: m.Weight, capacity: m.Capacity, adopt: m.Adopt, order: i, dirIDs: map[string]string{},
-			health: provider.NewHealth(provider.HealthOptions{Threshold: 3, OutAfter: opt.Settings.OutAfter, Now: p.now})}
+			health:      provider.NewHealth(provider.HealthOptions{Threshold: 3, OutAfter: opt.Settings.OutAfter, Now: p.now}),
+			maxInflight: caps.MaxConnsPerHost, unofficial: caps.Tier == provider.TierUnofficial}
+		if mm.maxInflight <= 0 {
+			mm.maxInflight = defaultMaxInflight
+		}
 		if mm.weight <= 0 {
 			mm.weight = 1
 		}
@@ -143,9 +164,11 @@ func (p *Pool) probeInterval() time.Duration { return p.settings.ProbeInterval }
 
 // MemberStatus is one member as the control plane sees it.
 type MemberStatus struct {
-	Name      string
-	Root      string
-	Health    provider.HealthSnapshot
+	Name   string
+	Root   string
+	Health provider.HealthSnapshot
+	// LatencyMS is the member's average read latency, in milliseconds per
+	// MiB (a request under a MiB counts as one).
 	LatencyMS float64
 	Weight    float64
 	Capacity  int64
@@ -171,7 +194,10 @@ func (p *Pool) RootID() string { return rootID }
 // Capabilities derives the pool's matrix from its members: it can do what
 // every member can do, and its rate budget is the sum of theirs, because the
 // members each keep their own limiter and the pool's must not throttle
-// below what they allow together.
+// below what they allow together. Its connection budget is the sum of the
+// members' too when reads fan out across them (a member that declares none
+// counts defaultMaxInflight, as pickReplica does); one ordered stream per
+// file (read_fanout off) can use only one member's at a time.
 func (p *Pool) Capabilities() provider.Caps {
 	c := provider.Caps{
 		StreamList:   true,
@@ -217,7 +243,15 @@ func (p *Pool) Capabilities() provider.Caps {
 		c.QPS.Meta += mc.QPS.Meta
 		c.QPS.Download += mc.QPS.Download
 		c.QPS.Upload += mc.QPS.Upload
-		c.MaxConnsPerHost += mc.MaxConnsPerHost
+		conns := mc.MaxConnsPerHost
+		if conns <= 0 {
+			conns = defaultMaxInflight
+		}
+		if p.readFanout == fanoutOff {
+			c.MaxConnsPerHost = max(c.MaxConnsPerHost, conns)
+		} else {
+			c.MaxConnsPerHost += conns
+		}
 		first = false
 	}
 	c.HashTypes = sortedHashes(hashes)

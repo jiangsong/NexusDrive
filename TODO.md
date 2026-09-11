@@ -1610,6 +1610,10 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   `pools.<n>.read_fanout: off|auto|all`（unofficial 层默认同文件单流），`resolveFile` 结果 5 s 缓存，`tryReplicas`
   遇 404 先 `Stat` 再标 missing；`cache.Options.WholeLayoutMin`（64 MiB）以上按偏移直接写 `hydrated/<fh>.part` + 位图，
   写满 rename；已 hydrate 文件 `Read` 返回 `fuse.ReadResultFd`；`FileLseeker`；挂载内 `NodeCopyFileRanger`。
+- **进度**：池副本扇出已完成——`internal/pool/pick.go`（`pickReplica`：在途数 / 连接预算 + 每 MiB 延迟 EWMA，degraded 成员加罚分，
+  unofficial 层在 `read_fanout: auto` 下同文件单流）、`replicacache.go`（`resolveFile` 5 s 缓存，每个索引事务与 `execIndex` 失效）、
+  404 先 `Stat` 再标 missing、`pools.<n>.read_fanout` 校验；上面列出的 `internal/pool` 与 `test/perf` 验收测试均已在。
+  未做：速率窗口、全局在途预算、稀疏整文件布局，以及 vfs 侧「`MaxConnsPerHost > 1` 时顺序窗口起点取 `min(ReadAheadBlocks, MaxConnsPerHost)`」。
 - **验收**：
   - `internal/pool`：`TestReadFanoutSpreadsBlocks`（12 块、窗口 8 → 每成员 `ReadRange` 4 ± 1）、`TestReadFanoutSkipsDownMember`、
     `TestReadFanoutPrefersFast`；`test/perf`：`TestPoolReadFanoutAddsBandwidth`（20 ms 延迟、48 MiB、3 成员 < 0.5× 单成员）。

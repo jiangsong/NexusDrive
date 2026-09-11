@@ -118,7 +118,7 @@ func (p *Pool) giveUpOn(ctx context.Context, m *member, op pendingOp) {
 		return
 	}
 	p.mu.Lock()
-	_, _ = p.db.ExecContext(ctx, `DELETE FROM replicas WHERE member = ? AND path = ?`, m.name, op.path)
+	_, _ = p.execIndex(ctx, `DELETE FROM replicas WHERE member = ? AND path = ?`, m.name, op.path)
 	p.mu.Unlock()
 	m.mu.Lock()
 	m.needsScrub = true

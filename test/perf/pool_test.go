@@ -1,9 +1,12 @@
 package perf
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,5 +254,111 @@ func TestRepairCostIsOneUploadPerReplica(t *testing.T) {
 	}
 	if extra := h.members[0].Calls("BeginUpload") + h.members[1].Calls("BeginUpload") - uploadsBefore; extra != files {
 		t.Fatalf("repair began %d uploads for %d files", extra, files)
+	}
+}
+
+// TestPoolReadFanoutAddsBandwidth: a 3-replica file reads at close to three
+// drives' speed. Each member serves at most two requests at a time (its
+// connection budget, which is what caps a real drive's throughput), and a
+// reader issues eight block requests at once the way VFS readahead does.
+// One member serves 12 blocks two at a time; three members serve them six at
+// a time. This is the one perf test that asserts a wall-clock ratio: call
+// counts cannot show bandwidth. The pool is driven directly so the VFS
+// window policy does not blur what the replica picker adds.
+func TestPoolReadFanoutAddsBandwidth(t *testing.T) {
+	const (
+		blockSize = 4 << 20
+		blocks    = 12 // 48 MiB
+		window    = 8
+		latency   = 20 * time.Millisecond
+		conns     = 2
+		// The design target is 0.5 (docs/pool-v2.md §4.5) and the expected
+		// ratio is about 1/3; 0.6 leaves room for a loaded CI machine
+		// without letting "no fan-out at all" (≈ 1.0) pass.
+		maxRatio = 0.6
+	)
+	data := make([]byte, 0, blocks*blockSize)
+	for i := 0; i < blocks; i++ {
+		data = append(data, bytes.Repeat([]byte{byte('A' + i)}, blockSize)...)
+	}
+	timed := func(members int) time.Duration {
+		opt := pool.Options{Name: "home", StateDir: t.TempDir(), Settings: config.Pool{Replicas: members, MinReplicas: 1}}
+		for i := 0; i < members; i++ {
+			f := fakeprovider.New(fmt.Sprintf("m%d", i))
+			f.Seed("/movie.mkv", data)
+			caps := f.Capabilities()
+			caps.MaxConnsPerHost = conns
+			f.SetCaps(caps)
+			opt.Members = append(opt.Members, pool.Member{Name: f.Name(), Provider: f, Adopt: true})
+			f.SetFaults(func(ft *fakeprovider.Faults) { ft.Latency = latency; ft.MaxConcurrent = conns })
+		}
+		p, err := pool.New(opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		ctx := context.Background()
+		entries, _, err := p.List(ctx, p.RootID(), "")
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("list = %v, %v", entries, err)
+		}
+		e := entries[0]
+		best := time.Duration(0)
+		for round := 0; round < 2; round++ {
+			next := make(chan int, blocks)
+			for i := 0; i < blocks; i++ {
+				next <- i
+			}
+			close(next)
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			var failed error
+			fail := func(err error) {
+				mu.Lock()
+				if failed == nil {
+					failed = err
+				}
+				mu.Unlock()
+			}
+			start := time.Now()
+			for w := 0; w < window; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					// A reused buffer keeps copying out of the measurement:
+					// what is timed is the members, not allocation.
+					got := make([]byte, blockSize)
+					for i := range next {
+						off := int64(i) * blockSize
+						rc, err := p.ReadRange(ctx, e.ID, e.Version, off, blockSize)
+						if err != nil {
+							fail(err)
+							continue
+						}
+						_, err = io.ReadFull(rc, got)
+						rc.Close()
+						if err != nil || !bytes.Equal(got, data[off:off+blockSize]) {
+							fail(fmt.Errorf("block %d: %v", i, err))
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			took := time.Since(start)
+			if failed != nil {
+				t.Fatalf("%d members: %v", members, failed)
+			}
+			if best == 0 || took < best {
+				best = took
+			}
+		}
+		return best
+	}
+	single := timed(1)
+	fused := timed(3)
+	ratio := float64(fused) / float64(single)
+	t.Logf("48 MiB in 12 blocks: 1 member %v, 3 members %v, ratio %.2f", single, fused, ratio)
+	if ratio >= maxRatio {
+		t.Fatalf("3 replicas read in %.2f× the single-member time, want < %.2f", ratio, maxRatio)
 	}
 }

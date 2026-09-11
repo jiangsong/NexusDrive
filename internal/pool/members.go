@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloudfs/internal/net/retry"
@@ -24,6 +25,18 @@ type member struct {
 	adopt    bool
 	order    int
 	health   *provider.Health
+	// maxInflight is how many reads the member is meant to serve at once:
+	// its connection budget (Caps.MaxConnsPerHost), defaultMaxInflight when
+	// it declares none.
+	maxInflight int
+	// unofficial marks a drive on an unofficial API (Caps.Tier), whose
+	// concurrent ranges of one file read_fanout auto limits.
+	unofficial bool
+	// inflight counts reads being served, from the call until the body is
+	// drained or closed; served sums the bytes they returned. Both feed
+	// pickReplica.
+	inflight atomic.Int32
+	served   atomic.Int64
 
 	mu sync.Mutex
 	// dirIDs caches path → directory id on this member; the member_dirs
@@ -34,8 +47,10 @@ type member struct {
 	// every operation that would have used it.
 	lastTry time.Time
 	// latency is an exponentially weighted average of read latency, in
-	// nanoseconds; reads prefer the replica that answers fastest.
-	latency float64
+	// nanoseconds per MiB; reads prefer the replica that answers fastest.
+	// measured is false until the first sample.
+	latency  float64
+	measured bool
 	// needsScrub is set when the member missed more than the op log kept;
 	// the next scrub re-lists everything it holds.
 	needsScrub bool
@@ -66,13 +81,25 @@ func (m *member) note(err error) {
 	m.health.Note(err)
 }
 
-// noteLatency folds one read's duration into the member's average.
-func (m *member) noteLatency(d time.Duration) {
+// latencyUnit is the request size read latency is normalised to, so a
+// member answering 32 MiB requests compares fairly with one answering 4 MiB
+// ones. A smaller request — a link resolve passes 0 — counts as one unit:
+// below a MiB the time measures the round trip, not the transfer.
+const latencyUnit = 1 << 20
+
+// noteLatency folds one read of n bytes that took d into the member's
+// per-MiB average.
+func (m *member) noteLatency(d time.Duration, n int64) {
+	if n < latencyUnit {
+		n = latencyUnit
+	}
+	perUnit := float64(d) * latencyUnit / float64(n)
 	m.mu.Lock()
-	if m.latency == 0 {
-		m.latency = float64(d)
+	if !m.measured {
+		m.latency = perUnit
+		m.measured = true
 	} else {
-		m.latency = 0.8*m.latency + 0.2*float64(d)
+		m.latency = 0.8*m.latency + 0.2*perUnit
 	}
 	m.mu.Unlock()
 }

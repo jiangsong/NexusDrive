@@ -580,7 +580,7 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 控制面:`/pool/status|create|members|members/state|members/drain|members/remove|repair|scrub|rebuild|divergences|join`,`/fs/list` 与 `/fs/stat` 的条目带 `availability`、`replicas_live/target`、`degraded_reason`;`/status.remotes[].state` 对所有 remote 报告可达性。
 
-**v2（设计稿，未实现）**：带宽融合（副本块级扇出、请求合并、`Transfer` 令牌类、目录读序预取）、`cloudfs export` 导出作业、CRUSH-lite 放置（按路径规则、成员 class、故障域、配额满换盘、rebalance/backfill、`min_replicas` 诚实化）见 `docs/pool-v2.md`，对应 `TODO.md` T-29 ~ T-33。
+**v2（设计稿，未实现）**：带宽融合（请求合并、`Transfer` 令牌类、目录读序预取；副本块级扇出已实现，见 `docs/pool.md`）、`cloudfs export` 导出作业、CRUSH-lite 放置（按路径规则、成员 class、故障域、配额满换盘、rebalance/backfill、`min_replicas` 诚实化）见 `docs/pool-v2.md`，对应 `TODO.md` T-29 ~ T-33。
 
 ## 5. 可靠性场景矩阵
 

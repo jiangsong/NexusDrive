@@ -112,6 +112,7 @@ func TestValidateErrors(t *testing.T) {
 		"pool exposed twice":      "remotes: {a: {type: x}, h1: {type: pool, pool: p}, h2: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}]}}",
 		"pool min > replicas":     "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}], replicas: 1, min_replicas: 2}}",
 		"pool bad root":           "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a, root: relative}]}}",
+		"pool bad read_fanout":    "remotes: {a: {type: x}, home: {type: pool, pool: p}}\npools: {p: {members: [{remote: a}], read_fanout: sometimes}}",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
@@ -167,7 +168,7 @@ mounts:
 		t.Fatal(err)
 	}
 	p := c.Pools["home"]
-	if p.Replicas != 3 || p.MinReplicas != 1 || p.OutAfter != 10*time.Minute || p.HoldMaxBytes != 8<<30 || p.ScrubSample != 0.05 {
+	if p.Replicas != 3 || p.MinReplicas != 1 || p.OutAfter != 10*time.Minute || p.HoldMaxBytes != 8<<30 || p.ScrubSample != 0.05 || p.ReadFanout != ReadFanoutAuto {
 		t.Fatalf("defaults not applied: %+v", p)
 	}
 	if p.Members[1].Capacity != 2<<40 || p.Members[1].Weight != 2 || p.Members[1].Adopt == nil || *p.Members[1].Adopt {

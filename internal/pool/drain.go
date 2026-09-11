@@ -101,7 +101,7 @@ func (p *Pool) DrainOnce(ctx context.Context) (removed int, empty bool, err erro
 				empty = false
 				continue
 			}
-			_, _ = p.db.ExecContext(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, c.path, m.name)
+			_, _ = p.execIndex(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, c.path, m.name)
 			removed++
 		}
 		var left int

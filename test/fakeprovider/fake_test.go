@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
+	"time"
 
 	"cloudfs/internal/provider"
 )
@@ -158,5 +160,53 @@ func TestRegistry(t *testing.T) {
 	}
 	if _, err := provider.New("nope", "x", nil); err == nil {
 		t.Fatal("unknown type should error")
+	}
+}
+
+// TestMaxConcurrentServesCallsInTurn: a drive that serves N calls at once
+// makes the rest wait, which is what a per-member bandwidth test needs.
+func TestMaxConcurrentServesCallsInTurn(t *testing.T) {
+	f := New("t")
+	e := f.Seed("/a", []byte("x"))
+	f.SetFaults(func(ft *Faults) { ft.Latency = 20 * time.Millisecond; ft.MaxConcurrent = 2 })
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := f.Stat(context.Background(), e.ID); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := f.PeakConcurrent(); got != 2 {
+		t.Fatalf("peak concurrent calls = %d, want 2", got)
+	}
+	if took := time.Since(start); took < 55*time.Millisecond {
+		t.Fatalf("6 calls of 20ms two at a time took %v, want >= 60ms", took)
+	}
+}
+
+// TestPeakConcurrentCountsOverlappingCalls: without a limit, calls overlap
+// and the high-water mark says so.
+func TestPeakConcurrentCountsOverlappingCalls(t *testing.T) {
+	f := New("t")
+	e := f.Seed("/a", []byte("x"))
+	f.SetFaults(func(ft *Faults) { ft.Latency = 30 * time.Millisecond })
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := f.ReadRange(context.Background(), e.ID, "", 0, 1); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := f.PeakConcurrent(); got < 2 || got > 4 {
+		t.Fatalf("peak concurrent calls = %d, want 2..4", got)
 	}
 }

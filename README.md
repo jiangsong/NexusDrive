@@ -261,15 +261,16 @@ pools:
   home:
     members: [{remote: ali}, {remote: gd}]
     replicas: 3
+    read_fanout: auto   # off | auto | all：块读如何分到副本
 mounts:
   - path: /mnt/cloud
     layout:
       /: {remote: home}
 ```
 
-一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；第一次使用见 [从零开始](docs/getting-started.md)，配置项与内部机制见 [存储池](docs/pool.md)。
+一个目录、N 份副本、任一网盘掉线不影响使用、坏了自动在其它网盘重建、本地只做热缓存；大文件的并行块读分散到各个副本（`read_fanout`）；每个网盘上看到的仍是真实文件。界面「存储池」一屏或 `cloudfs pool …` 管理；第一次使用见 [从零开始](docs/getting-started.md)，配置项与内部机制见 [存储池](docs/pool.md)。
 
-**规划中（未实现）**：带宽融合（一个 3 副本文件从 3 个网盘并行读）、目录读序小文件预取、`cloudfs export` 导出到移动硬盘、按路径的放置规则与 rebalance，见 [存储池 v2](docs/pool-v2.md)。届时配置形如：
+**规划中（未实现）**：带宽融合的其余部分（预取窗口按成员连接数起步、速率窗口）、目录读序小文件预取、`cloudfs export` 导出到移动硬盘、按路径的放置规则与 rebalance，见 [存储池 v2](docs/pool-v2.md)。届时配置形如：
 
 ```yaml
 pools:
@@ -277,7 +278,6 @@ pools:
     rules:                                   # 规划中
       - {prefix: /photos, replicas: 2, prefer: [nas]}
     failure_domain: account
-    read_fanout: auto
 export:                                      # 规划中
   transfers: 4
   streams: 4

@@ -101,7 +101,7 @@ func (p *Pool) idFor(ctx context.Context, pth string) (string, error) {
 	id = newID()
 	// Two callers may race to mint the same path; the UNIQUE constraint
 	// keeps one id per path, and the loser reads the winner's.
-	if _, err := p.db.ExecContext(ctx, `INSERT OR IGNORE INTO ids(id, path, created_at) VALUES(?, ?, ?)`, id, pth, time.Now().UnixNano()); err != nil {
+	if _, err := p.execIndex(ctx, `INSERT OR IGNORE INTO ids(id, path, created_at) VALUES(?, ?, ?)`, id, pth, time.Now().UnixNano()); err != nil {
 		return "", fmt.Errorf("pool: %w", err)
 	}
 	if err := p.db.QueryRowContext(ctx, `SELECT id FROM ids WHERE path = ?`, pth).Scan(&id); err != nil {
