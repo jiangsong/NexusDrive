@@ -12,7 +12,7 @@ Branch: `feat/pool-v2`. Language: code and comments in English; user docs in Chi
 - `internal/vfs` owns cache/consistency/upload decisions; `fusefs`/`mcpsrv` stay thin adapters.
 - Perf tests (`test/perf`) assert provider call counts via `test/fakeprovider`, never wall clock (single exception: `TestPoolReadFanoutAddsBandwidth`/export parallelism tests which assert a ratio).
 - TDD: write the failing test first, then implement. Keep files < 800 lines; new files 200–400 lines typical.
-- Commit per task with conventional-commit subject (`feat:`/`fix:`/`test:`/`refactor:`), body explains why, and end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Commit per task with conventional-commit subject (`feat:`/`fix:`/`test:`/`refactor:`), body explains why, and end with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 - Config YAML keys are snake_case; every new key has a default filled in `internal/config` validation and appears in `README.md` config example only once implemented (remove the 【规划中】 marker for what you ship).
 - Existing invariants to respect (see `CLAUDE.md`): commit happens at FLUSH; conflict detection uses `RemoteVersion`; `cloudfs-local:` ids; one staging snapshot per inode; `meta.AdoptByIno` CAS.
 
