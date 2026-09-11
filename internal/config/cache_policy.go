@@ -14,16 +14,30 @@ import (
 // for "not set", which is why 0 is never a meaningful explicit override for
 // them (a caller who wants readahead disabled sets Options.ReadAheadBlocks
 // to 0 at the daemon level instead).
+//
+// ReadaheadMax and ReadaheadRequest are special: vfs.Mount.Policy carries
+// them straight through to vfs (see ResolvedCachePolicy), and 0 there means
+// "not configured — fall back to vfs's own Options.ReadAheadBlocks /
+// Options.ReadaheadRequest (CLOUDFS_READAHEAD_BLOCKS /
+// CLOUDFS_READAHEAD_REQUEST)". So the "none"/"" preset baseline must leave
+// both at 0 rather than baking in a resolved default: doing otherwise would
+// make every daemon-built mount permanently override the global tuning,
+// silently, even with no cache.policy configured at all.
 type CachePolicy struct {
 	// Preset is one of "", "none", "media", "photos", "code". "" and "none"
 	// both mean "no preset defaults, only the built-in defaults".
-	Preset             string        `yaml:"preset"`
-	SmallFileWhole     *bool         `yaml:"small_file_whole"`
-	SmallFileThreshold Size          `yaml:"small_file_threshold"` // default 4MiB
-	DirReadahead       *int          `yaml:"dir_readahead"`        // files ahead; default 32; 0 = off
-	ReadaheadMax       Size          `yaml:"readahead_max"`        // default 64MiB
-	ReadaheadRequest   Size          `yaml:"readahead_request"`    // default: derive per mount (Task 4)
-	ReadaheadLead      time.Duration `yaml:"readahead_lead"`       // default 8s
+	Preset             string `yaml:"preset"`
+	SmallFileWhole     *bool  `yaml:"small_file_whole"`
+	SmallFileThreshold Size   `yaml:"small_file_threshold"` // default 4MiB
+	DirReadahead       *int   `yaml:"dir_readahead"`        // files ahead; default 32; 0 = off
+	// ReadaheadMax and ReadaheadRequest: 0 means "not configured"; vfs then
+	// falls back to Options.ReadAheadBlocks / Options.ReadaheadRequest,
+	// whose own defaults are effectively 64MiB (16 blocks * the 4MiB default
+	// block size) and "derive per mount" (Task 4) respectively. Setting
+	// either here (directly or via a preset) always overrides that fallback.
+	ReadaheadMax     Size          `yaml:"readahead_max"`
+	ReadaheadRequest Size          `yaml:"readahead_request"`
+	ReadaheadLead    time.Duration `yaml:"readahead_lead"` // default 8s
 }
 
 // ResolvedCachePolicy is the effective, fully-defaulted cache policy for one
@@ -31,6 +45,11 @@ type CachePolicy struct {
 // been applied. It holds plain values (no pointers): daemon converts it,
 // field by field, into vfs.CachePolicy when it builds each vfs.Mount, so
 // that vfs never needs to import this package's option types.
+//
+// ReadaheadMax and ReadaheadRequest keep the "0 = not configured" meaning
+// from CachePolicy all the way through resolution — see the comment on
+// CachePolicy. Every other field always resolves to a concrete value (there
+// is no competing vfs.Options fallback for them to accidentally shadow).
 type ResolvedCachePolicy struct {
 	SmallFileWhole     bool
 	SmallFileThreshold Size
@@ -47,12 +66,16 @@ var knownCachePresets = map[string]bool{
 
 // presetCachePolicy returns the built-in defaults for a preset name. "" and
 // "none" (and any other value already rejected by validation) fall through
-// to the plain defaults.
+// to the plain defaults, which deliberately leave ReadaheadMax and
+// ReadaheadRequest at 0 ("not configured") rather than baking in the 64MiB /
+// derive-per-mount behaviour those fallbacks document — that documented
+// behaviour lives in vfs's own Options defaults, not here, so it stays a
+// single source of truth and CLOUDFS_READAHEAD_BLOCKS keeps working when no
+// cache.policy is set at all.
 func presetCachePolicy(preset string) ResolvedCachePolicy {
 	r := ResolvedCachePolicy{
 		SmallFileThreshold: 4 << 20,
 		DirReadahead:       32,
-		ReadaheadMax:       64 << 20,
 		ReadaheadLead:      8 * time.Second,
 	}
 	switch preset {
@@ -142,7 +165,10 @@ func ResolveCachePolicy(global CachePolicy, layout *CachePolicy, blockSize int64
 	if r.ReadaheadRequest != 0 && blockSize > 0 && int64(r.ReadaheadRequest)%blockSize != 0 {
 		return ResolvedCachePolicy{}, fmt.Errorf("config: cache readahead_request must be a positive multiple of block_size (%d), got %s", blockSize, r.ReadaheadRequest)
 	}
-	if blockSize > 0 && int64(r.ReadaheadMax) < blockSize {
+	// 0 means "not configured" (fall back to vfs's own Options.ReadAheadBlocks
+	// default), so it is exempt from the >= block_size requirement the same
+	// way 0 is exempt from the multiple-of-block_size requirement above.
+	if r.ReadaheadMax != 0 && blockSize > 0 && int64(r.ReadaheadMax) < blockSize {
 		return ResolvedCachePolicy{}, fmt.Errorf("config: cache readahead_max (%s) must be >= block_size (%d)", r.ReadaheadMax, blockSize)
 	}
 	return r, nil

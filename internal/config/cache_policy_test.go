@@ -11,12 +11,17 @@ func TestResolveCachePolicyPresetDefaults(t *testing.T) {
 		preset string
 		want   ResolvedCachePolicy
 	}{
+		// "", "none" and "code" all leave ReadaheadMax/ReadaheadRequest at 0
+		// ("not configured"): vfs falls back to its own Options defaults for
+		// them (documented as 64MiB / derive-per-mount), and baking those
+		// defaults in here would make every daemon-built mount silently
+		// override that fallback even with no cache.policy configured.
 		{"", ResolvedCachePolicy{
-			SmallFileThreshold: 4 << 20, DirReadahead: 32, ReadaheadMax: 64 << 20,
+			SmallFileThreshold: 4 << 20, DirReadahead: 32, ReadaheadMax: 0,
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
 		{"none", ResolvedCachePolicy{
-			SmallFileThreshold: 4 << 20, DirReadahead: 32, ReadaheadMax: 64 << 20,
+			SmallFileThreshold: 4 << 20, DirReadahead: 32, ReadaheadMax: 0,
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
 		{"media", ResolvedCachePolicy{
@@ -28,7 +33,7 @@ func TestResolveCachePolicyPresetDefaults(t *testing.T) {
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
 		{"code", ResolvedCachePolicy{
-			SmallFileThreshold: 1 << 20, DirReadahead: 128, ReadaheadMax: 64 << 20,
+			SmallFileThreshold: 1 << 20, DirReadahead: 128, ReadaheadMax: 0,
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
 	}
