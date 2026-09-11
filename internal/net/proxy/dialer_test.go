@@ -251,3 +251,67 @@ func TestTransportReusesConnections(t *testing.T) {
 	}
 	tr.CloseIdleConnections()
 }
+
+func TestTransportForSetsMaxConnsPerHost(t *testing.T) {
+	tr, err := transportFor(Outbound{Type: "direct"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.MaxConnsPerHost != 0 || tr.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("conns<=0 should keep today's defaults, got %+v", tr)
+	}
+	tr, err = transportFor(Outbound{Type: "direct"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.MaxConnsPerHost != 5 || tr.MaxIdleConnsPerHost != 5 {
+		t.Fatalf("conns=5 should bound both idle and in-flight, got %+v", tr)
+	}
+}
+
+func TestClientWithLimitAppliesMaxConnsPerHost(t *testing.T) {
+	m, err := NewManager(ManagerOptions{Rules: []string{"FINAL,direct"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, setConns := m.ClientWithLimit("", 5*time.Second)
+	setConns(3)
+	tr := client.Transport.(*ruleTransport)
+	o := Outbound{Name: "direct", Type: "direct"}
+
+	first, err := tr.transportFor(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.MaxConnsPerHost != 3 {
+		t.Fatalf("MaxConnsPerHost = %d, want 3", first.MaxConnsPerHost)
+	}
+
+	setConns(5)
+	second, err := tr.transportFor(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.MaxConnsPerHost != 5 {
+		t.Fatalf("MaxConnsPerHost = %d, want 5", second.MaxConnsPerHost)
+	}
+	if first == second {
+		t.Fatal("changing the limit should yield a distinct transport")
+	}
+}
+
+func TestClientPlainStillGetsTodaysDefaults(t *testing.T) {
+	m, err := NewManager(ManagerOptions{Rules: []string{"FINAL,direct"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := m.Client("", 5*time.Second)
+	tr := client.Transport.(*ruleTransport)
+	got, err := tr.transportFor(Outbound{Name: "direct", Type: "direct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxConnsPerHost != 0 || got.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("Client() without ClientWithLimit should keep the old defaults, got %+v", got)
+	}
+}

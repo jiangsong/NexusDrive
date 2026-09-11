@@ -394,7 +394,7 @@ func (m *Manager) checkGroup(ctx context.Context, g Group) {
 
 // probe measures how long a HEAD request through o takes.
 func probe(ctx context.Context, o Outbound, target string, timeout time.Duration) (time.Duration, error) {
-	tr, err := transportFor(o)
+	tr, err := transportFor(o, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -465,11 +465,20 @@ func (m *Manager) Health() []Health {
 	return out
 }
 
-// transportFor builds an http.Transport that egresses through o.
-func transportFor(o Outbound) (*http.Transport, error) {
+// transportFor builds an http.Transport that egresses through o. conns
+// bounds both the idle and in-flight connections per host; conns<=0 keeps
+// today's behaviour (8 idle, unbounded in flight).
+func transportFor(o Outbound, conns int) (*http.Transport, error) {
+	idle := 8
+	var maxConns int
+	if conns > 0 {
+		idle = conns
+		maxConns = conns
+	}
 	tr := &http.Transport{
 		MaxIdleConns:        64,
-		MaxIdleConnsPerHost: 8,
+		MaxIdleConnsPerHost: idle,
+		MaxConnsPerHost:     maxConns,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
@@ -503,6 +512,16 @@ func transportFor(o Outbound) (*http.Transport, error) {
 	return tr, nil
 }
 
+// transportKey identifies one cached transport: an outbound plus the
+// connection limit it was built with. The limit is part of the key so that
+// changing it (setConns) never hands an in-flight caller a transport that
+// was just closed out from under it — callers keep whatever transport they
+// already picked up, and only new lookups see the new limit.
+type transportKey struct {
+	name, typ, addr string
+	conns           int
+}
+
 // ruleTransport routes each request through the outbound its host resolves to.
 // One instance serves every provider, so a single rule set governs the whole
 // process.
@@ -513,7 +532,8 @@ type ruleTransport struct {
 	override string
 
 	mu         sync.Mutex
-	transports map[string]*http.Transport
+	conns      int // 0 = today's defaults; see transportFor.
+	transports map[transportKey]*http.Transport
 }
 
 func (t *ruleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -534,21 +554,53 @@ func (t *ruleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (t *ruleTransport) transportFor(o Outbound) (*http.Transport, error) {
-	key := o.Name + "|" + o.Type + "|" + o.Addr
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	conns := t.conns
+	key := transportKey{o.Name, o.Type, o.Addr, conns}
 	if tr, ok := t.transports[key]; ok {
+		t.mu.Unlock()
 		return tr, nil
 	}
-	tr, err := transportFor(o)
+	t.mu.Unlock()
+
+	tr, err := transportFor(o, conns)
 	if err != nil {
 		return nil, err
 	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if existing, ok := t.transports[key]; ok {
+		// Another caller built one for the same key while we were building
+		// ours (or the limit briefly cycled back); keep the one already in
+		// the cache and drop the duplicate we just made.
+		tr.CloseIdleConnections()
+		return existing, nil
+	}
 	if t.transports == nil {
-		t.transports = map[string]*http.Transport{}
+		t.transports = map[transportKey]*http.Transport{}
 	}
 	t.transports[key] = tr
 	return tr, nil
+}
+
+// setConns changes the connection limit applied to transports built from now
+// on. Transports already cached under the old limit are closed and dropped:
+// a request in flight through one keeps using it (RoundTrip already has the
+// pointer), but nothing new picks it up again.
+func (t *ruleTransport) setConns(n int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.conns == n {
+		return
+	}
+	t.conns = n
+	for k, tr := range t.transports {
+		if k.conns != n {
+			tr.CloseIdleConnections()
+			delete(t.transports, k)
+		}
+	}
 }
 
 // CloseIdleConnections releases pooled connections.
@@ -563,13 +615,25 @@ func (t *ruleTransport) CloseIdleConnections() {
 // Transport returns an http.RoundTripper that applies the rules. Pass a
 // non-empty override to pin a remote to one outbound regardless of the rules.
 func (m *Manager) Transport(override string) http.RoundTripper {
-	return &ruleTransport{m: m, override: override, transports: map[string]*http.Transport{}}
+	return &ruleTransport{m: m, override: override, transports: map[transportKey]*http.Transport{}}
 }
 
-// Client returns an http.Client using Transport(override).
-func (m *Manager) Client(override string, timeout time.Duration) *http.Client {
+// ClientWithLimit returns an http.Client using Transport(override), plus a
+// setter that bounds the connections per host across every outbound this
+// client's transport builds. Passing conns<=0 to the setter (or never
+// calling it) keeps today's defaults: 8 idle per host, unbounded in flight.
+func (m *Manager) ClientWithLimit(override string, timeout time.Duration) (*http.Client, func(conns int)) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	return &http.Client{Transport: m.Transport(override), Timeout: timeout}
+	rt := &ruleTransport{m: m, override: override, transports: map[transportKey]*http.Transport{}}
+	return &http.Client{Transport: rt, Timeout: timeout}, rt.setConns
+}
+
+// Client returns an http.Client using Transport(override), with today's
+// fixed connection limits. It is a thin wrapper over ClientWithLimit for
+// callers that have no per-remote override to apply.
+func (m *Manager) Client(override string, timeout time.Duration) *http.Client {
+	client, _ := m.ClientWithLimit(override, timeout)
+	return client
 }

@@ -156,6 +156,11 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		if setter, ok := p.(provider.TokenPersistenceSetter); ok && cfg.SourcePath != "" {
 			setter.SetTokenPersister(config.TokenPersister(cfg, name))
 		}
+		// An explicit per-remote override must also show up in the caps
+		// every upper layer reads, not just the transport buildProvider
+		// already bounded; a no-op when resolved.MaxConns is unset. It goes
+		// on before Instrument so both wrappers' interfaces compose.
+		p = provider.WithMaxConns(p, resolved.MaxConns)
 		st := provider.NewStats()
 		d.CallStats[name] = st
 		d.Providers[name] = provider.Instrument(p, st)
@@ -642,7 +647,7 @@ func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *r
 	}
 	// The factory may build its own client; give it a preconfigured one so the
 	// proxy rules and limiter apply without every driver repeating the wiring.
-	httpClient := pm.Client(rc.Proxy, 0)
+	httpClient, setConns := pm.ClientWithLimit(rc.Proxy, 0)
 	cfg["_http_client"] = httpx.New(httpx.Options{
 		HTTP:     httpClient,
 		Remote:   name,
@@ -661,6 +666,18 @@ func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *r
 		httpClient.CloseIdleConnections()
 		return nil, nil, fmt.Errorf("daemon: remote %q: %w", name, err)
 	}
+	// The transport's connection limit follows an explicit per-remote
+	// override, else the backend's own recommendation, else the historical
+	// default of 8 — the same three-way fallback the caller applies to Caps
+	// (provider.WithMaxConns) once it has decided whether to wrap p at all.
+	effective := rc.MaxConns
+	if effective <= 0 {
+		effective = p.Capabilities().MaxConnsPerHost
+	}
+	if effective <= 0 {
+		effective = 8
+	}
+	setConns(effective)
 	return p, func() error {
 		httpClient.CloseIdleConnections()
 		if closer, ok := p.(interface{ Close() error }); ok {

@@ -170,6 +170,22 @@ type counting struct {
 	s  *Stats
 	ra RangeReaderAt // nil when the backend has no buffer-filling read
 	sl StreamLister  // nil when the backend has no streaming directory path
+	// maxConns, when > 0, overrides Capabilities().MaxConnsPerHost. It is
+	// set by WithMaxConns; Instrument leaves it at 0 so the backend's own
+	// advertised limit stands.
+	maxConns int
+}
+
+// Capabilities reports the backend's capability matrix, with
+// MaxConnsPerHost overridden when a caps override was set. Every
+// combinatorial wrapper below embeds *counting, so this one method covers
+// all of them without each needing its own.
+func (c *counting) Capabilities() Caps {
+	caps := c.Provider.Capabilities()
+	if c.maxConns > 0 {
+		caps.MaxConnsPerHost = c.maxConns
+	}
+	return caps
 }
 
 func (c *counting) ListStream(ctx context.Context, dirID string, visit func(Entry) error) error {
@@ -425,7 +441,32 @@ func Instrument(p Provider, s *Stats) Provider {
 	if p == nil || s == nil {
 		return p
 	}
-	base := &counting{Provider: p, s: s}
+	return wrap(p, s, 0)
+}
+
+// WithMaxConns returns p wrapped so Capabilities().MaxConnsPerHost reports n,
+// preserving every optional interface p implements (ChangeLister,
+// ServerCopier, SinglePutter, RangeReaderAt, StreamLister) the same way
+// Instrument does — it reuses Instrument's combinatorial wrappers rather
+// than a wrapper family of its own, so the two compose: stacking Instrument
+// on top of WithMaxConns (the daemon's order, since the override is known
+// right after provider.New but call counting is wired in afterwards) keeps
+// both the override and every interface.
+//
+// n<=0 is a no-op: the provider's own advertised limit stands.
+func WithMaxConns(p Provider, n int) Provider {
+	if p == nil || n <= 0 {
+		return p
+	}
+	return wrap(p, nil, n)
+}
+
+// wrap builds the combinatorial counting/caps-override chain around p. s may
+// be nil (WithMaxConns has no stats to record into — Stats methods are all
+// nil-receiver safe); maxConns may be 0 (no caps override, Instrument's
+// ordinary case).
+func wrap(p Provider, s *Stats, maxConns int) Provider {
+	base := &counting{Provider: p, s: s, maxConns: maxConns}
 	if ra, ok := p.(RangeReaderAt); ok {
 		base.ra = ra
 	}

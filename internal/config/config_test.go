@@ -58,6 +58,13 @@ func TestParseExample(t *testing.T) {
 	if q := c.Remotes["p115"].QPS; q == nil || q.Meta != 1 || q.Download != 2 {
 		t.Fatalf("qps = %+v", q)
 	}
+	if c.Remotes["ali"].MaxConns != 0 {
+		t.Fatalf("max_conns should default to 0 (no override), got %d", c.Remotes["ali"].MaxConns)
+	}
+	withLimit, err := Parse([]byte("remotes: {a: {type: x, max_conns: 2}}"))
+	if err != nil || withLimit.Remotes["a"].MaxConns != 2 {
+		t.Fatalf("max_conns = %+v, %v", withLimit.Remotes["a"], err)
+	}
 	if c.Mounts[0].Layout["/media"].Mode != ModeReadonly || c.Mounts[0].Layout["/work"].DirTTL != time.Minute {
 		t.Fatalf("layout = %+v", c.Mounts[0].Layout)
 	}
@@ -87,6 +94,7 @@ func TestValidateErrors(t *testing.T) {
 		"unknown outbound":        "proxy: {groups: [{name: g, type: fallback, members: [zzz]}]}",
 		"bad rule target":         "proxy: {rules: [\"FINAL,ghost\"]}",
 		"bad mode":                "remotes: {a: {type: x}}\nmounts: [{path: /m, layout: {/x: {remote: a, mode: fast}}}]",
+		"negative max_conns":      "remotes: {a: {type: x, max_conns: -1}}",
 		"bad block size":          "cache: {block_size: 100}",
 		"unknown field":           "cache: {dirr: /x}",
 		"webdav prefix":           "webdav: {http: '127.0.0.1:8080', prefix: /}",

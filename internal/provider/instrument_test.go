@@ -293,3 +293,83 @@ func TestInstrumentKeepsTheOneRequestUploadBesideTheOthers(t *testing.T) {
 		}
 	}
 }
+
+// TestWithMaxConnsOverridesCapabilitiesAndKeepsEveryOptionalInterface: the
+// caps override must go through the same combinatorial wrappers Instrument
+// uses, or a backend with a change feed / server copy / one-request upload
+// loses it the moment a per-remote max_conns override is configured.
+func TestWithMaxConnsOverridesCapabilitiesAndKeepsEveryOptionalInterface(t *testing.T) {
+	cases := []struct {
+		name                  string
+		p                     Provider
+		changes, copies, puts bool
+	}{
+		{"plain", &stubProvider{}, false, false, false},
+		{"changes", &stubWithChanges{&stubProvider{}}, true, false, false},
+		{"copy", &stubWithCopy{&stubProvider{}}, false, true, false},
+		{"both", &stubWithBoth{&stubProvider{}}, true, true, false},
+		{"put only", &stubWithPut{&stubProvider{}}, false, false, true},
+		{"put and changes", &stubWithPutAndChanges{&stubProvider{}}, true, false, true},
+		{"put and copy", &stubWithPutAndCopy{&stubProvider{}}, false, true, true},
+		{"all three", &stubWithEverything{&stubProvider{}}, true, true, true},
+	}
+	for _, c := range cases {
+		w := WithMaxConns(c.p, 7)
+		if got := w.Capabilities().MaxConnsPerHost; got != 7 {
+			t.Errorf("%s: MaxConnsPerHost = %d, want 7", c.name, got)
+		}
+		if _, ok := w.(ChangeLister); ok != c.changes {
+			t.Errorf("%s: ChangeLister = %v, want %v", c.name, ok, c.changes)
+		}
+		if _, ok := w.(ServerCopier); ok != c.copies {
+			t.Errorf("%s: ServerCopier = %v, want %v", c.name, ok, c.copies)
+		}
+		if _, ok := w.(SinglePutter); ok != c.puts {
+			t.Errorf("%s: SinglePutter = %v, want %v", c.name, ok, c.puts)
+		}
+		if _, ok := w.(RangeReaderAt); !ok {
+			t.Errorf("%s: lost ReadRangeAt", c.name)
+		}
+		if _, ok := w.(StreamLister); !ok {
+			t.Errorf("%s: lost ListStream", c.name)
+		}
+		if Unwrap(w) != c.p {
+			t.Errorf("%s: Unwrap did not reach the backend", c.name)
+		}
+
+		// Stacking Instrument on top (the daemon's actual order: WithMaxConns
+		// right after provider.New, Instrument afterwards for call counting)
+		// must keep both the override and call counting, plus every optional
+		// interface — through the same combinatorial wrapper set.
+		st := NewStats()
+		both := Instrument(w, st)
+		if got := both.Capabilities().MaxConnsPerHost; got != 7 {
+			t.Errorf("%s: after Instrument, MaxConnsPerHost = %d, want 7", c.name, got)
+		}
+		if _, ok := both.(ChangeLister); ok != c.changes {
+			t.Errorf("%s: after Instrument, ChangeLister = %v, want %v", c.name, ok, c.changes)
+		}
+		if _, ok := both.(ServerCopier); ok != c.copies {
+			t.Errorf("%s: after Instrument, ServerCopier = %v, want %v", c.name, ok, c.copies)
+		}
+		if _, ok := both.(SinglePutter); ok != c.puts {
+			t.Errorf("%s: after Instrument, SinglePutter = %v, want %v", c.name, ok, c.puts)
+		}
+		both.List(context.Background(), "/", "")
+		if st.Snapshot()["list"] != 1 {
+			t.Errorf("%s: call counting stopped working once stacked on WithMaxConns", c.name)
+		}
+	}
+}
+
+// TestWithMaxConnsIsANoOpAtZero mirrors the transport-level rule: conns<=0
+// means "no override", so the provider's own advertised limit stands.
+func TestWithMaxConnsIsANoOpAtZero(t *testing.T) {
+	p := &stubProvider{}
+	if got := WithMaxConns(p, 0); got != Provider(p) {
+		t.Fatal("n<=0 should return the provider unchanged")
+	}
+	if got := WithMaxConns(nil, 5); got != nil {
+		t.Fatal("wrapping nil should stay nil")
+	}
+}

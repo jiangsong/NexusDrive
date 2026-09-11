@@ -146,8 +146,12 @@ type Remote struct {
 	// Explicit reauthorization rotates it; automatic token refresh preserves it.
 	AccountBinding string `yaml:"account_binding,omitempty"`
 	// UploadWorkers overrides the backend's recommended upload concurrency.
-	UploadWorkers int            `yaml:"upload_workers"`
-	Extra         map[string]any `yaml:",inline"`
+	UploadWorkers int `yaml:"upload_workers"`
+	// MaxConns overrides the backend's advertised Caps.MaxConnsPerHost,
+	// bounding both idle and in-flight HTTP connections to this remote. Zero
+	// (the default) leaves the driver's own limit in effect.
+	MaxConns int            `yaml:"max_conns"`
+	Extra    map[string]any `yaml:",inline"`
 }
 
 type Layout struct {
@@ -389,6 +393,9 @@ func (c *Config) Validate() error {
 		}
 		if r.Proxy != "" && !names[r.Proxy] {
 			return fmt.Errorf("config: remote %q references unknown proxy %q", name, r.Proxy)
+		}
+		if r.MaxConns < 0 {
+			return fmt.Errorf("config: remote %q has a negative max_conns", name)
 		}
 	}
 	if err := c.validatePools(); err != nil {

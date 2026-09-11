@@ -131,6 +131,29 @@ func TestPerRemoteQPSOverridesReachTheLimiter(t *testing.T) {
 	}
 }
 
+func TestPerRemoteMaxConnsReachesCapabilities(t *testing.T) {
+	body := strings.Replace(baseConfig,
+		"  demo: { type: fake }",
+		"  demo: { type: fake, max_conns: 2 }", 1)
+	cfg, _ := writeConfig(t, body)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := Open(ctx, Options{Config: cfg, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if got := d.Providers["demo"].Capabilities().MaxConnsPerHost; got != 2 {
+		t.Fatalf("demo (max_conns: 2) caps.MaxConnsPerHost = %d, want 2", got)
+	}
+	// "slow" declared no override, so the driver's own default (fakeprovider
+	// advertises 8) stands.
+	if got := d.Providers["slow"].Capabilities().MaxConnsPerHost; got != 8 {
+		t.Fatalf("slow (no override) caps.MaxConnsPerHost = %d, want the driver's own 8", got)
+	}
+}
+
 func TestProxyRoutingIsBuilt(t *testing.T) {
 	cfg, _ := writeConfig(t, baseConfig)
 	ctx, cancel := context.WithCancel(context.Background())
