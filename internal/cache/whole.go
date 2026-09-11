@@ -370,6 +370,15 @@ func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 	if err := c.installTemp(k, name, size, false); err != nil {
 		return err
 	}
+	// Consume the reservation atomically with publication, before another
+	// admission can observe both the new object and its temporary charge.
+	// admitMu is still held here (its Unlock is deferred above), so this
+	// happens before any other admission decision can be made — same as
+	// Hydrate's own consumption of its reservation at publish.
+	c.mu.Lock()
+	c.reservedBytes -= size
+	c.reservedEntries--
+	c.mu.Unlock()
 	reservationHeld = false
 	c.rememberKey(k)
 	return nil

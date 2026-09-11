@@ -120,6 +120,9 @@ func TestPutWholeChargesBytesOnce(t *testing.T) {
 	if s := c.Stats(); s.Bytes != size || s.WholeBytes != size {
 		t.Fatalf("charged more than once: %+v", s)
 	}
+	if s := c.Stats(); s.ReservedBytes != 0 {
+		t.Fatalf("reservation not released after a successful install: %+v", s)
+	}
 }
 
 func TestPutWholeReplacesPartialBlocksWithoutDoubleCharge(t *testing.T) {
@@ -155,6 +158,9 @@ func TestPutWholeReturnsErrNoSpaceOverBudget(t *testing.T) {
 	if s := c.Stats(); s.Bytes != 0 {
 		t.Fatalf("over-budget PutWhole left a charge: %+v", s)
 	}
+	if s := c.Stats(); s.ReservedBytes != 0 {
+		t.Fatalf("reservation not released after ErrNoSpace: %+v", s)
+	}
 	noTempFilesInHydrated(t, c)
 }
 
@@ -169,6 +175,9 @@ func TestPutWholeShortReaderInstallsNothing(t *testing.T) {
 	}
 	if s := c.Stats(); s.Bytes != 0 {
 		t.Fatalf("short reader left a charge: %+v", s)
+	}
+	if s := c.Stats(); s.ReservedBytes != 0 {
+		t.Fatalf("reservation not released after a short-reader error: %+v", s)
 	}
 	noTempFilesInHydrated(t, c)
 }
@@ -342,6 +351,9 @@ func TestPutWholeAbortsCleanlyWhenSupersededDuringStream(t *testing.T) {
 	if s := c.Stats(); s.Bytes != size {
 		t.Fatalf("stale install left a double charge: %+v", s)
 	}
+	if s := c.Stats(); s.ReservedBytes != 0 {
+		t.Fatalf("reservation not released after a superseded install: %+v", s)
+	}
 	noOrphanTempsInHydrated(t, c)
 }
 
@@ -381,7 +393,37 @@ func TestPutWholeAbortsCleanlyOnForgetDuringStream(t *testing.T) {
 	if s := c.Stats(); s.Bytes != 0 {
 		t.Fatalf("stale install after forget left a charge: %+v", s)
 	}
+	if s := c.Stats(); s.ReservedBytes != 0 {
+		t.Fatalf("reservation not released after a forgotten install: %+v", s)
+	}
 	noTempFilesInHydrated(t, c)
+}
+
+// TestPutWholeReservationDoesNotLeakAcrossSuccessfulInstalls guards against
+// a successful PutWhole permanently losing its admission reservation.
+// installTemp itself never touches reservedBytes/reservedEntries — only
+// PutWhole's own success path does, right after installTemp returns — so a
+// missing (or misplaced, e.g. left only in the now-skipped defer) decrement
+// there leaks size bytes and one entry of budget on every single successful
+// call. With a budget that holds only one install's worth of content, that
+// leak compounds until the very next call's admission check sees an already
+// "reserved" (but actually free) budget and returns ErrNoSpace, even though
+// each iteration is preceded by a Forget that frees the previous install's
+// real charge. Each iteration also checks Stats().ReservedBytes == 0
+// straight after success, which is what the leak actually violates.
+func TestPutWholeReservationDoesNotLeakAcrossSuccessfulInstalls(t *testing.T) {
+	c, _ := newTest(t, Options{BlockSize: 16, MaxBytes: 16})
+	full := bytes.Repeat([]byte("z"), 16)
+	size := int64(len(full))
+	for i := 0; i < 20; i++ {
+		if err := c.PutWhole(key, bytes.NewReader(full), size); err != nil {
+			t.Fatalf("iteration %d: %v (stats=%+v)", i, err, c.Stats())
+		}
+		if s := c.Stats(); s.ReservedBytes != 0 {
+			t.Fatalf("iteration %d: reservation leaked after success: %+v", i, s)
+		}
+		c.Forget(key)
+	}
 }
 
 // TestPutWholeConcurrentWithPutStaysConsistent runs PutWhole and Put for the
