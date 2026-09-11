@@ -23,6 +23,8 @@ import (
 	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 	"cloudfs/test/fakeprovider"
+
+	"golang.org/x/sys/unix"
 )
 
 // mountEnv is a live FUSE mount over a fake provider.
@@ -730,6 +732,59 @@ func TestPassthroughKernelLeaseSurvivesFirstCloseAndInvalidation(t *testing.T) {
 			t.Fatal("last close did not release backing lease")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestReadOnlyOpenKeepsKernelCache: a read-only Open() returns
+// FOPEN_KEEP_CACHE, so the kernel does not invalidate a file's page cache
+// just because it was opened again. Reading the same file a second time,
+// through a fresh file descriptor, should be served entirely out of that
+// page cache and never reach this process's READ handler.
+func TestReadOnlyOpenKeepsKernelCache(t *testing.T) {
+	e := newMount(t, "")
+	body := []byte("cache me across opens, please, kernel")
+	e.fake.Seed("cached.txt", body)
+	p := filepath.Join(e.dir, "cached.txt")
+
+	got, err := os.ReadFile(p)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("first read: %v, %q", err, got)
+	}
+	if e.mnt.root.ops[opRead].Load() == 0 {
+		t.Fatal("the first read should have gone through the process")
+	}
+
+	before := e.mnt.root.ops[opRead].Load()
+	got, err = os.ReadFile(p)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("second read: %v, %q", err, got)
+	}
+	if after := e.mnt.root.ops[opRead].Load(); after != before {
+		t.Fatalf("a second read-only open cost %d READ requests; FOPEN_KEEP_CACHE should have kept the kernel page cache warm", after-before)
+	}
+}
+
+// TestLseekReportsNoHoles exercises FileLseeker through a real mount:
+// SEEK_HOLE from the start of a file with no holes must land exactly on
+// EOF, which is what GNU cp's --sparse=auto probe relies on.
+func TestLseekReportsNoHoles(t *testing.T) {
+	e := newMount(t, "")
+	body := []byte("no holes anywhere in this file")
+	e.fake.Seed("plain.txt", body)
+	p := filepath.Join(e.dir, "plain.txt")
+
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	off, err := unix.Seek(int(f.Fd()), 0, unix.SEEK_HOLE)
+	if err != nil {
+		t.Fatalf("SEEK_HOLE: %v", err)
+	}
+	if off != int64(len(body)) {
+		t.Fatalf("SEEK_HOLE from 0 = %d, want %d (EOF, no interior holes)", off, len(body))
 	}
 }
 

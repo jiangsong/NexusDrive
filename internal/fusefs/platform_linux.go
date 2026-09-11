@@ -18,12 +18,22 @@ const platformName = "libfuse (Linux)"
 // max_write to match the block size, and the kernel's own read-ahead.
 func applyPlatformOptions(o *fuse.MountOptions) {
 	o.MaxWrite = 1 << 20
-	o.MaxReadAhead = 1 << 20
+	// go-fuse's own MaxReadAhead doc comment claims the kernel caps this at
+	// 128 KiB, but that is stale: since Linux moved read-ahead to
+	// max_readahead-derived ra_pages, the kernel honours values well past
+	// that, up to MaxWrite. 4 MiB keeps a sequential reader's window ahead
+	// of a single 4 MiB block fetch instead of trailing it.
+	o.MaxReadAhead = 4 << 20
 	if v := os.Getenv("CLOUDFS_KERNEL_READAHEAD"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			o.MaxReadAhead = n
 		}
 	}
+	// Let more READ requests stay in flight at once (go-fuse's default of
+	// 12 serialises the kernel's own read-ahead into small sequential
+	// bursts); this is what turns a `cp`'s 128 KiB reads into pipelined
+	// 1 MiB block fetches.
+	o.MaxBackground = 64
 	// Let the kernel cache pages across opens; the VFS invalidates actively
 	// when a write or a delta says the content changed.
 	o.ExplicitDataCacheControl = false

@@ -25,6 +25,8 @@ func applyPlatformOptions(o *fuse.MountOptions) {
 		// which would create a write per browsed folder.
 		"noappledouble",
 		"noapplexattr",
+		// UNVERIFIED: macFUSE 4.x honours iosize; Fuse-T ignores it.
+		"iosize=1048576",
 	)
 }
 

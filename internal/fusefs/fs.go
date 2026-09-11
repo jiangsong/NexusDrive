@@ -23,6 +23,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 )
 
 // Options configures the adapter.
@@ -381,6 +382,7 @@ var (
 	_ fs.FileFsyncer         = (*file)(nil)
 	_ fs.FileGetattrer       = (*file)(nil)
 	_ fs.FilePassthroughFder = (*file)(nil)
+	_ fs.FileLseeker         = (*file)(nil)
 )
 
 // PassthroughFd hands the kernel a descriptor on the fully cached copy of the
@@ -429,7 +431,17 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 			return nil, 0, errno(err)
 		}
 	}
-	return &file{root: n.root, handle: h}, 0, 0
+	if write {
+		return &file{root: n.root, handle: h}, 0, 0
+	}
+	// FOPEN_KEEP_CACHE lets the kernel keep a read-only file's page cache
+	// warm across opens, instead of invalidating it on every open(2) as it
+	// otherwise would. This is safe because ExplicitDataCacheControl is
+	// false: the kernel still invalidates on its own when it sees a size or
+	// mtime change, and the vfs layer actively invalidates on a version
+	// change (a remote edit or a local write), so a stale page never
+	// survives an actual content change.
+	return &file{root: n.root, handle: h}, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -685,6 +697,41 @@ func (f *file) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.Errno {
 	f.root.fillAttr(&out.Attr, at)
 	out.SetTimeout(f.root.opt.AttrTimeout)
 	return 0
+}
+
+// Lseek implements SEEK_DATA/SEEK_HOLE so that hole-scanning tools (GNU
+// `cp --sparse=auto`, among others) get a real answer instead of ENOTSUP.
+// cloudfs never reports a file as sparse, so the mapping is trivial: the
+// pure lseekNoHoles does the actual arithmetic and is unit-tested without a
+// mount.
+func (f *file) Lseek(ctx context.Context, off uint64, whence uint32) (uint64, syscall.Errno) {
+	at, err := f.root.opt.FS.Stat(ctx, f.handle.Ino)
+	if err != nil {
+		return 0, errno(err)
+	}
+	return lseekNoHoles(off, uint64(at.Size), whence)
+}
+
+// lseekNoHoles maps a SEEK_DATA/SEEK_HOLE query against a file with no
+// interior holes: everything before size is data, and the only hole starts
+// at EOF. An offset at or past size has neither data nor a hole left to
+// report, which POSIX defines as ENXIO; any other whence is not ours to
+// handle.
+func lseekNoHoles(off, size uint64, whence uint32) (uint64, syscall.Errno) {
+	switch whence {
+	case unix.SEEK_DATA:
+		if off < size {
+			return off, 0
+		}
+		return 0, syscall.ENXIO
+	case unix.SEEK_HOLE:
+		if off < size {
+			return size, 0
+		}
+		return 0, syscall.ENXIO
+	default:
+		return 0, syscall.EINVAL
+	}
 }
 
 // The root is an ordinary node, so no separate set of root operations exists.
