@@ -68,6 +68,14 @@ cache:
   sub_block_size: 16KiB # 随机读未命中时只取这么多（内核一次随机读正好要 16 KiB）
   write_behind: 256MiB  # 冷读拉回的整块先在内存里服务，后台落盘；超过上限退化为同步写
   max_age: 720h
+  policy: # 全局缓存策略默认值；每个 layout.<prefix> 可用自己的 cache 覆盖
+    preset: none  # none（默认）| media | photos | code，见下表；显式字段总是赢过 preset
+    # small_file_whole: false   # 小文件是否整取（0KiB..threshold 一次读完），默认 false
+    # small_file_threshold: 4MiB  # 多大以内算"小文件"；必须是 64KiB 的倍数
+    # dir_readahead: 32           # readdir 时预取多少个后续文件；0 = 关闭
+    # readahead_max: 64MiB        # 顺序预读窗口上限；必须 >= block_size
+    # readahead_request: 0        # 一次合并读请求覆盖多少字节；0 = 按 provider 能力自动推算
+    # readahead_lead: 8s          # 预读提前量（尚未消费，供后续任务用）
 
 journal:
   durability: power     # power：close() 等本地 fsync 完成才返回（默认）
@@ -119,7 +127,13 @@ mounts:
   - path: /mnt/cloud
     layout:
       /work:  { remote: nas,  root: /work,  mode: writeback, dir_ttl: 1m }
-      /media: { remote: p115, root: /media, mode: readonly,  dir_ttl: 24h }
+      /media: { remote: p115, root: /media, mode: readonly,  dir_ttl: 24h,
+                cache: { preset: media } }  # 大文件顺序播放：大窗口、大合并请求、关闭目录预取
+      # cache.policy 的 preset 可选 none/media/photos/code：
+      #   media  → readahead_max 128MiB, readahead_request 16MiB, dir_readahead 0, 未设 dir_ttl 时默认 24h
+      #   photos → dir_readahead 64,     small_file_threshold 8MiB, readahead_max 16MiB
+      #   code   → dir_readahead 128,    small_file_threshold 1MiB, 未设 dir_ttl 时默认 1m
+      # layout.<prefix>.cache 里的字段覆盖 cache.policy 的全局默认，两边都可以单独指定 preset
 
 mcp:
   http: 127.0.0.1:8765

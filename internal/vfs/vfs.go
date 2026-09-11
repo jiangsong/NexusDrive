@@ -56,6 +56,37 @@ type Mount struct {
 	Mode           config.Mode
 	DirTTL         time.Duration
 	Pin            bool
+	// Policy tunes this mount's readahead and small-file behaviour. The
+	// zero value means "no override for any field", i.e. this mount behaves
+	// exactly as it did before CachePolicy existed. daemon assembly fills it
+	// in from internal/config's ResolveCachePolicy (presets and per-prefix
+	// `layout.<prefix>.cache` overrides); vfs itself never looks at presets
+	// or config.CachePolicy.
+	Policy CachePolicy
+}
+
+// CachePolicy tunes per-mount readahead and small-file behaviour. It is a
+// plain struct (no pointers) so a zero value is always meaningful: every
+// field means "no override, fall back to the global Options default (or, for
+// ReadaheadRequest, to the per-provider derivation Options.ReadaheadRequest
+// documents)". DirReadahead, SmallFileThreshold, SmallFileWhole and
+// ReadaheadLead are resolved and carried here but not yet consumed by vfs;
+// later tasks (directory readahead, small-file whole-read) read them off
+// Mount.Policy.
+type CachePolicy struct {
+	SmallFileWhole     bool
+	SmallFileThreshold int64
+	DirReadahead       int
+	// ReadaheadMax caps the sequential prefetch window in bytes for this
+	// mount. Zero means "use Options.ReadAheadBlocks instead"; see
+	// (*FS).maybeReadAhead.
+	ReadaheadMax int64
+	// ReadaheadRequest caps how many contiguous missing blocks one
+	// coalesced readahead range request may cover, in bytes, for this
+	// mount. Zero means "use Options.ReadaheadRequest, or derive it from the
+	// provider's capabilities"; see (*FS).coalesceBlocks.
+	ReadaheadRequest int64
+	ReadaheadLead    time.Duration
 }
 
 // Options configures a VFS.

@@ -210,7 +210,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		d.Close()
 		return nil, err
 	}
-	mounts, err := buildMounts(mountCfg, d.Providers, bindings)
+	mounts, err := buildMounts(mountCfg, d.Providers, bindings, cfg.Cache.Policy, int64(cfg.Cache.BlockSize))
 	if err != nil {
 		d.Close()
 		return nil, err
@@ -742,37 +742,6 @@ func remoteAccountBindings(cfg *config.Config) (map[string]string, error) {
 	return out, nil
 }
 
-func buildMounts(m config.Mount, providers map[string]provider.Provider, bindings map[string]string) ([]vfs.Mount, error) {
-	var out []vfs.Mount
-	prefixes := make([]string, 0, len(m.Layout))
-	for prefix := range m.Layout {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Strings(prefixes)
-	for _, prefix := range prefixes {
-		l := m.Layout[prefix]
-		p, ok := providers[l.Remote]
-		if !ok {
-			return nil, fmt.Errorf("daemon: mount %s references unknown remote %q", prefix, l.Remote)
-		}
-		root := l.Root
-		if root == "" {
-			// An unset root means "the remote's own root". Discover it the same
-			// way CheckAccount does, so a config that checks out also mounts;
-			// path-based backends fall back to "/".
-			root = providerRoot(p)
-		}
-		out = append(out, vfs.Mount{
-			Prefix: prefix, Remote: l.Remote, RootID: root, AccountBinding: bindings[l.Remote], Provider: p,
-			Mode: l.Mode, DirTTL: l.DirTTL, Pin: l.Pin,
-		})
-	}
-	if len(out) == 0 {
-		return nil, errors.New("daemon: the mount has an empty layout")
-	}
-	return out, nil
-}
-
 // EnsureDir creates a directory the daemon needs.
 func EnsureDir(p string) error {
 	if err := os.MkdirAll(p, 0o700); err != nil {
@@ -780,4 +749,3 @@ func EnsureDir(p string) error {
 	}
 	return nil
 }
-

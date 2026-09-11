@@ -18,8 +18,9 @@ import (
 const coalesceCap = 4
 
 // coalesceBlocks returns how many contiguous missing blocks one readahead
-// range request should cover for h's mount: derived from opt.ReadaheadRequest
-// (or, when that is zero, from the provider's capabilities), clamped to
+// range request should cover for h's mount: derived from
+// h.Mount.Policy.ReadaheadRequest (or, when that is zero, opt.ReadaheadRequest,
+// or, when that is also zero, from the provider's capabilities), clamped to
 // [1, coalesceCap], and forced to 1 once this remote has been marked
 // short-request-only by fetchReadaheadRun.
 func (f *FS) coalesceBlocks(h *Handle) int {
@@ -27,7 +28,10 @@ func (f *FS) coalesceBlocks(h *Handle) int {
 		return 1
 	}
 	bs := f.cache.BlockSize()
-	req := f.opt.ReadaheadRequest
+	req := h.Mount.Policy.ReadaheadRequest
+	if req <= 0 {
+		req = f.opt.ReadaheadRequest
+	}
 	if req <= 0 {
 		caps := h.Mount.Provider.Capabilities()
 		if caps.RangeRead && caps.QPS.Download <= 16 {
@@ -59,8 +63,19 @@ func (f *FS) coalesceBlocks(h *Handle) int {
 func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, off, n int64) {
 	// The sequential run is tracked even when prefetching is disabled:
 	// wantsSubBlock relies on it to hand a sequential reader whole blocks.
-	maxWindow := f.opt.ReadAheadBlocks
 	bs := f.cache.BlockSize()
+	// A per-mount ReadaheadMax overrides the global window cap; the
+	// CLOUDFS_READAHEAD_BLOCKS environment variable (read once into
+	// opt.ReadAheadBlocks at daemon startup) has no way to tell "the person
+	// set it" from "it defaulted to 16" by the time it reaches vfs, so a
+	// mount policy always wins here when it sets ReadaheadMax, whether or
+	// not the environment variable was also set.
+	maxWindow := f.opt.ReadAheadBlocks
+	if h.Mount.Policy.ReadaheadMax > 0 {
+		if w := int(h.Mount.Policy.ReadaheadMax / bs); w > 0 {
+			maxWindow = w
+		}
+	}
 	idx := off / bs
 	h.mu.Lock()
 	if h.closed {

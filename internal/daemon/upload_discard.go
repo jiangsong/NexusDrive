@@ -58,7 +58,7 @@ func DiscardUploadOffline(ctx context.Context, cfg *config.Config, id string, co
 	if err != nil {
 		return err
 	}
-	mounts, err := buildMounts(cfg.Mounts[0], providers, bindings)
+	mounts, err := buildMounts(cfg.Mounts[0], providers, bindings, cfg.Cache.Policy, int64(cfg.Cache.BlockSize))
 	if err != nil {
 		return err
 	}

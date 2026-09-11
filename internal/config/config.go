@@ -94,6 +94,9 @@ type Cache struct {
 	// background writers have put them on disk (0 = 256 MiB).
 	WriteBehind Size          `yaml:"write_behind"`
 	MaxAge      time.Duration `yaml:"max_age"`
+	// Policy is the global cache policy default; a layout's own `cache` key
+	// overrides it per prefix. See CachePolicy and ResolveCachePolicy.
+	Policy CachePolicy `yaml:"policy"`
 }
 
 // Journal configures the local write journal.
@@ -163,6 +166,9 @@ type Layout struct {
 	Mode   Mode          `yaml:"mode"`
 	Pin    bool          `yaml:"pin"`
 	DirTTL time.Duration `yaml:"dir_ttl"`
+	// Cache overrides cache.policy for this prefix; nil means "use the
+	// global policy unchanged". See CachePolicy and ResolveCachePolicy.
+	Cache *CachePolicy `yaml:"cache"`
 }
 
 type Mount struct {
@@ -363,6 +369,11 @@ func (c *Config) Validate() error {
 	if c.Cache.BlockSize <= 0 || c.Cache.BlockSize%(64<<10) != 0 {
 		return fmt.Errorf("config: cache.block_size must be a positive multiple of 64KiB, got %s", c.Cache.BlockSize)
 	}
+	// Validate the global cache policy on its own, so an unknown preset or a
+	// bad size fails even for a config with no mounts yet.
+	if _, err := ResolveCachePolicy(c.Cache.Policy, nil, int64(c.Cache.BlockSize)); err != nil {
+		return err
+	}
 	names := map[string]bool{"direct": true}
 	for _, o := range c.Proxy.Outbounds {
 		switch o.Type {
@@ -439,6 +450,21 @@ func (c *Config) Validate() error {
 			case "", ModeWriteback, ModeStrict, ModeReadonly:
 			default:
 				return fmt.Errorf("config: mount %s%s has unknown mode %q", m.Path, sub, l.Mode)
+			}
+			if _, err := ResolveCachePolicy(c.Cache.Policy, l.Cache, int64(c.Cache.BlockSize)); err != nil {
+				return fmt.Errorf("config: mount %s%s: %w", m.Path, sub, err)
+			}
+			// A media/code preset implies a dir_ttl, but only when the
+			// layout did not already set one of its own.
+			if l.DirTTL == 0 {
+				preset := c.Cache.Policy.Preset
+				if l.Cache != nil && l.Cache.Preset != "" {
+					preset = l.Cache.Preset
+				}
+				if d := presetDirTTL(preset); d != 0 {
+					l.DirTTL = d
+					m.Layout[sub] = l
+				}
 			}
 		}
 	}
