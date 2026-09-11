@@ -74,7 +74,12 @@ type Fake struct {
 	// readBytes sums the lengths of every ReadRange, so a test can tell a
 	// sub-block fetch from a whole-block one.
 	readBytes int64
-	total     int
+	// maxReadLen is the high-water mark of the requested length (n) across
+	// every ReadRange call since creation or the last ResetReadRangeStats,
+	// so a test can assert "nothing bigger than one block was ever asked
+	// for" without inspecting individual calls.
+	maxReadLen int64
+	total      int
 	Faults    Faults
 	// noHashes hides content hashes from every Entry, the way a backend
 	// without a hash API (sftp, webdav) reports files.
@@ -196,6 +201,25 @@ func (f *Fake) ReadBytes() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.readBytes
+}
+
+// MaxReadRangeLen returns the largest length any single ReadRange call has
+// requested since creation or the last ResetReadRangeStats. A test asserting
+// "the caller never asked for more than one block" reads this instead of
+// inspecting every call.
+func (f *Fake) MaxReadRangeLen() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxReadLen
+}
+
+// ResetReadRangeStats zeroes the MaxReadRangeLen high-water mark, so a test
+// can check "nothing this large happened after this point" without a second
+// Fake.
+func (f *Fake) ResetReadRangeStats() {
+	f.mu.Lock()
+	f.maxReadLen = 0
+	f.mu.Unlock()
 }
 
 func (f *Fake) TotalCalls() int {
@@ -521,6 +545,9 @@ func (f *Fake) ReadRange(ctx context.Context, id, version string, off, n int64) 
 		return nil, provider.ErrConflict
 	}
 	f.readBytes += n
+	if n > f.maxReadLen {
+		f.maxReadLen = n
+	}
 	if off < 0 || off > int64(len(nd.data)) {
 		return nil, fmt.Errorf("fakeprovider: range %d out of bounds", off)
 	}

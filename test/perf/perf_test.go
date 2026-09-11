@@ -371,12 +371,23 @@ func TestShortRangeDisablesCoalescingForRemote(t *testing.T) {
 	}
 
 	// A second file on the same remote must never retry a multi-block
-	// request: every block should cost its own ReadRange call.
+	// request at all: reset the high-water mark and check that nothing
+	// bigger than one block is ever asked for again. This is the precise
+	// form of the assertion — a call-count bound alone would still pass if
+	// the "never coalesce again" memory were removed, since a failed
+	// multi-block attempt plus its single-block retries costs strictly more
+	// calls than coalescing would have, not fewer.
 	before := h.fake.Calls("ReadRange")
+	h.fake.ResetReadRangeStats()
 	readSequential("second.bin")
+	if max := h.fake.MaxReadRangeLen(); max > blockSize {
+		t.Fatalf("second file asked for a %d-byte range (block size is %d); coalescing should be disabled for this remote after the short range", max, blockSize)
+	}
+	// Also keep an exact count as a deterministic secondary check: with
+	// coalescing off, every block costs exactly one ReadRange call.
 	wantBlocks := size / blockSize
-	if calls := h.fake.Calls("ReadRange") - before; calls < wantBlocks {
-		t.Fatalf("second file cost %d ReadRange calls for %d blocks; coalescing should be disabled for this remote after the short range", calls, wantBlocks)
+	if calls := h.fake.Calls("ReadRange") - before; calls != wantBlocks {
+		t.Fatalf("second file cost %d ReadRange calls for %d blocks, want exactly %d (coalescing disabled means one call per block)", calls, wantBlocks, wantBlocks)
 	}
 }
 
