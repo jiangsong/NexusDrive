@@ -64,6 +64,7 @@ type streamKey struct{ member, path string }
 // limitsStreams reports whether m may serve only one range of a file at a
 // time: a drive on an unofficial API under read_fanout auto, where several
 // concurrent ranges of one file look like a download tool to risk control.
+// pickReplica lifts the limit only for a sole usable holder.
 func (p *Pool) limitsStreams(m *member) bool {
 	return p.readFanout == fanoutAuto && m.unofficial
 }
@@ -81,20 +82,57 @@ type candidate struct {
 // on the file. The caller returns the reservation through a lease.
 //
 // Candidates are the usable holders; a member that is down only when no
-// healthier one holds the file, so its read doubles as the probe. A member
-// on an unofficial API already serving this file is skipped unless nothing
-// else is left, and a member below its connection budget beats a saturated
-// one unless all are saturated. The score is load (inflight/maxInflight)
-// plus latency per MiB relative to the fastest measured candidate, plus
-// degradedPenalty for a member that has started failing; an unmeasured
-// member scores as the fastest, so it gets its chance. Scores
-// within scoreTie are equal, and then the less loaded member, then the one
-// that has served fewer bytes, then declaration order wins — there is no
-// stickiness to the first member declared.
-func (p *Pool) pickReplica(reps []replicaRow) (*member, replicaRow, bool) {
+// healthier one holds the file, so its read doubles as the probe. Under
+// read_fanout auto a member on an unofficial API that is already serving
+// this file is not a candidate while any other usable holder is left. When
+// every holder left is such a member, the pick waits for a stream of the
+// file to end and looks again — health included — and returns ctx.Err() if
+// the context ends first. Only a sole usable holder may take a second
+// stream: there is nobody to share the file with.
+//
+// Among what remains, a member below its connection budget beats a
+// saturated one unless all are saturated. The score is load
+// (inflight/maxInflight) plus latency per MiB relative to the fastest
+// measured candidate, plus degradedPenalty for a member that has started
+// failing; an unmeasured member scores as the fastest, so it gets its
+// chance. Scores within scoreTie are equal, and then the less loaded member,
+// then the one that has served fewer bytes, then declaration order wins —
+// there is no stickiness to the first member declared.
+//
+// ok is false, with a nil error, when no holder can serve the read at all.
+func (p *Pool) pickReplica(ctx context.Context, reps []replicaRow) (*member, replicaRow, bool, error) {
+	for {
+		p.pickMu.Lock()
+		c, ok, wait := p.pickLocked(reps)
+		if ok {
+			c.m.inflight.Add(1)
+			if p.limitsStreams(c.m) {
+				p.streams[streamKey{c.m.name, c.r.path}]++
+			}
+		}
+		p.pickMu.Unlock()
+		if ok {
+			return c.m, c.r, true, nil
+		}
+		if wait == nil {
+			return nil, replicaRow{}, false, nil
+		}
+		// No lock is held while waiting: the lease that ends a stream
+		// takes pickMu to close wait.
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, replicaRow{}, false, ctx.Err()
+		}
+	}
+}
+
+// pickLocked is one look at the candidates, under pickMu. It answers the
+// candidate to reserve; or, when more than one holder is usable but every
+// one is an unofficial member already streaming the file, a channel closed
+// when a stream of the file ends; or neither, when nothing can serve.
+func (p *Pool) pickLocked(reps []replicaRow) (candidate, bool, <-chan struct{}) {
 	probe := p.probeInterval()
-	p.pickMu.Lock()
-	defer p.pickMu.Unlock()
 	var healthy, probing []candidate
 	for _, r := range reps {
 		m := p.byName[r.member]
@@ -109,25 +147,52 @@ func (p *Pool) pickReplica(reps []replicaRow) (*member, replicaRow, bool) {
 			probing = append(probing, candidate{m: m, r: r})
 		}
 	}
+	usable := len(healthy) + len(probing)
+	if usable == 0 {
+		return candidate{}, false, nil
+	}
 	cands := healthy
 	if len(cands) == 0 {
 		cands = probing
 	}
-	if len(cands) == 0 {
-		return nil, replicaRow{}, false
+	if usable > 1 {
+		free := p.streamFree(healthy)
+		if len(free) == 0 {
+			free = p.streamFree(probing)
+		}
+		if len(free) == 0 {
+			return candidate{}, false, p.streamWaitLocked(reps[0].path)
+		}
+		cands = free
 	}
-	cands = keepIf(cands, func(c candidate) bool {
-		return !p.limitsStreams(c.m) || p.streams[streamKey{c.m.name, c.r.path}] == 0
-	})
 	cands = keepIf(cands, func(c candidate) bool {
 		return int(c.m.inflight.Load()) < c.m.maxInflight
 	})
-	c := choose(cands)
-	c.m.inflight.Add(1)
-	if p.limitsStreams(c.m) {
-		p.streams[streamKey{c.m.name, c.r.path}]++
+	return choose(cands), true, nil
+}
+
+// streamFree drops the members limitsStreams holds to one stream of a file
+// they are already serving. Called under pickMu.
+func (p *Pool) streamFree(cands []candidate) []candidate {
+	out := make([]candidate, 0, len(cands))
+	for _, c := range cands {
+		if !p.limitsStreams(c.m) || p.streams[streamKey{c.m.name, c.r.path}] == 0 {
+			out = append(out, c)
+		}
 	}
-	return c.m, c.r, true
+	return out
+}
+
+// streamWaitLocked returns the channel closed when a stream of pth ends,
+// shared by every pick waiting on that file. Called under pickMu; the lease
+// that ends the stream closes and forgets it.
+func (p *Pool) streamWaitLocked(pth string) <-chan struct{} {
+	ch, ok := p.streamWake[pth]
+	if !ok {
+		ch = make(chan struct{})
+		p.streamWake[pth] = ch
+	}
+	return ch
 }
 
 // keepIf filters cands, keeping all of them when none passes: a preference
@@ -220,6 +285,10 @@ func (l *lease) done(n int64, ok bool) {
 			} else {
 				l.p.streams[k]--
 			}
+			if ch, ok := l.p.streamWake[k.path]; ok {
+				close(ch)
+				delete(l.p.streamWake, k.path)
+			}
 			l.p.pickMu.Unlock()
 		}
 		if ok {
@@ -269,13 +338,16 @@ func (p *Pool) fanOut(ctx context.Context, pth string, reps []replicaRow, do fun
 	left := append([]replicaRow(nil), reps...)
 	var lastUnreachable error
 	for {
-		m, r, ok := p.pickReplica(left)
+		m, r, ok, err := p.pickReplica(ctx, left)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			break
 		}
 		left = dropMember(left, r.member)
 		l := &lease{p: p, m: m, r: r, start: time.Now()}
-		err := do(m, r, l)
+		err = do(m, r, l)
 		if err == nil {
 			m.note(nil)
 			return nil

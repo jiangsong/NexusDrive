@@ -75,12 +75,14 @@ type Pool struct {
 	// two merges of the same directory must not interleave.
 	mu sync.Mutex
 
-	// readFanout is the read_fanout mode. pickMu guards replica picks and
-	// streams, the ranges in flight per (member, file) for members whose
-	// streams are limited (limitsStreams).
+	// readFanout is the read_fanout mode. pickMu guards replica picks,
+	// streams — the ranges in flight per (member, file) for members whose
+	// streams are limited (limitsStreams) — and streamWake, the channel per
+	// file that picks waiting for one of those streams to end wait on.
 	readFanout fanoutMode
 	pickMu     sync.Mutex
 	streams    map[streamKey]int
+	streamWake map[string]chan struct{}
 	// resolveCache keeps resolveFile's answers; every index change
 	// invalidates it.
 	resolveCache *replicaCache
@@ -114,7 +116,7 @@ func New(opt Options) (*Pool, error) {
 		return nil, err
 	}
 	p := &Pool{name: opt.Name, settings: opt.Settings, db: db, stateDir: opt.StateDir, byName: map[string]*member{}, now: opt.Now,
-		readFanout: fanout, streams: map[streamKey]int{}}
+		readFanout: fanout, streams: map[streamKey]int{}, streamWake: map[string]chan struct{}{}}
 	if p.now == nil {
 		p.now = time.Now
 	}
