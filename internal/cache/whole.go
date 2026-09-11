@@ -261,21 +261,84 @@ func (c *Cache) installTemp(k FileKey, tmpPath string, size int64, pinned bool) 
 	return nil
 }
 
+// ErrInstallSuperseded is returned by PutWhole when the key it was
+// installing was replaced, forgotten, or the cache closed while the stream
+// that would have published it was still in flight (see PutWhole). The
+// already-fetched content is discarded cleanly: nothing is double-charged
+// and no temporary file is left behind. Unlike Hydrate's analogous early
+// checks (which return nil for "not applicable, try again later"), this is
+// a genuine failure to install: the caller's fetch was not published, and
+// whatever the competing operation left in place is authoritative instead.
+var ErrInstallSuperseded = errors.New("cache: install superseded during stream")
+
 // PutWhole streams r — which must yield exactly size bytes — directly into
 // the cache as a hydrated object for k, skipping the block-file-then-hydrate
 // double write that a fetch-then-Put-per-block-then-Hydrate sequence needs.
-// A short (or long) read is an error and nothing is installed. A concurrent
-// Put of a block for the same key cannot interleave: both hold admitMu for
-// their whole call.
+// A short (or long) read is an error and nothing is installed.
+//
+// Reserving room and publishing both need admitMu, but the copy in between
+// does not hold it: r is typically a network fetch, and admitMu is the one
+// mutex every Put, Hydrate, installWhole and PutWhole call serializes on, so
+// holding it for the whole stream would stall every other file's cache
+// admission for as long as this one fetch takes. Mirroring Hydrate, the
+// reservation is carried across the gap in reservedBytes/reservedEntries
+// (visible to concurrent admission checks) and fs.busy protects any
+// already-published whole object for this key from eviction while the
+// replacement is in flight. A concurrent Put of a block for the same key
+// cannot corrupt this: after the copy, PutWhole re-takes admitMu and checks
+// fs is still the current, same-generation state before publishing, the
+// same guard Hydrate uses; if something else (Put, Hydrate, installWhole,
+// another PutWhole, or Forget) touched the key meanwhile, this returns
+// ErrInstallSuperseded instead of publishing stale content over a newer
+// write.
 func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 	if size < 0 {
 		return errors.New("cache: negative complete-file size")
 	}
+	fh := k.hash()
+
 	c.admitMu.Lock()
-	defer c.admitMu.Unlock()
-	if err := c.makeRoomFor(size, 1, size, nil); err != nil {
+	c.mu.Lock()
+	if c.wb.closed {
+		c.mu.Unlock()
+		c.admitMu.Unlock()
+		return os.ErrClosed
+	}
+	fs := c.files[fh]
+	if fs == nil {
+		fs = &fileState{present: map[int64]bool{}}
+		c.files[fh] = fs
+	}
+	generation := fs.generation
+	fs.busy++
+	c.mu.Unlock()
+
+	err := c.makeRoomFor(size, 1, size, nil)
+	if err == nil {
+		c.mu.Lock()
+		c.reservedBytes += size
+		c.reservedEntries++
+		c.mu.Unlock()
+	}
+	c.admitMu.Unlock()
+	if err != nil {
+		c.mu.Lock()
+		fs.busy--
+		c.mu.Unlock()
 		return err
 	}
+
+	reservationHeld := true
+	defer func() {
+		c.mu.Lock()
+		fs.busy--
+		if reservationHeld {
+			c.reservedBytes -= size
+			c.reservedEntries--
+		}
+		c.mu.Unlock()
+	}()
+
 	// Same naming convention as installWhole's temporaries: reload's orphan
 	// sweep recognises the ".install-" prefix and reclaims it after a crash.
 	out, err := os.CreateTemp(filepath.Join(c.opt.Dir, "hydrated"), ".install-*")
@@ -284,15 +347,30 @@ func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 	}
 	name := out.Name()
 	defer func() { out.Close(); c.discardTemp(name) }()
+
+	// The stream — which may block on the network for a long time — runs
+	// with neither lock held. The reservation above already accounts for
+	// it, so a concurrent Put/Hydrate/installWhole/PutWhole for any other
+	// key proceeds without waiting on this fetch.
 	if err := copyWhole(out, r, size); err != nil {
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
+
+	c.admitMu.Lock()
+	defer c.admitMu.Unlock()
+	c.mu.Lock()
+	stale := c.wb.closed || c.files[fh] != fs || fs.generation != generation
+	c.mu.Unlock()
+	if stale {
+		return ErrInstallSuperseded
+	}
 	if err := c.installTemp(k, name, size, false); err != nil {
 		return err
 	}
+	reservationHeld = false
 	c.rememberKey(k)
 	return nil
 }
