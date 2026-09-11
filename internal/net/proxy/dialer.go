@@ -468,6 +468,13 @@ func (m *Manager) Health() []Health {
 // transportFor builds an http.Transport that egresses through o. conns
 // bounds both the idle and in-flight connections per host; conns<=0 keeps
 // today's behaviour (8 idle, unbounded in flight).
+//
+// MaxConnsPerHost bounds TCP (or TLS) connections, not concurrent requests:
+// ForceAttemptHTTP2 below lets one connection carry many concurrent HTTP/2
+// streams, so a backend that actually needs its request concurrency capped
+// — an unofficial API's risk-control threshold, an sftp session limit — is
+// only bounded by this when it talks HTTP/1.1, or when the request-level
+// limiter (QPS) also does its part.
 func transportFor(o Outbound, conns int) (*http.Transport, error) {
 	idle := 8
 	var maxConns int

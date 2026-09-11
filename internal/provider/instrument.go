@@ -148,8 +148,38 @@ func (s *Stats) Ops() []string {
 }
 
 // ReadBytes and WriteBytes report the payload actually transferred.
-func (s *Stats) ReadBytes() int64  { return s.readBytes.Load() }
-func (s *Stats) WriteBytes() int64 { return s.writeBytes.Load() }
+func (s *Stats) ReadBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.readBytes.Load()
+}
+
+func (s *Stats) WriteBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.writeBytes.Load()
+}
+
+// noteRead and noteWrite add to the byte counters. Like timed and note, they
+// are nil-receiver safe: WithMaxConns wraps with a nil *Stats when there is
+// nothing to count, only a caps override to apply, and every counting-family
+// method reaches the byte counters through these rather than the atomic
+// fields directly.
+func (s *Stats) noteRead(n int64) {
+	if s == nil {
+		return
+	}
+	s.readBytes.Add(n)
+}
+
+func (s *Stats) noteWrite(n int64) {
+	if s == nil {
+		return
+	}
+	s.writeBytes.Add(n)
+}
 
 // Reset clears the counters, which a benchmark does between phases.
 func (s *Stats) Reset() {
@@ -236,7 +266,7 @@ func (c *counting) ReadRangeAt(ctx context.Context, id, version string, off int6
 	n, err := c.ra.ReadRangeAt(ctx, id, version, off, buf)
 	done()
 	c.s.note(err)
-	c.s.readBytes.Add(int64(n))
+	c.s.noteRead(int64(n))
 	return n, err
 }
 
@@ -259,7 +289,7 @@ func (c *counting) UploadPart(ctx context.Context, s UploadSession, idx int, r i
 	t, err := c.Provider.UploadPart(ctx, s, idx, r, n)
 	c.s.note(err)
 	if err == nil && n > 0 {
-		c.s.writeBytes.Add(n)
+		c.s.noteWrite(n)
 	}
 	return t, err
 }
@@ -318,7 +348,7 @@ func (r *countingReader) Close() error {
 func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	if n > 0 {
-		r.s.readBytes.Add(int64(n))
+		r.s.noteRead(int64(n))
 	}
 	return n, err
 }
@@ -383,7 +413,7 @@ func (c putting) PutFile(ctx context.Context, parentID, name string, r io.Reader
 	e, err := c.sp.PutFile(ctx, parentID, name, r, size, h)
 	c.s.note(err)
 	if err == nil && size > 0 {
-		c.s.writeBytes.Add(size)
+		c.s.noteWrite(size)
 	}
 	return e, err
 }

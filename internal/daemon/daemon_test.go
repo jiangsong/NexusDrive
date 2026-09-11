@@ -19,6 +19,36 @@ import (
 	"cloudfs/internal/i18n"
 )
 
+// tokenCapturingFake records whether SetTokenPersister was called, so a test
+// can tell whether Open() actually wired the hook without depending on
+// provider.TokenPersistence's private state.
+type tokenCapturingFake struct {
+	*fakeprovider.Fake
+	persister provider.TokenPersister
+}
+
+func (f *tokenCapturingFake) SetTokenPersister(save provider.TokenPersister) {
+	f.persister = save
+}
+
+func init() {
+	// fake-nocap: a driver that advertises no MaxConnsPerHost of its own,
+	// the way a not-yet-updated driver would. TestPerRemoteMaxConnsReachesCapabilities
+	// uses it to check the no-override/no-declared-cap case.
+	provider.Register("fake-nocap", func(name string, _ map[string]any) (provider.Provider, error) {
+		f := fakeprovider.New(name)
+		f.SetCaps(provider.Caps{})
+		return f, nil
+	})
+	// fake-token: a driver that both persists tokens and (like gdrive,
+	// onedrive, box) is a provider.TokenPersistenceSetter.
+	// TestTokenPersistenceSurvivesMaxConnsOverride uses it to pin the
+	// ordering in Open() between that check and provider.WithMaxConns.
+	provider.Register("fake-token", func(name string, _ map[string]any) (provider.Provider, error) {
+		return &tokenCapturingFake{Fake: fakeprovider.New(name)}, nil
+	})
+}
+
 const baseConfig = `
 cache:
   dir: %s
@@ -134,7 +164,7 @@ func TestPerRemoteQPSOverridesReachTheLimiter(t *testing.T) {
 func TestPerRemoteMaxConnsReachesCapabilities(t *testing.T) {
 	body := strings.Replace(baseConfig,
 		"  demo: { type: fake }",
-		"  demo: { type: fake, max_conns: 2 }", 1)
+		"  demo: { type: fake, max_conns: 2 }\n  nocap: { type: fake-nocap }", 1)
 	cfg, _ := writeConfig(t, body)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -151,6 +181,47 @@ func TestPerRemoteMaxConnsReachesCapabilities(t *testing.T) {
 	// advertises 8) stands.
 	if got := d.Providers["slow"].Capabilities().MaxConnsPerHost; got != 8 {
 		t.Fatalf("slow (no override) caps.MaxConnsPerHost = %d, want the driver's own 8", got)
+	}
+	// "nocap" declares no MaxConnsPerHost and has no override, so the
+	// three-way fallback (override, declared cap, 8) lands on 8 for the
+	// transport (buildProvider's setConns) — Capabilities() must report the
+	// same 8, not the driver's own undeclared 0, or a caller sizing work off
+	// Capabilities() would think the connection is unbounded when the
+	// transport actually caps it.
+	if got := d.Providers["nocap"].Capabilities().MaxConnsPerHost; got != 8 {
+		t.Fatalf("nocap (no declared cap, no override) caps.MaxConnsPerHost = %d, want the same 8 the transport uses", got)
+	}
+}
+
+// TestTokenPersistenceSurvivesMaxConnsOverride pins the ordering in Open():
+// the provider.TokenPersistenceSetter check must run before
+// provider.WithMaxConns wraps p, because that wrapper does not forward
+// interfaces outside this package's own optional set. Wrapping first would
+// silently drop OAuth token persistence for gdrive/onedrive/box whenever
+// max_conns is configured on those remotes.
+func TestTokenPersistenceSurvivesMaxConnsOverride(t *testing.T) {
+	body := strings.Replace(baseConfig,
+		"  demo: { type: fake }",
+		"  demo: { type: fake }\n  tok: { type: fake-token, max_conns: 3 }", 1)
+	cfg, _ := writeConfig(t, body)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, err := Open(ctx, Options{Config: cfg, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	tok, ok := provider.Unwrap(d.Providers["tok"]).(*tokenCapturingFake)
+	if !ok {
+		t.Fatalf("Unwrap did not reach *tokenCapturingFake, got %T", provider.Unwrap(d.Providers["tok"]))
+	}
+	if tok.persister == nil {
+		t.Fatal("Open() did not install the token persister once max_conns was set on the remote")
+	}
+	// The override still took effect alongside it.
+	if got := d.Providers["tok"].Capabilities().MaxConnsPerHost; got != 3 {
+		t.Fatalf("tok caps.MaxConnsPerHost = %d, want 3", got)
 	}
 }
 

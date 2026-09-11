@@ -373,3 +373,46 @@ func TestWithMaxConnsIsANoOpAtZero(t *testing.T) {
 		t.Fatal("wrapping nil should stay nil")
 	}
 }
+
+// TestWithMaxConnsWrappedProviderSurvivesRealTraffic: WithMaxConns wraps
+// with a nil *Stats (there is nothing to count, only a caps override to
+// apply). ReadRangeAt, UploadPart, the ReadRange reader and PutFile all add
+// to Stats' byte counters — this pins that they go through nil-safe helpers
+// rather than touching the atomic fields on a nil *Stats directly, which
+// panicked the first time daemon.Open() wrapped every remote (not just ones
+// with an explicit override) with WithMaxConns and real traffic ran through
+// one that was never also passed to Instrument.
+func TestWithMaxConnsWrappedProviderSurvivesRealTraffic(t *testing.T) {
+	w := WithMaxConns(&fastPutter{&stubProvider{}}, 4)
+
+	rc, err := w.ReadRange(context.Background(), "/x", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ra, ok := w.(RangeReaderAt)
+	if !ok {
+		t.Fatal("lost RangeReaderAt")
+	}
+	if _, err := ra.ReadRangeAt(context.Background(), "/x", "", 0, make([]byte, 4)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := w.UploadPart(context.Background(), UploadSession{}, 0, strings.NewReader("abcd"), 4); err != nil {
+		t.Fatal(err)
+	}
+
+	sp, ok := w.(SinglePutter)
+	if !ok {
+		t.Fatal("lost SinglePutter")
+	}
+	if _, err := sp.PutFile(context.Background(), "/", "x", strings.NewReader("abcd"), 4, nil); err != nil {
+		t.Fatal(err)
+	}
+}

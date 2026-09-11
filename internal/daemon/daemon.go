@@ -147,7 +147,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			d.Close()
 			return nil, fmt.Errorf("daemon: remote %q: %w", name, err)
 		}
-		p, closeProvider, err := buildProvider(name, resolved, pm, d.Limiters)
+		p, effectiveConns, closeProvider, err := buildProvider(name, resolved, pm, d.Limiters)
 		if err != nil {
 			d.Close()
 			return nil, err
@@ -156,11 +156,14 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		if setter, ok := p.(provider.TokenPersistenceSetter); ok && cfg.SourcePath != "" {
 			setter.SetTokenPersister(config.TokenPersister(cfg, name))
 		}
-		// An explicit per-remote override must also show up in the caps
-		// every upper layer reads, not just the transport buildProvider
-		// already bounded; a no-op when resolved.MaxConns is unset. It goes
+		// The caps every upper layer reads must agree with the transport
+		// buildProvider already bounded, so this wraps with the same
+		// effectiveConns buildProvider computed and applied via setConns —
+		// never re-derive the override/declared-cap/8 fallback here, or a
+		// driver that leaves MaxConnsPerHost undeclared could end up with
+		// Capabilities() and the real transport limit disagreeing. It goes
 		// on before Instrument so both wrappers' interfaces compose.
-		p = provider.WithMaxConns(p, resolved.MaxConns)
+		p = provider.WithMaxConns(p, effectiveConns)
 		st := provider.NewStats()
 		d.CallStats[name] = st
 		d.Providers[name] = provider.Instrument(p, st)
@@ -639,8 +642,13 @@ func defaultRate(c ratelimit.Class) float64 {
 }
 
 // buildProvider constructs one backend, wiring it to the shared proxy routing
-// and rate limiter through the config the factory receives.
-func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *ratelimit.Registry) (provider.Provider, func() error, error) {
+// and rate limiter through the config the factory receives. The returned
+// effective value is the connection limit it bounded the transport to —
+// callers must feed it back into provider.WithMaxConns rather than
+// re-deriving the fallback from rc.MaxConns alone, or a driver that leaves
+// MaxConnsPerHost undeclared could have Capabilities() (0, "unbounded")
+// silently disagree with the transport (8, actually bounded).
+func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *ratelimit.Registry) (p provider.Provider, effective int, closeFn func() error, err error) {
 	cfg := map[string]any{}
 	for k, v := range rc.Extra {
 		cfg[k] = v
@@ -661,16 +669,17 @@ func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *r
 		func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return pm.DialContext(ctx, network, addr, rc.Proxy)
 		})
-	p, err := provider.New(rc.Type, name, cfg)
+	p, err = provider.New(rc.Type, name, cfg)
 	if err != nil {
 		httpClient.CloseIdleConnections()
-		return nil, nil, fmt.Errorf("daemon: remote %q: %w", name, err)
+		return nil, 0, nil, fmt.Errorf("daemon: remote %q: %w", name, err)
 	}
-	// The transport's connection limit follows an explicit per-remote
-	// override, else the backend's own recommendation, else the historical
-	// default of 8 — the same three-way fallback the caller applies to Caps
-	// (provider.WithMaxConns) once it has decided whether to wrap p at all.
-	effective := rc.MaxConns
+	// The connection limit follows an explicit per-remote override, else the
+	// backend's own recommendation, else the historical default of 8. This
+	// is the one place that fallback is computed; both the transport
+	// (setConns, right below) and Caps (the caller's provider.WithMaxConns)
+	// must use this same number.
+	effective = rc.MaxConns
 	if effective <= 0 {
 		effective = p.Capabilities().MaxConnsPerHost
 	}
@@ -678,7 +687,7 @@ func buildProvider(name string, rc config.Remote, pm *proxy.Manager, limiters *r
 		effective = 8
 	}
 	setConns(effective)
-	return p, func() error {
+	return p, effective, func() error {
 		httpClient.CloseIdleConnections()
 		if closer, ok := p.(interface{ Close() error }); ok {
 			return closer.Close()

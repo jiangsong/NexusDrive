@@ -35,7 +35,7 @@ func OpenAccount(cfg *config.Config, name string) (provider.Provider, func() err
 		}
 		return p.Capabilities(), true
 	})
-	p, closeProvider, err := buildProvider(name, resolved, pm, reg)
+	p, effectiveConns, closeProvider, err := buildProvider(name, resolved, pm, reg)
 	if err != nil {
 		pm.Stop()
 		return nil, nil, err
@@ -43,6 +43,11 @@ func OpenAccount(cfg *config.Config, name string) (provider.Provider, func() err
 	if setter, ok := p.(provider.TokenPersistenceSetter); ok && cfg.SourcePath != "" {
 		setter.SetTokenPersister(config.TokenPersister(cfg, name))
 	}
+	// Same ordering and rule as daemon.Open: the caps override must use the
+	// same effectiveConns buildProvider already applied to the transport,
+	// and it goes on after the TokenPersistenceSetter check since its
+	// wrapper does not forward that interface.
+	p = provider.WithMaxConns(p, effectiveConns)
 	return p, func() error { defer pm.Stop(); return closeProvider() }, nil
 }
 
