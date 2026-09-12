@@ -1618,7 +1618,10 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 - **进度**：池副本扇出已完成——`internal/pool/pick.go`（`pickReplica`：在途数 / 连接预算 + 每 MiB 延迟 EWMA，degraded 成员加罚分，
   unofficial 层在 `read_fanout: auto` 下同文件单流）、`replicacache.go`（`resolveFile` 5 s 缓存，每个索引事务与 `execIndex` 失效）、
   404 先 `Stat` 再标 missing、`pools.<n>.read_fanout` 校验；上面列出的 `internal/pool` 与 `test/perf` 验收测试均已在。
-  未做：速率窗口、全局在途预算、稀疏整文件布局，以及 vfs 侧「`MaxConnsPerHost > 1` 时顺序窗口起点取 `min(ReadAheadBlocks, MaxConnsPerHost)`」。
+  速率窗口与全局在途预算已完成——`internal/vfs/readahead.go` 的 `nextWindow` 按句柄读速 EWMA × `readahead_lead`
+  定窗口（下限 2 块、上限 `readahead_max`，只在前台读 miss 时增长；还没有速率估计时起点取 `MaxConnsPerHost`），
+  `launchReadaheadRun` 把在途预取字节数压在 `cache.WriteBehindBudget()` 之下；测试在 `test/perf/dirahead_test.go`。
+  未做：稀疏整文件布局（`cache.Options.WholeLayoutMin`，消除 hydration 的二次写）。
 - **验收**：
   - `internal/pool`：`TestReadFanoutSpreadsBlocks`（12 块、窗口 8 → 每成员 `ReadRange` 4 ± 1）、`TestReadFanoutSkipsDownMember`、
     `TestReadFanoutPrefersFast`；`test/perf`：`TestPoolReadFanoutAddsBandwidth`（20 ms 延迟、48 MiB、3 成员 < 0.5× 单成员）。
