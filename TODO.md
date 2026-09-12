@@ -1072,10 +1072,11 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 
 ## 验证缺口（需要外部资源或长时间运行）
 
-### [ ] T-11 78 处 `UNVERIFIED` 待真实账号核对
+### [ ] T-11 92 处 `UNVERIFIED` 待真实账号核对
 
 按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
-`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **78 处 / 25 个文件**，
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **92 处 / 31 个文件**（2026-09-12 重数；
+其中 5 处是 T-33 配额哨兵新加的驱动映射，其余差额来自此前未计入的测试与工具文件），
 不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
 从来没有进过这张表，驱动侧的计数也偏低。下表按当前实测重列。不能在实际核验前笼统
 断言这些未确认行为只影响可用性、绝不影响数据正确性。
@@ -1605,7 +1606,7 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   每 remote 槽位 `clamp(round(QPS.Download), 2, MaxConnsPerHost) − 1`，前台读遇同文件在途预取则等待而不是重发，
   `invalidateListing` / `dropPaths` 清读序。测试 `test/perf/dirahead_test.go` 五条，全部按 provider 调用次数断言。
 
-### [ ] T-31 大文件：速率窗口、全局在途预算、池副本扇出、稀疏整文件布局（`docs/pool-v2.md` §4，阶段 C + F）
+### [x] T-31 大文件：速率窗口、全局在途预算、池副本扇出、稀疏整文件布局（`docs/pool-v2.md` §4，阶段 C + F）
 
 - **证据**：readahead 窗口固定 16 块 = 64 MiB，不看文件大小与读者速率（`daemon.go` `readAheadBlocks`）；
   `PutAsync` 超 write-behind 预算时静默退化为同步 `Put`；池读在延迟相同时永远打声明顺序第一个副本
@@ -1621,7 +1622,10 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   速率窗口与全局在途预算已完成——`internal/vfs/readahead.go` 的 `nextWindow` 按句柄读速 EWMA × `readahead_lead`
   定窗口（下限 2 块、上限 `readahead_max`，只在前台读 miss 时增长；还没有速率估计时起点取 `MaxConnsPerHost`），
   `launchReadaheadRun` 把在途预取字节数压在 `cache.WriteBehindBudget()` 之下；测试在 `test/perf/dirahead_test.go`。
-  未做：稀疏整文件布局（`cache.Options.WholeLayoutMin`，消除 hydration 的二次写）。
+  稀疏整文件布局也已完成：`internal/cache/sparse.go`——超过 `cache.Options.WholeLayoutMin` 的文件，取回的块
+  直接按偏移写进 `hydrated/<hash>.part`（稀疏文件）并维护块位图，写满后 fsync + rename，冷读只写一遍本地盘；
+  重启后位图有效就继续用、无效或块粒度不符就丢弃重取。测试 `internal/cache/sparse_test.go`、
+  `internal/cache/sparse_disk_test.go`、`test/perf/sparse_test.go`。
 - **验收**：
   - `internal/pool`：`TestReadFanoutSpreadsBlocks`（12 块、窗口 8 → 每成员 `ReadRange` 4 ± 1）、`TestReadFanoutSkipsDownMember`、
     `TestReadFanoutPrefersFast`；`test/perf`：`TestPoolReadFanoutAddsBandwidth`（20 ms 延迟、48 MiB、3 成员 < 0.5× 单成员）。
@@ -1630,7 +1634,7 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   - 冷读一个 256 MiB 文件，本地磁盘写入字节 == 文件大小（不再 2×）；`reload` 后 `.part` 带有效位图可继续读。
   - `internal/fusefs`（Linux）：`cp --sparse=auto` 不再产生 `ENOTSUP`；已 hydrate 文件的读走 `ReadResultFd`。
 
-### [ ] T-32 `cloudfs export`：把虚拟路径批量导出到本地/移动硬盘（`docs/pool-v2.md` §5，阶段 D）
+### [x] T-32 `cloudfs export`：把虚拟路径批量导出到本地/移动硬盘（`docs/pool-v2.md` §5，阶段 D）
 
 - **证据**：没有任何导出/同步/拉取命令。`cloudfs cp` 只支持虚拟路径 → 虚拟路径单文件（`internal/vfs/copy.go`）；
   `cloudfs pin` 落缓存不落目标目录；`cp -r` 走内核单文件串行 READ，无跨文件并行、无续传、拔盘即失败。
