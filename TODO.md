@@ -1566,7 +1566,7 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 回归：`TestInstrumentKeepsTheOneRequestUploadBesideTheOthers` 覆盖五种组合，并断言 `Unwrap`、`RangeReaderAt`、
 `StreamLister` 仍可达；回退实现即失败。
 
-### [ ] T-29 读路径便宜项：内核缓存、请求合并、`Transfer` 令牌类、`MaxConnsPerHost` 接线（`docs/pool-v2.md` 阶段 A）
+### [x] T-29 读路径便宜项：内核缓存、请求合并、`Transfer` 令牌类、`MaxConnsPerHost` 接线（`docs/pool-v2.md` 阶段 A）
 
 - **证据**：只读 open 返回 flags `0`（`internal/fusefs/fs.go` `Open`），内核每次 open 丢页缓存；`platform_linux.go`
   `MaxReadAhead = 1MiB`，`MountOptions.MaxBackground` 用 go-fuse 默认 12；`maybeReadAhead` 为窗口内每个块各发一个
@@ -1582,7 +1582,7 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   - `internal/net/proxy`：`setConns(3)` 后 transport 的 `MaxConnsPerHost == 3`；`max_conns: 2` 的 remote 经 caps 报告 2。
   - `qps.transfer: 0` 时 aliyun 的字节 GET 仍记入 `Download` 桶（回退路径有测试）。
 
-### [ ] T-30 目录读序预取与 `cache.policy` 按前缀预设（`docs/pool-v2.md` §3、§7，阶段 B）
+### [x] T-30 目录读序预取与 `cache.policy` 按前缀预设（`docs/pool-v2.md` §3、§7，阶段 B）
 
 - **证据**：读路径没有跨文件预取；`cp -r` 一万个小文件 = 一万次串行 open/read/close，受 provider QPS 约束；
   `FS.Pin` 是唯一的整子树下载且落缓存不落目标；小文件先写块文件、10 s 后 hydration 再拷一遍。
@@ -1599,6 +1599,11 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   - `TestDirectoryReadaheadSkipsLargeFiles`：超阈值文件的块不被预取。
   - `TestDirectoryReadaheadStopsOnListingChange`：`Refresh` 后不再有超出已认领范围的 `ReadRange`。
   - `internal/config`：preset 解析、显式键覆盖 preset、校验错误；两个不同策略的 mount 得到不同窗口。
+- **完成**：`internal/config/cache_policy.go`（preset + 覆盖 + 校验）与 daemon 的 `vfs.CachePolicy` 传递此前已在；
+  本次补上 vfs 侧的 `internal/vfs/read_dir_ahead.go`——句柄首读时按 `meta.ChildrenPage` 判定列表顺序，
+  连续 3 次起窗，前方 `dir_readahead` 个 ≤ `small_file_threshold` 的文件整文件一次 range → `cache.PutWhole`，
+  每 remote 槽位 `clamp(round(QPS.Download), 2, MaxConnsPerHost) − 1`，前台读遇同文件在途预取则等待而不是重发，
+  `invalidateListing` / `dropPaths` 清读序。测试 `test/perf/dirahead_test.go` 五条，全部按 provider 调用次数断言。
 
 ### [ ] T-31 大文件：速率窗口、全局在途预算、池副本扇出、稀疏整文件布局（`docs/pool-v2.md` §4，阶段 C + F）
 

@@ -52,6 +52,10 @@ type Handle struct {
 	// them in one block means the reads have locality, and the rest of the
 	// block is worth fetching in one go.
 	subMiss map[int64]int
+	// dirAheadSeen marks that this handle has already told the directory
+	// read-ahead it started reading; the signal is one per open file, not
+	// one per read.
+	dirAheadSeen bool
 }
 
 // Open opens a file by inode. write selects the write path.
@@ -238,6 +242,17 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 				}
 			}
 		}
+	}
+	// A sibling prefetch may already be fetching this very file. Waiting
+	// for it costs nothing and saves the drive a second request for the
+	// same bytes.
+	f.awaitDirReadAhead(ctx, h.Ino)
+	h.mu.Lock()
+	first := !h.dirAheadSeen
+	h.dirAheadSeen = true
+	h.mu.Unlock()
+	if first {
+		f.noteDirRead(ctx, h)
 	}
 	bs := f.cache.BlockSize()
 	total := 0

@@ -185,8 +185,15 @@ type FS struct {
 	dirFlight flight[uint64, *directoryRefresh]
 	// prefetching tracks blocks a read-ahead goroutine already owns.
 	prefetching inflight
-	blockFlight flight[blockKey, []byte]
-	subFlight   flight[subKey, []byte]
+	// dirAhead is the per-directory read order the sibling prefetch works
+	// from (directory inode -> *dirAheadState); dirAheadFlight is the
+	// whole-file fetches in flight (file inode -> chan struct{} closed when
+	// the fetch ends); dirAheadSem is the prefetch concurrency per remote.
+	dirAhead       sync.Map
+	dirAheadFlight sync.Map
+	dirAheadSem    sync.Map
+	blockFlight    flight[blockKey, []byte]
+	subFlight      flight[subKey, []byte]
 	// readaheadDisabled remembers, per mount remote name, that a coalesced
 	// multi-block readahead run once came back short on that remote (a
 	// server that caps request size below what was asked). Once set,
@@ -1034,6 +1041,9 @@ func (f *FS) pathOf(ctx context.Context, ino uint64) (string, error) {
 func (f *FS) dropPaths() {
 	f.paths.Store(&sync.Map{})
 	f.dirIDs.Store(&sync.Map{})
+	// A rename or removal moves names around; every directory's read
+	// order is a guess about names.
+	f.dirAhead.Range(func(k, _ any) bool { f.dirAhead.Delete(k); return true })
 	if f.hasPins.Load() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1067,6 +1077,8 @@ func (f *FS) dirRemoteID(ctx context.Context, ino uint64) (string, error) {
 // directory itself (its cached stream), each entry whose content moved, and
 // each name that appeared or vanished.
 func (f *FS) invalidateListing(dir uint64, c meta.DirChange) {
+	// What the sibling prefetch thought came next may not any more.
+	f.forgetDirReadAhead(dir)
 	f.invalidate(dir)
 	for _, ino := range c.Updated {
 		f.invalidate(ino)
