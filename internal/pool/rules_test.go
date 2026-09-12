@@ -166,3 +166,107 @@ func TestTrimUsesThePrefixRuleAsTheSurplusLine(t *testing.T) {
 		t.Fatalf("/keep/master.bin has %d replicas, want the rule's 3 kept", got)
 	}
 }
+
+// memberNames is the candidate order as names, for the placement tests.
+func memberNames(ms []*member) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.name
+	}
+	return out
+}
+
+func newRulePool(t *testing.T, settings config.Pool, members ...Member) *Pool {
+	t.Helper()
+	p, err := New(Options{Name: "home", StateDir: t.TempDir(), Settings: settings, Members: members})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	return p
+}
+
+// TestCandidatesRankByRequirePreferDomainAvoid: the rule's verdicts are
+// the ordering, and only require excludes. A pool that dropped avoided
+// members outright would refuse to place a file the operator only asked
+// to keep off those drives when possible.
+func TestCandidatesRankByRequirePreferDomainAvoid(t *testing.T) {
+	ctx := context.Background()
+	a, b, c := fakeprovider.New("a"), fakeprovider.New("b"), fakeprovider.New("c")
+	members := []Member{
+		{Name: "a", Provider: a, Adopt: true, Classes: []string{"slow", "cheap"}, Domain: "acct-1"},
+		{Name: "b", Provider: b, Adopt: true, Classes: []string{"fast"}, Domain: "acct-1"},
+		{Name: "c", Provider: c, Adopt: true, Classes: []string{"fast", "cheap"}, Domain: "acct-2"},
+	}
+
+	// prefer promotes, without excluding anyone.
+	p := newRulePool(t, config.Pool{Replicas: 3, MinReplicas: 1, Rules: []config.PoolRule{
+		{Prefix: "/video", Prefer: []string{"fast"}},
+	}}, members...)
+	got := memberNames(p.candidates(ctx, "/video/a.mkv"))
+	if len(got) != 3 || got[0] == "a" {
+		t.Fatalf("prefer fast = %v, want the fast members first and nobody dropped", got)
+	}
+
+	// avoid demotes, and also without excluding anyone.
+	p = newRulePool(t, config.Pool{Replicas: 3, MinReplicas: 1, Rules: []config.PoolRule{
+		{Prefix: "/video", Avoid: []string{"cheap"}},
+	}}, members...)
+	got = memberNames(p.candidates(ctx, "/video/a.mkv"))
+	if len(got) != 3 || got[0] != "b" {
+		t.Fatalf("avoid cheap = %v, want b first and the avoided members still available", got)
+	}
+
+	// require is the one hard rule.
+	p = newRulePool(t, config.Pool{Replicas: 3, MinReplicas: 1, Rules: []config.PoolRule{
+		{Prefix: "/video", Require: []string{"fast", "cheap"}},
+	}}, members...)
+	got = memberNames(p.candidates(ctx, "/video/a.mkv"))
+	if len(got) != 1 || got[0] != "c" {
+		t.Fatalf("require fast+cheap = %v, want only c", got)
+	}
+
+	// A path no rule covers ranks as it always did.
+	if got := memberNames(p.candidates(ctx, "/docs/a.txt")); len(got) != 3 {
+		t.Fatalf("outside every rule = %v, want every member", got)
+	}
+}
+
+// TestCandidatesSpreadAcrossFailureDomains: two members of one account
+// share a ban and a quota, so the second replica of a file belongs in the
+// other account even though that member is declared last.
+func TestCandidatesSpreadAcrossFailureDomains(t *testing.T) {
+	ctx := context.Background()
+	a, b, c := fakeprovider.New("a"), fakeprovider.New("b"), fakeprovider.New("c")
+	p := newRulePool(t, config.Pool{Replicas: 2, MinReplicas: 1},
+		Member{Name: "a", Provider: a, Adopt: true, Domain: "acct-1"},
+		Member{Name: "b", Provider: b, Adopt: true, Domain: "acct-1"},
+		Member{Name: "c", Provider: c, Adopt: true, Domain: "acct-2"})
+
+	docs, _ := p.Mkdir(ctx, rootID, "docs")
+	upload(t, ctx, p, docs.ID, "a.txt", []byte("spread me"))
+	if _, err := p.RepairOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Content("/docs/a.txt"); !ok {
+		t.Fatalf("the second replica stayed in the first account (a %v, b %v, c %v)",
+			has(a, "/docs/a.txt"), has(b, "/docs/a.txt"), has(c, "/docs/a.txt"))
+	}
+	if _, ok := b.Content("/docs/a.txt"); ok {
+		t.Fatal("b shares an account with the first replica and should not have been chosen")
+	}
+	// Spreading is a preference, not a rule: with the other account gone,
+	// the third copy still lands rather than being refused.
+	got := memberNames(p.candidates(ctx, "/docs/a.txt"))
+	if len(got) != 3 {
+		t.Fatalf("candidates = %v, want every member still available", got)
+	}
+	if got[len(got)-1] != "b" {
+		t.Fatalf("candidates = %v, want the duplicate-domain member last", got)
+	}
+}
+
+func has(f *fakeprovider.Fake, pth string) bool {
+	_, ok := f.Content(pth)
+	return ok
+}

@@ -182,10 +182,25 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		}
 		rows.Close()
 	}
+	// Domains already carrying a copy: another copy there buys less than
+	// the same copy somewhere else, because one account's ban or quota
+	// takes them all at once.
+	takenDomains := map[string]bool{}
+	for _, m := range p.members {
+		if holding[m.name] {
+			takenDomains[m.domain] = true
+		}
+	}
+	rule := p.ruleFor(pth)
 	probe := p.probeInterval()
 	type scored struct {
-		m    *member
-		free int64
+		m *member
+		// The rule's verdicts, in the order they rank: a preferred member
+		// beats a neutral one, a member whose domain is already holding a
+		// copy loses to one that spreads, an avoided member loses to
+		// anything else, and a member that is out is a probe gamble.
+		prefer, dupDomain, avoid, out bool
+		free                          int64
 	}
 	var holders, others []scored
 	for _, m := range p.members {
@@ -195,30 +210,51 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		if !m.usable(probe) {
 			continue
 		}
-		if !holding[m.name] && p.canHold(ctx, m, parent, name) != nil {
+		if holding[m.name] {
+			// A member already holding the path stays a candidate even
+			// when the rule would not choose it today: an overwrite lands
+			// where the file lives, and the rule changing must not fork
+			// one file into two placements.
+			holders = append(holders, scored{m: m, free: p.free(ctx, m)})
 			continue
 		}
-		sc := scored{m: m, free: p.free(ctx, m)}
-		if holding[m.name] {
-			holders = append(holders, sc)
-		} else {
-			others = append(others, sc)
+		if p.canHold(ctx, m, parent, name) != nil {
+			continue
 		}
+		if rule != nil && !hasAllClasses(m, rule.Require) {
+			continue // require is the one hard rule
+		}
+		sc := scored{m: m, free: p.free(ctx, m), dupDomain: takenDomains[m.domain], out: m.state() == provider.HealthOut}
+		if rule != nil {
+			sc.prefer = hasAnyClass(m, rule.Prefer)
+			sc.avoid = hasAnyClass(m, rule.Avoid)
+		}
+		others = append(others, sc)
+	}
+	bySpace := func(a, b scored) (bool, bool) {
+		fa, fb := a.free, b.free
+		if (fa < 0) != (fb < 0) {
+			return fa >= 0, true // known space before unknown
+		}
+		if fa != fb && fa >= 0 {
+			// Weight scales what "more room" means.
+			return float64(fa)*a.m.weight > float64(fb)*b.m.weight, true
+		}
+		if a.m.weight != b.m.weight {
+			return a.m.weight > b.m.weight, true
+		}
+		return a.m.order < b.m.order, true
 	}
 	order := func(s []scored) {
 		sort.SliceStable(s, func(i, j int) bool {
-			fi, fj := s[i].free, s[j].free
-			if (fi < 0) != (fj < 0) {
-				return fi >= 0 // known space before unknown
+			a, b := s[i], s[j]
+			for _, flag := range [][2]bool{{a.prefer, b.prefer}, {!a.dupDomain, !b.dupDomain}, {!a.avoid, !b.avoid}, {!a.out, !b.out}} {
+				if flag[0] != flag[1] {
+					return flag[0]
+				}
 			}
-			if fi != fj && fi >= 0 {
-				// Weight scales what "more room" means.
-				return float64(fi)*s[i].m.weight > float64(fj)*s[j].m.weight
-			}
-			if s[i].m.weight != s[j].m.weight {
-				return s[i].m.weight > s[j].m.weight
-			}
-			return s[i].m.order < s[j].m.order
+			less, _ := bySpace(a, b)
+			return less
 		})
 	}
 	order(holders)
@@ -231,6 +267,30 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		out = append(out, s.m)
 	}
 	return out
+}
+
+// hasAnyClass reports whether the member carries at least one of the
+// classes — how prefer and avoid read a member.
+func hasAnyClass(m *member, classes []string) bool {
+	for _, want := range classes {
+		for _, got := range m.classes {
+			if got == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAllClasses reports whether the member carries every class — how
+// require reads a member, so a rule can demand two properties at once.
+func hasAllClasses(m *member, classes []string) bool {
+	for _, want := range classes {
+		if !hasAnyClass(m, []string{want}) {
+			return false
+		}
+	}
+	return true
 }
 
 // Quota implements provider.Quotaer for the pool: what the members report

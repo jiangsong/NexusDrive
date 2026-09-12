@@ -220,47 +220,18 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 	return made, lastErr
 }
 
-// repairTarget picks the member to receive the next copy: one that already
-// has a stale or pending copy at the path (refreshed in place), then one
-// that has none, both in declaration order and only if usable.
+// repairTarget picks the member to receive the next copy: the best
+// candidate for the path that is not already carrying a live one. It is
+// candidates() minus the current holders on purpose — a second placement
+// policy here is how repair stopped honouring rules and failure domains
+// (docs/pool-v2.md §6.2).
 func (p *Pool) repairTarget(ctx context.Context, pth string, live []replicaRow) *member {
 	taken := map[string]bool{}
 	for _, r := range live {
 		taken[r.member] = true
 	}
-	holding := map[string]bool{}
-	rows, err := p.db.QueryContext(ctx, `SELECT member FROM replicas WHERE path = ?`, pth)
-	if err == nil {
-		for rows.Next() {
-			var m string
-			if rows.Scan(&m) == nil {
-				holding[m] = true
-			}
-		}
-		rows.Close()
-	}
-	probe := p.probeInterval()
-	parent, name := parentOf(pth), path.Base(pth)
-	eligible := func(m *member) bool {
-		if taken[m.name] {
-			return false
-		}
-		switch m.state() {
-		case provider.HealthOut, provider.HealthDisabled, provider.HealthDraining:
-			return false
-		}
-		if !holding[m.name] && p.canHold(ctx, m, parent, name) != nil {
-			return false
-		}
-		return m.usable(probe)
-	}
-	for _, m := range p.members {
-		if holding[m.name] && eligible(m) {
-			return m
-		}
-	}
-	for _, m := range p.members {
-		if !holding[m.name] && eligible(m) {
+	for _, m := range p.candidates(ctx, pth) {
+		if !taken[m.name] {
 			return m
 		}
 	}

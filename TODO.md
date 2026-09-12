@@ -1672,8 +1672,10 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   daemon 经 `_pool_domains` 注入每个成员的故障域身份，`targetFor(path)` / `wantReplicas(path)` 已取代
   `replicaTarget()` 在 scan / repair / trim / drain / write / `Availability` 的全部按路径调用点
   （`internal/pool/rules.go` + `rules_test.go`、`marker_settings_test.go`、`daemon/pool_domains_test.go`）。
-  **未做**：§6.2 `candidates()` 仍不读 `prefer` / `avoid` / `require` / `Domain`，`repairTarget` 未合并；
-  §6.3 配额哨兵、§6.4 服务端复制、§6.5 `write_mode` 消费、§6.6 rebalance 全部未开始。
+  §6.2 也已落地：`candidates()` 按「已持有 → `require` 过滤 → `prefer` → 故障域不重复 → 不在 `avoid` →
+  不是 out → 已知空间 → `free × weight` → weight → 声明顺序」排序，`repairTarget` 收敛成
+  `candidates(path) − 已持有活副本`（`internal/pool/placement.go`、`repair.go`）。
+  **未做**：`fullUntil` 这一档要等 §6.3 的配额哨兵；§6.4 服务端复制、§6.5 `write_mode` 消费、§6.6 rebalance 未开始。
 
 ## 明确不在当前范围内
 
