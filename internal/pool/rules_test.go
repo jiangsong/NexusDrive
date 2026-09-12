@@ -115,7 +115,7 @@ func TestRepairFillsToThePrefixRuleNotThePoolDefault(t *testing.T) {
 	if got := liveCount(t, p, "/docs/a.txt"); got != 1 {
 		t.Fatalf("/docs/a.txt has %d replicas, want the pool's 1", got)
 	}
-	if n, err := p.underReplicated(ctx); err != nil || n != 0 {
+	if n, _, err := p.underReplicated(ctx); err != nil || n != 0 {
 		t.Fatalf("underReplicated = %d, %v; want 0 once every path meets its own rule", n, err)
 	}
 }

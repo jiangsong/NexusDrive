@@ -61,6 +61,13 @@ func (d *Doctor) checkPools(ctx context.Context) []Check {
 		case r.Unavailable > 0:
 			rep.Level = LevelFail
 			rep.setDetail("doctor.pool.replicas.lost", r.Unavailable, r.UnderReplicated)
+		case r.BelowMin > 0:
+			// min_replicas never fails a write, so this line is the only
+			// place it means anything: the operator asked to hear when a
+			// file is one member away from being lost.
+			rep.Level = LevelWarn
+			rep.setDetail("doctor.pool.replicas.belowmin", r.BelowMin, r.MinReplicas)
+			rep.setFix("doctor.pool.replicas.fix", name)
 		case r.UnderReplicated > 0:
 			rep.Level = LevelWarn
 			rep.setDetail("doctor.pool.replicas.under", r.UnderReplicated, r.Target, r.Repair.Queued, r.Repair.Blocked)

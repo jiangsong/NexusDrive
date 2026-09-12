@@ -76,6 +76,7 @@ var zh = map[string]string{
 	"doctor.pool.replicas.capped":   "只有 %d 个成员能存副本，replicas: %d 要得更多",
 	"doctor.pool.replicas.lost":     "%d 个文件没有可达副本；%d 个低于目标",
 	"doctor.pool.replicas.under":    "%d 个文件低于 %d 副本的目标（修复队列 %d，等待 %d）",
+	"doctor.pool.replicas.belowmin": "%d 个文件低于 min_replicas %d；再坏一个成员就会丢",
 	"doctor.pool.replicas.fix":      "cloudfs pool repair %s",
 	"doctor.pool.holds":             "为复制在本地暂存了 %d 字节，超过 %d 的预算",
 	"doctor.pool.divergences":       "%d 个路径需要你决定",

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cloudfs/internal/config"
 	"cloudfs/internal/provider"
 )
 
@@ -116,6 +117,7 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 			if err != nil {
 				return provider.UploadSession{}, err
 			}
+			p.awaitMinReplicas(ctx, pth)
 			return provider.UploadSession{ID: "rapid-" + e.ID, RapidDone: true, Entry: &e}, nil
 		}
 		return packSession(m, pth, hold, ms), nil
@@ -195,7 +197,14 @@ func (p *Pool) CompleteUpload(ctx context.Context, s provider.UploadSession, par
 	if err != nil {
 		return provider.Entry{}, err
 	}
-	return p.finishUpload(ctx, m, pth, me, hold)
+	e, err := p.finishUpload(ctx, m, pth, me, hold)
+	if err != nil {
+		return provider.Entry{}, err
+	}
+	// Strict mode waits here, outside the index lock finishUpload takes:
+	// the copies it waits for are made by repair, which needs that lock.
+	p.awaitMinReplicas(ctx, pth)
+	return e, nil
 }
 
 // finishUpload commits a landed upload to the index: the entry now carries
@@ -811,4 +820,51 @@ func (p *Pool) Delete(ctx context.Context, id string) error {
 		}
 		return dropSubtree(tx, pth)
 	})
+}
+
+// awaitMinReplicas is what write_mode: strict costs a close(): the index
+// is committed and the index lock released and the bytes are already durable on one member
+// and in the local hold, and this waits up to min_replicas_timeout for
+// the other copies to exist too.
+//
+// It never fails the write. A timeout leaves the file in the repair
+// queue, exactly where relaxed mode leaves it; waiting is a promise about
+// when close() returns, not about whether the data is safe. Re-running
+// CompleteUpload against a member is not safe to retry, which is why
+// strict mode repairs after the commit rather than blocking the upload
+// itself.
+func (p *Pool) awaitMinReplicas(ctx context.Context, pth string) {
+	if p.writeMode() != config.WriteModeStrict {
+		return
+	}
+	min := p.minReplicas(pth)
+	if min <= 1 {
+		return
+	}
+	wait, cancel := context.WithTimeout(ctx, p.minReplicasDeadline())
+	defer cancel()
+	for wait.Err() == nil {
+		row, ok, err := p.entryAt(wait, pth)
+		if err != nil || !ok {
+			return
+		}
+		live, err := p.liveReplicas(wait, pth, row.ctoken)
+		if err != nil {
+			return
+		}
+		if len(live) >= min {
+			return
+		}
+		if target, capped := p.targetFor(pth); capped && len(live) >= target {
+			// No member left that could take another copy: waiting for
+			// one cannot end any better than this.
+			return
+		}
+		// One repair pass fills the whole target, not just the
+		// threshold; stopping it at min_replicas would only make the
+		// same copies happen later.
+		if _, err := p.repairPath(wait, pth); err != nil && wait.Err() != nil {
+			return
+		}
+	}
 }

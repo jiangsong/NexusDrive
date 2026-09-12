@@ -2,6 +2,7 @@ package pool
 
 import (
 	"strings"
+	"time"
 
 	"cloudfs/internal/config"
 	"cloudfs/internal/provider"
@@ -104,4 +105,40 @@ func (p *Pool) replicaTarget() (target int, capped bool) {
 		return eligible, true
 	}
 	return want, false
+}
+
+// minReplicas is the alert threshold for a path: below it the pool is
+// telling the operator that one more member failing loses the file. It is
+// never a write barrier — see writeMode.
+func (p *Pool) minReplicas(pth string) int {
+	want := p.wantReplicas(pth)
+	min := p.settings.MinReplicas
+	if min < 1 {
+		min = 1
+	}
+	if min > want {
+		// A rule that lowers replicas below the pool's min_replicas
+		// cannot be short of its own target.
+		min = want
+	}
+	return min
+}
+
+// writeMode is how close() treats min_replicas: relaxed (the default)
+// returns as soon as the write is durable on one member and the journal,
+// strict waits up to min_replicas_timeout for the rest and returns
+// successfully either way. Neither ever fails a write for it.
+func (p *Pool) writeMode() string {
+	if p.settings.WriteMode == config.WriteModeStrict {
+		return config.WriteModeStrict
+	}
+	return config.WriteModeRelaxed
+}
+
+// minReplicasDeadline bounds a strict-mode wait.
+func (p *Pool) minReplicasDeadline() time.Duration {
+	if p.settings.MinReplicasTimeout > 0 {
+		return p.settings.MinReplicasTimeout
+	}
+	return 2 * time.Minute
 }

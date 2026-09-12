@@ -20,13 +20,17 @@ type Report struct {
 	Members         []MemberReport
 	Files           int
 	UnderReplicated int
-	Unavailable     int
-	Repair          RepairStats
-	HoldsBytes      int64
-	Divergences     int
-	Notices         []string
-	Quota           provider.Quota
-	QuotaKnown      bool
+	// BelowMin counts files with fewer live replicas than min_replicas.
+	// They are readable; the count is what makes "min_replicas" mean
+	// something, since no write ever fails for it.
+	BelowMin    int
+	Unavailable int
+	Repair      RepairStats
+	HoldsBytes  int64
+	Divergences int
+	Notices     []string
+	Quota       provider.Quota
+	QuotaKnown  bool
 }
 
 // MemberReport is one member in the report.
@@ -65,7 +69,7 @@ func (p *Pool) StatusReport(ctx context.Context) (Report, error) {
 		r.Members = append(r.Members, mr)
 	}
 	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries WHERE kind = ? AND conflict_of = ''`, int(provider.KindFile)).Scan(&r.Files)
-	if r.UnderReplicated, err = p.underReplicated(ctx); err != nil {
+	if r.UnderReplicated, r.BelowMin, err = p.underReplicated(ctx); err != nil {
 		return r, err
 	}
 	if r.Unavailable, err = p.unavailableFiles(ctx); err != nil {
@@ -138,6 +142,10 @@ type Availability struct {
 	Live   int    // replicas on members in service
 	Target int
 	Reason string
+	// BelowMin marks a file with fewer live replicas than min_replicas:
+	// still readable, but one member failing loses it. min_replicas is an
+	// alert threshold, never a write barrier — see Pool.writeMode.
+	BelowMin bool
 }
 
 const (
@@ -199,6 +207,14 @@ func (p *Pool) Availability(ctx context.Context, pth string) (Availability, erro
 		a.State = AvailUnavailable
 		if a.Reason == "" {
 			a.Reason = "no replica on a reachable member"
+		}
+	case inService < p.minReplicas(pth):
+		// Being short of the target is a degraded file; being below
+		// min_replicas is the threshold the operator asked to hear about.
+		a.State = AvailDegraded
+		a.BelowMin = true
+		if a.Reason == "" {
+			a.Reason = fmt.Sprintf("below min_replicas: %d of %d replicas", inService, p.minReplicas(pth))
 		}
 	case inService < target:
 		a.State = AvailDegraded

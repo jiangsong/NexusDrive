@@ -1682,7 +1682,11 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   新表 `member_usage`（触发器维护，`meta.schema_version = 2` 迁移重算）取代放置时的 `SUM(size)`。
   §6.4 修复走服务端复制已落地：同 `Domain` 且 `Caps.ServerCopy` 时 `copyReplica` 先试 `ServerCopier.Copy`，
   `ErrUnsupported` / `ErrNotFound` 回退字节拷，模糊失败标记 `server-copy-unsure` 并在下次尝试前 `ScrubPath`。
-  **未做**：§6.5 `write_mode` 消费、§6.6 rebalance。
+  §6.5 `min_replicas` 诚实化已落地：`relaxed`（默认）把它当告警阈值——`ScanOnce` 用 `below min_replicas`
+  入队（优先级 2）、`Availability.BelowMin`、`Report.BelowMin`、`pool status` 与 `doctor` 各一行；
+  `strict` 在 `finishUpload` 之后（不持索引锁）同步跑 `repairPath`，deadline `min_replicas_timeout`，
+  超时仍返回成功。`docs/pool.md` 的表格与写路径描述已同步改写。
+  **未做**：§6.6 rebalance 与 backfill。
 
 ## 明确不在当前范围内
 

@@ -215,7 +215,7 @@ func printPoolStatus(out control.PoolStatusResponse) error {
 		}
 		fmt.Fprintf(tw, "pool %s\t%s\n", p.Name, p.PoolID)
 		fmt.Fprintf(tw, "  replicas\t%d (min %d, current target %s)\n", p.Replicas, p.MinReplicas, target)
-		fmt.Fprintf(tw, "  files\t%d (%d under-replicated, %d unavailable)\n", p.Files, p.UnderReplicated, p.Unavailable)
+		fmt.Fprintf(tw, "  files\t%d (%d under-replicated, %d below min_replicas, %d unavailable)\n", p.Files, p.UnderReplicated, p.BelowMin, p.Unavailable)
 		fmt.Fprintf(tw, "  repair queue\t%d (%d waiting)\n", p.Repair.Queued, p.Repair.Blocked)
 		if p.Total > 0 {
 			fmt.Fprintf(tw, "  space\t%s used of %s (%s free)\n", humanBytes(p.Used), humanBytes(p.Total), humanBytes(p.Free))

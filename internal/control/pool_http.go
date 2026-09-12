@@ -54,6 +54,7 @@ type PoolView struct {
 	Members         []PoolMemberView `json:"members"`
 	Files           int              `json:"files"`
 	UnderReplicated int              `json:"under_replicated"`
+	BelowMin        int              `json:"below_min_replicas"`
 	Unavailable     int              `json:"unavailable"`
 	Repair          struct {
 		Queued  int `json:"queued"`
@@ -171,7 +172,7 @@ func poolView(ctx context.Context, name string, p *pool.Pool) (PoolView, error) 
 		return PoolView{}, err
 	}
 	v := PoolView{Name: name, PoolID: r.PoolID, Replicas: r.Replicas, MinReplicas: r.MinReplicas, Target: r.Target, TargetCapped: r.TargetCapped,
-		Files: r.Files, UnderReplicated: r.UnderReplicated, Unavailable: r.Unavailable, HoldsBytes: r.HoldsBytes, Divergences: r.Divergences, Notices: r.Notices}
+		Files: r.Files, UnderReplicated: r.UnderReplicated, BelowMin: r.BelowMin, Unavailable: r.Unavailable, HoldsBytes: r.HoldsBytes, Divergences: r.Divergences, Notices: r.Notices}
 	if v.Notices == nil {
 		v.Notices = []string{}
 	}

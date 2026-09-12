@@ -105,7 +105,13 @@ func (p *Pool) ScanOnce(ctx context.Context) (int, error) {
 		if len(live) >= target {
 			continue
 		}
-		if err := p.enqueueRepair(ctx, f.path, "under-replicated", 0); err != nil {
+		// Below min_replicas the next member failing loses the file, so
+		// those repairs go to the front of the queue.
+		reason, priority := "under-replicated", 0
+		if len(live) < p.minReplicas(f.path) {
+			reason, priority = "below min_replicas", 2
+		}
+		if err := p.enqueueRepair(ctx, f.path, reason, priority); err != nil {
 			return queued, err
 		}
 		queued++
@@ -483,32 +489,35 @@ func (p *Pool) RepairStatus(ctx context.Context) (RepairStats, error) {
 	return st, nil
 }
 
-// underReplicated counts files below the current target, for status.
-func (p *Pool) underReplicated(ctx context.Context) (int, error) {
+// underReplicated counts files below the current target, and separately
+// those below min_replicas, for status.
+func (p *Pool) underReplicated(ctx context.Context) (under int, belowMin int, err error) {
 	rows, err := p.db.QueryContext(ctx, `SELECT path, ctoken FROM entries WHERE kind = ? AND conflict_of = ''`, int(provider.KindFile))
 	if err != nil {
-		return 0, fmt.Errorf("pool: %w", err)
+		return 0, 0, fmt.Errorf("pool: %w", err)
 	}
 	defer rows.Close()
-	n := 0
 	var pending []struct{ path, ctoken string }
 	for rows.Next() {
 		var pth, ct string
 		if err := rows.Scan(&pth, &ct); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		pending = append(pending, struct{ path, ctoken string }{pth, ct})
 	}
 	for _, f := range pending {
 		live, err := p.liveReplicas(ctx, f.path, f.ctoken)
 		if err != nil {
-			return n, err
+			return under, belowMin, err
 		}
 		if target, _ := p.targetFor(f.path); len(live) < target {
-			n++
+			under++
+		}
+		if len(live) < p.minReplicas(f.path) {
+			belowMin++
 		}
 	}
-	return n, nil
+	return under, belowMin, nil
 }
 
 var _ = sort.Strings

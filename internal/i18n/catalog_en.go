@@ -78,6 +78,7 @@ var en = map[string]string{
 	"doctor.pool.replicas.capped":   "only %d members can hold copies, replicas: %d asks for more",
 	"doctor.pool.replicas.lost":     "%d files have no reachable replica; %d below target",
 	"doctor.pool.replicas.under":    "%d files below the target of %d (repair queue %d, %d waiting)",
+	"doctor.pool.replicas.belowmin": "%d files below min_replicas %d; one more member failing loses them",
 	"doctor.pool.replicas.fix":      "cloudfs pool repair %s",
 	"doctor.pool.holds":             "%d bytes held locally for replication, over the %d budget",
 	"doctor.pool.divergences":       "%d paths need a decision",
