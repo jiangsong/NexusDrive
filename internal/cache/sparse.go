@@ -675,7 +675,11 @@ func (c *Cache) reloadParts(dir string, entries []os.DirEntry) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		fh := strings.TrimSuffix(strings.TrimSuffix(name, ".tmp"), ".part.bitmap")
+		if strings.HasSuffix(name, ".part.bitmap.tmp") {
+			os.Remove(filepath.Join(dir, name)) // never the authoritative claim
+			continue
+		}
+		fh := strings.TrimSuffix(name, ".part.bitmap")
 		if fh == name || !validFileHash(fh) || kept[fh] {
 			continue
 		}

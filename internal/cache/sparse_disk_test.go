@@ -34,7 +34,12 @@ func (d *diskUse) sample(t *testing.T, c *Cache) {
 			return nil // a file the cache removed mid-walk is not an error
 		}
 		name := e.Name()
-		if strings.HasSuffix(name, ".key") || strings.HasSuffix(name, ".part.bitmap") {
+		// Bookkeeping, not file content: the per-file identity, the
+		// whole-file bitmap, and a partial block's sidecar — which shares
+		// the ".part" suffix with the sparse file but lives under blocks/.
+		inBlocks := strings.Contains(p, string(os.PathSeparator)+"blocks"+string(os.PathSeparator))
+		if strings.HasSuffix(name, ".key") || strings.Contains(name, ".part.bitmap") ||
+			inBlocks && strings.HasSuffix(name, ".part") {
 			return nil
 		}
 		info, err := e.Info()
