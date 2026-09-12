@@ -84,6 +84,7 @@ func (c *Cache) Close() error {
 	}
 	c.sweepAllClaims()
 	c.hydrateWG.Wait()
+	c.closeParts()
 	return nil
 }
 
@@ -185,6 +186,8 @@ func (c *Cache) flushBlock(id blockID) {
 	}
 	data := m.mem
 	m.flushing = true
+	fs := c.files[id.file]
+	sparse := fs != nil && c.wholeLayout(fs.size)
 	c.mu.Unlock()
 	c.admitMu.Unlock()
 	var temp string
@@ -201,6 +204,12 @@ func (c *Cache) flushBlock(id blockID) {
 		}
 		c.mu.Unlock()
 	}()
+	if sparse {
+		// Large files are written once, at their real offset inside the
+		// file the cache will publish; there is no block file to rename.
+		c.flushMemToPart(id, m, data)
+		return
+	}
 	// A unique unpublished file cannot overwrite another generation's temp.
 	p := c.blockPath(id.file, id.index)
 	err := os.MkdirAll(filepath.Dir(p), 0o700)

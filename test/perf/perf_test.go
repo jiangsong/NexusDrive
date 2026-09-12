@@ -27,9 +27,10 @@ import (
 )
 
 type harness struct {
-	fs   *vfs.FS
-	fake *fakeprovider.Fake
-	up   *upload.Uploader
+	fs    *vfs.FS
+	fake  *fakeprovider.Fake
+	up    *upload.Uploader
+	cache *cache.Cache
 }
 
 func newHarness(t *testing.T, blockSize int64, readAhead, prefetchDepth int) *harness {
@@ -40,6 +41,13 @@ func newHarness(t *testing.T, blockSize int64, readAhead, prefetchDepth int) *ha
 // that cares about readahead coalescing does not depend on the mount
 // provider's default capabilities to derive it.
 func newHarnessOpt(t *testing.T, blockSize int64, readAhead, prefetchDepth int, readaheadRequest int64) *harness {
+	return newHarnessCache(t, cache.Options{BlockSize: blockSize}, readAhead, prefetchDepth, readaheadRequest)
+}
+
+// newHarnessCache is newHarnessOpt with the cache built from explicit
+// options, for a test that cares which on-disk layout a file gets. Dir is
+// filled in here; everything else is the caller's.
+func newHarnessCache(t *testing.T, cacheOpt cache.Options, readAhead, prefetchDepth int, readaheadRequest int64) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
@@ -47,7 +55,8 @@ func newHarnessOpt(t *testing.T, blockSize int64, readAhead, prefetchDepth int, 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	ca, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: blockSize})
+	cacheOpt.Dir = filepath.Join(dir, "cache")
+	ca, err := cache.New(cacheOpt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +92,7 @@ func newHarnessOpt(t *testing.T, blockSize int64, readAhead, prefetchDepth int, 
 		t.Fatal(err)
 	}
 	fsys.SetWriteBackend(j, up)
-	return &harness{fs: fsys, fake: fake, up: up}
+	return &harness{fs: fsys, fake: fake, up: up, cache: ca}
 }
 
 // seedTree builds dirs × filesPerDir files.

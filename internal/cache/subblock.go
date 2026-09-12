@@ -74,15 +74,21 @@ func (p *partial) covers(off, n int64) bool {
 	return true
 }
 
-// encode renders the bitmap for the sidecar file.
-func (p *partial) encode() string {
+// packed renders the bitmap words little-endian: the wire form the block
+// sidecar and the whole-file bitmap (sparse.go) share.
+func (p *partial) packed() string {
 	buf := make([]byte, 0, len(p.bits)*8)
 	for _, w := range p.bits {
 		for s := 0; s < 64; s += 8 {
 			buf = append(buf, byte(w>>uint(s)))
 		}
 	}
-	return fmt.Sprintf("sub=%d total=%d bits=%s\n", p.sub, p.total, hex.EncodeToString(buf))
+	return hex.EncodeToString(buf)
+}
+
+// encode renders the bitmap for the sidecar file.
+func (p *partial) encode() string {
+	return fmt.Sprintf("sub=%d total=%d bits=%s\n", p.sub, p.total, p.packed())
 }
 
 func decodePartial(s string) (*partial, error) {
@@ -92,21 +98,12 @@ func decodePartial(s string) (*partial, error) {
 	if _, err := fmt.Sscanf(strings.TrimSpace(s), "sub=%d total=%d bits=%s", &sub, &total, &bits); err != nil {
 		return nil, fmt.Errorf("cache: bad sidecar: %w", err)
 	}
-	raw, err := hex.DecodeString(bits)
-	if err != nil || sub <= 0 || total <= 0 {
+	if sub <= 0 || total <= 0 {
 		return nil, errors.New("cache: bad sidecar bitmap")
 	}
-	p := &partial{sub: sub, total: total, bits: make([]uint64, (total+63)/64)}
-	for i, b := range raw {
-		if i/8 >= len(p.bits) {
-			break
-		}
-		p.bits[i/8] |= uint64(b) << (uint(i%8) * 8)
-	}
-	for i := 0; i < total; i++ {
-		if p.has(i) {
-			p.have++
-		}
+	p := newPartialTotal(sub, total)
+	if err := unpackBits(p, bits); err != nil {
+		return nil, err
 	}
 	return p, nil
 }
@@ -500,11 +497,11 @@ func (c *Cache) flushSubs(id blockID) {
 		pending[i] = b
 	}
 	sub, total := m.partial.sub, m.partial.total
-	var blockLen int64
+	var blockLen, fileSize int64
 	var key FileKey
 	if fs, ok := c.files[id.file]; ok {
 		_, blockLen = c.BlockRange(id.index, fs.size)
-		key = fs.key
+		key, fileSize = fs.key, fs.size
 	}
 	f := m.f
 	c.mu.Unlock()
@@ -595,6 +592,13 @@ func (c *Cache) flushSubs(id blockID) {
 	}
 	if promoted {
 		os.Remove(c.sidecarPath(id.file, id.index))
+		if c.wholeLayout(fileSize) {
+			// The file lives in one sparse file; a block filled piece by
+			// piece joins it rather than waiting for a hydration that has
+			// nothing else to merge.
+			c.adoptBlockIntoPart(key, id.index)
+			complete = false
+		}
 	} else if claim != nil {
 		_ = c.writeSidecar(id.file, id.index, claim)
 	}
@@ -750,6 +754,10 @@ func (c *Cache) putRangeSync(k FileKey, idx, off int64, data []byte, fileSize in
 
 	if promoted {
 		os.Remove(c.sidecarPath(fh, idx))
+		if c.wholeLayout(fileSize) {
+			c.adoptBlockIntoPart(k, idx)
+			return nil
+		}
 		if complete {
 			c.scheduleHydrate(k)
 		}
@@ -778,15 +786,19 @@ func (c *Cache) locateRange(k FileKey, idx, off, n int64) (blockLen, fileSize in
 	defer c.mu.Unlock()
 	meta, present := c.blocks[blockID{fh, idx}]
 	var size int64
-	hydrated := false
+	hydrated, sparse := false, false
 	if fs, fok := c.files[fh]; fok {
 		hydrated, size = fs.hydrated, fs.size
 		if fs.whole != nil {
 			fs.whole.lastAccess = c.opt.Now()
 			fs.whole.hot = true
 		}
+		if fs.part != nil && fs.part.hasBlock(idx) {
+			sparse = true
+			fs.part.lastAccess, fs.part.hot = c.opt.Now(), true
+		}
 	}
-	if present {
+	if present && !sparse {
 		if !meta.hot {
 			meta.hot = true
 		}
@@ -808,7 +820,7 @@ func (c *Cache) locateRange(k FileKey, idx, off, n int64) (blockLen, fileSize in
 		}
 		return bl, size, true
 	}
-	if !hydrated {
+	if !hydrated && !sparse {
 		return 0, 0, false
 	}
 	_, bl := c.BlockRange(idx, size)

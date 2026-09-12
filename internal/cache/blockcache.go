@@ -58,6 +58,14 @@ type Options struct {
 	// right at completion copied the whole file again while the reader that
 	// had just fetched it was still busy on the same disk.
 	HydrateAfter time.Duration
+	// WholeLayoutMin is the size from which a file is cached as one sparse
+	// file whose blocks are written at their real offsets, instead of one
+	// file per block that hydration later copies into a whole file
+	// (0 = 64 MiB, negative = never). Above it a cold read writes the file
+	// to the local disk once rather than twice; below it block files keep
+	// their sub-block granularity for random reads, and the copy hydration
+	// makes is bounded by this size.
+	WholeLayoutMin int64
 
 	// Busy reports that the foreground is waiting on IO. Hydration copies a
 	// whole file at once, so it asks before starting and again as it goes,
@@ -128,6 +136,7 @@ type Stats struct {
 	HydratedFiles      int
 	PinnedBlocks       int
 	WholeBytes         int64
+	SparseBytes        int64
 	ReservedBytes      int64
 	WriteReservedBytes int64
 	LeasedBytes        int64
@@ -173,9 +182,14 @@ type Cache struct {
 	misses    int64
 	evictions int64
 	// Admission serialises capacity checks and publication, not cache reads.
-	admitMu              sync.Mutex
-	objects              map[diskIdentity]*wholeObject
-	wholeBytes           int64
+	admitMu    sync.Mutex
+	objects    map[diskIdentity]*wholeObject
+	wholeBytes int64
+	// parts holds the files being filled in the sparse whole-file layout
+	// (sparse.go), and partBytes what their real blocks occupy.
+	parts                map[string]*wholePart
+	partBytes            int64
+	partOpenMu           sync.Mutex
 	reservedBytes        int64
 	writeReserved        int64 // in-flight journal writes, not cache payload quota
 	detachedFlushBytes   int64
@@ -198,6 +212,9 @@ type fileState struct {
 	// userPinned is independent of temporary protection for pending writes.
 	userPinned bool
 	whole      *wholeObject
+	// part is the sparse whole file this file is being filled into, for a
+	// file at or above Options.WholeLayoutMin that is not complete yet.
+	part       *wholePart
 	busy       int
 	generation uint64
 }
@@ -221,7 +238,7 @@ func New(opt Options) (*Cache, error) {
 			return nil, fmt.Errorf("cache: %w", err)
 		}
 	}
-	c := &Cache{opt: opt, blocks: map[blockID]*blockMeta{}, files: map[string]*fileState{}, objects: map[diskIdentity]*wholeObject{}, orphanTemps: map[string]int64{}}
+	c := &Cache{opt: opt, blocks: map[blockID]*blockMeta{}, files: map[string]*fileState{}, objects: map[diskIdentity]*wholeObject{}, parts: map[string]*wholePart{}, orphanTemps: map[string]int64{}}
 	if opt.Busy != nil {
 		c.SetBusy(opt.Busy)
 	}
@@ -338,6 +355,7 @@ func (c *Cache) reload() error {
 		}
 		c.attachWholeLocked(e.Name(), fs, info)
 	}
+	c.reloadParts(hydratedDir, entries)
 	return nil
 }
 
@@ -506,6 +524,12 @@ func (c *Cache) locate(k FileKey, idx int64) (n, fileSize int64, ok bool) {
 			fs.whole.lastAccess = now
 			fs.whole.hot = true
 		}
+		if fs.part != nil && fs.part.hasBlock(idx) {
+			// Present at its real offset inside the half-written sparse
+			// file, which is served exactly like a hydrated one.
+			hydrated = true
+			fs.part.lastAccess, fs.part.hot = now, true
+		}
 	}
 	c.mu.Unlock()
 
@@ -530,10 +554,16 @@ func (c *Cache) readBlock(k FileKey, idx, off int64, dst []byte, fileSize int64)
 	}
 	fh := k.hash()
 	c.mu.Lock()
+	var part *wholePart
+	if fs := c.files[fh]; fs != nil && fs.part != nil && fs.part.hasBlock(idx) {
+		// The sparse file holds the whole block; a block file for the same
+		// index can only be an older partial one, so it is not consulted.
+		part = fs.part
+	}
 	meta, present := c.blocks[blockID{fh, idx}]
 	var open *os.File
 	var mem []byte
-	if present {
+	if present && part == nil {
 		open, mem = meta.f, meta.mem
 		if meta.partial != nil && len(meta.subs) > 0 {
 			pieces := c.partialPiecesLocked(meta, off, dst)
@@ -542,6 +572,18 @@ func (c *Cache) readBlock(k FileKey, idx, off int64, dst []byte, fileSize int64)
 		}
 	}
 	c.mu.Unlock()
+	if part != nil {
+		base, _ := c.BlockRange(idx, fileSize)
+		f, err := c.partFile(part)
+		if err != nil {
+			return 0, err
+		}
+		n, err := f.ReadAt(dst, base+off)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+		return n, nil
+	}
 	if mem != nil {
 		// Not on disk yet: serve the copy the write-behind worker holds.
 		if off >= int64(len(mem)) {
@@ -622,6 +664,9 @@ func (c *Cache) Put(k FileKey, idx int64, data []byte, fileSize int64) error {
 func (c *Cache) put(k FileKey, idx int64, data []byte, fileSize int64) error {
 	if int64(len(data)) > c.opt.BlockSize {
 		return fmt.Errorf("cache: block of %d bytes exceeds block size %d", len(data), c.opt.BlockSize)
+	}
+	if c.wholeLayout(fileSize) {
+		return c.putPart(k, idx, data, fileSize)
 	}
 	fh := k.hash()
 	if err := c.blockRoom(k, idx, 0, int64(len(data)), fileSize, false); err != nil {
@@ -796,7 +841,9 @@ func (c *Cache) Hydrate(k FileKey) error {
 	c.admitMu.Lock()
 	c.mu.Lock()
 	fs := c.files[fh]
-	if c.wb.closed || fs == nil || fs.hydrated || fs.busy > 0 {
+	// A file in the sparse layout publishes itself by renaming its own
+	// file; there are no block files for hydration to merge.
+	if c.wb.closed || fs == nil || fs.hydrated || fs.busy > 0 || fs.part != nil {
 		c.mu.Unlock()
 		c.admitMu.Unlock()
 		return nil
@@ -1078,6 +1125,15 @@ func (c *Cache) forgetFile(k FileKey, durable bool) error {
 	if err := remove(c.hydratedPath(fh)); err != nil {
 		return err
 	}
+	if fs != nil && fs.part != nil {
+		if err := remove(c.partPath(fh)); err != nil {
+			return err
+		}
+		if err := remove(c.partBitmapPath(fh)); err != nil {
+			return err
+		}
+		c.forgetPartLocked(fs, fs.part, true)
+	}
 	if fs != nil {
 		c.detachWholeLocked(fh, fs)
 	}
@@ -1125,15 +1181,15 @@ func (c *Cache) makeRoomFor(need int64, entries int, diskNeed int64, exclude *bl
 	if expire {
 		c.lastExpire = now
 	}
-	checkFree := c.opt.MinFree > 0 && (diskNeed > 0 || now.Sub(c.lastFreeCheck) >= housekeepEvery || c.bytes+c.wholeBytes-c.bytesAtFreeCheck >= freeCheckBytes)
+	checkFree := c.opt.MinFree > 0 && (diskNeed > 0 || now.Sub(c.lastFreeCheck) >= housekeepEvery || c.bytes+c.wholeBytes+c.partBytes-c.bytesAtFreeCheck >= freeCheckBytes)
 	c.mu.Unlock()
 	if expire {
 		c.evictExpiredExcept(exclude)
 	}
 	for {
 		c.mu.Lock()
-		overBytes := c.opt.MaxBytes > 0 && c.bytes+c.wholeBytes+c.orphanBytes+c.reservedBytes+c.detachedFlushBytes+need > c.opt.MaxBytes
-		overObjects := c.opt.MaxBlocks > 0 && len(c.blocks)+len(c.objects)+len(c.orphanTemps)+c.reservedEntries+c.detachedFlushEntries+entries > c.opt.MaxBlocks
+		overBytes := c.opt.MaxBytes > 0 && c.bytes+c.wholeBytes+c.partBytes+c.orphanBytes+c.reservedBytes+c.detachedFlushBytes+need > c.opt.MaxBytes
+		overObjects := c.opt.MaxBlocks > 0 && len(c.blocks)+len(c.objects)+len(c.parts)+len(c.orphanTemps)+c.reservedEntries+c.detachedFlushEntries+entries > c.opt.MaxBlocks
 		c.mu.Unlock()
 		if !overBytes && !overObjects {
 			break
@@ -1160,7 +1216,7 @@ func (c *Cache) makeRoomFor(need int64, entries int, diskNeed int64, exclude *bl
 		}
 		c.mu.Lock()
 		c.lastFreeCheck = now
-		c.bytesAtFreeCheck = c.bytes + c.wholeBytes
+		c.bytesAtFreeCheck = c.bytes + c.wholeBytes + c.partBytes
 		c.mu.Unlock()
 	}
 	return nil
@@ -1308,6 +1364,11 @@ func (c *Cache) evictExpiredExcept(exclude *blockID) {
 			c.evictObjectLocked(o)
 		}
 	}
+	for _, p := range c.parts {
+		if p.lastAccess.Before(cutoff) {
+			c.evictPartLocked(p)
+		}
+	}
 }
 
 // evictOne removes the best victim: coldest probationary block first, then
@@ -1345,8 +1406,20 @@ func (c *Cache) evictOneExcept(exclude *blockID) bool {
 			object, bestHot, bestTime, found = o, o.hot, o.lastAccess, true
 		}
 	}
+	var part *wholePart
+	for _, p := range c.parts {
+		if c.partProtectedLocked(c.files[p.fh]) {
+			continue
+		}
+		if better(p.hot, p.lastAccess) {
+			part, object, bestHot, bestTime, found = p, nil, p.hot, p.lastAccess, true
+		}
+	}
 	if !found {
 		return false
+	}
+	if part != nil {
+		return c.evictPartLocked(part)
 	}
 	if object != nil {
 		return c.evictObjectLocked(object)
@@ -1380,7 +1453,7 @@ func (c *Cache) GC() error {
 func (c *Cache) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Stats{Blocks: len(c.blocks), Bytes: c.bytes + c.wholeBytes + c.orphanBytes, WholeBytes: c.wholeBytes, ReservedBytes: c.reservedBytes + c.detachedFlushBytes, WriteReservedBytes: c.writeReserved, OrphanBytes: c.orphanBytes, Hits: c.hits, Misses: c.misses, Evictions: c.evictions}
+	s := Stats{Blocks: len(c.blocks), Bytes: c.bytes + c.wholeBytes + c.partBytes + c.orphanBytes, WholeBytes: c.wholeBytes, SparseBytes: c.partBytes, ReservedBytes: c.reservedBytes + c.detachedFlushBytes, WriteReservedBytes: c.writeReserved, OrphanBytes: c.orphanBytes, Hits: c.hits, Misses: c.misses, Evictions: c.evictions}
 	for _, o := range c.objects {
 		if o.readers > 0 {
 			s.LeasedBytes += o.size

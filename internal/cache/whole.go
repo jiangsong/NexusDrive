@@ -385,6 +385,11 @@ func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 }
 
 func (c *Cache) removeFileBlocksLocked(fh string, fs *fileState) {
+	if fs.part != nil {
+		// A complete file was installed for this key from elsewhere; the
+		// half-written sparse one it supersedes goes with the blocks.
+		c.forgetPartLocked(fs, fs.part, true)
+	}
 	for id, m := range c.blocks {
 		if id.file != fh {
 			continue
