@@ -296,6 +296,7 @@ type Config struct {
 	MCP        MCP               `yaml:"mcp"`
 	Control    Control           `yaml:"control"`
 	WebDAV     WebDAV            `yaml:"webdav"`
+	Export     Export            `yaml:"export"`
 }
 
 // Default returns the built-in defaults applied before the file is decoded.
@@ -312,6 +313,7 @@ func Default() Config {
 		Journal: Journal{Durability: "power"},
 		Control: Control{Socket: "~/.cache/cloudfs/control.sock", UI: true},
 		WebDAV:  WebDAV{Prefix: "/dav", Root: "/", Strategy: "proxy"},
+		Export:  DefaultExport(),
 	}
 }
 
@@ -387,6 +389,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Cache.BlockSize <= 0 || c.Cache.BlockSize%(64<<10) != 0 {
 		return fmt.Errorf("config: cache.block_size must be a positive multiple of 64KiB, got %s", c.Cache.BlockSize)
+	}
+	if err := c.Export.Validate(); err != nil {
+		return err
 	}
 	// Validate the global cache policy on its own, so an unknown preset or a
 	// bad size fails even for a config with no mounts yet.

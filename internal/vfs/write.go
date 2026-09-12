@@ -927,6 +927,16 @@ func localVersion(uploadID string) string  { return "local-" + uploadID }
 // IsLocalOnly reports whether a node has not been uploaded yet.
 func IsLocalOnly(remoteID string) bool { return strings.HasPrefix(remoteID, localIDPrefix) }
 
+// LocalUploadID returns the journal upload whose blob is the only copy of
+// this node, for readers outside this package that have to reach the bytes
+// without asking a backend that does not have them yet.
+func LocalUploadID(remoteID string) (string, bool) {
+	if !IsLocalOnly(remoteID) {
+		return "", false
+	}
+	return strings.TrimPrefix(remoteID, localIDPrefix), true
+}
+
 // renameLocalOnly moves a file whose only copy is the queued write. It
 // retargets the pending upload, replaces any file already at the destination,
 // and updates the tree.

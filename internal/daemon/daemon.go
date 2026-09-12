@@ -19,6 +19,7 @@ import (
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
+	"cloudfs/internal/export"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
@@ -41,8 +42,10 @@ type Daemon struct {
 	Uploader  *upload.Uploader
 	FS        *vfs.FS
 	Refresher *vfs.Refresher
-	Proxy     *proxy.Manager
-	Limiters  *ratelimit.Registry
+	// Export runs `cloudfs export` jobs out of its own queue.
+	Export   *export.Manager
+	Proxy    *proxy.Manager
+	Limiters *ratelimit.Registry
 	// Providers maps remote name to backend.
 	Providers map[string]provider.Provider
 	// Pools maps the name of each pool remote to the pool behind it, for
@@ -251,6 +254,27 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	}
 	d.closers = append(d.closers, fsys.Close)
 
+	// Exports copy bytes out of the mount onto ordinary local storage. They
+	// keep their own queue next to the cache: an export stages no blob and
+	// owns no upload row, so putting it in the journal's schema would make
+	// every daemon migrate a database it otherwise never touches.
+	exportStore, err := export.OpenStore(cacheDir)
+	if err != nil {
+		d.Close()
+		return nil, err
+	}
+	exports, err := export.New(export.Options{Store: exportStore, FS: fsys, Config: cfg.Export})
+	if err != nil {
+		exportStore.Close()
+		d.Close()
+		return nil, err
+	}
+	d.Export = exports
+	// A copy to a drive is background work: it stands aside while the kernel
+	// is waiting on a read, the same way hydration and rebalancing do.
+	exports.SetBusy(fsys.Busy)
+	d.closers = append(d.closers, exports.Close)
+
 	// Remotes with a change feed follow the provider within a poll interval;
 	// the rest rely on the directory TTL. Polling a full listing on a
 	// rate-limited drive is exactly the pattern that trips risk control, so
@@ -353,6 +377,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		fsys.StartPins(ctx, time.Minute)
 		fsys.StartCopies(ctx, time.Minute)
 		d.closers = append(d.closers, func() error { fsys.StopCopies(); return nil })
+		exports.Start(ctx, time.Minute)
 	}
 	return d, nil
 }
