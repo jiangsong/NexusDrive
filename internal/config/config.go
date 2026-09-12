@@ -217,6 +217,9 @@ type PoolMember struct {
 	// Adopt lets files already on the member enter the namespace as
 	// single-replica files. Nil means true: adding a drive adds its content.
 	Adopt *bool `yaml:"adopt"`
+	// Class labels this member for PoolRule's prefer/avoid/require. A name
+	// used by any rule must appear on at least one member.
+	Class []string `yaml:"class"`
 }
 
 // Pool fuses several remotes into one namespace with N-replica placement.
@@ -244,6 +247,22 @@ type Pool struct {
 	// load and latency, but a member on an unofficial API serves at most
 	// one stream per file) or all (spread with no tier restriction).
 	ReadFanout string `yaml:"read_fanout"`
+	// Rules override replicas and placement bias per path prefix; the
+	// longest matching prefix applies, and the pool's own settings above are
+	// the implicit default rule. See docs/pool-v2.md §6.1.
+	Rules []PoolRule `yaml:"rules"`
+	// FailureDomain is what "spread across" means when placing replicas:
+	// account (default), provider, or member. See PoolFailureDomain*.
+	FailureDomain string `yaml:"failure_domain"`
+	// WriteMode is relaxed (default: min_replicas is an alert threshold) or
+	// strict (close() waits up to MinReplicasTimeout for it). See
+	// PoolWriteMode*.
+	WriteMode string `yaml:"write_mode"`
+	// MinReplicasTimeout bounds how long a strict-mode close() waits for
+	// min_replicas before returning anyway.
+	MinReplicasTimeout time.Duration `yaml:"min_replicas_timeout"`
+	// Rebalance configures automatic backfill and skew correction.
+	Rebalance PoolRebalance `yaml:"rebalance"`
 }
 
 // PoolType is the remote type that exposes a Pool as a backend.
@@ -575,6 +594,9 @@ func (c *Config) validatePools() error {
 		case ReadFanoutOff, ReadFanoutAuto, ReadFanoutAll:
 		default:
 			return fmt.Errorf("config: pool %q read_fanout must be off, auto or all (got %q)", name, p.ReadFanout)
+		}
+		if err := validatePoolPlacement(name, &p); err != nil {
+			return err
 		}
 		c.Pools[name] = p
 	}

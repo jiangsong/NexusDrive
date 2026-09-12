@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -152,12 +153,27 @@ func RemovePoolMember(configPath, pool, remote string) error {
 func SetPoolField(configPath, pool, key, value string) error {
 	switch key {
 	case "replicas", "min_replicas", "out_after", "probe_interval", "gc_grace", "op_ttl", "trim_grace",
-		"hold_max_bytes", "hold_max_age", "repair_concurrency", "scrub_interval", "scrub_sample":
+		"hold_max_bytes", "hold_max_age", "repair_concurrency", "scrub_interval", "scrub_sample",
+		"write_mode", "failure_domain", "min_replicas_timeout":
 	default:
 		return fmt.Errorf("config: %q is not a pool setting", key)
 	}
 	if strings.TrimSpace(value) == "" || containsControl(value) {
 		return errors.New("config: value must be a single-line value without control characters")
+	}
+	switch key {
+	case "write_mode":
+		if value != WriteModeRelaxed && value != WriteModeStrict {
+			return fmt.Errorf("config: write_mode must be %s or %s", WriteModeRelaxed, WriteModeStrict)
+		}
+	case "failure_domain":
+		if value != FailureDomainAccount && value != FailureDomainProvider && value != FailureDomainMember {
+			return fmt.Errorf("config: failure_domain must be %s, %s or %s", FailureDomainAccount, FailureDomainProvider, FailureDomainMember)
+		}
+	case "min_replicas_timeout":
+		if _, err := time.ParseDuration(value); err != nil {
+			return fmt.Errorf("config: min_replicas_timeout: %w", err)
+		}
 	}
 	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
 		pn := poolNode(root, pool)
@@ -166,6 +182,104 @@ func SetPoolField(configPath, pool, key, value string) error {
 		}
 		setNode(pn, key, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
 		return nil
+	})
+}
+
+// AddPoolRule appends a placement rule to an existing pool. Full validation
+// (canonical unique prefix, replicas within range, classes declared by some
+// member) happens through the same Parse the write commits, like every
+// other pool editor.
+func AddPoolRule(configPath, pool string, r PoolRule) error {
+	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
+		if _, ok := c.Pools[pool]; !ok {
+			return fmt.Errorf("config: unknown pool %q", pool)
+		}
+		pn := poolNode(root, pool)
+		if pn == nil {
+			return fmt.Errorf("config: unknown pool %q", pool)
+		}
+		rs := mappingValue(pn, "rules")
+		if rs == nil || rs.Kind != yaml.SequenceNode {
+			rs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			setNode(pn, "rules", rs)
+		}
+		for _, rn := range rs.Content {
+			if pv := mappingValue(rn, "prefix"); pv != nil && pv.Value == r.Prefix {
+				return fmt.Errorf("config: pool %q already has a rule for prefix %q", pool, r.Prefix)
+			}
+		}
+		rs.Content = append(rs.Content, ruleNode(r))
+		return nil
+	})
+}
+
+// RemovePoolRule drops the rule for one prefix from a pool's configuration.
+func RemovePoolRule(configPath, pool, prefix string) error {
+	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
+		if _, ok := c.Pools[pool]; !ok {
+			return fmt.Errorf("config: unknown pool %q", pool)
+		}
+		pn := poolNode(root, pool)
+		rs := mappingValue(pn, "rules")
+		if pn == nil || rs == nil || rs.Kind != yaml.SequenceNode {
+			return fmt.Errorf("config: pool %q has no rule for prefix %q", pool, prefix)
+		}
+		for i, rn := range rs.Content {
+			if pv := mappingValue(rn, "prefix"); pv != nil && pv.Value == prefix {
+				rs.Content = append(rs.Content[:i], rs.Content[i+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("config: pool %q has no rule for prefix %q", pool, prefix)
+	})
+}
+
+// SetPoolMemberField sets one field of one pool member. Today the only key
+// is "class", a comma-separated list of member classes; an empty value
+// clears it rather than writing an empty sequence.
+func SetPoolMemberField(configPath, pool, remote, key, value string) error {
+	if key != "class" {
+		return fmt.Errorf("config: %q is not a pool member setting", key)
+	}
+	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
+		p, ok := c.Pools[pool]
+		if !ok {
+			return fmt.Errorf("config: unknown pool %q", pool)
+		}
+		member := false
+		for _, m := range p.Members {
+			if m.Remote == remote {
+				member = true
+				break
+			}
+		}
+		if !member {
+			return fmt.Errorf("config: %q is not a member of pool %q", remote, pool)
+		}
+		pn := poolNode(root, pool)
+		ms := mappingValue(pn, "members")
+		if pn == nil || ms == nil || ms.Kind != yaml.SequenceNode {
+			return fmt.Errorf("config: pool %q has no members", pool)
+		}
+		for _, mn := range ms.Content {
+			rv := mappingValue(mn, "remote")
+			if rv == nil || rv.Value != remote {
+				continue
+			}
+			var classes []string
+			for _, cl := range strings.Split(value, ",") {
+				if cl = strings.TrimSpace(cl); cl != "" {
+					classes = append(classes, cl)
+				}
+			}
+			if len(classes) == 0 {
+				removeNode(mn, "class")
+			} else {
+				setNode(mn, "class", stringSeqNode(classes))
+			}
+			return nil
+		}
+		return fmt.Errorf("config: %q is not a member of pool %q", remote, pool)
 	})
 }
 
@@ -195,6 +309,39 @@ func memberNode(m PoolMember) *yaml.Node {
 	}
 	if m.Adopt != nil && !*m.Adopt {
 		setNode(n, "adopt", &yaml.Node{Kind: yaml.ScalarNode, Value: "false"})
+	}
+	if len(m.Class) > 0 {
+		setNode(n, "class", stringSeqNode(m.Class))
+	}
+	return n
+}
+
+// ruleNode builds the YAML node for one placement rule, in the same flow
+// style as memberNode.
+func ruleNode(r PoolRule) *yaml.Node {
+	n := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Style: yaml.FlowStyle}
+	setNode(n, "prefix", scalar(r.Prefix))
+	if r.Replicas != 0 {
+		setNode(n, "replicas", intNode(r.Replicas))
+	}
+	if len(r.Prefer) > 0 {
+		setNode(n, "prefer", stringSeqNode(r.Prefer))
+	}
+	if len(r.Avoid) > 0 {
+		setNode(n, "avoid", stringSeqNode(r.Avoid))
+	}
+	if len(r.Require) > 0 {
+		setNode(n, "require", stringSeqNode(r.Require))
+	}
+	return n
+}
+
+// stringSeqNode builds a flow-style YAML sequence of strings, used for
+// class lists and rule prefer/avoid/require.
+func stringSeqNode(vals []string) *yaml.Node {
+	n := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+	for _, v := range vals {
+		n.Content = append(n.Content, scalar(v))
 	}
 	return n
 }

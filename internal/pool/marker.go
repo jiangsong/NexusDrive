@@ -41,15 +41,25 @@ type Marker struct {
 
 // Settings is the part of the pool configuration every machine must
 // agree on.
+//
+// Rules and FailureDomain joined this struct when placement v2 shipped
+// (docs/pool-v2.md §6.1); upgrading a machine's config to use them bumps
+// the settings digest once, which every other machine sees as a one-time
+// "newer pool settings" notice (see docs/pool.md) until it upgrades too.
 type Settings struct {
-	Replicas    int           `json:"replicas"`
-	MinReplicas int           `json:"min_replicas"`
-	GCGrace     time.Duration `json:"gc_grace"`
-	TrimGrace   time.Duration `json:"trim_grace"`
+	Replicas      int               `json:"replicas"`
+	MinReplicas   int               `json:"min_replicas"`
+	GCGrace       time.Duration     `json:"gc_grace"`
+	TrimGrace     time.Duration     `json:"trim_grace"`
+	Rules         []config.PoolRule `json:"rules,omitempty"`
+	FailureDomain string            `json:"failure_domain,omitempty"`
 }
 
 func settingsOf(c config.Pool) Settings {
-	return Settings{Replicas: c.Replicas, MinReplicas: c.MinReplicas, GCGrace: c.GCGrace, TrimGrace: c.TrimGrace}
+	return Settings{
+		Replicas: c.Replicas, MinReplicas: c.MinReplicas, GCGrace: c.GCGrace, TrimGrace: c.TrimGrace,
+		Rules: c.Rules, FailureDomain: c.FailureDomain,
+	}
 }
 
 // epochOf derives a settings epoch: the time the settings last changed on

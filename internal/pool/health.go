@@ -56,7 +56,7 @@ func (p *Pool) Start(ctx context.Context) {
 		defer scrub.Stop()
 		p.reconcileHolds(ctx)
 		_ = p.WriteMarkers(ctx)
-		if p.settings.Replicas > 1 {
+		if p.anyMultiReplica() {
 			_, _ = p.ScanOnce(ctx)
 		}
 		for {
@@ -70,7 +70,7 @@ func (p *Pool) Start(ctx context.Context) {
 				_, _ = p.RepairOnce(ctx)
 				_, _, _ = p.DrainOnce(ctx)
 			case <-scan.C:
-				if p.settings.Replicas > 1 {
+				if p.anyMultiReplica() {
 					_, _ = p.ScanOnce(ctx)
 				}
 				_, _ = p.TrimOnce(ctx)

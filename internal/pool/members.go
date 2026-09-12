@@ -24,7 +24,13 @@ type member struct {
 	capacity int64
 	adopt    bool
 	order    int
-	health   *provider.Health
+	// classes labels this member for PoolRule's prefer/avoid/require.
+	// domain is its failure-domain identity (an account binding, a
+	// provider type or the member's own name, per Pool.FailureDomain).
+	// Neither is consumed by placement yet.
+	classes []string
+	domain  string
+	health  *provider.Health
 	// maxInflight is how many reads the member is meant to serve at once:
 	// its connection budget (Caps.MaxConnsPerHost), defaultMaxInflight when
 	// it declares none.

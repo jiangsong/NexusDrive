@@ -37,6 +37,10 @@ const (
 	ConfigMembers  = "_pool_members"
 	ConfigSettings = "_pool_settings"
 	ConfigStateDir = "_pool_state_dir"
+	// ConfigDomains carries each member's failure-domain identity, computed
+	// by the daemon (which alone knows account bindings and remote types)
+	// from Settings.FailureDomain: map[remote name]domain.
+	ConfigDomains = "_pool_domains"
 )
 
 // Member is one backend of a pool as the daemon assembles it.
@@ -49,6 +53,12 @@ type Member struct {
 	Weight   float64
 	Capacity int64
 	Adopt    bool
+	// Classes labels this member for PoolRule's prefer/avoid/require.
+	Classes []string
+	// Domain is this member's failure-domain identity: an account binding,
+	// a provider type, or the member's own name, per Settings.FailureDomain.
+	// Not consumed by placement yet.
+	Domain string
 }
 
 // Options configures New.
@@ -140,7 +150,12 @@ func New(opt Options) (*Pool, error) {
 			return nil, fmt.Errorf("pool %q: member %q: %w", opt.Name, m.Name, err)
 		}
 		caps := m.Provider.Capabilities()
+		domain := m.Domain
+		if domain == "" {
+			domain = m.Name
+		}
 		mm := &member{name: m.Name, p: m.Provider, root: root, weight: m.Weight, capacity: m.Capacity, adopt: m.Adopt, order: i, dirIDs: map[string]string{},
+			classes: append([]string(nil), m.Classes...), domain: domain,
 			health:      provider.NewHealth(provider.HealthOptions{Threshold: 3, OutAfter: opt.Settings.OutAfter, Now: p.now}),
 			maxInflight: caps.MaxConnsPerHost, unofficial: caps.Tier == provider.TierUnofficial}
 		if mm.maxInflight <= 0 {
@@ -174,6 +189,10 @@ type MemberStatus struct {
 	LatencyMS float64
 	Weight    float64
 	Capacity  int64
+	// Classes and Domain mirror the member's placement identity (see
+	// Member.Classes and Member.Domain); not consumed by placement yet.
+	Classes []string
+	Domain  string
 }
 
 // Status reports every member's health, in declaration order.
@@ -183,7 +202,8 @@ func (p *Pool) Status() []MemberStatus {
 		m.mu.Lock()
 		lat := m.latency / 1e6
 		m.mu.Unlock()
-		out = append(out, MemberStatus{Name: m.name, Root: m.root, Health: m.health.Snapshot(), LatencyMS: lat, Weight: m.weight, Capacity: m.capacity})
+		out = append(out, MemberStatus{Name: m.name, Root: m.root, Health: m.health.Snapshot(), LatencyMS: lat, Weight: m.weight, Capacity: m.capacity,
+			Classes: append([]string(nil), m.classes...), Domain: m.domain})
 	}
 	return out
 }
@@ -300,6 +320,7 @@ func init() {
 		members, _ := cfg[ConfigMembers].(map[string]provider.Provider)
 		settings, _ := cfg[ConfigSettings].(config.Pool)
 		stateDir, _ := cfg[ConfigStateDir].(string)
+		domains, _ := cfg[ConfigDomains].(map[string]string)
 		if len(settings.Members) == 0 {
 			return nil, fmt.Errorf("pool %q: no settings; the daemon assembles pools after their members", name)
 		}
@@ -313,7 +334,16 @@ func init() {
 			if m.Adopt != nil {
 				adopt = *m.Adopt
 			}
-			opt.Members = append(opt.Members, Member{Name: m.Remote, Provider: mp, Root: m.Root, Weight: m.Weight, Capacity: int64(m.Capacity), Adopt: adopt})
+			// A caller that passes no domains (a unit test, or a
+			// machine still on the old daemon) leaves every member in
+			// its own domain, which is what spreading meant before
+			// failure domains existed.
+			domain := domains[m.Remote]
+			if domain == "" {
+				domain = m.Remote
+			}
+			opt.Members = append(opt.Members, Member{Name: m.Remote, Provider: mp, Root: m.Root, Weight: m.Weight, Capacity: int64(m.Capacity), Adopt: adopt,
+				Classes: m.Class, Domain: domain})
 		}
 		return New(opt)
 	})

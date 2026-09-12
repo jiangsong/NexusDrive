@@ -43,25 +43,6 @@ const (
 	repairBatch    = 16
 )
 
-// replicaTarget is how many replicas a file can have right now: the
-// configured count, capped by the members that can take one.
-func (p *Pool) replicaTarget() (target int, capped bool) {
-	eligible := 0
-	for _, m := range p.members {
-		if st := m.health.Snapshot(); st.State != provider.HealthOut && st.State != provider.HealthDisabled && st.State != provider.HealthDraining {
-			eligible++
-		}
-	}
-	target = p.settings.Replicas
-	if target < 1 {
-		target = 1
-	}
-	if eligible < target {
-		return eligible, true
-	}
-	return target, false
-}
-
 // liveReplicas returns the replicas that carry the entry's content on
 // members that are in service.
 func (p *Pool) liveReplicas(ctx context.Context, pth, ctoken string) ([]replicaRow, error) {
@@ -98,7 +79,6 @@ func (p *Pool) enqueueRepair(ctx context.Context, pth, reason string, priority i
 // pool can hold right now. It is how a file that came with an adopted
 // drive, or lost a replica to a member that went out, reaches the queue.
 func (p *Pool) ScanOnce(ctx context.Context) (int, error) {
-	target, _ := p.replicaTarget()
 	rows, err := p.db.QueryContext(ctx, `SELECT path, ctoken FROM entries WHERE kind = ? AND conflict_of = ''`, int(provider.KindFile))
 	if err != nil {
 		return 0, fmt.Errorf("pool: %w", err)
@@ -120,6 +100,7 @@ func (p *Pool) ScanOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return queued, err
 		}
+		target, _ := p.targetFor(f.path)
 		if len(live) >= target {
 			continue
 		}
@@ -173,7 +154,7 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 		_, _ = p.db.ExecContext(ctx, `DELETE FROM repair_queue WHERE path = ?`, pth)
 		return 0, nil
 	}
-	target, capped := p.replicaTarget()
+	target, capped := p.targetFor(pth)
 	live, err := p.liveReplicas(ctx, pth, row.ctoken)
 	if err != nil {
 		return 0, err
@@ -213,7 +194,7 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 		// leaves the file to the scan, which re-queues it when a member
 		// comes back.
 		_, _ = p.db.ExecContext(ctx, `DELETE FROM repair_queue WHERE path = ?`, pth)
-		if len(live) >= p.settings.Replicas || capped {
+		if len(live) >= p.wantReplicas(pth) || capped {
 			p.releaseHolds(ctx, pth)
 		}
 	default:
@@ -451,7 +432,6 @@ func (p *Pool) RepairStatus(ctx context.Context) (RepairStats, error) {
 
 // underReplicated counts files below the current target, for status.
 func (p *Pool) underReplicated(ctx context.Context) (int, error) {
-	target, _ := p.replicaTarget()
 	rows, err := p.db.QueryContext(ctx, `SELECT path, ctoken FROM entries WHERE kind = ? AND conflict_of = ''`, int(provider.KindFile))
 	if err != nil {
 		return 0, fmt.Errorf("pool: %w", err)
@@ -471,7 +451,7 @@ func (p *Pool) underReplicated(ctx context.Context) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		if len(live) < target {
+		if target, _ := p.targetFor(f.path); len(live) < target {
 			n++
 		}
 	}

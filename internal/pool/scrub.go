@@ -65,7 +65,7 @@ func (p *Pool) ScrubOnce(ctx context.Context) (int, error) {
 		looked++
 	}
 	// What the re-listing found missing is queued for repair.
-	if p.settings.Replicas > 1 {
+	if p.anyMultiReplica() {
 		if _, err := p.ScanOnce(ctx); err != nil {
 			return looked, err
 		}
@@ -97,10 +97,6 @@ func (p *Pool) ScrubPath(ctx context.Context, pth string) error {
 // both be repairing, and a copy that just appeared may be the other's
 // work in progress.
 func (p *Pool) TrimOnce(ctx context.Context) (int, error) {
-	target := p.settings.Replicas
-	if target < 1 {
-		target = 1
-	}
 	rows, err := p.db.QueryContext(ctx, `SELECT path, ctoken FROM entries WHERE kind = ? AND conflict_of = ''`, int(provider.KindFile))
 	if err != nil {
 		return 0, fmt.Errorf("pool: %w", err)
@@ -128,6 +124,7 @@ func (p *Pool) TrimOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return trimmed, err
 		}
+		target := p.wantReplicas(f.path)
 		if len(live) <= target {
 			continue
 		}

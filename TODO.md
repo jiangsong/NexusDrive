@@ -1666,6 +1666,14 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   - `test/perf/pool_test.go`：`TestRebalanceCostIsOneUploadPlusOneDeletePerMove`、`TestPlacementSpreadsAcrossDomains`。
   - `test/chaos`：rebalance 中途成员失联 → 队列条目退避、无副本丢失；两机同时 rebalance 同一文件 → 内容相同即良性。
   - `cloudfs doctor` 列出 `below min_replicas` 与 rebalance 积压。
+- **进度**：§6.1 的配置与目标口径已落地——`config.PoolRule` / `PoolMember.Class` / `failure_domain` / `write_mode` /
+  `min_replicas_timeout` / `rebalance` 解析与校验（`internal/config/pool_rules.go`），编辑器 `AddPoolRule` /
+  `RemovePoolRule` / `SetPoolMemberField` 与 `SetPoolField` 白名单扩展，`marker.Settings` 带上 `Rules` / `FailureDomain`，
+  daemon 经 `_pool_domains` 注入每个成员的故障域身份，`targetFor(path)` / `wantReplicas(path)` 已取代
+  `replicaTarget()` 在 scan / repair / trim / drain / write / `Availability` 的全部按路径调用点
+  （`internal/pool/rules.go` + `rules_test.go`、`marker_settings_test.go`、`daemon/pool_domains_test.go`）。
+  **未做**：§6.2 `candidates()` 仍不读 `prefer` / `avoid` / `require` / `Domain`，`repairTarget` 未合并；
+  §6.3 配额哨兵、§6.4 服务端复制、§6.5 `write_mode` 消费、§6.6 rebalance 全部未开始。
 
 ## 明确不在当前范围内
 

@@ -208,7 +208,7 @@ func (p *Pool) finishUpload(ctx context.Context, m *member, pth string, me provi
 				return err
 			}
 		}
-		if p.settings.Replicas > 1 {
+		if p.wantReplicas(pth) > 1 {
 			if _, err := tx.Exec(`INSERT INTO repair_queue(path, reason, priority, next_at, attempts, source_hint, created_at) VALUES(?, 'under-replicated', 1, 0, 0, ?, ?)
 				ON CONFLICT(path) DO UPDATE SET reason = excluded.reason, next_at = 0, attempts = 0, source_hint = excluded.source_hint`, pth, hold, now); err != nil {
 				return err
@@ -219,7 +219,7 @@ func (p *Pool) finishUpload(ctx context.Context, m *member, pth string, me provi
 	if err != nil {
 		return provider.Entry{}, err
 	}
-	if p.settings.Replicas <= 1 && hold != "" {
+	if p.wantReplicas(pth) <= 1 && hold != "" {
 		p.releaseHolds(ctx, pth)
 	}
 	e := provider.Entry{ID: id, ParentID: parentID, Name: name, Kind: provider.KindFile, Size: me.Size, ModTime: me.ModTime, Version: ctoken}

@@ -153,7 +153,7 @@ func (p *Pool) Availability(ctx context.Context, pth string) (Availability, erro
 	if err != nil {
 		return Availability{}, err
 	}
-	target, _ := p.replicaTarget()
+	target, _ := p.targetFor(pth)
 	if pth == "/" {
 		return Availability{State: AvailFull, Live: target, Target: target}, nil
 	}

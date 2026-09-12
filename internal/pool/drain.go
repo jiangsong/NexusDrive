@@ -58,7 +58,6 @@ func (p *Pool) DrainOnce(ctx context.Context) (removed int, empty bool, err erro
 	if _, err := p.RepairOnce(ctx); err != nil && ctx.Err() != nil {
 		return 0, false, err
 	}
-	target, _ := p.replicaTarget()
 	empty = true
 	for _, m := range draining {
 		rows, err := p.db.QueryContext(ctx, `SELECT r.path, r.remote_id, e.ctoken, e.kind FROM replicas r JOIN entries e ON e.path = r.path WHERE r.member = ?`, m.name)
@@ -84,7 +83,7 @@ func (p *Pool) DrainOnce(ctx context.Context) (removed int, empty bool, err erro
 			if err != nil {
 				return removed, false, err
 			}
-			if len(live) < target {
+			if target, _ := p.targetFor(c.path); len(live) < target {
 				empty = false
 				continue
 			}

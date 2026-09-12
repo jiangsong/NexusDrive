@@ -715,10 +715,15 @@ func buildPool(name string, rc config.Remote, cfg *config.Config, providers map[
 		}
 		members[m.Remote] = mp
 	}
+	domains, err := poolDomains(settings, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: pool %q: %w", name, err)
+	}
 	p, err := provider.New(config.PoolType, name, map[string]any{
 		pool.ConfigMembers:  members,
 		pool.ConfigSettings: settings,
 		pool.ConfigStateDir: stateDir,
+		pool.ConfigDomains:  domains,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("daemon: remote %q: %w", name, err)
@@ -728,6 +733,37 @@ func buildPool(name string, rc config.Remote, cfg *config.Config, providers map[
 		return nil, fmt.Errorf("daemon: remote %q: the pool factory returned a %T", name, p)
 	}
 	return pl, nil
+}
+
+// poolDomains maps each member remote to its failure-domain identity, the
+// thing replicas of one file are spread across. The daemon computes it
+// because it alone resolves account bindings and remote types; the pool
+// only compares the strings.
+func poolDomains(settings config.Pool, cfg *config.Config) (map[string]string, error) {
+	out := make(map[string]string, len(settings.Members))
+	for _, m := range settings.Members {
+		switch settings.FailureDomain {
+		case config.FailureDomainMember:
+			out[m.Remote] = m.Remote
+			continue
+		}
+		rc, ok := cfg.Remotes[m.Remote]
+		if !ok {
+			return nil, fmt.Errorf("member %q is not a configured remote", m.Remote)
+		}
+		if settings.FailureDomain == config.FailureDomainProvider {
+			out[m.Remote] = rc.Type
+			continue
+		}
+		// FailureDomainAccount, the default: two members of the same
+		// account share a quota and a ban, so they are one domain.
+		binding, err := config.EffectiveAccountBinding(rc)
+		if err != nil {
+			return nil, fmt.Errorf("member %q account binding: %w", m.Remote, err)
+		}
+		out[m.Remote] = binding
+	}
+	return out, nil
 }
 
 func remoteAccountBindings(cfg *config.Config) (map[string]string, error) {
