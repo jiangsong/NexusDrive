@@ -319,3 +319,38 @@ func TestRebalanceKeepsTheFileWhenTheDestinationDisappears(t *testing.T) {
 		t.Fatalf("queue row = %q %q, want it retried with the reason recorded", state, lastErr)
 	}
 }
+
+// TestRebalanceHoldsItselfToTheConfiguredRate: housekeeping must not be
+// the reason a drive is busy, so a move pays back the time its bytes
+// would have cost at max_rate before the next one starts.
+func TestRebalanceHoldsItselfToTheConfiguredRate(t *testing.T) {
+	ctx := context.Background()
+	a, b := capFake("a"), capFake("b")
+	p := newRulePool(t, config.Pool{Replicas: 1, MinReplicas: 1,
+		Rebalance: config.PoolRebalance{MaxRate: 1000}}, // 1000 bytes per second
+		Member{Name: "a", Provider: a, Adopt: true, Domain: "a", Capacity: 64 << 10},
+		Member{Name: "b", Provider: b, Adopt: true, Domain: "b", Capacity: 64 << 10})
+	docs, _ := p.Mkdir(ctx, rootID, "docs")
+	content := make([]byte, 200)
+	for i := range content {
+		content[i] = byte('a' + i%26)
+	}
+	upload(t, ctx, p, docs.ID, "one.bin", content)
+
+	from, to := "a", "b"
+	if _, ok := b.Content("/docs/one.bin"); ok {
+		from, to = "b", "a"
+	}
+	if _, err := p.db.ExecContext(ctx, `INSERT INTO rebalance_queue(path, from_member, to_member, size, plan_id, created_at)
+		VALUES(?, ?, ?, ?, 'plan', 1)`, "/docs/one.bin", from, to, len(content)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if n, err := p.RebalanceOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("moved %d (%v)", n, err)
+	}
+	// 200 bytes at 1000 bytes/s is 200ms of airtime.
+	if took := time.Since(start); took < 150*time.Millisecond {
+		t.Fatalf("the move took %s, faster than max_rate allows", took)
+	}
+}

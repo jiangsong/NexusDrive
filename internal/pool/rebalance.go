@@ -301,6 +301,7 @@ func (p *Pool) RebalanceOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("pool: %w", err)
 	}
+	started := time.Now()
 	src, dst := p.byName[from], p.byName[to]
 	if src == nil || dst == nil {
 		_, _ = p.db.ExecContext(ctx, `UPDATE rebalance_queue SET state = 'failed', last_error = ? WHERE path = ?`, "member is no longer in the pool", pth)
@@ -317,13 +318,32 @@ func (p *Pool) RebalanceOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	_, _ = p.db.ExecContext(ctx, `UPDATE rebalance_queue SET state = 'done', last_error = '' WHERE path = ?`, pth)
-	if pause := p.settings.Rebalance.PauseBetween; pause > 0 {
-		select {
-		case <-time.After(pause):
-		case <-ctx.Done():
+	p.rebalanceWait(ctx, size, time.Since(started))
+	return 1, nil
+}
+
+// rebalanceWait holds the next move back long enough to keep the average
+// byte rate under rebalance.max_rate, and to leave pause_between between
+// moves. Both are about not making the pool's own housekeeping the
+// reason a drive is busy: a move nobody is waiting for can afford to
+// take its time.
+func (p *Pool) rebalanceWait(ctx context.Context, moved int64, took time.Duration) {
+	wait := p.settings.Rebalance.PauseBetween
+	if rate := int64(p.settings.Rebalance.MaxRate); rate > 0 && moved > 0 {
+		owed := time.Duration(float64(moved) / float64(rate) * float64(time.Second))
+		if owed > took {
+			if rest := owed - took; rest > wait {
+				wait = rest
+			}
 		}
 	}
-	return 1, nil
+	if wait <= 0 {
+		return
+	}
+	select {
+	case <-time.After(wait):
+	case <-ctx.Done():
+	}
 }
 
 // moveReplica copies one file to dst and then drops it from src. The

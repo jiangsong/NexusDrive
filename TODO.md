@@ -1643,7 +1643,7 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   - `test/perf/export_test.go`：20 ms 延迟下 3 成员导出墙钟 ≤ 单成员 0.5×（唯一看时间的断言，断言的是并行度）。
   - 路由守卫、JSON 契约、CLI 与 web i18n 覆盖测试全绿。
 
-### [ ] T-33 放置 v2：按路径规则、成员 class、故障域、配额满换盘、修复服务端复制、rebalance（`docs/pool-v2.md` §6，阶段 E）
+### [x] T-33 放置 v2：按路径规则、成员 class、故障域、配额满换盘、修复服务端复制、rebalance（`docs/pool-v2.md` §6，阶段 E）
 
 - **证据**：`replicas` 是池级一个整数，无按路径策略、无故障域（两份副本可能落在同一账号的两个 remote 上）；
   `repair.go` 的 `repairTarget` 是与 `placement.go` `candidates()` 不一致的第二套策略；provider 无配额哨兵，
@@ -1693,8 +1693,9 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   health.go 里独立 ticker、`Report.Rebalance` + `POST /pool/rebalance` + `cloudfs pool rebalance` +
   doctor 一行。测试：`rebalance_test.go`、`test/perf` 的 `TestRebalanceCostIsOneUploadPlusOneDeletePerMove`
   与 `TestPlacementSpreadsAcrossDomains`、`test/chaos` 的 `TestRebalanceLosesNothingWhenAMemberGoesAwayMidPlan`。
-  **未做**：`rebalance.max_rate` 还只是配置项（`pause_between` 已生效，字节速率上限未接线）；UI 池页的每成员
-  填充条与「Rebalance」按钮未做。
+  `rebalance.max_rate` 与 `pause_between` 都已接线（搬完一个文件后按字节数补齐应花的时间再推进下一个），
+  UI 池页加了平衡度卡片与「Rebalance」按钮（先 `dry_run` 看计划再确认）。T-33 的代码面至此完成，
+  剩下的是需要真实账号才能验证的驱动配额信号（各处 `UNVERIFIED:`）。
 
 ## 明确不在当前范围内
 

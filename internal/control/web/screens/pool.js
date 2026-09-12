@@ -120,15 +120,55 @@ export function renderPool(host) {
       el('td', {}, actions));
   }
 
+  // Rebalancing moves whole files between drives, which costs upload
+  // bandwidth on both. Show the plan before asking for it: a person
+  // deciding whether to spend that wants to see how much it is.
+  async function rebalance(p) {
+    const skew = el('input', { type: 'text', value: '10%', autocomplete: 'off', spellcheck: 'false' });
+    const ok = await openForm({
+      title: t('pool.rebalance.title'),
+      rows: [[t('pool.rebalance.skew'), skew]],
+      note: el('div', { class: 'dim', style: 'font-size:11.5px' }, t('pool.rebalance.note')),
+      confirmLabel: t('pool.rebalance.preview'),
+    });
+    if (!ok) return;
+    const target = parseSkew(skew.value);
+    let plan;
+    try {
+      plan = await api.post('/pool/rebalance', { pool: p.name, target_skew: target, dry_run: true });
+    } catch (e) { toast(e.message, 'bad'); return; }
+    const moves = plan.moves || [];
+    if (!moves.length) { toast(t('pool.rebalance.none', plan.reason || ''), 'warn'); return; }
+    const go = await confirmDelete({
+      title: t('pool.rebalance.title'),
+      body: t('pool.rebalance.plan', moves.length, bytes(plan.bytes || 0)),
+      confirmLabel: t('pool.action.rebalance'),
+    });
+    if (!go) return;
+    act('/pool/rebalance', { pool: p.name, target_skew: target, confirm: true },
+      (r) => t('pool.rebalance.queued', (r.moves || []).length));
+  }
+
+  // The skew is a fill-ratio difference; people write it as a percentage.
+  function parseSkew(v) {
+    const raw = String(v || '').trim();
+    if (!raw) return 0;
+    const n = parseFloat(raw.replace('%', ''));
+    if (!isFinite(n) || n <= 0) return 0;
+    return raw.includes('%') ? n / 100 : n;
+  }
+
   function poolSection(p, res) {
     const target = p.target_capped ? `${p.target} (${t('pool.capped')})` : String(p.target);
     const health = p.unavailable ? 'bad' : (p.under_replicated ? 'warn' : 'ok');
-    const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:0 20px' },
+    const rb = p.rebalance || { queued: 0, skew: 0 };
+    const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;padding:0 20px' },
       card(t('pool.space'), p.total ? bytes(p.free) : '—', p.total ? `${t('pool.space.used')} ${bytes(p.used)} / ${bytes(p.total)}` : t('pool.space.unknown')),
       card(t('pool.files'), p.files.toLocaleString(), t('pool.files.sub', p.replicas, target)),
       card(t('pool.health'), el('span', { class: 'dot ' + health, style: 'display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:8px' }),
         t('pool.health.sub', p.under_replicated, p.unavailable)),
-      card(t('pool.repair'), String(p.repair.queued), t('pool.repair.sub', p.repair.blocked, bytes(p.holds_bytes))));
+      card(t('pool.repair'), String(p.repair.queued), t('pool.repair.sub', p.repair.blocked, bytes(p.holds_bytes))),
+      card(t('pool.rebalance'), `${Math.round((rb.skew || 0) * 100)}%`, t('pool.rebalance.sub', `${Math.round((rb.skew || 0) * 100)}%`, rb.queued || 0)));
     // The write path returns once one member has the data; the rest is repair's
     // job, so say so where the replica counts are read.
     const asyncNote = el('div', { class: 'detail', style: 'padding:10px 20px 0' }, t('pool.protect.async', p.replicas - 1));
@@ -151,6 +191,7 @@ export function renderPool(host) {
           el('button', { onclick: () => act('/pool/repair', { pool: p.name }, (r) => `${t('pool.repaired')} ${r.made || 0}`) }, t('pool.action.repair')),
           el('button', { onclick: () => act('/pool/scrub', { pool: p.name }, (r) => `${t('pool.scrubbed')} ${r.looked || 0}`) }, t('pool.action.scrub')),
           el('button', { onclick: () => scrubPath(p) }, t('pool.action.scrubpath')),
+          el('button', { onclick: () => rebalance(p) }, t('pool.action.rebalance')),
           el('button', { class: 'danger', onclick: () => rebuild(p) }, t('pool.rebuild')))),
       cards,
       asyncNote,
