@@ -56,6 +56,12 @@ type Handle struct {
 	// read-ahead it started reading; the signal is one per open file, not
 	// one per read.
 	dirAheadSeen bool
+	// rate is an exponentially weighted average of how fast this handle is
+	// being read, in bytes per second, and lastReadAt when the previous
+	// read returned. The read-ahead window is sized from it: a player
+	// pulling 5 MiB/s needs a few seconds of runway, not a fixed 64 MiB.
+	rate       float64
+	lastReadAt time.Time
 }
 
 // Open opens a file by inode. write selects the write path.
@@ -256,6 +262,7 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 	}
 	bs := f.cache.BlockSize()
 	total := 0
+	stalled := false
 	for total < len(buf) {
 		pos := off + int64(total)
 		idx := pos / bs
@@ -265,6 +272,10 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 		// the block size.
 		n, ok := f.cache.ReadAt(key, idx, inBlock, buf[total:])
 		if !ok {
+			// The reader had to wait for bytes: the window is behind the
+			// reader and may grow. A read served from the cache is proof
+			// it is far enough ahead already.
+			stalled = true
 			var err error
 			if f.wantsSubBlock(h, idx) {
 				n, err = f.readSubBlock(ctx, h, key, idx, inBlock, buf[total:])
@@ -308,7 +319,7 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 			break
 		}
 	}
-	f.maybeReadAhead(ctx, h, key, off, int64(total))
+	f.maybeReadAhead(ctx, h, key, off, int64(total), stalled)
 	if total == 0 {
 		return 0, io.EOF
 	}

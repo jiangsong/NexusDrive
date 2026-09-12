@@ -60,7 +60,7 @@ func (f *FS) coalesceBlocks(h *Handle) int {
 // Once open, the window's missing, unclaimed blocks are grouped into runs of
 // up to coalesceBlocks(h) contiguous blocks, and each run is fetched with one
 // range request instead of one per block — see launchReadaheadRun.
-func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, off, n int64) {
+func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, off, n int64, stalled bool) {
 	// The sequential run is tracked even when prefetching is disabled:
 	// wantsSubBlock relies on it to hand a sequential reader whole blocks.
 	bs := f.cache.BlockSize()
@@ -95,11 +95,8 @@ func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, o
 		h.window = 1
 	}
 	sequential := h.seqRun >= seqArm
-	if sequential && maxWindow > 0 && h.window < maxWindow {
-		h.window *= 2
-		if h.window > maxWindow {
-			h.window = maxWindow
-		}
+	if sequential && maxWindow > 0 {
+		h.window = f.nextWindow(h, bs, maxWindow, n, stalled)
 	}
 	h.lastBlock = idx
 	h.lastEnd = off + n
@@ -156,6 +153,59 @@ func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, o
 	flush()
 }
 
+// nextWindow sizes the read-ahead window from how fast the handle is
+// actually being read, rather than doubling to a fixed ceiling. A player
+// pulling 5 MiB/s wants a few seconds of runway — readahead_lead — and
+// nothing more: a 64 MiB window in front of it is 12 seconds of data
+// nobody has asked for, paid for in requests and in cache the rest of the
+// mount could have used.
+//
+// The window only grows when a read actually had to wait. Being ahead of
+// the reader is the goal; being further ahead than that is not an
+// improvement, so a hit never widens it. Caller holds h.mu.
+func (f *FS) nextWindow(h *Handle, bs int64, maxWindow int, n int64, stalled bool) int {
+	now := time.Now()
+	if !h.lastReadAt.IsZero() {
+		if dt := now.Sub(h.lastReadAt).Seconds(); dt > 0 && dt < 5 {
+			sample := float64(n) / dt
+			if h.rate == 0 {
+				h.rate = sample
+			} else {
+				h.rate = 0.7*h.rate + 0.3*sample
+			}
+		}
+	}
+	h.lastReadAt = now
+
+	lead := h.Mount.Policy.ReadaheadLead
+	if lead <= 0 {
+		lead = 8 * time.Second
+	}
+	// The floor is what one round trip needs to stay useful; the ceiling
+	// is the configured maximum. A handle with no rate estimate yet opens
+	// to the connection budget, so the first burst uses the parallelism
+	// the drive allows instead of ramping up one doubling at a time.
+	target := 2
+	if h.rate > 0 {
+		if want := int(h.rate * lead.Seconds() / float64(bs)); want > target {
+			target = want
+		}
+	} else if conns := h.Mount.Provider.Capabilities().MaxConnsPerHost; conns > target {
+		target = conns
+	}
+	if target > maxWindow {
+		target = maxWindow
+	}
+	switch {
+	case h.window > target:
+		return target // the reader slowed down, or never needed this much
+	case stalled:
+		return target
+	default:
+		return h.window // far enough ahead already
+	}
+}
+
 // launchReadaheadRun fetches one contiguous run of blocks, sharing the fetch
 // of each with any other caller (foreground or background) already working
 // on it via blockFlight.Reserve. A block Reserve reports as already in flight
@@ -164,6 +214,25 @@ func (f *FS) maybeReadAhead(ctx context.Context, h *Handle, key cache.FileKey, o
 // leave gaps in the run; fetchReadaheadRun re-groups what remains into
 // contiguous sub-runs before issuing range requests.
 func (f *FS) launchReadaheadRun(ctx context.Context, ino uint64, node meta.Node, mount Mount, key cache.FileKey, run []int64) {
+	// Blocks in flight become write-behind memory the moment they land, so
+	// prefetching past that budget only trades a bounded queue for an
+	// unbounded one. Two handles reading at once share the ceiling.
+	bs := f.cache.BlockSize()
+	want := int64(len(run)) * bs
+	budget := f.cache.WriteBehindBudget()
+	if f.readaheadBytes.Add(want) > budget {
+		f.readaheadBytes.Add(-want)
+		for _, idx := range run {
+			f.prefetching.release(blockKey{ino: ino, idx: idx})
+		}
+		return
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			f.readaheadBytes.Add(-want)
+		}
+	}()
 	keys := make([]blockKey, len(run))
 	for i, idx := range run {
 		keys[i] = blockKey{ino: ino, idx: idx}
@@ -185,8 +254,10 @@ func (f *FS) launchReadaheadRun(ctx context.Context, ino uint64, node meta.Node,
 	for i, k := range owned {
 		ownedIdx[i] = k.idx
 	}
+	launched = true
 	go func() {
 		defer func() {
+			f.readaheadBytes.Add(-want)
 			for _, idx := range ownedIdx {
 				f.prefetching.release(blockKey{ino: ino, idx: idx})
 			}

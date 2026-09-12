@@ -258,6 +258,17 @@ func (c *Cache) anyInMemoryLocked(fh string) bool {
 	return false
 }
 
+// WriteBehindBudget reports how many bytes of fetched blocks may be held
+// in memory at once. Read-ahead uses it as its own ceiling: blocks in
+// flight become exactly this kind of memory the moment they arrive, so
+// prefetching past it only trades a bounded queue for an unbounded one.
+func (c *Cache) WriteBehindBudget() int64 {
+	if c.opt.WriteBehind > 0 {
+		return c.opt.WriteBehind
+	}
+	return writeBehindMax
+}
+
 // WriteBehindPending reports bytes registered but not yet on disk.
 func (c *Cache) WriteBehindPending() int64 {
 	c.mu.Lock()

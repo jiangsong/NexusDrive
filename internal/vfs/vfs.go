@@ -69,10 +69,10 @@ type Mount struct {
 // plain struct (no pointers) so a zero value is always meaningful: every
 // field means "no override, fall back to the global Options default (or, for
 // ReadaheadRequest, to the per-provider derivation Options.ReadaheadRequest
-// documents)". DirReadahead, SmallFileThreshold, SmallFileWhole and
-// ReadaheadLead are resolved and carried here but not yet consumed by vfs;
-// later tasks (directory readahead, small-file whole-read) read them off
-// Mount.Policy.
+// documents)". DirReadahead, SmallFileThreshold and SmallFileWhole drive the
+// sibling prefetch (read_dir_ahead.go); ReadaheadLead is how many seconds of
+// runway the sequential window keeps in front of the reader's measured rate
+// (readahead.go).
 type CachePolicy struct {
 	SmallFileWhole     bool
 	SmallFileThreshold int64
@@ -183,8 +183,11 @@ type FS struct {
 
 	// singleflight for directory listings and block fetches
 	dirFlight flight[uint64, *directoryRefresh]
-	// prefetching tracks blocks a read-ahead goroutine already owns.
-	prefetching inflight
+	// prefetching tracks blocks a read-ahead goroutine already owns;
+	// readaheadBytes is how many bytes of them are in flight across every
+	// handle, held under the cache's write-behind budget.
+	prefetching    inflight
+	readaheadBytes atomic.Int64
 	// dirAhead is the per-directory read order the sibling prefetch works
 	// from (directory inode -> *dirAheadState); dirAheadFlight is the
 	// whole-file fetches in flight (file inode -> chan struct{} closed when

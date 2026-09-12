@@ -30,13 +30,20 @@ type dirAheadRig struct {
 // layout names one.
 func newDirAheadRig(t *testing.T, policy vfs.CachePolicy) *dirAheadRig {
 	t.Helper()
+	return newDirAheadRigBudget(t, policy, 0)
+}
+
+// newDirAheadRigBudget is newDirAheadRig with an explicit write-behind
+// budget, which is also the ceiling read-ahead holds itself to.
+func newDirAheadRigBudget(t *testing.T, policy vfs.CachePolicy, writeBehind int64) *dirAheadRig {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	ca, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: 4096})
+	ca, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: 4096, WriteBehind: writeBehind})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,5 +239,67 @@ func TestDirectoryReadaheadStopsOnListingChange(t *testing.T) {
 	r.settle(t)
 	if got := r.fake.Calls("ReadRange") - before; got > 1 {
 		t.Fatalf("one read after a refresh cost %d range requests", got)
+	}
+}
+
+// TestReadaheadWindowFollowsTheReaderRate: a window is runway, and runway
+// is measured in seconds of playback, not in megabytes. A reader taking
+// 1 MiB/s must not have 64 MiB pulled in front of it — that is data
+// nobody asked for, paid for in requests and in cache the rest of the
+// mount could have used.
+func TestReadaheadWindowFollowsTheReaderRate(t *testing.T) {
+	r := newDirAheadRig(t, vfs.CachePolicy{ReadaheadLead: 2 * time.Second, ReadaheadMax: 64 << 12})
+	ctx := context.Background()
+	const size = 64 << 12 // 16 blocks of 4 KiB
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	r.fake.Seed("media/movie.bin", content)
+
+	// Read the first four blocks slowly: about one block every 100 ms, so
+	// roughly 40 KiB/s, which two seconds of lead makes ~20 blocks — but
+	// the file is 16 blocks long, so what this really asserts is that the
+	// window never runs away from a reader that is barely moving.
+	for i := 0; i < 4; i++ {
+		if _, err := r.fs.ReadFileRange(ctx, "/media/movie.bin", int64(i)*4096, 4096); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	r.settle(t)
+	// A 40 KiB/s reader with 2 s of lead wants ~80 KiB of runway. Having
+	// read 16 KiB, anything past ~128 KiB of traffic means the window
+	// ignored the rate and ran to its ceiling.
+	if read := r.fake.ReadBytes(); read > 128<<10 {
+		t.Fatalf("a slow reader pulled %d bytes; the window should follow its rate", read)
+	}
+}
+
+// TestReadaheadStaysUnderTheWriteBehindBudget: blocks in flight become
+// write-behind memory the moment they land, so read-ahead must respect
+// the same ceiling rather than trading a bounded queue for an unbounded
+// one.
+func TestReadaheadStaysUnderTheWriteBehindBudget(t *testing.T) {
+	r := newDirAheadRigBudget(t, vfs.CachePolicy{}, 32<<10) // 8 blocks of 4 KiB
+	ctx := context.Background()
+	const size = 4 << 20
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	r.fake.Seed("media/big.bin", content)
+	r.fake.SetFaults(func(f *fakeprovider.Faults) { f.Latency = 20 * time.Millisecond })
+	for i := 0; i < 6; i++ {
+		if _, err := r.fs.ReadFileRange(ctx, "/media/big.bin", int64(i)*4096, 4096); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.settle(t)
+	// Eight blocks of budget, one range request per coalesced run: more
+	// than a handful of requests in flight at once means the budget was
+	// not consulted.
+	if got := r.fake.PeakConcurrent(); got > 8 {
+		t.Fatalf("%d range requests were in flight at once against a budget of 8 blocks", got)
 	}
 }
