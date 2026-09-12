@@ -8,6 +8,7 @@ export const icons = {
   db: svg('<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'),
   globe: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>'),
   wrench: svg('<path d="M14 6a4 4 0 0 1 5 5l-9 9-4-1-1-4z"/>'),
+  download: svg('<path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/>'),
   transfer: svg('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>'),
   search: svg('<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>'),
   plus: svg('<path d="M12 5v14M5 12h14"/>'),

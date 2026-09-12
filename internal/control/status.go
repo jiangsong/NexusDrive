@@ -185,6 +185,9 @@ type Collector struct {
 	// Pools are the running storage pools by the name of the remote that
 	// exposes each; nil when none is configured.
 	Pools map[string]*pool.Pool
+	// Export runs `cloudfs export` jobs. nil on a daemon that owns no export
+	// queue, and the export routes then answer 503 rather than pretending.
+	Export ExportManager
 	// Providers are the live backends by remote name, for the capability
 	// table an account page shows. Nothing is served from them but Caps.
 	Providers map[string]provider.Provider

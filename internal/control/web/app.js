@@ -7,6 +7,7 @@ import { renderMain } from '/ui/screens/main.js';
 import { renderPool } from '/ui/screens/pool.js';
 import { renderTransfers } from '/ui/screens/transfers.js';
 import { renderCopies } from '/ui/screens/copies.js';
+import { renderExports } from '/ui/screens/exports.js';
 import { renderStorage } from '/ui/screens/storage.js';
 import { renderProxy } from '/ui/screens/proxy.js';
 import { renderDiagnostics } from '/ui/screens/diagnostics.js';
@@ -18,6 +19,7 @@ const screens = {
   'pool-view': renderPool,
   'transfers-view': renderTransfers,
   'copies-view': renderCopies,
+  'exports-view': renderExports,
   'storage-view': renderStorage,
   'proxy-view': renderProxy,
   'diagnostics-view': renderDiagnostics,

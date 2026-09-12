@@ -58,7 +58,15 @@ type Options struct {
 	Allow []string
 	// ReadOnly refuses every mutating tool.
 	ReadOnly bool
-	Limits   Limits
+	// Export, when set, exposes the export tools. nil leaves them
+	// unregistered: a server with no export queue behind it should not
+	// advertise a tool it cannot run.
+	Export ExportJobs
+	// ExportRoots bounds where an export may write on this machine. An empty
+	// list refuses every destination, which is the safe default for a server
+	// whose configuration says nothing about it.
+	ExportRoots []string
+	Limits      Limits
 	// Version is reported to the client.
 	Version string
 }
@@ -81,6 +89,7 @@ func New(opt Options) (*Server, error) {
 	}
 	opt.Limits = opt.Limits.withDefaults()
 	opt.Allow = append([]string(nil), opt.Allow...)
+	opt.ExportRoots = append([]string(nil), opt.ExportRoots...)
 	for i, a := range opt.Allow {
 		opt.Allow[i] = normalise(a)
 	}
@@ -105,6 +114,7 @@ func New(opt Options) (*Server, error) {
 	s.register()
 	s.registerCopyTools()
 	s.registerUploadTools()
+	s.registerExportTools()
 	s.registerResources()
 	return s, nil
 }

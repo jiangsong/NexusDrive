@@ -132,6 +132,10 @@ func main() {
 		err = runCopy(ctx, os.Args[2:], os.Stdout)
 	case "copies":
 		err = runCopies(ctx, os.Args[2:], os.Stdout)
+	case "export":
+		err = runExport(ctx, os.Args[2:], os.Stdout)
+	case "exports":
+		err = runExports(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
 	case "ui", "open":
@@ -189,6 +193,12 @@ Inspection
   copies retry|cancel <id>  retry or stop preparation while retaining its content
   copies forget <id> --confirm
                             discard terminal history and unreferenced private content
+  export <vpath>... <dir> [--mirror --confirm] [--verify] [--wait] [--json]
+                            copy virtual paths onto local storage; resumable, needs a running daemon
+  exports list | show | pause | resume | cancel <id>
+                            inspect and steer export jobs
+  exports forget <id> --confirm
+                            drop a finished job and its part files; finished copies are kept
   bench <dir> [--all|--tests a,b] [--cold] [--repeat 3] [--metrics addr] [--label L]
                             run the IO benchmark against any directory
   proxy test <host>         show which outbound a host routes to
@@ -655,11 +665,12 @@ func cmdMCP(ctx context.Context, args []string) error {
 		if addr == "" {
 			addr = "127.0.0.1:8765"
 		}
-		return serveMCPHTTPWith(ctx, d, allow, readOnly, addr)
+		return serveMCPHTTPWith(ctx, d, allow, readOnly, addr, cfg.MCP.ExportRoots)
 	}
 	// stdio is the default: it is how Claude Code and Codex launch servers.
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
+		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 	})
 	if err != nil {
 		return err
@@ -669,12 +680,22 @@ func cmdMCP(ctx context.Context, args []string) error {
 }
 
 func serveMCPHTTP(ctx context.Context, d *daemon.Daemon, cfg *config.Config, addr string) error {
-	return serveMCPHTTPWith(ctx, d, cfg.MCP.Allow, cfg.MCP.ReadOnly, addr)
+	return serveMCPHTTPWith(ctx, d, cfg.MCP.Allow, cfg.MCP.ReadOnly, addr, cfg.MCP.ExportRoots)
 }
 
-func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, readOnly bool, addr string) error {
+// exportJobsOf keeps a nil manager a nil interface: mcpsrv registers the
+// export tools on the strength of that field alone.
+func exportJobsOf(d *daemon.Daemon) mcpsrv.ExportJobs {
+	if d.Export == nil {
+		return nil
+	}
+	return d.Export
+}
+
+func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, readOnly bool, addr string, exportRoots []string) error {
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
+		Export: exportJobsOf(d), ExportRoots: exportRoots,
 	})
 	if err != nil {
 		return err

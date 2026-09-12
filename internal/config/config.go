@@ -180,6 +180,12 @@ type MCP struct {
 	HTTP     string   `yaml:"http"`
 	Allow    []string `yaml:"allow"`
 	ReadOnly bool     `yaml:"read_only"`
+	// ExportRoots bounds the MCP export tool: a destination outside every
+	// one of these local directories is refused. Allow is about what an
+	// agent may read out of the mount; this is about where it may write on
+	// this machine, which is a different question and needs its own answer.
+	// An empty list means the tool refuses every destination.
+	ExportRoots []string `yaml:"export_roots"`
 }
 
 type Control struct {

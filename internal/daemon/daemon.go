@@ -429,6 +429,11 @@ func (d *Daemon) Collector() *control.Collector {
 		CacheMaxBytes: int64(d.Config.Cache.MaxSize),
 		FreeSpace:     cache.FreeSpace,
 	}
+	// A nil manager has to stay a nil interface: the export routes answer 503
+	// on the strength of that field alone.
+	if d.Export != nil {
+		col.Export = d.Export
+	}
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that
