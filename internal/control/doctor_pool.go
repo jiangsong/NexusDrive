@@ -83,6 +83,15 @@ func (d *Doctor) checkPools(ctx context.Context) []Check {
 			hc.setDetail("doctor.pool.holds", r.HoldsBytes, d.HoldMaxBytes)
 			out = append(out, hc)
 		}
+		if r.Rebalance.Queued > 0 || r.Rebalance.Failed > 0 {
+			rb := Check{Name: "pool/" + name + "/rebalance", Level: LevelOK}
+			rb.setDetail("doctor.pool.rebalance.queued", r.Rebalance.Queued, r.Rebalance.Done, r.Rebalance.Skew*100)
+			if r.Rebalance.Failed > 0 {
+				rb.Level = LevelWarn
+				rb.addDetail("doctor.pool.rebalance.failed", r.Rebalance.Failed)
+			}
+			out = append(out, rb)
+		}
 		if r.Divergences > 0 {
 			dc := Check{Name: "pool/" + name + "/divergences", Level: LevelWarn}
 			dc.setDetail("doctor.pool.divergences", r.Divergences)

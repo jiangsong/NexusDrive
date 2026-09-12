@@ -39,6 +39,15 @@ func newPoolRigWith(t *testing.T, settings config.Pool, memberNames ...string) *
 	return newPoolRigTTL(t, settings, time.Second, memberNames...)
 }
 
+// newPoolRigSized is newPoolRigWith where every member has a capacity, so
+// the pool can say how full each one is — what rebalance works from.
+func newPoolRigSized(t *testing.T, settings config.Pool, capacity int64, memberNames ...string) *poolRig {
+	t.Helper()
+	r := newPoolRigTTL(t, settings, time.Second, memberNames...)
+	r.pool.SetMemberCapacities(capacity)
+	return r
+}
+
 func newPoolRigTTL(t *testing.T, settings config.Pool, ttl time.Duration, memberNames ...string) *poolRig {
 	t.Helper()
 	dir := t.TempDir()
@@ -574,5 +583,86 @@ func TestDeltaSurfacesVendorAppEdit(t *testing.T) {
 	}
 	if got := listNames(t, r.fs, "/"); got != "appended.txt,shared.txt" {
 		t.Fatalf("listing after the feed = %s", got)
+	}
+}
+
+// TestRebalanceLosesNothingWhenAMemberGoesAwayMidPlan: the reliability
+// matrix for a rebalance is simple — moves may fail, files may not
+// disappear. Every move is copy, verify, drop; a member that stops
+// answering in the middle leaves the file exactly where it was, and the
+// queue remembers to try again.
+func TestRebalanceLosesNothingWhenAMemberGoesAwayMidPlan(t *testing.T) {
+	ctx := context.Background()
+	r := newPoolRigSized(t, config.Pool{Replicas: 1, MinReplicas: 1, ProbeInterval: time.Hour}, 256, "a", "b")
+	a, b := r.members["a"], r.members["b"]
+
+	// Everything starts on a: b is the drive that was just added.
+	if err := r.pool.SetMemberState("b", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	const files = 8
+	for i := 0; i < files; i++ {
+		if _, err := r.fs.WriteFile(ctx, "/f"+string(rune('a'+i))+".txt", []byte{byte('a' + i), 'x', 'y'}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.pool.SetMemberState("b", "enabled"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := r.pool.PlanRebalance(ctx, 0.01, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) == 0 {
+		t.Fatalf("nothing planned: %+v", plan)
+	}
+
+	// The destination disappears halfway through the plan.
+	moved := 0
+	for i := 0; i < len(plan.Moves)*3; i++ {
+		if moved == 1 {
+			b.SetFaults(func(f *fakeprovider.Faults) { f.Down = true })
+		}
+		n, err := r.pool.RebalanceOnce(ctx)
+		if err != nil {
+			break
+		}
+		if n == 0 {
+			break
+		}
+		moved += n
+	}
+	b.SetFaults(func(f *fakeprovider.Faults) { f.Down = false })
+
+	// Every file is still readable through the mount, wherever it lives.
+	for i := 0; i < files; i++ {
+		path := "/f" + string(rune('a'+i)) + ".txt"
+		got, err := r.fs.ReadFileRange(ctx, path, 0, 3)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if want := []byte{byte('a' + i), 'x', 'y'}; string(got) != string(want) {
+			t.Fatalf("%s = %q, want %q", path, got, want)
+		}
+	}
+	// And no file lost its only copy: what the pool thinks is live is
+	// really there on the member it names.
+	for i := 0; i < files; i++ {
+		path := "/f" + string(rune('a'+i)) + ".txt"
+		_, onA := a.Content(path)
+		_, onB := b.Content(path)
+		if !onA && !onB {
+			t.Fatalf("%s is on neither member", path)
+		}
+	}
+	st, err := r.pool.RebalanceStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Queued+st.Done+st.Failed != len(plan.Moves) {
+		t.Fatalf("queue accounts for %+v of %d planned moves", st, len(plan.Moves))
 	}
 }

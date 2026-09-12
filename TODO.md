@@ -1686,7 +1686,15 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   入队（优先级 2）、`Availability.BelowMin`、`Report.BelowMin`、`pool status` 与 `doctor` 各一行；
   `strict` 在 `finishUpload` 之后（不持索引锁）同步跑 `repairPath`，deadline `min_replicas_timeout`，
   超时仍返回成功。`docs/pool.md` 的表格与写路径描述已同步改写。
-  **未做**：§6.6 rebalance 与 backfill。
+  §6.6 rebalance 与 backfill 已落地：`internal/pool/rebalance.go` + `rebalance_queue` 表，
+  `PlanRebalance(targetSkew, dryRun)`（最满 → 最空、大文件优先、只搬规则允许的、搬一半差值）、
+  `RebalanceOnce`（先拷后删、按索引校验、`pause_between`）、`Pool.SetBusy`（daemon 接 `fsys.Busy`）、
+  `backfillIfNeeded`、`dropReplica` 被 drain / trim / rebalance 共用、`TrimOnce` 改裁放置分数最差的副本、
+  health.go 里独立 ticker、`Report.Rebalance` + `POST /pool/rebalance` + `cloudfs pool rebalance` +
+  doctor 一行。测试：`rebalance_test.go`、`test/perf` 的 `TestRebalanceCostIsOneUploadPlusOneDeletePerMove`
+  与 `TestPlacementSpreadsAcrossDomains`、`test/chaos` 的 `TestRebalanceLosesNothingWhenAMemberGoesAwayMidPlan`。
+  **未做**：`rebalance.max_rate` 还只是配置项（`pause_between` 已生效，字节速率上限未接线）；UI 池页的每成员
+  填充条与「Rebalance」按钮未做。
 
 ## 明确不在当前范围内
 

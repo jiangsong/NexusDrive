@@ -52,7 +52,7 @@ mounts:
 
 **命名规则。** 每个网盘都有拒绝的名字(SMB 的 Windows 保留名、OneDrive 的禁字符、大部分网盘的大小写折叠)。驱动在 `Caps.Naming` 里声明,池放置前先检查;运行时被拒绝的名字也会被**学习**下来,下次不再往那个成员放同类名字。没有一个成员能放的名字会以「不支持」加原因拒绝。
 
-**容量。** 能报告配额的网盘(gdrive、webdav RFC 4331、aliyun)按剩余空间参与放置;不能的用 `capacity:` 配置值减去池已放置的字节数;都没有则不按空间优先。`df` 看到的是池容量 = Σ成员容量 / replicas。加盘后已有文件不会自动搬迁;rebalance/backfill 是 v2 规划项,见 [pool-v2.md](pool-v2.md) §6.6。
+**容量。** 能报告配额的网盘(gdrive、webdav RFC 4331、aliyun)按剩余空间参与放置;不能的用 `capacity:` 配置值减去池已放置的字节数;都没有则不按空间优先。`df` 看到的是池容量 = Σ成员容量 / replicas。加盘后已有文件会被 rebalance 逐步搬过去:`Start` 时若有成员一个文件都没有而别的成员有,自动排一轮计划(`rebalance.auto_backfill`,默认开);之后当最满与最空成员的填充率差超过 `rebalance.target_skew`(默认 10%)时也可以手工触发 `cloudfs pool rebalance <pool> --confirm`(加 `--dry-run` 只看计划)。每次搬迁都是**先拷后删**,中途失败只会多一份副本、不会少一份;搬迁只在本机空闲时推进,并受 `rebalance.max_rate` 与 `rebalance.pause_between` 约束。
 
 **核对(scrub)。** 定期重新列举一部分目录,把网盘上发生的事收进索引:在官方 App 里删掉一份 → 当作副本丢失补回(删除请通过池做);在官方 App 里改名 → 报告为分歧(带新名字),不猜;多余的副本只在哈希证明内容相同且超过 `trim_grace` 后从声明顺序最靠后的成员裁掉。
 
@@ -69,6 +69,7 @@ mounts:
 3. 离线机器晚到的 op-log 重放按幂等规则兜底;超过 `op_ttl` 直接丢弃并全量核对。成员**可达但拒绝**某个改名/移动(目标名被占、命名规则不允许、配额)同样进 op-log 重试;重试次数用完就登记分歧、不再声称这个成员持有该文件(副本数因此少一份,由修复在别处补上),而它上面那份旧副本原样留着——池不会删自己说不清来历的东西。
 4. 时钟偏斜:两个内容的 mtime 相差 ≤ 2 秒视为不可判定,记作分歧并按声明顺序取胜者。
 5. 两台机器同时修复同一文件 → 内容相同即良性;裁剪只在哈希一致且过了 `trim_grace` 之后。
+6. 搬迁中途成员失联 → 队列条目退避重试,文件留在原成员上;先拷后删意味着最坏结果是多一份副本,由裁剪清掉。
 6. 某台机器改了池设置(replicas 等)→ 标记文件里版本号更大的一方被保留,另一方在状态页收到提示,由人决定。
 
 ## 出问题时先看什么
@@ -90,7 +91,11 @@ mounts:
 | `out_after` | 10m | down 持续多久判定 out,触发再复制 |
 | `probe_interval` | 30s | down 的成员多久被试一次 |
 | `op_ttl` | 7d | op-log 保留多久,超过即丢弃并全量核对 |
-| `trim_grace` | 1h | 多余副本至少存在多久才裁剪 |
+| `trim_grace` | 1h | 多余副本至少存在多久才裁剪;裁掉的是**放置分数最差**的那一份(最满的成员、被 `avoid`、故障域重复),不是声明顺序最后的那份 |
+| `rebalance.target_skew` | 0.10 | 最满与最空成员填充率之差超过它才排计划 |
+| `rebalance.auto_backfill` | true | 有成员为空而别的成员不为空时,`Start` 自动排一轮 |
+| `rebalance.max_rate` | 30MiB/s | 搬迁的字节速率上限 |
+| `rebalance.pause_between` | 500ms | 两次搬迁之间的间隔 |
 | `hold_max_bytes` / `hold_max_age` | 8GiB / 24h | 本地暂存的预算 |
 | `scrub_interval` / `scrub_sample` | 24h / 0.05 | 定期核对的频率与抽样比例 |
 | `read_fanout` | auto | 块读如何分到副本:`off` 每个文件一条有序流(v1 行为);`auto` 按负载与每 MiB 延迟分散,但非官方 API 的成员(`Caps.Tier=unofficial`)对同一文件最多一条并发流,以免触发风控;`all` 不做层级限制 |

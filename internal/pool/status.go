@@ -26,6 +26,7 @@ type Report struct {
 	BelowMin    int
 	Unavailable int
 	Repair      RepairStats
+	Rebalance   RebalanceStats
 	HoldsBytes  int64
 	Divergences int
 	Notices     []string
@@ -76,6 +77,9 @@ func (p *Pool) StatusReport(ctx context.Context) (Report, error) {
 		return r, err
 	}
 	if r.Repair, err = p.RepairStatus(ctx); err != nil {
+		return r, err
+	}
+	if r.Rebalance, err = p.RebalanceStatus(ctx); err != nil {
 		return r, err
 	}
 	if r.HoldsBytes, err = p.HoldsBytes(ctx); err != nil {

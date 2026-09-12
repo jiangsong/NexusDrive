@@ -138,6 +138,22 @@ CREATE TRIGGER IF NOT EXISTS member_usage_del AFTER DELETE ON replicas BEGIN
   UPDATE member_usage SET bytes = MAX(0, bytes - old.size), files = MAX(0, files - 1)
     WHERE member = old.member;
 END;
+-- rebalance_queue is one plan's worth of moves: copy to the emptier
+-- member, verify, then drop the copy on the fuller one. It is durable so
+-- a restart mid-plan neither loses the plan nor repeats a move.
+CREATE TABLE IF NOT EXISTS rebalance_queue (
+  path        TEXT PRIMARY KEY,
+  from_member TEXT NOT NULL,
+  to_member   TEXT NOT NULL,
+  size        INTEGER NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'pending',  -- pending | copied | done | failed
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  next_at     INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT NOT NULL DEFAULT '',
+  plan_id     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rebalance_member ON rebalance_queue(from_member, state);
 CREATE TRIGGER IF NOT EXISTS member_usage_upd AFTER UPDATE ON replicas BEGIN
   UPDATE member_usage SET bytes = MAX(0, bytes - old.size), files = MAX(0, files - 1)
     WHERE member = old.member;

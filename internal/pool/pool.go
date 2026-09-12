@@ -100,6 +100,10 @@ type Pool struct {
 	bg     sync.WaitGroup
 	stopBG chan struct{}
 	bgMu   sync.Mutex
+	// busy answers "is this machine doing something a user is waiting
+	// for": the rebalancer stands aside while it is true. Nil means never
+	// busy, which is what a test wants.
+	busy func() bool
 
 	noticeMu sync.Mutex
 	notices  []string

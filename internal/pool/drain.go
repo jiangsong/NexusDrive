@@ -2,7 +2,6 @@ package pool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"cloudfs/internal/provider"
@@ -91,16 +90,10 @@ func (p *Pool) DrainOnce(ctx context.Context) (removed int, empty bool, err erro
 				empty = false
 				continue
 			}
-			err = m.p.Delete(ctx, c.remoteID)
-			if errors.Is(err, provider.ErrNotFound) {
-				err = nil
-			}
-			m.note(err)
-			if err != nil {
+			if err := p.dropReplica(ctx, c.path, m); err != nil {
 				empty = false
 				continue
 			}
-			_, _ = p.execIndex(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, c.path, m.name)
 			removed++
 		}
 		var left int

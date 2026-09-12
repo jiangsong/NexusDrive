@@ -244,6 +244,11 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// Hydration merges a whole file at once; it waits for the reads the
 	// kernel is blocked on rather than sharing the disk with them.
 	ca.SetBusy(fsys.Busy)
+	// Same reason for the pools: a rebalance move is a whole file in each
+	// direction and must stand aside while a read is waiting.
+	for _, pl := range d.Pools {
+		pl.SetBusy(fsys.Busy)
+	}
 	d.closers = append(d.closers, fsys.Close)
 
 	// Remotes with a change feed follow the provider within a poll interval;

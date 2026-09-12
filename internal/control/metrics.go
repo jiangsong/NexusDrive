@@ -109,6 +109,7 @@ func (s *Server) routes() []route {
 		{pattern: "/pool/repair", handler: s.poolWork},
 		{pattern: "/pool/scrub", handler: s.poolWork},
 		{pattern: "/pool/rebuild", handler: s.poolWork},
+		{pattern: "/pool/rebalance", handler: s.poolRebalance},
 		{pattern: "/pool/divergences", handler: s.poolDivergences},
 		{pattern: "/pool/join", handler: s.poolJoin},
 		{pattern: "/daemon/restart", handler: s.daemonRestart},

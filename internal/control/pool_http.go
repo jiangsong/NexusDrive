@@ -60,6 +60,13 @@ type PoolView struct {
 		Queued  int `json:"queued"`
 		Blocked int `json:"blocked"`
 	} `json:"repair"`
+	Rebalance struct {
+		Queued     int     `json:"queued"`
+		Done       int     `json:"done"`
+		Failed     int     `json:"failed"`
+		BytesMoved int64   `json:"bytes_moved"`
+		Skew       float64 `json:"skew"`
+	} `json:"rebalance"`
 	HoldsBytes  int64    `json:"holds_bytes"`
 	Divergences int      `json:"divergences"`
 	Notices     []string `json:"notices"`
@@ -114,6 +121,38 @@ type PoolPathRequest struct {
 	Path    string `json:"path,omitempty"`
 	Full    bool   `json:"full,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+}
+
+// PoolRebalanceRequest is POST /pool/rebalance.
+type PoolRebalanceRequest struct {
+	Pool string `json:"pool"`
+	// TargetSkew is the fill-ratio spread to aim for, 0 meaning the
+	// pool's configured rebalance.target_skew.
+	TargetSkew float64 `json:"target_skew,omitempty"`
+	// DryRun plans without queueing anything.
+	DryRun  bool `json:"dry_run,omitempty"`
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// PoolRebalanceResponse is the plan, whether or not it was queued.
+type PoolRebalanceResponse struct {
+	Pool   string              `json:"pool"`
+	PlanID string              `json:"plan_id,omitempty"`
+	Skew   float64             `json:"skew"`
+	Target float64             `json:"target_skew"`
+	Moves  []PoolRebalanceMove `json:"moves"`
+	Bytes  int64               `json:"bytes"`
+	Queued bool                `json:"queued"`
+	Reason string              `json:"reason,omitempty"`
+	DryRun bool                `json:"dry_run"`
+}
+
+// PoolRebalanceMove is one file changing members.
+type PoolRebalanceMove struct {
+	Path string `json:"path"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	Size int64  `json:"size"`
 }
 
 // PoolDivergenceView is one thing a person must decide.
@@ -177,6 +216,8 @@ func poolView(ctx context.Context, name string, p *pool.Pool) (PoolView, error) 
 		v.Notices = []string{}
 	}
 	v.Repair.Queued, v.Repair.Blocked = r.Repair.Queued, r.Repair.Blocked
+	v.Rebalance.Queued, v.Rebalance.Done = r.Rebalance.Queued, r.Rebalance.Done
+	v.Rebalance.Failed, v.Rebalance.BytesMoved, v.Rebalance.Skew = r.Rebalance.Failed, r.Rebalance.BytesMoved, r.Rebalance.Skew
 	if r.QuotaKnown {
 		v.Total, v.Used, v.Free = r.Quota.Total, r.Quota.Used, r.Quota.Free()
 	}
@@ -498,6 +539,41 @@ func (s *Server) poolWork(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 		return
+	}
+	writeJSON(w, out)
+}
+
+// POST /pool/rebalance plans a set of moves that levels the members out,
+// and queues it unless the caller only wanted to see it. Moving data
+// between drives costs upload bandwidth on both, so a real run needs
+// confirm the way the other expensive pool operations do.
+func (s *Server) poolRebalance(w http.ResponseWriter, r *http.Request) {
+	if !privateRequest(w, r) {
+		return
+	}
+	var in PoolRebalanceRequest
+	if !decodeMutation(w, r, &in) {
+		return
+	}
+	p, ok := s.poolByName(w, in.Pool)
+	if !ok {
+		return
+	}
+	if !in.DryRun && !in.Confirm {
+		httpErrorT(w, r, http.StatusBadRequest, "err.confirm_rebalance")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	plan, err := p.PlanRebalance(ctx, in.TargetSkew, in.DryRun)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := PoolRebalanceResponse{Pool: in.Pool, PlanID: plan.PlanID, Skew: plan.Skew, Target: plan.Target,
+		Bytes: plan.Bytes, Queued: plan.Planned, Reason: plan.Reason, DryRun: in.DryRun, Moves: []PoolRebalanceMove{}}
+	for _, mv := range plan.Moves {
+		out.Moves = append(out.Moves, PoolRebalanceMove{Path: mv.Path, From: mv.From, To: mv.To, Size: mv.Size})
 	}
 	writeJSON(w, out)
 }

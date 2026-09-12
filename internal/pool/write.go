@@ -758,7 +758,7 @@ func likePrefix(pth string) string {
 func movePaths(tx *sql.Tx, oldPath, newPath string) error {
 	like := likePrefix(oldPath)
 	n := len(oldPath)
-	for _, table := range []string{"ids", "entries", "replicas", "member_dirs", "holds", "divergences", "pending_ops", "repair_queue"} {
+	for _, table := range []string{"ids", "entries", "replicas", "member_dirs", "holds", "divergences", "pending_ops", "repair_queue", "rebalance_queue"} {
 		if _, err := tx.Exec(`UPDATE `+table+` SET path = ? || substr(path, ?) WHERE path = ? OR path LIKE ? ESCAPE '\'`, newPath, n+1, oldPath, like); err != nil {
 			return err
 		}

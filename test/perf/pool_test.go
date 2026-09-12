@@ -33,6 +33,14 @@ type poolHarness struct {
 
 func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
 	t.Helper()
+	return newPoolHarnessWith(t, config.Pool{Replicas: 2, MinReplicas: 1}, 0, memberNames...)
+}
+
+// newPoolHarnessWith is newPoolHarness with the pool settings and a
+// per-member capacity spelled out, for the tests that need a pool whose
+// members can be full.
+func newPoolHarnessWith(t *testing.T, settings config.Pool, capacity int64, memberNames ...string) *poolHarness {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
 	if err != nil {
@@ -45,11 +53,11 @@ func newPoolHarness(t *testing.T, memberNames ...string) *poolHarness {
 	}
 	t.Cleanup(func() { ca.Close() })
 	h := &poolHarness{}
-	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: config.Pool{Replicas: 2, MinReplicas: 1}}
-	for _, n := range memberNames {
+	opt := pool.Options{Name: "home", StateDir: filepath.Join(dir, "pool"), Settings: settings}
+	for i, n := range memberNames {
 		f := fakeprovider.New(n)
 		h.members = append(h.members, f)
-		opt.Members = append(opt.Members, pool.Member{Name: n, Provider: f, Adopt: true})
+		opt.Members = append(opt.Members, pool.Member{Name: n, Provider: f, Adopt: true, Capacity: capacity, Domain: fmt.Sprintf("acct-%d", i)})
 	}
 	p, err := pool.New(opt)
 	if err != nil {
@@ -360,5 +368,144 @@ func TestPoolReadFanoutAddsBandwidth(t *testing.T) {
 	t.Logf("48 MiB in 12 blocks: 1 member %v, 3 members %v, ratio %.2f", single, fused, ratio)
 	if ratio >= maxRatio {
 		t.Fatalf("3 replicas read in %.2f× the single-member time, want < %.2f", ratio, maxRatio)
+	}
+}
+
+// TestRebalanceCostIsOneUploadPlusOneDeletePerMove: a rebalance is the
+// most expensive thing the pool does on its own initiative, so its price
+// has to stay exactly what it claims — the file goes up once and comes
+// off once. A regression that re-listed, re-read or re-uploaded would be
+// invisible in wall-clock on fakes and very visible on a real account.
+func TestRebalanceCostIsOneUploadPlusOneDeletePerMove(t *testing.T) {
+	h := newPoolHarnessWith(t, config.Pool{Replicas: 1, MinReplicas: 1}, 64<<10, "a", "b")
+	ctx := context.Background()
+	// Everything lands on a, the way a pool looks the moment b is added.
+	if err := h.pool.SetMemberState("b", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	const files = 6
+	for i := 0; i < files; i++ {
+		// Distinct content per file: identical bytes would dedup on the
+		// destination and hide what a move really costs.
+		if _, err := h.fs.WriteFile(ctx, fmt.Sprintf("/f%02d.txt", i), bytes.Repeat([]byte{byte('a' + i)}, 4096), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.pool.SetMemberState("b", "enabled"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := h.pool.PlanRebalance(ctx, 0.05, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) == 0 {
+		t.Fatalf("nothing to move: %+v", plan)
+	}
+	before := map[string]int{}
+	for _, op := range []string{"BeginUpload", "UploadPart", "CompleteUpload", "Delete", "List", "ReadRange"} {
+		for _, m := range h.members {
+			before[op] += m.Calls(op)
+		}
+	}
+	moved := 0
+	for i := 0; i < len(plan.Moves)*2 && moved < len(plan.Moves); i++ {
+		n, err := h.pool.RebalanceOnce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		moved += n
+	}
+	if moved != len(plan.Moves) {
+		t.Fatalf("moved %d of %d planned", moved, len(plan.Moves))
+	}
+	spent := func(op string) int {
+		n := 0
+		for _, m := range h.members {
+			n += m.Calls(op)
+		}
+		return n - before[op]
+	}
+	if got := spent("BeginUpload"); got != moved {
+		t.Fatalf("%d uploads for %d moves", got, moved)
+	}
+	if got := spent("CompleteUpload"); got != moved {
+		t.Fatalf("%d completes for %d moves", got, moved)
+	}
+	if got := spent("Delete"); got != moved {
+		t.Fatalf("%d deletes for %d moves", got, moved)
+	}
+	if got := spent("List"); got != 0 {
+		t.Fatalf("a rebalance listed %d directories; the index already knows where things are", got)
+	}
+	// A single-replica pool has no hold to copy from, so the bytes come
+	// off the source member — once. Reading the file more than once per
+	// move is the regression this guards against.
+	read := int64(0)
+	for _, m := range h.members {
+		read += m.ReadBytes()
+	}
+	if want := int64(moved) * 4096; read > want {
+		t.Fatalf("a rebalance read %d bytes to move %d files of 4096 bytes", read, moved)
+	}
+}
+
+// TestPlacementSpreadsAcrossDomains: two members of one account share a
+// ban and a quota, so replicas of one file belong in different accounts
+// whenever the pool has more than one.
+func TestPlacementSpreadsAcrossDomains(t *testing.T) {
+	ctx := context.Background()
+	a1, a2, b1 := fakeprovider.New("a1"), fakeprovider.New("a2"), fakeprovider.New("b1")
+	p, err := pool.New(pool.Options{Name: "home", StateDir: t.TempDir(),
+		Settings: config.Pool{Replicas: 2, MinReplicas: 1},
+		Members: []pool.Member{
+			{Name: "a1", Provider: a1, Adopt: true, Domain: "acct-a"},
+			{Name: "a2", Provider: a2, Adopt: true, Domain: "acct-a"},
+			{Name: "b1", Provider: b1, Adopt: true, Domain: "acct-b"},
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	dir, err := p.Mkdir(ctx, p.RootID(), "docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const files = 6
+	for i := 0; i < files; i++ {
+		name := fmt.Sprintf("f%02d.txt", i)
+		sess, err := p.BeginUpload(ctx, dir.ID, name, 4, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pt, err := p.UploadPart(ctx, sess, 0, bytes.NewReader([]byte("data")), 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.CompleteUpload(ctx, sess, []provider.PartToken{pt}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < files*2; i++ {
+		if _, err := p.RepairOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < files; i++ {
+		pth := fmt.Sprintf("/docs/f%02d.txt", i)
+		_, onA1 := a1.Content(pth)
+		_, onA2 := a2.Content(pth)
+		_, onB1 := b1.Content(pth)
+		if onA1 && onA2 && !onB1 {
+			t.Fatalf("%s has both copies in one account", pth)
+		}
+		if !onB1 {
+			t.Fatalf("%s did not reach the second account", pth)
+		}
 	}
 }

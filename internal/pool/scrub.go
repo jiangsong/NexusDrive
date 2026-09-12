@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"time"
 
 	"cloudfs/internal/provider"
@@ -128,10 +129,15 @@ func (p *Pool) TrimOnce(ctx context.Context) (int, error) {
 		if len(live) <= target {
 			continue
 		}
-		// Newest-seen copies are the surplus candidates, last-declared
-		// members first.
-		for i := len(live) - 1; i >= 0 && len(live) > target; i-- {
-			r := live[i]
+		// The copy to drop is the one placement would have chosen last:
+		// the fullest member, one the rule avoids, one whose failure
+		// domain another copy already covers. Dropping by declaration
+		// order instead would undo a rebalance, since the copy it just
+		// made is often the last-declared one.
+		for _, r := range p.worstPlacedFirst(ctx, f.path, live) {
+			if len(live) <= target {
+				break
+			}
 			var seenAt int64
 			_ = p.db.QueryRowContext(ctx, `SELECT seen_at FROM replicas WHERE path = ? AND member = ?`, r.path, r.member).Scan(&seenAt)
 			if seenAt > cutoff {
@@ -141,16 +147,15 @@ func (p *Pool) TrimOnce(ctx context.Context) (int, error) {
 			if m == nil || !m.usable(probe) {
 				continue
 			}
-			err := m.p.Delete(ctx, r.remoteID)
-			if errors.Is(err, provider.ErrNotFound) {
-				err = nil
-			}
-			m.note(err)
-			if err != nil {
+			if err := p.dropReplica(ctx, r.path, m); err != nil {
 				continue
 			}
-			_, _ = p.execIndex(ctx, `DELETE FROM replicas WHERE path = ? AND member = ?`, r.path, r.member)
-			live = append(live[:i], live[i+1:]...)
+			for i, l := range live {
+				if l.member == r.member {
+					live = append(live[:i], live[i+1:]...)
+					break
+				}
+			}
 			trimmed++
 		}
 	}
@@ -196,3 +201,27 @@ func (p *Pool) ClearDivergence(ctx context.Context, pth, member, kind string) er
 }
 
 var _ = sql.ErrNoRows
+
+// worstPlacedFirst orders a file's replicas from the one placement wants
+// least to the one it wants most. A member that is no longer a candidate
+// at all — it went out, or a rule now excludes it — sorts worst.
+func (p *Pool) worstPlacedFirst(ctx context.Context, pth string, live []replicaRow) []replicaRow {
+	rank := map[string]int{}
+	for i, m := range p.candidates(ctx, pth) {
+		rank[m.name] = i
+	}
+	out := append([]replicaRow(nil), live...)
+	worst := len(rank) + 1
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, ok := rank[out[i].member]
+		if !ok {
+			ri = worst
+		}
+		rj, ok := rank[out[j].member]
+		if !ok {
+			rj = worst
+		}
+		return ri > rj
+	})
+	return out
+}

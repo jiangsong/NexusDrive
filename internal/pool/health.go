@@ -7,6 +7,10 @@ import (
 	"cloudfs/internal/provider"
 )
 
+// rebalanceInterval is how often one queued move is attempted. Moves are
+// background work by definition: nobody is waiting for one.
+const rebalanceInterval = 15 * time.Second
+
 // Start runs the pool's background loops until Stop or ctx ends. For now
 // that is the probe: a member that is down is asked something cheap every
 // probe interval, so it comes back into service the moment it answers,
@@ -23,7 +27,7 @@ func (p *Pool) Start(ctx context.Context) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	p.bg.Add(2)
+	p.bg.Add(3)
 	go func() {
 		defer p.bg.Done()
 		t := time.NewTicker(interval)
@@ -36,6 +40,26 @@ func (p *Pool) Start(ctx context.Context) {
 				return
 			case <-t.C:
 				p.ProbeOnce(ctx)
+			}
+		}
+	}()
+	// The rebalancer runs on its own ticker rather than inside the repair
+	// worker: one move is a whole file in each direction, and a slow one
+	// must not hold up replay, repair or drain behind it.
+	go func() {
+		defer p.bg.Done()
+		t := time.NewTicker(rebalanceInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if _, err := p.RebalanceOnce(ctx); err != nil && ctx.Err() != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -59,6 +83,7 @@ func (p *Pool) Start(ctx context.Context) {
 		if p.anyMultiReplica() {
 			_, _ = p.ScanOnce(ctx)
 		}
+		p.backfillIfNeeded(ctx)
 		for {
 			select {
 			case <-stop:

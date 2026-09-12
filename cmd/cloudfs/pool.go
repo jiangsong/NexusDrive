@@ -13,11 +13,11 @@ import (
 	"cloudfs/internal/control"
 )
 
-// cmdPool: cloudfs pool status|create|add|remove|drain|enable|disable|repair|scrub|divergences|join|rebuild.
+// cmdPool: cloudfs pool status|create|add|remove|drain|enable|disable|repair|scrub|rebalance|divergences|join|rebuild.
 // Configuration edits go to the file (and tell the daemon's next start);
 // the rest asks the running daemon.
 func cmdPool(ctx context.Context, args []string) error {
-	f := parseFlags(args, "full", "confirm")
+	f := parseFlags(args, "full", "confirm", "dry-run")
 	action := f.arg(0)
 	cfg, configPath, err := loadConfig(f)
 	if err != nil {
@@ -141,6 +141,47 @@ func cmdPool(ctx context.Context, args []string) error {
 			fmt.Printf("%s: %v\n", k, v)
 		}
 		return nil
+	case "rebalance":
+		// cloudfs pool rebalance <pool> [--target-skew 10%] [--dry-run] --confirm
+		pool := f.arg(1)
+		dry := f.bool("dry-run")
+		if !dry && !f.bool("confirm") {
+			return errors.New("pool rebalance: moving files between drives costs upload bandwidth on both; pass --confirm, or --dry-run to see the plan")
+		}
+		skew, err := parsePercent(f.str("target-skew", ""))
+		if err != nil {
+			return fmt.Errorf("pool rebalance: --target-skew: %w", err)
+		}
+		var out control.PoolRebalanceResponse
+		online, err := control.CallPool(ctx, socket, tcp, "rebalance",
+			control.PoolRebalanceRequest{Pool: pool, TargetSkew: skew, DryRun: dry, Confirm: f.bool("confirm")}, &out)
+		if err != nil {
+			return err
+		}
+		if !online {
+			return errors.New("pool: the daemon is not running")
+		}
+		fmt.Printf("skew %.1f%% (target %.1f%%)\n", out.Skew*100, out.Target*100)
+		if len(out.Moves) == 0 {
+			if out.Reason != "" {
+				fmt.Println(out.Reason)
+			}
+			return nil
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "PATH\tFROM\tTO\tSIZE")
+		for _, mv := range out.Moves {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", mv.Path, mv.From, mv.To, humanBytes(mv.Size))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if out.Queued {
+			fmt.Printf("queued %d moves, %s\n", len(out.Moves), humanBytes(out.Bytes))
+		} else {
+			fmt.Printf("%d moves, %s (nothing queued)\n", len(out.Moves), humanBytes(out.Bytes))
+		}
+		return nil
 	case "divergences":
 		var out struct {
 			Divergences []control.PoolDivergenceView `json:"divergences"`
@@ -217,6 +258,11 @@ func printPoolStatus(out control.PoolStatusResponse) error {
 		fmt.Fprintf(tw, "  replicas\t%d (min %d, current target %s)\n", p.Replicas, p.MinReplicas, target)
 		fmt.Fprintf(tw, "  files\t%d (%d under-replicated, %d below min_replicas, %d unavailable)\n", p.Files, p.UnderReplicated, p.BelowMin, p.Unavailable)
 		fmt.Fprintf(tw, "  repair queue\t%d (%d waiting)\n", p.Repair.Queued, p.Repair.Blocked)
+		if p.Rebalance.Queued > 0 || p.Rebalance.Done > 0 || p.Rebalance.Failed > 0 {
+			fmt.Fprintf(tw, "  rebalance\t%d queued, %d done (%s moved), %d failed\n",
+				p.Rebalance.Queued, p.Rebalance.Done, humanBytes(p.Rebalance.BytesMoved), p.Rebalance.Failed)
+		}
+		fmt.Fprintf(tw, "  skew\t%.1f%% between the fullest and emptiest member\n", p.Rebalance.Skew*100)
 		if p.Total > 0 {
 			fmt.Fprintf(tw, "  space\t%s used of %s (%s free)\n", humanBytes(p.Used), humanBytes(p.Total), humanBytes(p.Free))
 		}
@@ -250,4 +296,25 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// parsePercent reads a fill-ratio tolerance written either as a percentage
+// ("10%") or as a fraction ("0.1"). Empty means "use the pool's own".
+func parsePercent(v string) (float64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	pct := strings.HasSuffix(v, "%")
+	n, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+	if err != nil {
+		return 0, err
+	}
+	if pct {
+		n /= 100
+	}
+	if n <= 0 || n >= 1 {
+		return 0, fmt.Errorf("must be between 0 and 1 (or 0%% and 100%%), got %s", v)
+	}
+	return n, nil
 }
