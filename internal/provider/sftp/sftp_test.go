@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 
 	psftp "github.com/pkg/sftp"
 
+	"cloudfs/internal/net/retry"
 	"cloudfs/internal/provider"
 )
 
@@ -435,5 +437,34 @@ func TestPutFileStoresAtomicallyAndReplaces(t *testing.T) {
 	}
 	if p.Capabilities().SinglePutMax <= 0 {
 		t.Fatal("sftp should advertise single-request uploads")
+	}
+}
+
+func TestAFullFilesystemIsClassifiedAsQuota(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"errno", &os.PathError{Op: "write", Path: "/srv/one.txt", Err: syscall.ENOSPC}},
+		{"status code", &psftp.StatusError{Code: 14}}, // SSH_FX_NO_SPACE_ON_FILESYSTEM
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapErr(tc.err)
+			if !errors.Is(got, provider.ErrQuotaExceeded) {
+				t.Fatalf("%v mapped to %v, want ErrQuotaExceeded", tc.err, got)
+			}
+			if c := retry.Classify(got); c != retry.ClassQuota {
+				t.Fatalf("Classify = %v, want quota: a full server must not be retried", c)
+			}
+			// Re-mapping an already mapped error must not downgrade it.
+			if c := retry.Classify(mapErr(got)); c != retry.ClassQuota {
+				t.Fatalf("re-mapped Classify = %v, want quota", c)
+			}
+		})
+	}
+	// A generic failure stays a conflict, not a full disk.
+	if errors.Is(mapErr(&psftp.StatusError{Code: 4}), provider.ErrQuotaExceeded) {
+		t.Fatal("SSH_FX_FAILURE must not be read as a full filesystem")
 	}
 }

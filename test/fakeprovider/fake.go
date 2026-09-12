@@ -47,6 +47,18 @@ type Faults struct {
 	// rest wait their turn, the way a drive's connection budget caps its
 	// throughput. Set it before calls start.
 	MaxConcurrent int
+	// FailOp makes the next N calls of one operation ("Copy",
+	// "CompleteUpload") fail with ErrTransient, the way a call that timed
+	// out looks: the caller never learns whether it took effect.
+	FailOp map[string]int
+	// QuotaExceeded makes every write fail with ErrQuotaExceeded, the way
+	// a drive whose account is already full answers.
+	QuotaExceeded bool
+	// QuotaAfterBytes, when > 0, accepts writes until the backend holds
+	// that many bytes and fails with ErrQuotaExceeded after that — a drive
+	// that fills up mid-transfer, which is where an upload has to be
+	// restarted somewhere else rather than retried here.
+	QuotaAfterBytes int64
 }
 
 type node struct {
@@ -312,6 +324,39 @@ func (f *Fake) Quota(ctx context.Context) (provider.Quota, error) {
 	return f.quota, nil
 }
 
+// Copy implements provider.ServerCopier: the backend duplicates a file
+// without the bytes leaving it. Enable it with SetCaps(ServerCopy: true);
+// it is off by default because most drives cannot do it.
+func (f *Fake) Copy(ctx context.Context, id, newParentID, newName string) (provider.Entry, error) {
+	if err := f.enter(ctx, "Copy"); err != nil {
+		return provider.Entry{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.caps.ServerCopy {
+		return provider.Entry{}, provider.ErrUnsupported
+	}
+	src, ok := f.nodes[id]
+	if !ok || src.entry.Kind != provider.KindFile {
+		return provider.Entry{}, provider.ErrNotFound
+	}
+	if _, ok := f.nodes[newParentID]; !ok {
+		return provider.Entry{}, provider.ErrNotFound
+	}
+	if err := f.checkName(newParentID, newName); err != nil {
+		return provider.Entry{}, err
+	}
+	if f.noRoom(int64(len(src.data))) {
+		return provider.Entry{}, f.errFull()
+	}
+	data := append([]byte(nil), src.data...)
+	e, ok := f.putFile(newParentID, newName, data)
+	if !ok {
+		return provider.Entry{}, fmt.Errorf("%w: parent directory of %s is gone", provider.ErrNotFound, newName)
+	}
+	return f.view(e), nil
+}
+
 // SetNaming makes the backend refuse names by these rules, the way a real
 // drive does, so a pool's placement can be tested against a refusal.
 func (f *Fake) SetNaming(n provider.Naming) {
@@ -420,6 +465,11 @@ func (f *Fake) enter(ctx context.Context, op string) error {
 	if faults.FailNext > 0 {
 		f.Faults.FailNext--
 	}
+	failOp := false
+	if n := f.Faults.FailOp[op]; n > 0 {
+		f.Faults.FailOp[op] = n - 1
+		failOp = true
+	}
 	f.mu.Unlock()
 
 	done, err := f.admit(ctx, faults.MaxConcurrent)
@@ -434,7 +484,7 @@ func (f *Fake) enter(ctx context.Context, op string) error {
 			return ctx.Err()
 		}
 	}
-	if faults.FailNext > 0 {
+	if faults.FailNext > 0 || failOp {
 		return provider.ErrTransient
 	}
 	if faults.RiskControlAfter > 0 && total > faults.RiskControlAfter {
@@ -606,12 +656,41 @@ func (f *Fake) LinkValid(url string) bool {
 	return false
 }
 
+// noRoom reports whether the backend would refuse to store extra more
+// bytes. Caller holds the lock.
+func (f *Fake) noRoom(extra int64) bool {
+	if f.Faults.QuotaExceeded {
+		return true
+	}
+	if f.Faults.QuotaAfterBytes <= 0 {
+		return false
+	}
+	var held int64
+	for _, n := range f.nodes {
+		held += int64(len(n.data))
+	}
+	for _, u := range f.uploads {
+		for _, part := range u.parts {
+			held += int64(len(part))
+		}
+	}
+	return held+extra > f.Faults.QuotaAfterBytes
+}
+
+// errFull is what a backend with no room answers.
+func (f *Fake) errFull() error {
+	return fmt.Errorf("%w: %s is full", provider.ErrQuotaExceeded, f.name)
+}
+
 func (f *Fake) BeginUpload(ctx context.Context, parentID, name string, size int64, h provider.Hashes) (provider.UploadSession, error) {
 	if err := f.enter(ctx, "BeginUpload"); err != nil {
 		return provider.UploadSession{}, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noRoom(0) {
+		return provider.UploadSession{}, f.errFull()
+	}
 	p, ok := f.nodes[parentID]
 	if !ok || p.entry.Kind != provider.KindDir {
 		return provider.UploadSession{}, provider.ErrNotFound
@@ -646,6 +725,9 @@ func (f *Fake) UploadPart(ctx context.Context, s provider.UploadSession, idx int
 	if !ok {
 		return provider.PartToken{}, provider.ErrNotFound
 	}
+	if f.noRoom(int64(len(data))) {
+		return provider.PartToken{}, f.errFull()
+	}
 	u.parts[idx] = data
 	return provider.PartToken{Index: idx, ETag: sha1sum(data)}, nil
 }
@@ -674,6 +756,9 @@ func (f *Fake) CompleteUpload(ctx context.Context, s provider.UploadSession, par
 	}
 	if int64(buf.Len()) != u.size {
 		return provider.Entry{}, fmt.Errorf("fakeprovider: size mismatch: got %d want %d", buf.Len(), u.size)
+	}
+	if f.noRoom(0) {
+		return provider.Entry{}, f.errFull()
 	}
 	e, ok := f.putFile(u.parentID, u.name, buf.Bytes())
 	if !ok {

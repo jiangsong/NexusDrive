@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"cloudfs/internal/provider"
@@ -116,24 +117,35 @@ func (p *Pool) ScanOnce(ctx context.Context) (int, error) {
 // replicas it made.
 func (p *Pool) RepairOnce(ctx context.Context) (int, error) {
 	now := p.now().UnixNano()
-	rows, err := p.db.QueryContext(ctx, `SELECT path FROM repair_queue WHERE next_at <= ? ORDER BY priority DESC, created_at ASC LIMIT ?`, now, repairBatch)
+	rows, err := p.db.QueryContext(ctx, `SELECT path, reason FROM repair_queue WHERE next_at <= ? ORDER BY priority DESC, created_at ASC LIMIT ?`, now, repairBatch)
 	if err != nil {
 		return 0, fmt.Errorf("pool: %w", err)
 	}
-	var paths []string
+	type due struct{ path, reason string }
+	var paths []due
 	for rows.Next() {
-		var pth string
-		if err := rows.Scan(&pth); err != nil {
+		var d due
+		if err := rows.Scan(&d.path, &d.reason); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		paths = append(paths, pth)
+		paths = append(paths, d)
 	}
 	rows.Close()
 	made := 0
-	for _, pth := range paths {
+	for _, d := range paths {
 		if ctx.Err() != nil {
 			return made, ctx.Err()
+		}
+		pth := d.path
+		if strings.HasPrefix(d.reason, reasonCopyUnsure) {
+			// A server-side copy failed in a way that does not say
+			// whether it landed. Re-list before deciding: a copy that did
+			// land is a replica like any other, and sending the file
+			// again would make a second one.
+			if err := p.ScrubPath(ctx, pth); err != nil && ctx.Err() != nil {
+				return made, err
+			}
 		}
 		n, err := p.repairPath(ctx, pth)
 		made += n
@@ -170,7 +182,10 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 		}
 		if err := p.copyReplica(ctx, pth, row, live, dst); err != nil {
 			lastErr = err
-			if !unreachable(err) {
+			// A full member is not a disagreement about the file: it is
+			// a drive with no room, already marked full, and the next
+			// candidate gets the copy.
+			if !unreachable(err) && !outOfSpace(err) {
 				_ = p.tx(ctx, func(tx *sql.Tx) error {
 					recordDivergence(tx, pth, dst.name, "repair-failed", err.Error(), p.now().UnixNano())
 					return nil
@@ -207,6 +222,12 @@ func (p *Pool) repairPath(ctx context.Context, pth string) (int, error) {
 		reason := "retry"
 		if lastErr != nil {
 			reason = "retry: " + lastErr.Error()
+		}
+		if errors.Is(lastErr, errCopyUnconfirmed) {
+			// Nobody knows whether that copy landed. The next pass must
+			// re-list before it writes, or a copy that did land becomes
+			// two.
+			reason = reasonCopyUnsure + ": " + lastErr.Error()
 		}
 		if noMember && lastErr == nil {
 			// Nothing in service can take another copy: the name may be
@@ -321,28 +342,89 @@ func hashFile(f *os.File, size int64) (provider.Hashes, error) {
 // copyReplica puts the entry's content on dst at its real path, and
 // records the new replica with the entry's own content token: a copy is
 // the same content, whatever mtime the member stamps on it.
+// reasonCopyUnsure marks a repair whose server-side copy failed without
+// saying whether it landed; errCopyUnconfirmed is how copyReplica says so
+// to the queue.
+const reasonCopyUnsure = "server-copy-unsure"
+
+var errCopyUnconfirmed = errors.New("pool: server-side copy is unconfirmed")
+
+// serverCopy asks the destination member to duplicate the file from a
+// replica it can reach itself: the same failure domain is the same
+// account, where a backend copies without the bytes travelling through
+// this machine. It reports whether it handled the copy at all, so the
+// caller falls back to sending the bytes when it did not.
+func (p *Pool) serverCopy(ctx context.Context, pth string, row entryRow, live []replicaRow, dst *member, dirID string) (provider.Entry, bool, error) {
+	sc, ok := dst.p.(provider.ServerCopier)
+	if !ok || !dst.p.Capabilities().ServerCopy {
+		return provider.Entry{}, false, nil
+	}
+	var srcID string
+	for _, r := range live {
+		m := p.byName[r.member]
+		if m == nil || m.name == dst.name || m.domain != dst.domain {
+			continue
+		}
+		if !m.usable(p.probeInterval()) {
+			continue
+		}
+		srcID = r.remoteID
+		break
+	}
+	if srcID == "" {
+		return provider.Entry{}, false, nil
+	}
+	e, err := sc.Copy(ctx, srcID, dirID, path.Base(pth))
+	switch {
+	case err == nil:
+		dst.note(nil)
+		return e, true, nil
+	case errors.Is(err, provider.ErrUnsupported), errors.Is(err, provider.ErrNotFound):
+		// The backend cannot copy this, or the source moved under us.
+		// Sending the bytes is still an option.
+		dst.note(nil)
+		return provider.Entry{}, false, nil
+	case outOfSpace(err):
+		return provider.Entry{}, true, p.noteWrite(dst, err)
+	}
+	// Anything else — a timeout, a 5xx — leaves it unknown whether the
+	// copy landed. Do not send the bytes now: re-list first, next pass.
+	dst.note(err)
+	return provider.Entry{}, true, fmt.Errorf("%w: %s to %s: %w", errCopyUnconfirmed, pth, dst.name, err)
+}
+
 func (p *Pool) copyReplica(ctx context.Context, pth string, row entryRow, live []replicaRow, dst *member) error {
+	dirID, err := p.ensureDir(ctx, dst, parentOf(pth))
+	if err != nil {
+		return err
+	}
+	if e, handled, err := p.serverCopy(ctx, pth, row, live, dst, dirID); handled {
+		if err != nil {
+			return err
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.tx(ctx, func(tx *sql.Tx) error {
+			return upsertReplica(tx, pth, parentOf(pth), dst.name, e, row.ctoken, "live", p.now().UnixNano())
+		})
+	}
 	src, err := p.openSource(ctx, pth, row, live)
 	if err != nil {
 		return err
 	}
 	defer src.close()
-	dirID, err := p.ensureDir(ctx, dst, parentOf(pth))
-	if err != nil {
-		return err
-	}
 	name := path.Base(pth)
 	var e provider.Entry
 	caps := dst.p.Capabilities()
 	if sp, ok := dst.p.(provider.SinglePutter); ok && caps.SinglePutMax > 0 && src.size <= caps.SinglePutMax {
 		e, err = sp.PutFile(ctx, dirID, name, io.NewSectionReader(src, 0, src.size), src.size, src.hashes)
-		dst.note(err)
+		err = p.noteWrite(dst, err)
 		if err != nil {
 			return err
 		}
 	} else {
 		sess, err := dst.p.BeginUpload(ctx, dirID, name, src.size, src.hashes)
-		dst.note(err)
+		err = p.noteWrite(dst, err)
 		if err != nil {
 			if refusedName(err) {
 				p.learnDenial(ctx, dst, name)
@@ -371,14 +453,14 @@ func (p *Pool) copyReplica(ctx context.Context, pth string, row entryRow, live [
 					n = src.size - off
 				}
 				pt, err := dst.p.UploadPart(ctx, sess, i, io.NewSectionReader(src, off, n), n)
-				dst.note(err)
+				err = p.noteWrite(dst, err)
 				if err != nil {
 					return err
 				}
 				parts = append(parts, pt)
 			}
 			e, err = dst.p.CompleteUpload(ctx, sess, parts)
-			dst.note(err)
+			err = p.noteWrite(dst, err)
 			if err != nil {
 				return err
 			}

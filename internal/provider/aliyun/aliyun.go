@@ -261,6 +261,15 @@ func (e *APIError) Unwrap() error {
 		e.Code == "PermissionDenied", e.Code == "UserNotAllowedAccessDrive",
 		strings.HasPrefix(e.Code, "Unauthorized"):
 		return provider.ErrAuth
+	case strings.HasPrefix(e.Code, "QuotaExhausted"), e.Code == "NotEnoughSpace":
+		// The drive is full. Retrying cannot help; the caller either places
+		// the file on another member of a pool or dead-letters the upload.
+		//
+		// UNVERIFIED: QuotaExhausted.Drive is the documented code for a full
+		// drive and the prefix match also covers its siblings; confirm the
+		// exact code, and whether a bare NotEnoughSpace ever appears, against
+		// a real full account.
+		return provider.ErrQuotaExceeded
 	case strings.HasPrefix(e.Code, "QpsLimitExceed"):
 		// Per-API QPS ceiling: back off, the account is not in trouble.
 		//

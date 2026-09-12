@@ -237,6 +237,15 @@ var (
 	// returns it when every member holding a replica is down; the uploader
 	// defers instead of dead-lettering, and the kernel sees EHOSTDOWN.
 	ErrUnavailable = errors.New("provider: no reachable backend")
+	// ErrQuotaExceeded means the backend has no room for this write: the
+	// account's storage quota is full, not the request malformed. A pool
+	// marks the member full and places the file on another one; a plain
+	// remote has nowhere else to go, so the upload dead-letters.
+	ErrQuotaExceeded = errors.New("provider: storage quota exceeded")
+	// ErrRestartUpload says the multipart session this error interrupted
+	// cannot be resumed and the file must be sent again from the start —
+	// against whichever backend the caller picks next.
+	ErrRestartUpload = errors.New("provider: upload must restart")
 )
 
 // CursorResetError asks the caller to invalidate directory freshness and adopt

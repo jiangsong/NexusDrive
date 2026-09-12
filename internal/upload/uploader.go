@@ -390,6 +390,26 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 			}
 		}
 		_ = u.opt.Journal.Retry(ctx, up.ID, err, delay)
+	case retry.ClassQuota:
+		if !errors.Is(err, provider.ErrRestartUpload) {
+			// A plain remote that is full has nowhere else to put the
+			// file: an operator has to free space or change the target.
+			u.dead(ctx, up, err)
+			return
+		}
+		// A pool member filled up mid-flight. Its session is gone, so the
+		// parts go with it and the next attempt starts a fresh upload —
+		// which placement sends to a member with room. There is nothing
+		// to wait for, so no backoff.
+		if up.Attempt+1 >= u.opt.MaxAttempts {
+			u.dead(ctx, up, fmt.Errorf("upload: giving up after %d attempts: %w", up.Attempt+1, err))
+			return
+		}
+		_ = u.opt.Journal.SetSession(ctx, up.ID, nil)
+		for _, pt := range mustParts(ctx, u.opt.Journal, up.ID) {
+			_ = u.opt.Journal.RecordPart(ctx, up.ID, journal.Part{Index: pt.Index, State: "stale"})
+		}
+		_ = u.opt.Journal.Retry(ctx, up.ID, err, 0)
 	default:
 		u.dead(ctx, up, err)
 	}

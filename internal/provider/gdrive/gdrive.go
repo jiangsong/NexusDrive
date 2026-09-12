@@ -1414,6 +1414,15 @@ func mapError(err error) error {
 	switch {
 	case se.Code == 401:
 		kind = provider.ErrAuth
+	case se.Code == 403 && reason == "storagequotaexceeded":
+		// The account has no room left. This is not a rate limit and not a
+		// permission problem: retrying the same Drive can never succeed, so
+		// it has to be told apart from every other 403.
+		//
+		// UNVERIFIED: Drive is documented to answer 403 with the error reason
+		// "storageQuotaExceeded" when the account is full; confirm the exact
+		// reason string against a real full account.
+		kind = provider.ErrQuotaExceeded
 	case se.Code == 403 && isQuotaReason(reason):
 		kind = provider.ErrRateLimited
 	case se.Code == 403:

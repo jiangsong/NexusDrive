@@ -1117,6 +1117,15 @@ func mapError(err error) error {
 	code := strings.ToLower(envelope.Error.Code)
 	var kind error
 	switch {
+	case se.Code == 507 || code == "quotalimitreached":
+		// Before the 5xx arm below: 507 is a full drive, not a server that
+		// will recover on its own, so it must not be retried as transient.
+		//
+		// UNVERIFIED: Graph is documented to answer 507 Insufficient Storage
+		// and to carry the code "quotaLimitReached" when the drive is full;
+		// confirm the status and the envelope code against a real full
+		// account.
+		kind = provider.ErrQuotaExceeded
 	case se.Code == 401 || se.Code == 403:
 		kind = provider.ErrAuth
 	case se.Code == 404 || strings.Contains(code, "notfound") || code == "itemnotfound":

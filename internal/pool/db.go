@@ -120,7 +120,36 @@ CREATE TABLE IF NOT EXISTS divergences (
   seen_at INTEGER NOT NULL,
   PRIMARY KEY (path, member, kind)
 );
+-- member_usage is what the pool has placed on each member, so free space
+-- and rebalance skew cost one row read instead of SUM(size) over every
+-- replica. Triggers keep it, not the callers: replicas are deleted from
+-- eight places and one forgotten decrement is a number nobody can explain
+-- later.
+CREATE TABLE IF NOT EXISTS member_usage (
+  member TEXT PRIMARY KEY,
+  bytes  INTEGER NOT NULL DEFAULT 0,
+  files  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS member_usage_ins AFTER INSERT ON replicas BEGIN
+  INSERT INTO member_usage(member, bytes, files) VALUES(new.member, new.size, 1)
+    ON CONFLICT(member) DO UPDATE SET bytes = bytes + new.size, files = files + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS member_usage_del AFTER DELETE ON replicas BEGIN
+  UPDATE member_usage SET bytes = MAX(0, bytes - old.size), files = MAX(0, files - 1)
+    WHERE member = old.member;
+END;
+CREATE TRIGGER IF NOT EXISTS member_usage_upd AFTER UPDATE ON replicas BEGIN
+  UPDATE member_usage SET bytes = MAX(0, bytes - old.size), files = MAX(0, files - 1)
+    WHERE member = old.member;
+  INSERT INTO member_usage(member, bytes, files) VALUES(new.member, new.size, 1)
+    ON CONFLICT(member) DO UPDATE SET bytes = bytes + new.size, files = files + 1;
+END;
 `
+
+// schemaVersion is the index layout this build maintains. A database
+// written by an older build is migrated on open; the index is a cache, so
+// a migration may simply recompute what it needs.
+const schemaVersion = 2
 
 func openDB(path string) (*sql.DB, error) {
 	dsn := path
@@ -148,7 +177,36 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("pool: schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// migrate brings an index written by an older build up to schemaVersion.
+func migrate(db *sql.DB) error {
+	var have int
+	row := db.QueryRow(`SELECT CAST(v AS INTEGER) FROM meta WHERE k = 'schema_version'`)
+	if err := row.Scan(&have); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("pool: schema version: %w", err)
+	}
+	if have >= schemaVersion {
+		return nil
+	}
+	// v2 added member_usage. An index from v1 has replicas the triggers
+	// never saw, so the totals are recomputed once rather than migrated.
+	if _, err := db.Exec(`DELETE FROM member_usage`); err != nil {
+		return fmt.Errorf("pool: rebuild member_usage: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO member_usage(member, bytes, files)
+		SELECT member, COALESCE(SUM(size), 0), COUNT(*) FROM replicas GROUP BY member`); err != nil {
+		return fmt.Errorf("pool: rebuild member_usage: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO meta(k, v) VALUES('schema_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, schemaVersion); err != nil {
+		return fmt.Errorf("pool: schema version: %w", err)
+	}
+	return nil
 }
 
 // tx runs fn in one immediate transaction. Whatever it changed, answers

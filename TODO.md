@@ -1675,7 +1675,14 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   §6.2 也已落地：`candidates()` 按「已持有 → `require` 过滤 → `prefer` → 故障域不重复 → 不在 `avoid` →
   不是 out → 已知空间 → `free × weight` → weight → 声明顺序」排序，`repairTarget` 收敛成
   `candidates(path) − 已持有活副本`（`internal/pool/placement.go`、`repair.go`）。
-  **未做**：`fullUntil` 这一档要等 §6.3 的配额哨兵；§6.4 服务端复制、§6.5 `write_mode` 消费、§6.6 rebalance 未开始。
+  §6.3 配额满换盘已落地：`provider.ErrQuotaExceeded` / `ErrRestartUpload` 哨兵 + `retry.ClassQuota`，
+  gdrive / onedrive / webdav / aliyun / sftp / smb 六个驱动映射（各带 `UNVERIFIED:`，总数 78 → 83），
+  池 `member.markFull(10m)` + `candidates()` 的 full 档 + `BeginUpload` 换候选、`UploadPart` / `CompleteUpload`
+  返回 `ErrRestartUpload`、uploader `case retry.ClassQuota` 清 session 立即重试（无 restart 则死信），
+  新表 `member_usage`（触发器维护，`meta.schema_version = 2` 迁移重算）取代放置时的 `SUM(size)`。
+  §6.4 修复走服务端复制已落地：同 `Domain` 且 `Caps.ServerCopy` 时 `copyReplica` 先试 `ServerCopier.Copy`，
+  `ErrUnsupported` / `ErrNotFound` 回退字节拷，模糊失败标记 `server-copy-unsure` 并在下次尝试前 `ScrubPath`。
+  **未做**：§6.5 `write_mode` 消费、§6.6 rebalance。
 
 ## 明确不在当前范围内
 

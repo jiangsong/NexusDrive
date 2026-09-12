@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"cloudfs/internal/net/retry"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/provider/httpx"
 )
@@ -538,5 +539,19 @@ func TestBasePathPrefixHandled(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].ID != "/deep.txt" {
 		t.Fatalf("entries with a base prefix = %+v", entries)
+	}
+}
+
+func TestInsufficientStorageIsClassifiedAsQuota(t *testing.T) {
+	err := mapErr(&httpx.StatusError{Code: http.StatusInsufficientStorage, Status: "507 Insufficient Storage", URL: "https://dav.example.com/big.bin"})
+	if !errors.Is(err, provider.ErrQuotaExceeded) {
+		t.Fatalf("507 mapped to %v, want ErrQuotaExceeded", err)
+	}
+	if got := retry.Classify(err); got != retry.ClassQuota {
+		t.Fatalf("Classify = %v, want quota: a full server must not be retried as a 5xx", got)
+	}
+	// Every other status keeps the mapping httpx already gives it.
+	if got := mapErr(&httpx.StatusError{Code: http.StatusServiceUnavailable}); errors.Is(got, provider.ErrQuotaExceeded) {
+		t.Fatal("a plain 503 must not be read as a full server")
 	}
 }

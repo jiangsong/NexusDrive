@@ -981,3 +981,20 @@ func TestRegistered(t *testing.T) {
 		t.Fatalf("registry returned %T", p)
 	}
 }
+
+func TestAFullDriveIsClassifiedAsQuota(t *testing.T) {
+	for _, code := range []string{"QuotaExhausted.Drive", "QuotaExhausted", "NotEnoughSpace"} {
+		err := error(&APIError{Code: code, Message: "drive is full", Status: http.StatusForbidden})
+		if !errors.Is(err, provider.ErrQuotaExceeded) {
+			t.Fatalf("%s mapped to %v, want ErrQuotaExceeded", code, err)
+		}
+		if got := retry.Classify(err); got != retry.ClassQuota {
+			t.Fatalf("Classify(%s) = %v, want quota: a full drive must not be retried", code, got)
+		}
+	}
+	// The envelope is still readable: the sentinel replaces nothing.
+	err := error(&APIError{Code: "QuotaExhausted.Drive", Message: "drive is full", Status: http.StatusForbidden})
+	if !strings.Contains(err.Error(), "QuotaExhausted.Drive") {
+		t.Fatalf("error text lost the code: %q", err.Error())
+	}
+}

@@ -406,7 +406,7 @@ func (p *Provider) UploadPart(ctx context.Context, s provider.UploadSession, idx
 		ExpectStatus: []int{http.StatusCreated, http.StatusNoContent, http.StatusOK},
 	})
 	if err != nil {
-		return provider.PartToken{}, err
+		return provider.PartToken{}, mapErr(err)
 	}
 	return provider.PartToken{Index: 0, ETag: strings.Trim(resp.Header.Get("ETag"), `"`)}, nil
 }
@@ -490,9 +490,25 @@ func (p *Provider) Copy(ctx context.Context, id, newParentID, newName string) (p
 		ExpectStatus: []int{http.StatusCreated, http.StatusNoContent, http.StatusOK},
 	})
 	if err != nil {
-		return provider.Entry{}, err
+		return provider.Entry{}, mapErr(err)
 	}
 	return p.Stat(ctx, target)
+}
+
+// mapErr turns the one status WebDAV uses for "no room left" into the
+// sentinel internal/net/retry classifies as ClassQuota. Every other status is
+// already mapped by httpx.StatusError.Unwrap, which would otherwise read 507
+// as a 5xx and retry a full server forever.
+func mapErr(err error) error {
+	var se *httpx.StatusError
+	if errors.As(err, &se) && se.Code == http.StatusInsufficientStorage {
+		// UNVERIFIED: RFC 4918 defines 507 Insufficient Storage for a server
+		// that cannot store the body; confirm that a real server (Nextcloud,
+		// OpenList) sends it rather than a 403 or a 413 when the account is
+		// full.
+		return fmt.Errorf("%w: %v", provider.ErrQuotaExceeded, err)
+	}
+	return err
 }
 
 // Delete removes an entry, or its whole subtree for a collection.

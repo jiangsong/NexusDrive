@@ -11,10 +11,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	smb2 "github.com/hirochachacha/go-smb2"
+
 	"cloudfs/internal/net/ratelimit"
+	"cloudfs/internal/net/retry"
 	"cloudfs/internal/provider"
 )
 
@@ -1039,5 +1043,34 @@ func TestRegisteredUnderItsOwnType(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("smb is not registered; main.go's blank import would link nothing")
+	}
+}
+
+func TestAFullShareIsClassifiedAsQuota(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"ntstatus", &os.PathError{Op: "write", Path: "/one.txt", Err: &smb2.ResponseError{Code: statusDiskFull}}},
+		{"errno", &os.PathError{Op: "write", Path: "/one.txt", Err: syscall.ENOSPC}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapErr(tc.err)
+			if !errors.Is(got, provider.ErrQuotaExceeded) {
+				t.Fatalf("%v mapped to %v, want ErrQuotaExceeded", tc.err, got)
+			}
+			if c := retry.Classify(got); c != retry.ClassQuota {
+				t.Fatalf("Classify = %v, want quota: a full share must not be retried", c)
+			}
+			// Re-mapping an already mapped error must not downgrade it.
+			if c := retry.Classify(mapErr(got)); c != retry.ClassQuota {
+				t.Fatalf("re-mapped Classify = %v, want quota", c)
+			}
+		})
+	}
+	// Another NTSTATUS stays whatever it was.
+	if errors.Is(mapErr(&smb2.ResponseError{Code: 0xC0000022}), provider.ErrQuotaExceeded) {
+		t.Fatal("STATUS_ACCESS_DENIED must not be read as a full share")
 	}
 }

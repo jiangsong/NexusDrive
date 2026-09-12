@@ -63,7 +63,62 @@ type member struct {
 	// learned are naming patterns the member refused at run time; nil
 	// until loaded from the index.
 	learned []string
-	space   spaceInfo
+	// fullUntil is when the member stops being treated as full. The
+	// backend said it has no room, which no amount of retrying fixes, so
+	// placement demotes it until then rather than asking again per file.
+	fullUntil time.Time
+	space     spaceInfo
+}
+
+// quotaBackoff is how long a member stays marked full after the backend
+// said it had no room. Long enough that a directory of files does not ask
+// again per file, short enough that freeing space is noticed the same
+// session.
+const quotaBackoff = 10 * time.Minute
+
+// markFull records that the backend refused a write for lack of room: the
+// member is demoted in placement for quotaBackoff, and its cached space
+// reads as zero free so status and the free-space ordering agree with the
+// backend rather than with a minute-old quota call.
+func (m *member) markFull(now time.Time) {
+	m.mu.Lock()
+	m.fullUntil = now.Add(quotaBackoff)
+	m.mu.Unlock()
+	m.space.mu.Lock()
+	total := m.space.quota.Total
+	if total <= 0 {
+		total = 1
+	}
+	m.space.quota = provider.Quota{Total: total, Used: total}
+	m.space.known = true
+	m.space.fetched = now
+	m.space.mu.Unlock()
+}
+
+// isFull reports whether the member is still inside its full backoff.
+func (m *member) isFull(now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return now.Before(m.fullUntil)
+}
+
+// outOfSpace reports whether an error says the backend has no room.
+func outOfSpace(err error) bool {
+	return retry.Classify(err) == retry.ClassQuota
+}
+
+// noteWrite records the outcome of a write against a member and returns
+// the error unchanged. "The drive is full" stays out of the member's
+// health — it answered correctly, it just has no room — and instead marks
+// it full so placement stops choosing it.
+func (p *Pool) noteWrite(m *member, err error) error {
+	if outOfSpace(err) {
+		m.note(nil)
+		m.markFull(p.now())
+		return err
+	}
+	m.note(err)
+	return err
 }
 
 // isBadName reports whether a member's error says it will not hold the

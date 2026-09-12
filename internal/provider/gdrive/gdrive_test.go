@@ -1276,6 +1276,7 @@ func TestQuotaAndForbiddenAreClassifiedApart(t *testing.T) {
 		want   error
 	}{
 		{403, "userRateLimitExceeded", provider.ErrRateLimited},
+		{403, "storageQuotaExceeded", provider.ErrQuotaExceeded},
 		{403, "insufficientFilePermissions", provider.ErrAuth},
 		{404, "notFound", provider.ErrNotFound},
 		{429, "rateLimitExceeded", provider.ErrRateLimited},
@@ -1396,5 +1397,21 @@ func TestRegisteredUnderItsOwnType(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("gdrive is not registered; main.go's blank import would link nothing")
+	}
+}
+
+func TestAFullDriveIsClassifiedAsQuota(t *testing.T) {
+	body := `{"error":{"code":403,"errors":[{"reason":"storageQuotaExceeded"}],"message":"quota exceeded"}}`
+	err := mapError(&httpx.StatusError{Code: 403, Body: body})
+	if !errors.Is(err, provider.ErrQuotaExceeded) {
+		t.Fatalf("403/storageQuotaExceeded mapped to %v, want ErrQuotaExceeded", err)
+	}
+	if got := retry.Classify(err); got != retry.ClassQuota {
+		t.Fatalf("Classify = %v, want quota: a full Drive must not be retried", got)
+	}
+	// A 403 for any other reason stays a permission failure.
+	other := mapError(&httpx.StatusError{Code: 403, Body: `{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}`})
+	if errors.Is(other, provider.ErrQuotaExceeded) {
+		t.Fatal("a plain forbidden 403 must not be read as a full account")
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	psftp "github.com/pkg/sftp"
@@ -890,8 +891,19 @@ func mapErr(err error) error {
 	}
 	if errors.Is(err, provider.ErrNotFound) || errors.Is(err, provider.ErrExists) ||
 		errors.Is(err, provider.ErrTransient) || errors.Is(err, provider.ErrAuth) ||
-		errors.Is(err, provider.ErrConflict) || errors.Is(err, provider.ErrUnsupported) {
+		errors.Is(err, provider.ErrConflict) || errors.Is(err, provider.ErrUnsupported) ||
+		errors.Is(err, provider.ErrQuotaExceeded) {
 		return err
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		// Before the StatusError switch: a full filesystem must not be retried
+		// as transient, it has to move the file elsewhere.
+		//
+		// UNVERIFIED: sftp servers running over a local filesystem surface the
+		// underlying ENOSPC; confirm that a real full server reaches the client
+		// as syscall.ENOSPC rather than only as an opaque SSH_FX_FAILURE
+		// message.
+		return fmt.Errorf("%w: %v", provider.ErrQuotaExceeded, err)
 	}
 	if isNotExist(err) {
 		return fmt.Errorf("%w: %v", provider.ErrNotFound, err)
@@ -911,6 +923,12 @@ func mapErr(err error) error {
 			return fmt.Errorf("%w: %v", provider.ErrConflict, err)
 		case 8: // SSH_FX_OP_UNSUPPORTED
 			return fmt.Errorf("%w: %v", provider.ErrUnsupported, err)
+		case 14: // SSH_FX_NO_SPACE_ON_FILESYSTEM
+			// UNVERIFIED: only protocol version 5 and later define this code.
+			// OpenSSH speaks version 3 and answers SSH_FX_FAILURE with the
+			// reason in the message instead, so confirm what a real full
+			// server sends before relying on either arm.
+			return fmt.Errorf("%w: %v", provider.ErrQuotaExceeded, err)
 		}
 		return fmt.Errorf("%w: %v", provider.ErrTransient, err)
 	}

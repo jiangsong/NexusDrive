@@ -73,7 +73,7 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 		return provider.UploadSession{}, err
 	}
 	pth := joinPath(parentPath, name)
-	var lastUnreachable, lastRefusal error
+	var lastUnreachable, lastRefusal, lastFull error
 	for _, m := range p.candidates(ctx, pth) {
 		dirID, err := p.ensureDir(ctx, m, parentPath)
 		if err != nil {
@@ -85,6 +85,15 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 		}
 		ms, err := m.p.BeginUpload(ctx, dirID, name, size, h)
 		if err != nil {
+			if outOfSpace(err) {
+				// The member has no room. That is an answer about the
+				// drive, not about the file: mark it full and place the
+				// file on the next candidate.
+				m.note(nil)
+				m.markFull(p.now())
+				lastFull = err
+				continue
+			}
 			if unreachable(err) {
 				m.note(err)
 				lastUnreachable = err
@@ -110,6 +119,12 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 			return provider.UploadSession{ID: "rapid-" + e.ID, RapidDone: true, Entry: &e}, nil
 		}
 		return packSession(m, pth, hold, ms), nil
+	}
+	if lastFull != nil {
+		// Every member that could have taken it is full. The pool is out
+		// of space, which the caller must hear as such: retrying cannot
+		// help, and a write to a plain full drive fails the same way.
+		return provider.UploadSession{}, fmt.Errorf("%w: no member of pool %s has room for %s", provider.ErrQuotaExceeded, p.name, pth)
 	}
 	if lastUnreachable != nil {
 		return provider.UploadSession{}, fmt.Errorf("%w: no member can take %s (%v)", provider.ErrUnavailable, pth, lastUnreachable)
@@ -153,6 +168,14 @@ func (p *Pool) UploadPart(ctx context.Context, s provider.UploadSession, idx int
 		return provider.PartToken{}, err
 	}
 	pt, err := m.p.UploadPart(ctx, ms, idx, r, n)
+	if outOfSpace(err) {
+		m.note(nil)
+		m.markFull(p.now())
+		// The session is on a member that just ran out. It cannot be
+		// resumed anywhere, so the caller must start the file again —
+		// placement will pick a member with room.
+		return provider.PartToken{}, fmt.Errorf("%w: %w", provider.ErrRestartUpload, err)
+	}
 	m.note(err)
 	return pt, err
 }
@@ -163,6 +186,11 @@ func (p *Pool) CompleteUpload(ctx context.Context, s provider.UploadSession, par
 		return provider.Entry{}, err
 	}
 	me, err := m.p.CompleteUpload(ctx, ms, parts)
+	if outOfSpace(err) {
+		m.note(nil)
+		m.markFull(p.now())
+		return provider.Entry{}, fmt.Errorf("%w: %w", provider.ErrRestartUpload, err)
+	}
 	m.note(err)
 	if err != nil {
 		return provider.Entry{}, err

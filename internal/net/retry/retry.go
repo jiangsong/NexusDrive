@@ -34,6 +34,10 @@ const (
 	ClassTerminal
 	// ClassCanceled: context canceled or deadline exceeded. Stop quietly.
 	ClassCanceled
+	// ClassQuota: the backend is full. Retrying the same backend cannot
+	// help; the caller either places the file elsewhere (a pool) or
+	// dead-letters it (a plain remote).
+	ClassQuota
 )
 
 func (c Class) String() string {
@@ -54,6 +58,8 @@ func (c Class) String() string {
 		return "terminal"
 	case ClassCanceled:
 		return "canceled"
+	case ClassQuota:
+		return "quota"
 	}
 	return "unknown"
 }
@@ -70,6 +76,11 @@ func Classify(err error) Class {
 		return ClassOK
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return ClassCanceled
+	case errors.Is(err, provider.ErrQuotaExceeded):
+		// Before the status checks below: a full backend reports 507, 403
+		// or even 400, and every one of those would otherwise be read as
+		// "retry" or "terminal" rather than "put it somewhere else".
+		return ClassQuota
 	case errors.Is(err, provider.ErrRiskControl):
 		return ClassRiskControl
 	case errors.Is(err, provider.ErrRateLimited), errors.Is(err, provider.ErrTransient), errors.Is(err, provider.ErrUnavailable):

@@ -33,6 +33,11 @@ type spaceInfo struct {
 // backend's own figure is preferred; a configured capacity minus what the
 // pool has placed there is the fallback.
 func (p *Pool) free(ctx context.Context, m *member) int64 {
+	if m.isFull(p.now()) {
+		// The backend itself said it has no room. Asking it again per
+		// file is the call the full backoff exists to avoid.
+		return 0
+	}
 	m.space.mu.Lock()
 	fresh := m.space.known && p.now().Sub(m.space.fetched) < quotaTTL
 	q := m.space.quota
@@ -54,15 +59,34 @@ func (p *Pool) free(ctx context.Context, m *member) int64 {
 		return q.Free()
 	}
 	if m.capacity > 0 {
-		var placed sql.NullInt64
-		_ = p.db.QueryRowContext(ctx, `SELECT SUM(size) FROM replicas WHERE member = ?`, m.name).Scan(&placed)
-		free := m.capacity - placed.Int64
+		free := m.capacity - p.memberBytes(ctx, m.name)
 		if free < 0 {
 			free = 0
 		}
 		return free
 	}
 	return -1
+}
+
+// memberBytes is what the pool has placed on one member, from the running
+// total the replicas triggers keep.
+func (p *Pool) memberBytes(ctx context.Context, member string) int64 {
+	var bytes sql.NullInt64
+	_ = p.db.QueryRowContext(ctx, `SELECT bytes FROM member_usage WHERE member = ?`, member).Scan(&bytes)
+	if bytes.Int64 < 0 {
+		return 0
+	}
+	return bytes.Int64
+}
+
+// memberFiles is how many replicas one member holds, from the same total.
+func (p *Pool) memberFiles(ctx context.Context, member string) int64 {
+	var files sql.NullInt64
+	_ = p.db.QueryRowContext(ctx, `SELECT files FROM member_usage WHERE member = ?`, member).Scan(&files)
+	if files.Int64 < 0 {
+		return 0
+	}
+	return files.Int64
 }
 
 // naming is the member's declared rules plus what it has refused at run
@@ -198,9 +222,10 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		// The rule's verdicts, in the order they rank: a preferred member
 		// beats a neutral one, a member whose domain is already holding a
 		// copy loses to one that spreads, an avoided member loses to
-		// anything else, and a member that is out is a probe gamble.
-		prefer, dupDomain, avoid, out bool
-		free                          int64
+		// anything else, a member the backend called full is a write that
+		// will fail, and a member that is out is a probe gamble.
+		prefer, dupDomain, avoid, full, out bool
+		free                                int64
 	}
 	var holders, others []scored
 	for _, m := range p.members {
@@ -224,7 +249,7 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 		if rule != nil && !hasAllClasses(m, rule.Require) {
 			continue // require is the one hard rule
 		}
-		sc := scored{m: m, free: p.free(ctx, m), dupDomain: takenDomains[m.domain], out: m.state() == provider.HealthOut}
+		sc := scored{m: m, free: p.free(ctx, m), dupDomain: takenDomains[m.domain], full: m.isFull(p.now()), out: m.state() == provider.HealthOut}
 		if rule != nil {
 			sc.prefer = hasAnyClass(m, rule.Prefer)
 			sc.avoid = hasAnyClass(m, rule.Avoid)
@@ -248,7 +273,7 @@ func (p *Pool) candidates(ctx context.Context, pth string) []*member {
 	order := func(s []scored) {
 		sort.SliceStable(s, func(i, j int) bool {
 			a, b := s[i], s[j]
-			for _, flag := range [][2]bool{{a.prefer, b.prefer}, {!a.dupDomain, !b.dupDomain}, {!a.avoid, !b.avoid}, {!a.out, !b.out}} {
+			for _, flag := range [][2]bool{{a.prefer, b.prefer}, {!a.dupDomain, !b.dupDomain}, {!a.avoid, !b.avoid}, {!a.full, !b.full}, {!a.out, !b.out}} {
 				if flag[0] != flag[1] {
 					return flag[0]
 				}
@@ -316,9 +341,7 @@ func (p *Pool) Quota(ctx context.Context) (provider.Quota, error) {
 			m.space.mu.Unlock()
 		}
 		if q.Total <= 0 && m.capacity > 0 {
-			var placed sql.NullInt64
-			_ = p.db.QueryRowContext(ctx, `SELECT SUM(size) FROM replicas WHERE member = ?`, m.name).Scan(&placed)
-			q = provider.Quota{Total: m.capacity, Used: placed.Int64}
+			q = provider.Quota{Total: m.capacity, Used: p.memberBytes(ctx, m.name)}
 		}
 		if q.Total <= 0 {
 			continue

@@ -710,3 +710,26 @@ func TestGuardsAndErrorURLRedaction(t *testing.T) {
 		t.Fatalf("redacted status URL = %#v", se)
 	}
 }
+
+func TestAFullDriveIsClassifiedAsQuota(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"insufficient storage", 507, `{"error":{"code":"quotaLimitReached","message":"drive is full"}}`},
+		{"code without 507", 400, `{"error":{"code":"quotaLimitReached","message":"drive is full"}}`},
+		{"507 without envelope", 507, `not json`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mapError(&httpx.StatusError{Code: tc.status, Body: tc.body})
+			if !errors.Is(err, provider.ErrQuotaExceeded) {
+				t.Fatalf("mapped to %v, want ErrQuotaExceeded", err)
+			}
+			if got := retry.Classify(err); got != retry.ClassQuota {
+				t.Fatalf("Classify = %v, want quota: a full drive must not be retried", got)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -28,7 +29,14 @@ type fixture struct {
 	clk  *clock
 	ok   []Result
 	dead []error
+	// served is what Providers hands back for "ali"; it is the fake
+	// unless a test wraps it to answer differently.
+	served provider.Provider
 }
+
+// setProvider swaps what the uploader gets for the "ali" remote, so a
+// test can put a wrapper in front of the fake mid-run.
+func (f *fixture) setProvider(p provider.Provider) { f.served = p }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
@@ -39,12 +47,12 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { j.Close() })
 	fake := fakeprovider.New("ali")
-	f := &fixture{j: j, fake: fake, clk: c}
+	f := &fixture{j: j, fake: fake, clk: c, served: fake}
 	u, err := New(Options{
 		Journal: j,
 		Providers: func(remote string) (provider.Provider, bool) {
 			if remote == "ali" {
-				return fake, true
+				return f.served, true
 			}
 			return nil, false
 		},
@@ -585,4 +593,87 @@ func TestUploadOfADeletedFileIsNotDeadLettered(t *testing.T) {
 	if len(f.dead) != 0 {
 		t.Fatalf("OnDead fired for a deleted file: %v", f.dead)
 	}
+}
+
+// TestQuotaRestartDropsTheSessionAndRetriesAtOnce: a pool member that
+// filled up mid-transfer answers with a quota error that asks for a
+// restart. The parts are gone with the session, so the uploader must drop
+// both and try again immediately — the next attempt places the file on a
+// member with room, and a delay would only postpone a decision already
+// made.
+func TestQuotaRestartDropsTheSessionAndRetriesAtOnce(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	content := bytes.Repeat([]byte("q"), 9<<20) // 3 parts of 4 MiB
+	u := f.queue(t, "full.bin", content, "")
+	// The backend takes one part, then has no room. A pool answers that
+	// with "restart", because the file can still land on another member.
+	f.fake.SetFaults(func(ft *fakeprovider.Faults) { ft.QuotaAfterBytes = 4 << 20 })
+	f.setProvider(&restartOnQuota{Provider: f.fake})
+
+	if _, err := f.up.DrainOnce(ctx, "ali"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := f.j.Get(ctx, u.ID)
+	if got.State != journal.StatePending {
+		t.Fatalf("state = %s (%s), want the upload requeued", got.State, got.LastError)
+	}
+	if got.Session[sessionIDKey] != "" {
+		t.Fatalf("the session on the full member must be dropped: %+v", got.Session)
+	}
+	for _, pt := range mustParts(ctx, f.j, u.ID) {
+		if pt.State == "done" {
+			t.Fatalf("parts sent to the full member must not be reused: %+v", pt)
+		}
+	}
+	if got.NextRetryAt.After(f.clk.now()) {
+		t.Fatalf("a quota restart must be due immediately, next at %s", got.NextRetryAt)
+	}
+
+	// With room again, the restarted upload completes.
+	f.fake.SetFaults(func(ft *fakeprovider.Faults) { ft.QuotaAfterBytes = 0 })
+	f.setProvider(f.fake)
+	if _, err := f.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = f.j.Get(ctx, u.ID)
+	if got.State != journal.StateDone {
+		t.Fatalf("restart after a quota error failed: %s (%s)", got.State, got.LastError)
+	}
+}
+
+// TestQuotaWithoutRestartDeadLetters: a plain remote that is full has
+// nowhere else to put the file, so retrying is pointless and an operator
+// has to hear about it.
+func TestQuotaWithoutRestartDeadLetters(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	u := f.queue(t, "small.txt", []byte("data"), "")
+	f.fake.SetFaults(func(ft *fakeprovider.Faults) { ft.QuotaExceeded = true })
+
+	if _, err := f.up.DrainOnce(ctx, "ali"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := f.j.Get(ctx, u.ID)
+	if got.State != journal.StateDead {
+		t.Fatalf("state = %s (%s), want dead-lettered", got.State, got.LastError)
+	}
+	if len(f.dead) != 1 || !errors.Is(f.dead[0], provider.ErrQuotaExceeded) {
+		t.Fatalf("dead-letter cause = %v", f.dead)
+	}
+}
+
+// restartOnQuota is a provider that answers "out of room" the way a
+// storage pool does: the session cannot be resumed, so the caller must
+// send the file again — somewhere else.
+type restartOnQuota struct {
+	provider.Provider
+}
+
+func (r *restartOnQuota) UploadPart(ctx context.Context, s provider.UploadSession, idx int, rd io.Reader, n int64) (provider.PartToken, error) {
+	pt, err := r.Provider.UploadPart(ctx, s, idx, rd, n)
+	if errors.Is(err, provider.ErrQuotaExceeded) {
+		return provider.PartToken{}, fmt.Errorf("%w: %w", provider.ErrRestartUpload, err)
+	}
+	return pt, err
 }

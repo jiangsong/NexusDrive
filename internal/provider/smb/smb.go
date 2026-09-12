@@ -26,11 +26,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	smb2 "github.com/hirochachacha/go-smb2"
 
 	"cloudfs/internal/net/ratelimit"
 	"cloudfs/internal/provider"
 )
+
+// statusDiskFull is NTSTATUS STATUS_DISK_FULL ([MS-ERREF]). The client library
+// keeps its NTSTATUS table internal, so the value is spelled out here.
+const statusDiskFull = 0xC000007F
 
 // RootID is the id of the configured root directory.
 const RootID = "/"
@@ -864,10 +871,16 @@ func mapErr(err error) error {
 	for _, sentinel := range []error{
 		provider.ErrNotFound, provider.ErrExists, provider.ErrTransient,
 		provider.ErrAuth, provider.ErrConflict, provider.ErrUnsupported,
+		provider.ErrQuotaExceeded,
 	} {
 		if errors.Is(err, sentinel) {
 			return err
 		}
+	}
+	if isDiskFull(err) {
+		// Before the switch below: a full share must not be retried as
+		// transient, it has to move the file elsewhere.
+		return fmt.Errorf("%w: %v", provider.ErrQuotaExceeded, err)
 	}
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -885,6 +898,21 @@ func mapErr(err error) error {
 		return fmt.Errorf("%w: %v", provider.ErrTransient, err)
 	}
 	return err
+}
+
+// isDiskFull reports that the share has no room left. The client library maps
+// only collision, not-found and access-denied onto the os sentinels, so a full
+// share arrives as the raw NTSTATUS instead.
+//
+// UNVERIFIED: a real server is expected to answer STATUS_DISK_FULL when the
+// share (or the user's quota) is exhausted; confirm the NTSTATUS a real full
+// share sends, and whether a quota ceiling reports STATUS_DISK_FULL too.
+func isDiskFull(err error) bool {
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	var re *smb2.ResponseError
+	return errors.As(err, &re) && re.Code == statusDiskFull
 }
 
 // isConnectionLoss reports a dropped session, which is worth retrying on a
