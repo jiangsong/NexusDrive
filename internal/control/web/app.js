@@ -13,6 +13,7 @@ import { renderProxy } from '/ui/screens/proxy.js';
 import { renderDiagnostics } from '/ui/screens/diagnostics.js';
 import { renderSetup } from '/ui/screens/setup.js';
 import { renderAgents } from '/ui/screens/agents.js';
+import { renderIndex } from '/ui/screens/index.js';
 
 const screens = {
   'main-window': renderMain,
@@ -25,6 +26,7 @@ const screens = {
   'proxy-view': renderProxy,
   'diagnostics-view': renderDiagnostics,
   'agents-view': renderAgents,
+  'index-view': renderIndex,
 };
 
 // healthOf reads the structured snapshot, never the warning text: the daemon
@@ -154,6 +156,10 @@ export function onExportChange(fn) { exportHandlers.add(fn); return () => export
 // { kind: 'audit' | 'session', data } and picks what it shows.
 const agentHandlers = new Set();
 export function onAgentEvent(fn) { agentHandlers.add(fn); return () => agentHandlers.delete(fn); }
+// Index progress: one snapshot per frame, at most once a second, for the
+// progress bar on the index screen.
+const indexHandlers = new Set();
+export function onIndexChange(fn) { indexHandlers.add(fn); return () => indexHandlers.delete(fn); }
 
 subscribe(() => refreshTitlebar());
 startRouter(() => render()); // performs the initial render
@@ -163,4 +169,5 @@ events({
   onExport: (e) => { for (const fn of exportHandlers) fn(e); },
   onAudit: (d) => { for (const fn of agentHandlers) fn({ kind: 'audit', data: d }); },
   onSession: (d) => { for (const fn of agentHandlers) fn({ kind: 'session', data: d }); },
+  onIndex: (p) => { for (const fn of indexHandlers) fn(p); },
 });
