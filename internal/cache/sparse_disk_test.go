@@ -85,6 +85,10 @@ func coldRead(t *testing.T, c *Cache) *diskUse {
 		waitFlushed(t, c)
 		use.sample(t, c)
 	}
+	// The caller holds the janitor off during the fill (a long HydrateAfter)
+	// so the last block file is sampled before hydration removes it; now let
+	// it run, the way it would once the mount has gone quiet.
+	c.hydrateDue()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		use.sample(t, c)
@@ -105,7 +109,13 @@ func coldRead(t *testing.T, c *Cache) *diskUse {
 // is the same workload with the layout switched off, which writes it twice —
 // once as block files and again as the hydration copy of those blocks.
 func TestSparseLayoutWritesTheFileOnce(t *testing.T) {
-	c, err := newClosingCache(t, sparseOpts(t.TempDir()))
+	// A millisecond HydrateAfter let the janitor merge and remove the last
+	// block file between waitFlushed and the sample that should have counted
+	// it, under-reporting the control by one block; coldRead fires the
+	// janitor itself once every block has been sampled.
+	sparse := sparseOpts(t.TempDir())
+	sparse.HydrateAfter = time.Hour
+	c, err := newClosingCache(t, sparse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +124,7 @@ func TestSparseLayoutWritesTheFileOnce(t *testing.T) {
 	}
 
 	opt := sparseOpts(t.TempDir())
+	opt.HydrateAfter = time.Hour
 	opt.WholeLayoutMin = -1 // block files and a hydration copy, as before
 	old, err := newClosingCache(t, opt)
 	if err != nil {
