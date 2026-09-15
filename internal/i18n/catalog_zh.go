@@ -267,6 +267,20 @@ var zh = map[string]string{
 	"doctor.triggers.ok":     "已配置 %d 条触发器规则与 %d 个 agent，无警告",
 	"doctor.triggers.warn":   "配置警告：%s",
 	"doctor.triggers.fix":    "在配置文件里修改规则；不希望被 Agent 自身写入触发的 exec 规则需要 origins: [kernel, remote]",
+	// Embedding endpoint routes (T-39).
+	"err.embedding_none":                "未配置嵌入端点（index.embedding.provider: none）；请在配置文件里设置",
+	"err.embedding_shape":               "端点对一段文本返回了 %d 个向量",
+	"embedding.estimate.note":           "仅为估算：守护进程只知道已发送的字符数和持有的分块数；token 数取决于端点的分词器，单价以其价目表为准",
+	"doctor.embedding.none":             "未配置嵌入（index.embedding.provider: none）；检索仅支持关键词",
+	"doctor.embedding.ok":               "嵌入 %s/%s，%d 维：已嵌入 %d 个分块，待嵌入 %d 个",
+	"doctor.embedding.ok_unprobed":      "嵌入 %s/%s，维度待首次调用后确定：已嵌入 %d 个分块，待嵌入 %d 个",
+	"doctor.embedding.unhealthy":        "嵌入端点 %s 上次请求失败；恢复应答前语义检索降级为关键词",
+	"doctor.embedding.paused":           "嵌入端点 %s 连续失败，暂停至 %s",
+	"doctor.embedding.unhealthy.fix":    "用 cloudfs index embedding --check 测试端点；worker 会自行重试",
+	"doctor.embedding.dim_mismatch":     "嵌入模型 %s 返回 %d 维，索引里的向量是 %d 维；嵌入 worker 已停止",
+	"doctor.embedding.dim_mismatch.fix": "把 index.embedding 改回原来的模型与维度，或运行 cloudfs index rebuild --confirm 全量重嵌",
+	"doctor.embedding.remote":           "索引的文件内容会离开本机：分块被发送到 %s 做嵌入",
+	"doctor.embedding.remote.fix":       "若非有意，把 index.embedding.provider 设为 none，或把 base_url 指向本机端点",
 
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。
 	// 每一句对应守护进程真的提供的一个工具；没有的功能不提。

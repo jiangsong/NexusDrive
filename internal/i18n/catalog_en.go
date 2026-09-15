@@ -269,6 +269,20 @@ var en = map[string]string{
 	"doctor.triggers.ok":     "%d trigger rules and %d agents configured, no warnings",
 	"doctor.triggers.warn":   "configuration warnings: %s",
 	"doctor.triggers.fix":    "edit the rules in the configuration file; an exec rule the agent's own writes must not fire needs origins: [kernel, remote]",
+	// Embedding endpoint routes (T-39).
+	"err.embedding_none":                "no embedding endpoint is configured (index.embedding.provider: none); set one in the configuration file",
+	"err.embedding_shape":               "the endpoint answered %d vectors for one text",
+	"embedding.estimate.note":           "an estimate: the daemon counts the characters it sent and the chunks it holds; tokens depend on the endpoint's tokenizer and the price on its list",
+	"doctor.embedding.none":             "embedding not configured (index.embedding.provider: none); search is keyword-only",
+	"doctor.embedding.ok":               "embedding %s/%s, %d dimensions: %d chunks embedded, %d pending",
+	"doctor.embedding.ok_unprobed":      "embedding %s/%s, dimensions unknown until the first call: %d chunks embedded, %d pending",
+	"doctor.embedding.unhealthy":        "embedding endpoint %s failed its last request; semantic search runs as keyword until it answers again",
+	"doctor.embedding.paused":           "embedding endpoint %s is paused after repeated failures until %s",
+	"doctor.embedding.unhealthy.fix":    "check the endpoint with cloudfs index embedding --check; the worker retries on its own",
+	"doctor.embedding.dim_mismatch":     "embedding model %s answers %d dimensions but the index holds %d-dimensional vectors; the embed worker has stopped",
+	"doctor.embedding.dim_mismatch.fix": "change index.embedding back to the previous model and dimensions, or run cloudfs index rebuild --confirm to re-embed everything",
+	"doctor.embedding.remote":           "indexed file content leaves this machine: chunks are sent to %s for embedding",
+	"doctor.embedding.remote.fix":       "set index.embedding.provider to none or point base_url at a local endpoint if that is not intended",
 
 	// Send to agent: the console hands this prompt to the person to paste
 	// into their own MCP client. Each sentence names a tool the daemon

@@ -108,6 +108,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkIndex(ctx)...)
 	out = append(out, d.checkAgent(ctx)...)
 	out = append(out, d.checkTriggers()...)
+	out = append(out, d.checkEmbedding(ctx)...)
 	if cfg := d.config(); cfg != nil {
 		for name, r := range cfg.Remotes {
 			level, detailKey := LevelOK, "doctor.creds.keyring"
@@ -529,6 +530,86 @@ func (d *Doctor) checkTriggers() []Check {
 	c.setDetail("doctor.triggers.warn", strings.Join(cfg.Warnings, "; "))
 	c.setFix("doctor.triggers.fix")
 	return []Check{c}
+}
+
+// checkEmbedding reports on the embedding endpoint (TODO.md T-39): not
+// configured is fine and said so; an endpoint that failed its last call
+// or sits behind an open breaker is a warning carrying that error; a
+// dimension recorded in index_meta that differs from the one the endpoint
+// answers (or is configured to answer) is a failure, because vectors of
+// two sizes cannot be compared and the worker has stopped; and an
+// endpoint outside this machine gets a line of its own naming the host,
+// since every indexed chunk goes there. It spends no request: the
+// console's check button and `cloudfs index embedding --check` do that
+// on purpose.
+func (d *Doctor) checkEmbedding(ctx context.Context) []Check {
+	if d.Index == nil {
+		return nil
+	}
+	st, err := d.Index.Status(ctx, "")
+	if err != nil {
+		// checkIndex reported the index itself.
+		return nil
+	}
+	e := st.Embedding
+	c := Check{Name: "index_embedding"}
+	if e.Provider == "" || e.Provider == "none" {
+		c.Level = LevelOK
+		c.setDetail("doctor.embedding.none")
+		return []Check{c}
+	}
+	var out []Check
+	// The dimension the endpoint answers: probed on its first call, else
+	// the configured openai `dimensions`; 0 when neither is known yet.
+	expected := 0
+	if emb := d.Index.Embedder(); emb != nil {
+		expected = emb.Dim()
+	}
+	if expected == 0 {
+		if cfg := d.config(); cfg != nil {
+			expected = cfg.Index.Embedding.Dimensions
+		}
+	}
+	_, recorded, recErr := d.Index.RecordedEmbedding(ctx)
+	switch {
+	case recErr != nil:
+		c.Level = LevelWarn
+		c.passDetail(recErr.Error())
+		c.setFix("doctor.index.db.fix")
+	case recorded > 0 && expected > 0 && recorded != expected:
+		c.Level = LevelFail
+		c.setDetail("doctor.embedding.dim_mismatch", e.Model, expected, recorded)
+		c.setFix("doctor.embedding.dim_mismatch.fix")
+	case !e.Healthy:
+		c.Level = LevelWarn
+		switch {
+		case !e.BreakerOpenUntil.IsZero():
+			c.setDetail("doctor.embedding.paused", e.Host, e.BreakerOpenUntil.Local().Format("15:04:05"))
+			if e.LastError != "" {
+				c.addPassDetail(e.LastError)
+			}
+		case e.LastError != "":
+			c.setDetail("doctor.embedding.unhealthy", e.Host)
+			c.addPassDetail(e.LastError)
+		default:
+			c.setDetail("doctor.embedding.unhealthy", e.Host)
+		}
+		c.setFix("doctor.embedding.unhealthy.fix")
+	case e.Dim == 0:
+		c.Level = LevelOK
+		c.setDetail("doctor.embedding.ok_unprobed", e.Provider, e.Model, e.Embedded, e.Pending)
+	default:
+		c.Level = LevelOK
+		c.setDetail("doctor.embedding.ok", e.Provider, e.Model, e.Dim, e.Embedded, e.Pending)
+	}
+	out = append(out, c)
+	if e.Remote {
+		rc := Check{Name: "index_embedding_remote", Level: LevelWarn}
+		rc.setDetail("doctor.embedding.remote", e.Host)
+		rc.setFix("doctor.embedding.remote.fix")
+		out = append(out, rc)
+	}
+	return out
 }
 
 // Fix repairs what it safely can and reports what it did, in lang: the

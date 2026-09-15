@@ -109,6 +109,13 @@ func (c *Check) passDetail(text string) {
 	c.Detail = render(i18n.EN, c.detail)
 }
 
+// addPassDetail appends untranslated text — an endpoint's own error — after
+// what the check already said, with the same contract as addDetail.
+func (c *Check) addPassDetail(text string) {
+	c.detail = append(c.detail, message{key: text, raw: true})
+	c.Detail = render(i18n.EN, c.detail)
+}
+
 // setFix records the advice, with the same contract as setDetail.
 func (c *Check) setFix(key string, args ...any) {
 	c.fix = []message{{key: key, args: args}}

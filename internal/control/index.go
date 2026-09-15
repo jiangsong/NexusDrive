@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"cloudfs/internal/embed"
 	"cloudfs/internal/index"
 )
 
@@ -39,6 +40,13 @@ type IndexControl interface {
 	// before the index was ever bound to one. The doctor compares it with
 	// the live meta store.
 	Identity(ctx context.Context) (string, error)
+	// Embedder is the configured embedding client, nil for a keyword-only
+	// index. /index/embedding/check spends one request on it.
+	Embedder() embed.Embedder
+	// RecordedEmbedding is the model and dimension index_meta says the
+	// stored vectors were made with ("", 0 before any chunk was embedded);
+	// the doctor compares them with the configured endpoint.
+	RecordedEmbedding(ctx context.Context) (model string, dim int, err error)
 }
 
 // IndexRulesResponse is GET /index/rules.
@@ -118,6 +126,12 @@ type IndexStatus struct {
 	// budget | text_budget) and ResumeAt when it may go on, if known.
 	Paused   string    `json:"paused,omitempty"`
 	ResumeAt time.Time `json:"resume_at,omitzero"`
+	// Vectors is how many chunks have an embedding, against MaxChunks;
+	// Embedding is the endpoint block the overview card and the
+	// cloudfs_index_embed_* metrics read.
+	Vectors   int                   `json:"vectors"`
+	MaxChunks int                   `json:"max_chunks"`
+	Embedding index.EmbeddingStatus `json:"embedding"`
 }
 
 const (
@@ -138,6 +152,7 @@ func indexStatusOf(st index.Status) *IndexStatus {
 		FetchedThisHour: st.FetchBudget.Used, FetchBudget: st.FetchBudget.Limit, FetchBytesTotal: st.FetchBytesTotal,
 		Failures: st.Progress.Failed, Running: st.Progress.Running, Crawling: st.Progress.Extracting > 0,
 		Paused: st.Progress.Paused, ResumeAt: st.Progress.ResumeAt,
+		Vectors: st.Vectors, MaxChunks: st.MaxChunks, Embedding: st.Embedding,
 	}
 }
 

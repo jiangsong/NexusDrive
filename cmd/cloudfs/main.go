@@ -209,8 +209,12 @@ Agents
                             list, add or remove index rules; changes need the running daemon
   index rebuild --confirm | retry [<path>]
                             clear and rebuild the index, or requeue failed documents
-  index search <query> [--path P] [--mode keyword|hybrid] [--limit N] [--json]
+  index search <query> [--path P] [--mode keyword|hybrid|vector] [--limit N] [--json]
                             search extracted file contents
+  index embedding [--check] [--json]
+                            embedding endpoint status; --check spends one request on it
+  index auth [--key-file F] store the embedding api key (from --key-file, a hidden prompt or a pipe on
+                            stdin; never an argument) and reference it from index.embedding.api_key
   triggers list [--json]    show the trigger rules and agents; reads the config file when no daemon runs
   triggers deliveries [--rule R] [--state pending|running|done|dead] [--limit N] [--json]
                             list trigger deliveries, newest first; reads agent.db when no daemon runs

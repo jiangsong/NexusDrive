@@ -16,6 +16,7 @@ import (
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
 	"cloudfs/internal/index"
+	"golang.org/x/term"
 )
 
 // indexSearchFromArgs turns `cloudfs index search <query> [--path P]
@@ -64,24 +65,38 @@ func indexSearchFromArgs(args []string) (index.SearchQuery, error) {
 // without a daemon by opening index.db read-only; everything that changes
 // the index goes through the running daemon, which owns the worker.
 func runIndex(ctx context.Context, args []string, out io.Writer) error {
-	f := parseFlags(args, "json", "confirm")
+	return runIndexWith(ctx, args, os.Stdin, out)
+}
+
+// runIndexWith is runIndex with the standard input named, for `index
+// auth`, which reads the key from it.
+func runIndexWith(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
+	f := parseFlags(args, "json", "confirm", "check")
 	action := f.arg(0)
 	if action == "" {
-		return errors.New("index: usage: cloudfs index status|rules|add|rm|rebuild|retry|search ...")
+		return errors.New("index: usage: cloudfs index status|rules|add|rm|rebuild|retry|search|embedding|auth ...")
 	}
-	rest := dropFirstPositional(args, "json", "confirm")
+	rest := dropFirstPositional(args, "json", "confirm", "check")
 	timeout, err := time.ParseDuration(f.str("timeout", "30s"))
 	if err != nil || timeout <= 0 {
 		return errors.New("index: --timeout must be a positive duration")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if action == "auth" {
+		// auth is what makes an openai block loadable at all, so it
+		// works from the path alone and loads the file only afterwards.
+		c := indexCLI{in: in, out: out, asJSON: f.bools["json"]}
+		return c.auth(f.str("config", defaultConfigPath()), rest)
+	}
 	cfg, _, err := loadConfig(f)
 	if err != nil {
 		return err
 	}
-	c := indexCLI{cfg: cfg, out: out, asJSON: f.bools["json"]}
+	c := indexCLI{cfg: cfg, in: in, out: out, asJSON: f.bools["json"]}
 	switch action {
+	case "embedding":
+		return c.embedding(ctx, rest)
 	case "status":
 		return c.status(ctx, rest)
 	case "rules":
@@ -126,6 +141,7 @@ func dropFirstPositional(args []string, boolFlags ...string) []string {
 
 type indexCLI struct {
 	cfg    *config.Config
+	in     io.Reader
 	out    io.Writer
 	asJSON bool
 }
@@ -458,4 +474,178 @@ func (c *indexCLI) search(ctx context.Context, args []string) error {
 		fmt.Fprintf(c.out, "degraded: %s\n", res.Degraded)
 	}
 	return nil
+}
+
+// auth is `cloudfs index auth [--key-file F]`: the embedding API key goes
+// into the secret store and the configuration gets a keyring: or
+// secretfile: reference to it. The key is read from --key-file, from a
+// hidden terminal prompt, or from a pipe on stdin — never from an
+// argument, which would land in the shell history and the process list.
+// No daemon is involved: the key is used by the next daemon start, which
+// the command says.
+func (c *indexCLI) auth(configPath string, args []string) error {
+	f := parseFlags(args, "json")
+	for k := range f.values {
+		switch k {
+		case "config", "key-file", "timeout":
+		default:
+			if k == "key" || k == "api-key" {
+				return errors.New("index auth: the key is not taken as an argument (it would land in the shell history); pipe it on stdin or pass --key-file")
+			}
+			return fmt.Errorf("index auth: unknown flag --%s", k)
+		}
+	}
+	if len(f.args) > 0 {
+		return errors.New("index auth: the key is not taken as an argument (it would land in the shell history); pipe it on stdin or pass --key-file")
+	}
+	var key string
+	if kf := f.str("key-file", ""); kf != "" {
+		b, err := os.ReadFile(kf)
+		if err != nil {
+			return fmt.Errorf("index auth: %w", err)
+		}
+		key = string(b)
+	} else {
+		var err error
+		if key, err = c.readKey(); err != nil {
+			return err
+		}
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("index auth: the key is empty")
+	}
+	ref, err := config.SaveEmbeddingAPIKey(configPath, key)
+	if err != nil {
+		return err
+	}
+	if c.asJSON {
+		return json.NewEncoder(c.out).Encode(struct {
+			Reference string `json:"reference"`
+		}{ref})
+	}
+	kind, _, _ := strings.Cut(ref, ":")
+	fmt.Fprintf(c.out, "embedding api key stored (%s); index.embedding.api_key now references it\n", kind)
+	if cfg, err := config.Load(configPath); err == nil && !cfg.Index.Embedding.Enabled() {
+		fmt.Fprintln(c.out, "set index.embedding.provider and model in the configuration file to use it")
+	}
+	fmt.Fprintln(c.out, "restart the daemon for the key to take effect")
+	return nil
+}
+
+// readKey takes the key from a hidden prompt when stdin is a terminal and
+// from stdin as-is when it is a pipe or a file.
+func (c *indexCLI) readKey() (string, error) {
+	if f, ok := c.in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		fmt.Fprint(os.Stderr, "embedding api key (hidden): ")
+		b, err := term.ReadPassword(int(f.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", fmt.Errorf("index auth: %w", err)
+		}
+		return string(b), nil
+	}
+	if c.in == nil {
+		return "", errors.New("index auth: no input; pipe the key on stdin or pass --key-file")
+	}
+	b, err := io.ReadAll(io.LimitReader(c.in, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("index auth: %w", err)
+	}
+	return string(b), nil
+}
+
+// embedding is `cloudfs index embedding [--check]`: the endpoint panel in
+// text, through the running daemon; --check spends one request on the
+// endpoint and reports the answer.
+func (c *indexCLI) embedding(ctx context.Context, args []string) error {
+	f := parseFlags(args, "json", "check")
+	if len(f.args) > 0 {
+		return errors.New("index embedding: unexpected argument")
+	}
+	var res control.EmbeddingResponse
+	online, err := c.call(ctx, http.MethodGet, "/index/embedding", nil, &res)
+	if err != nil {
+		return err
+	}
+	if err := c.needDaemon(online); err != nil {
+		return err
+	}
+	if c.asJSON && !f.bools["check"] {
+		return json.NewEncoder(c.out).Encode(res)
+	}
+	if !c.asJSON {
+		printEmbedding(c.out, res)
+	}
+	if !f.bools["check"] {
+		return nil
+	}
+	var chk control.EmbeddingCheckResponse
+	if _, err := c.call(ctx, http.MethodPost, "/index/embedding/check", struct{}{}, &chk); err != nil {
+		return err
+	}
+	if c.asJSON {
+		return json.NewEncoder(c.out).Encode(struct {
+			control.EmbeddingResponse
+			Check control.EmbeddingCheckResponse `json:"check"`
+		}{res, chk})
+	}
+	if chk.OK {
+		fmt.Fprintf(c.out, "check: ok, %d dimensions in %d ms\n", chk.Dim, chk.LatencyMS)
+	} else {
+		fmt.Fprintf(c.out, "check: failed after %d ms: %s\n", chk.LatencyMS, chk.Error)
+	}
+	return nil
+}
+
+func printEmbedding(out io.Writer, res control.EmbeddingResponse) {
+	if !res.Enabled {
+		fmt.Fprintf(out, "embedding: not configured (index.embedding.provider: %s); search is keyword-only\n", res.Provider)
+		if res.APIKeyConfigured {
+			fmt.Fprintln(out, "api key: stored")
+		}
+		return
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "provider\t%s\n", res.Provider)
+	fmt.Fprintf(w, "model\t%s\n", res.Model)
+	if res.Dim > 0 {
+		fmt.Fprintf(w, "dimensions\t%d\n", res.Dim)
+	} else {
+		fmt.Fprintln(w, "dimensions\tunknown until the first call")
+	}
+	where := "local"
+	if res.Remote {
+		where = "remote: indexed content is sent there"
+	}
+	fmt.Fprintf(w, "endpoint\t%s (%s)\n", res.BaseHost, where)
+	if res.Provider == "openai" {
+		key := "missing; run cloudfs index auth"
+		if res.APIKeyConfigured {
+			key = "stored"
+		}
+		fmt.Fprintf(w, "api key\t%s\n", key)
+	}
+	switch {
+	case res.Healthy:
+		fmt.Fprintln(w, "health\thealthy")
+	case !res.BreakerOpenUntil.IsZero():
+		fmt.Fprintf(w, "health\tpaused until %s\n", res.BreakerOpenUntil.Local().Format("15:04:05"))
+	default:
+		fmt.Fprintln(w, "health\tunhealthy")
+	}
+	if res.LastError != "" {
+		fmt.Fprintf(w, "last error\t%s\n", res.LastError)
+	}
+	fmt.Fprintf(w, "embedded\t%d chunks, %d pending\n", res.Embedded, res.Pending)
+	if res.MaxChunks > 0 {
+		capped := ""
+		if res.Capped {
+			capped = " (cap reached; further chunks stay keyword-only)"
+		}
+		fmt.Fprintf(w, "vectors\t%d of %d max%s\n", res.Vectors, res.MaxChunks, capped)
+	}
+	fmt.Fprintf(w, "this month\t%d chars sent (~%d tokens)\n", res.Estimate.Chars, res.Estimate.TokensApprox)
+	fmt.Fprintf(w, "estimate\t%s; whole corpus ~%d tokens (%s)\n", res.Estimate.Formula, res.Estimate.CorpusTokensApprox, res.Estimate.Note)
+	w.Flush()
 }

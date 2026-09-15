@@ -4,13 +4,17 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
+	"cloudfs/internal/embed"
 	"cloudfs/internal/index"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var indexToolNames = []string{"semantic_search", "index_status", "index", "unindex", "read_extracted_text"}
@@ -345,5 +349,100 @@ func TestIndexStatusChecksItsOptionalPath(t *testing.T) {
 	}
 	if res := e.call(t, "index_status", map[string]any{}, nil); res.IsError {
 		t.Fatalf("whole-index status: %s", errText(res))
+	}
+}
+
+// embeddedEnv is newIndexEnv with a fake embedder and an embedding block
+// in the configuration: one document extracted and embedded, so the
+// semantic modes have vectors to run on.
+func embeddedEnv(t *testing.T) (*env, *index.Indexer, *embed.Fake) {
+	t.Helper()
+	cfg := rulesOn("/work")
+	cfg.Embedding = config.IndexEmbedding{Provider: "ollama", Model: "fake", BaseURL: "http://127.0.0.1:11434"}
+	fake := embed.NewFake(8)
+	shell := &lateIndex{}
+	e := newEnv(t, Options{Index: shell})
+	x := bindIndexWith(t, e, shell, cfg, fake)
+	e.fake.Seed("work/a.md", []byte("mode marker phrase"))
+	e.listDirs(t, "/work")
+	reconcile(t, x)
+	if rep, err := x.EmbedNow(context.Background()); err != nil || rep.Embedded == 0 {
+		t.Fatalf("embed: %+v %v", rep, err)
+	}
+	return e, x, fake
+}
+
+// TestSemanticSearchReportsModeUsed: mode_used is the mode that ran, not
+// the one asked for. With an embedder and vectors, hybrid is hybrid; on a
+// keyword-only index the same request runs as keyword and says why in
+// degraded, without an error.
+func TestSemanticSearchReportsModeUsed(t *testing.T) {
+	e, _, fake := embeddedEnv(t)
+	var out index.SearchResult
+	if res := e.call(t, "semantic_search", map[string]any{"query": "mode marker phrase", "mode": "hybrid"}, &out); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if out.ModeUsed != "hybrid" || out.Degraded != "" || len(out.Hits) != 1 || out.Hits[0].Path != "/work/a.md" {
+		t.Fatalf("hybrid: %+v", out)
+	}
+	calls := fake.Calls()
+	if res := e.call(t, "semantic_search", map[string]any{"query": "mode marker phrase", "mode": "vector"}, &out); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if out.ModeUsed != "vector" || out.Degraded != "" || fake.Calls() != calls+1 {
+		t.Fatalf("vector: %+v, calls %d -> %d", out, calls, fake.Calls())
+	}
+	if res := e.call(t, "semantic_search", map[string]any{"query": "mode marker phrase", "mode": "keyword"}, &out); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if out.ModeUsed != "keyword" || fake.Calls() != calls+1 {
+		t.Fatalf("keyword embedded the query: %+v, calls %d", out, fake.Calls())
+	}
+
+	none, x := newIndexEnv(t, Options{}, rulesOn("/work"))
+	none.fake.Seed("work/a.md", []byte("mode marker phrase"))
+	none.listDirs(t, "/work")
+	reconcile(t, x)
+	if res := none.call(t, "semantic_search", map[string]any{"query": "mode marker phrase", "mode": "hybrid"}, &out); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if out.ModeUsed != "keyword" || out.Degraded == "" || len(out.Hits) != 1 {
+		t.Fatalf("none: %+v", out)
+	}
+	if res := none.call(t, "semantic_search", map[string]any{"query": "mode marker phrase", "mode": "hybrid"}, nil); !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "keyword") {
+		t.Fatalf("the summary line does not name the mode that ran: %s", res.Content[0].(*mcp.TextContent).Text)
+	}
+}
+
+// TestIndexStatusCarriesEmbedding: index_status tells an agent whether
+// semantic search is real here — provider, model, dimension, health and
+// where content goes — and never the key.
+func TestIndexStatusCarriesEmbedding(t *testing.T) {
+	e, _, _ := embeddedEnv(t)
+	var st index.Status
+	if res := e.call(t, "index_status", map[string]any{}, &st); res.IsError {
+		t.Fatal(errText(res))
+	}
+	emb := st.Embedding
+	if emb.Provider != "ollama" || emb.Model != "fake" || emb.Dim != 8 || !emb.Healthy || emb.Embedded == 0 || emb.Pending != 0 || emb.Remote {
+		t.Fatalf("%+v", emb)
+	}
+	if st.Vectors == 0 || st.MaxChunks == 0 {
+		t.Fatalf("vectors %d max %d", st.Vectors, st.MaxChunks)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "api_key") || strings.Contains(string(raw), "keyring:") {
+		t.Fatalf("index_status carries a credential field: %s", raw)
+	}
+
+	none, _ := newIndexEnv(t, Options{}, rulesOn("/work"))
+	if res := none.call(t, "index_status", map[string]any{}, &st); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if st.Embedding.Provider != "none" || st.Embedding.Healthy {
+		t.Fatalf("none: %+v", st.Embedding)
 	}
 }

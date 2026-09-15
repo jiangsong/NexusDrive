@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/embed"
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/index"
 )
@@ -33,6 +34,11 @@ type fakeIndex struct {
 	progress chan index.Progress
 	// removeErr, when set, is what RemoveRule answers.
 	removeErr error
+	// embedder is what Embedder answers; recordedModel and recordedDim
+	// what index_meta says the vectors were made with.
+	embedder      embed.Embedder
+	recordedModel string
+	recordedDim   int
 }
 
 type textCall struct {
@@ -138,6 +144,18 @@ func (f *fakeIndex) Watch() (<-chan index.Progress, func()) {
 }
 
 func (f *fakeIndex) Identity(ctx context.Context) (string, error) { return f.identity, nil }
+
+func (f *fakeIndex) Embedder() embed.Embedder {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.embedder
+}
+
+func (f *fakeIndex) RecordedEmbedding(ctx context.Context) (string, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recordedModel, f.recordedDim, nil
+}
 
 func indexServer(t *testing.T) (*fixture, *fakeIndex, http.Handler) {
 	t.Helper()

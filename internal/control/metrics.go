@@ -146,6 +146,8 @@ func (s *Server) routes() []route {
 		{pattern: "/index/failed", handler: s.indexFailed},
 		{pattern: "/index/search", handler: s.indexSearch},
 		{pattern: "/index/text", handler: s.indexText},
+		{pattern: "/index/embedding", handler: s.indexEmbedding},
+		{pattern: "/index/embedding/check", handler: s.indexEmbeddingCheck},
 		{pattern: "/agent/prompt", handler: s.agentPrompt},
 		{pattern: "/agent/endpoints", handler: s.agentEndpoints},
 		{pattern: "/agent/invoke", handler: s.agentInvoke},
@@ -321,6 +323,14 @@ type metric struct {
 	value  float64
 }
 
+// boolGauge is a gauge value for a yes/no state.
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	st := s.collector.Collect(r.Context(), i18n.EN)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -380,6 +390,10 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 			metric{name: "cloudfs_index_text_bytes", help: "Extracted text held by the content index", typ: "gauge", value: float64(st.Index.TextBytes)},
 			metric{name: "cloudfs_index_fetch_bytes_total", help: "Bytes the indexer downloaded from remotes since start", typ: "counter", value: float64(st.Index.FetchBytesTotal)},
 			metric{name: "cloudfs_index_failures_total", help: "Extraction failures since start", typ: "counter", value: float64(st.Index.Failures)},
+			metric{name: "cloudfs_index_vectors", help: "Chunks with an embedding", typ: "gauge", value: float64(st.Index.Vectors)},
+			metric{name: "cloudfs_index_embed_pending", help: "Chunks waiting for an embedding", typ: "gauge", value: float64(st.Index.Embedding.Pending)},
+			metric{name: "cloudfs_index_embed_chars_total", help: "Characters sent to the embedding endpoint this calendar month", typ: "counter", value: float64(st.Index.Embedding.CharsThisMonth)},
+			metric{name: "cloudfs_index_embed_healthy", help: "Whether the embedding endpoint answered its last request (0 without one)", typ: "gauge", value: boolGauge(st.Index.Embedding.Healthy)},
 		)
 	}
 	if st.Triggers != nil {

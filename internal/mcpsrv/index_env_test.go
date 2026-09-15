@@ -7,6 +7,7 @@ import (
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
+	"cloudfs/internal/embed"
 	"cloudfs/internal/index"
 )
 
@@ -37,6 +38,13 @@ func (l *lateIndex) Text(ctx context.Context, p string, off int64, max int) (ind
 // ReconcileNow so that extraction happens on their own goroutine.
 func bindIndex(t *testing.T, e *env, shell *lateIndex, cfg config.Index) *index.Indexer {
 	t.Helper()
+	return bindIndexWith(t, e, shell, cfg, nil)
+}
+
+// bindIndexWith is bindIndex with an embedder behind the index, for the
+// semantic modes.
+func bindIndexWith(t *testing.T, e *env, shell *lateIndex, cfg config.Index, emb embed.Embedder) *index.Indexer {
+	t.Helper()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +53,7 @@ func bindIndex(t *testing.T, e *env, shell *lateIndex, cfg config.Index) *index.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	x, err := index.New(index.Options{FS: e.fs, Store: st, Config: cfg, StartDelay: time.Hour, ReconcileEvery: time.Hour})
+	x, err := index.New(index.Options{FS: e.fs, Store: st, Config: cfg, StartDelay: time.Hour, ReconcileEvery: time.Hour, Embedder: emb})
 	if err != nil {
 		t.Fatal(err)
 	}

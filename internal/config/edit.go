@@ -17,6 +17,15 @@ import (
 // editConfig serializes edits without rewriting unrelated YAML nodes. The
 // complete result is validated before its atomic rename becomes visible.
 func editConfig(path string, create bool, edit func(*yaml.Node, *Config) error) error {
+	return editConfigNode(path, create, nil, edit)
+}
+
+// editConfigNode is editConfig with a pre-parse hook: prepare runs on the
+// raw document before it is parsed, for an edit whose whole point is to
+// make a file valid that is not yet (adding the api_key an openai block
+// requires). The prepared document is what edit sees and what is
+// validated again before the write.
+func editConfigNode(path string, create bool, prepare func(*yaml.Node) error, edit func(*yaml.Node, *Config) error) error {
 	path, err := filepath.Abs(ExpandHome(path))
 	if err != nil {
 		return err
@@ -37,11 +46,6 @@ func editConfig(path string, create bool, edit func(*yaml.Node, *Config) error) 
 	if err != nil {
 		return err
 	}
-	c, err := Parse(b)
-	if err != nil {
-		return err
-	}
-	c.SourcePath = path
 	var doc yaml.Node
 	if err = yaml.Unmarshal(b, &doc); err != nil {
 		return err
@@ -49,6 +53,19 @@ func editConfig(path string, create bool, edit func(*yaml.Node, *Config) error) 
 	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 		return errors.New("config: expected a YAML mapping")
 	}
+	if prepare != nil {
+		if err = prepare(doc.Content[0]); err != nil {
+			return err
+		}
+		if b, err = yaml.Marshal(&doc); err != nil {
+			return err
+		}
+	}
+	c, err := Parse(b)
+	if err != nil {
+		return err
+	}
+	c.SourcePath = path
 	if err = edit(doc.Content[0], c); err != nil {
 		return err
 	}

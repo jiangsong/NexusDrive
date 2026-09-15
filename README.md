@@ -466,7 +466,10 @@ index rm <path> --confirm 移除运行时规则并丢弃只有它覆盖的文本
 index rebuild --confirm   清空索引并按规则重新下载、抽取
 index retry [path]        把失败文档（可限定子树）重新排队
 index search <query> [--path P] [--mode keyword|hybrid|vector] [--limit N] [--json]
-                          在抽取文本里检索；没有守护进程时只读 index.db。本期 hybrid/vector 按 keyword 执行
+                          在抽取文本里检索；没有守护进程时只读 index.db。未配置嵌入端点时 hybrid/vector 降级为 keyword 并在 degraded 里说明
+index embedding [--check] [--json]
+                          嵌入端点状态（provider / 模型 / 维度 / 主机 / 健康 / 已嵌入 / 本月字符与费用估算）；--check 真实调用一次端点
+index auth [--key-file F] 把嵌入 API key 存进密钥库并在 index.embedding.api_key 写引用；key 来自 --key-file、隐藏提示或 stdin 管道，绝不接受命令行参数
 triggers list | deliveries [--rule R] [--state S] [--limit N] [--cursor C] | show <id> [--json]
                           事件触发器的规则（只读）与投递记录；没有守护进程时只读 agent.db
 triggers test <rule> <path> --confirm | retry <id>   立刻投递一次 / 重排一条 dead 投递；需要运行中的守护进程

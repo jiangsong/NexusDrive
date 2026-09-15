@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,6 +234,25 @@ func (x *Indexer) Store() *Store { return x.store }
 
 // Embedder returns the configured embedder, nil for a keyword-only index.
 func (x *Indexer) Embedder() embed.Embedder { return x.embedder }
+
+// RecordedEmbedding is what index_meta says the stored vectors were made
+// with: the model and the dimension, "" and 0 before any chunk was
+// embedded. The doctor compares them with the configured endpoint.
+func (x *Indexer) RecordedEmbedding(ctx context.Context) (model string, dim int, err error) {
+	if model, err = x.store.Meta(ctx, metaEmbeddingModel); err != nil {
+		return "", 0, err
+	}
+	rec, err := x.store.Meta(ctx, metaEmbeddingDim)
+	if err != nil {
+		return "", 0, err
+	}
+	if rec != "" {
+		if dim, err = strconv.Atoi(rec); err != nil {
+			return "", 0, fmt.Errorf("index: index_meta %s is %q", metaEmbeddingDim, rec)
+		}
+	}
+	return model, dim, nil
+}
 
 // Yields reports how often the worker stood aside for foreground IO.
 func (x *Indexer) Yields() int64 { return x.yields.Load() }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"cloudfs/internal/control"
+	"cloudfs/internal/embed"
 	"cloudfs/internal/index"
 	"cloudfs/internal/textract"
 )
@@ -101,15 +102,21 @@ func indexCLIStore(t *testing.T, cacheDir string) {
 // cliIndex is IndexControl for the online half of the CLI tests: the
 // daemon's answers are canned, and what the CLI sent is recorded.
 type cliIndex struct {
-	added   []index.Rule
-	removed []string
-	rebuilt int
-	retried []string
-	queries []index.SearchQuery
+	added    []index.Rule
+	removed  []string
+	rebuilt  int
+	retried  []string
+	queries  []index.SearchQuery
+	embedder *embed.Fake
 }
 
 func (c *cliIndex) Status(context.Context, string) (index.Status, error) {
-	return index.Status{Enabled: true, Docs: index.DocCounts{OK: 1}, ChunksTotal: 1, Progress: index.Progress{Running: true}}, nil
+	st := index.Status{Enabled: true, Docs: index.DocCounts{OK: 1}, ChunksTotal: 1, Progress: index.Progress{Running: true}, Embedding: index.EmbeddingStatus{Provider: "none"}}
+	if c.embedder != nil {
+		st.Vectors, st.MaxChunks = 1, 1000
+		st.Embedding = index.EmbeddingStatus{Provider: "ollama", Model: "fake", Dim: c.embedder.Dim(), Host: "127.0.0.1", Healthy: true, Embedded: 1, CharsThisMonth: 40}
+	}
+	return st, nil
 }
 func (c *cliIndex) Rules(context.Context) ([]index.RuleView, error) {
 	out := []index.RuleView{}
@@ -146,6 +153,13 @@ func (c *cliIndex) Watch() (<-chan index.Progress, func()) {
 	return ch, func() {}
 }
 func (c *cliIndex) Identity(context.Context) (string, error) { return "", nil }
+func (c *cliIndex) Embedder() embed.Embedder {
+	if c.embedder == nil {
+		return nil
+	}
+	return c.embedder
+}
+func (c *cliIndex) RecordedEmbedding(context.Context) (string, int, error) { return "", 0, nil }
 
 func TestIndexCLIReadsTheStoreOfflineAndTheDaemonOnline(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
