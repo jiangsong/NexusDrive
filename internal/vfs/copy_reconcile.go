@@ -114,7 +114,7 @@ func (f *FS) adoptCopiedEntry(ctx context.Context, dm Mount, parent meta.Node, n
 		return Attr{}, err
 	}
 	f.invalidateFrom(ctx, parent.Ino)
-	f.changedEntry(ctx, parent.Ino, name, false)
+	f.changedEntry(ctx, parent.Ino, name, false, KindCreate)
 	return f.attrOf(ctx, out), nil
 }
 

@@ -33,6 +33,9 @@ type memBackend struct {
 	link        provider.Link
 	linkErr     error
 	readOnlyFor map[string]bool
+	// origins records the vfs origin name each Mkdir arrived with, so a test
+	// can prove the adapter tags the contexts it hands the VFS.
+	origins []string
 }
 
 type memNode struct {
@@ -244,9 +247,10 @@ func (b *memBackend) Create(_ context.Context, parent uint64, name string) (*vfs
 	return &vfs.Handle{Ino: n.ino}, nil
 }
 
-func (b *memBackend) Mkdir(_ context.Context, parent uint64, name string) (vfs.Attr, error) {
+func (b *memBackend) Mkdir(ctx context.Context, parent uint64, name string) (vfs.Attr, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.origins = append(b.origins, vfs.OriginName(ctx))
 	parentPath := b.pathOf(parent)
 	if parentPath == "" {
 		return vfs.Attr{}, vfs.ErrNotFound
@@ -835,5 +839,21 @@ func TestConcurrentPutsToDistinctNamesAllLand(t *testing.T) {
 		if body, ok := backend.content(p); !ok || body != want {
 			t.Fatalf("%s holds %q", p, body)
 		}
+	}
+}
+
+// TestWriteRequestsCarryTheWebDAVOrigin: the VFS reports a change with the
+// origin its context carries, so the adapter must tag every request before
+// the DAV handler turns it into filesystem calls.
+func TestWriteRequestsCarryTheWebDAVOrigin(t *testing.T) {
+	backend := newMemBackend()
+	c := startWritable(t, backend, true)
+	if code := c.status("MKCOL", "/tagged", "", nil); code != http.StatusCreated {
+		t.Fatalf("MKCOL = %d", code)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.origins) != 1 || backend.origins[0] != "webdav" {
+		t.Fatalf("Mkdir saw origins %q, want [webdav]", backend.origins)
 	}
 }

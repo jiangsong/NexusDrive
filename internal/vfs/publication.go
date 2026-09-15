@@ -127,7 +127,10 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 			f.cache.Forget(oldKey)
 		}
 		f.invalidateFrom(ctx, n.Ino)
-		f.changedNode(ctx, n.Ino, false)
+		// This is a write's commit finishing after a restart. Whoever made
+		// the write died with the previous process, so the origin is the
+		// background fallback; the kind is still what the content is.
+		f.changedNode(ctx, n.Ino, false, KindWrite)
 	}
 	return f.recoverCopyVersions(ctx, j)
 }

@@ -268,7 +268,8 @@ func (f *FS) submitCopyLocked(ctx context.Context, c *journal.CopyStaging) (jour
 	}
 	// BindCopy has made the complete local version visible even if the
 	// subsequent upload handoff fails. Readers must learn about it now.
-	f.changedNode(ctx, n.Ino, false)
+	// Copy never overwrites, so the destination is always a new name.
+	f.changedNode(ctx, n.Ino, false, KindCreate)
 	if f.copyBindFault != nil {
 		if err := f.copyBindFault(); err != nil {
 			return u, n, dm.Mode, err

@@ -911,7 +911,7 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 		f.wakePins()
 	}
 	if count > 128 {
-		f.changedNode(notifyCtx, ino, true)
+		f.changedNode(notifyCtx, ino, true, KindRemote)
 		if !wasComplete {
 			return nil
 		}
@@ -940,7 +940,7 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 func (f *FS) listingNotificationFallback(ino uint64) {
 	f.dropPaths()
 	f.wakePins()
-	f.emitChange(Change{Rescan: true})
+	f.emitChange(rescanChange())
 	f.invalidate(ino)
 	if fn := f.invalidateAllFn.Load(); fn != nil && *fn != nil {
 		(*fn)()

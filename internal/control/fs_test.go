@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"cloudfs/internal/vfs"
 	"cloudfs/test/fakeprovider"
@@ -311,6 +312,33 @@ func TestSearchCarriesCoverageAndRowFacts(t *testing.T) {
 	for _, bad := range []string{"/search", "/search?q=", "/search?q=a&sort=bogus", "/search?q=a&min_size=x", "/search?q=a&max_size=-1", "/search?ext=go&kind=link", "/search?q=size:lots", "/search?q=a&after=yesterday"} {
 		if w := call(t, s, "GET", bad, ""); w.Code != 400 {
 			t.Fatalf("%s: %d %s", bad, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestFSRoutesTagTheirChangesAsControlOrigin: what the browser changes is the
+// operator's doing, not the kernel's and not the remote's, and a change
+// subscriber (trigger rules) must be able to tell.
+func TestFSRoutesTagTheirChangesAsControlOrigin(t *testing.T) {
+	f, _ := fsControl(t)
+	s := NewServer(f.coll)
+	// List first: the first listing of a directory is itself a remote change.
+	if _, err := f.coll.FS.ReadDirPath(context.Background(), "/docs"); err != nil {
+		t.Fatal(err)
+	}
+	ch, cancel := f.coll.FS.WatchChanges()
+	defer cancel()
+	decode[FSEntry](t, call(t, s, http.MethodPost, "/fs/mkdir", `{"path":"/docs/made"}`))
+	decode[FSEntry](t, call(t, s, http.MethodPost, "/fs/rename", `{"from":"/docs/made","to":"/docs/moved"}`))
+	call(t, s, http.MethodPost, "/fs/delete", `{"path":"/docs/moved","confirm":true}`)
+	for _, want := range []vfs.ChangeKind{vfs.KindMkdir, vfs.KindRename, vfs.KindRemove} {
+		select {
+		case c := <-ch:
+			if c.Kind != want || c.Origin != vfs.OriginAPI {
+				t.Fatalf("change %+v is %s/%s, want %s/api", c, c.Kind, c.Origin, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no %s change arrived", want)
 		}
 	}
 }

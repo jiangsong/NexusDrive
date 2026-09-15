@@ -429,7 +429,7 @@ func (f *FS) commitWrite(ctx context.Context, h *Handle, w *writeState) error {
 		return err
 	}
 	w.committed = &node
-	f.changedNode(ctx, h.Ino, false)
+	f.changedNode(ctx, h.Ino, false, KindWrite)
 	if err := f.journal.MarkPublished(ctx, p.upload.ID); err != nil {
 		return err
 	}
@@ -632,7 +632,7 @@ func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, e
 	f.handles[h.FH] = h
 	f.addWriterLocked(node.Ino)
 	f.mu.Unlock()
-	f.changedEntry(ctx, parent, name, false)
+	f.changedEntry(ctx, parent, name, false, KindCreate)
 	return h, nil
 }
 
@@ -729,7 +729,7 @@ func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error
 	}
 	_ = f.meta.ClearAbsent(ctx, parent)
 	f.invalidateFrom(ctx, parent)
-	f.changedEntry(ctx, parent, name, false)
+	f.changedEntry(ctx, parent, name, false, KindMkdir)
 	return f.attrOf(ctx, node), nil
 }
 
@@ -812,7 +812,7 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	f.dropPaths()
 	f.invalidateFrom(ctx, parent)
 	f.invalidateEntryFrom(ctx, parent, name)
-	f.changedEntry(ctx, parent, name, n.IsDir())
+	f.changedEntry(ctx, parent, name, n.IsDir(), KindRemove)
 	return nil
 }
 
@@ -1054,7 +1054,7 @@ func (f *FS) UploadHooks() upload.Hooks {
 					if n, err := f.meta.Get(ctx, u.Ino); err == nil {
 						_ = f.meta.Invalidate(ctx, n.ParentIno)
 						f.invalidate(n.ParentIno)
-						f.changedNode(ctx, n.ParentIno, true)
+						f.changedNode(ctx, n.ParentIno, true, KindRemote)
 					}
 				}
 				return nil
@@ -1087,7 +1087,7 @@ func (f *FS) UploadHooks() upload.Hooks {
 				}
 				_ = f.meta.Invalidate(ctx, n.ParentIno)
 				f.invalidate(n.ParentIno)
-				f.changedNode(ctx, n.ParentIno, true)
+				f.changedNode(ctx, n.ParentIno, true, KindRemote)
 				return nil
 			}
 			if n.RemoteID != localRemoteID(u.ID) {
@@ -1174,8 +1174,10 @@ func (f *FS) UploadHooks() upload.Hooks {
 				f.cache.Pin(localKey, false)
 				f.cache.Forget(localKey)
 			}
+			// The bytes were written locally, but what changed here is the
+			// node's identity: it now names the remote's file and version.
 			f.invalidate(n.Ino)
-			f.changedNode(ctx, n.Ino, false)
+			f.changedNode(ctx, n.Ino, false, KindRemote)
 			return nil
 		},
 		Exists: func(ctx context.Context, u journal.Upload) bool {
@@ -1239,6 +1241,10 @@ func (f *FS) RepairLost(ctx context.Context, j *journal.Journal, ids []string) {
 		f.dropPaths()
 		_ = f.meta.Invalidate(ctx, node.ParentIno)
 		f.invalidate(node.ParentIno)
-		f.changedEntry(ctx, node.ParentIno, node.Name, node.IsDir())
+		// The name is gone from the tree; that it went because the bytes
+		// were lost rather than by request does not change what a
+		// subscriber sees. Recovery has no requester, so the origin is the
+		// remote fallback.
+		f.changedEntry(ctx, node.ParentIno, node.Name, node.IsDir(), KindRemove)
 	}
 }

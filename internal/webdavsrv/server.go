@@ -145,6 +145,7 @@ func Start(ctx context.Context, opt Options) (*Running, error) {
 	if opt.Token != "" {
 		handler = requireToken(handler, opt.Token)
 	}
+	handler = tagOrigin(handler)
 	listener, err := net.Listen("tcp", opt.Addr)
 	if err != nil {
 		return nil, err
@@ -283,6 +284,14 @@ func loopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// tagOrigin marks every request as WebDAV's so the changes it makes through
+// the VFS carry vfs.OriginAPI, like the other out-of-kernel adapters.
+func tagOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(vfs.WithOrigin(r.Context(), "webdav")))
+	})
 }
 
 func requireToken(next http.Handler, token string) http.Handler {

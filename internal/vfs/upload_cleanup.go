@@ -114,7 +114,9 @@ func (f *FS) DiscardUpload(ctx context.Context, id string, confirm bool) error {
 	for _, n := range nodes {
 		f.invalidateFrom(ctx, n.Ino)
 		f.invalidateFrom(ctx, n.ParentIno)
-		f.changedEntry(ctx, n.ParentIno, n.Name, false)
+		// Discarding the local version removes every name that carried it;
+		// the requester (control, MCP, or recovery) is in ctx.
+		f.changedEntry(ctx, n.ParentIno, n.Name, false, KindRemove)
 	}
 	f.wakePins()
 	if err := f.uploadCleanupBoundary("metadata"); err != nil {

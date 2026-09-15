@@ -7,16 +7,20 @@ import (
 	"time"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/vfs"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // sessionMiddleware gives every incoming call a CloudFS session, resolved
 // from the connection it arrived on, so that path checks read the session's
-// scope rather than one process-wide allowlist. It is a no-op when no session
-// store is configured.
+// scope rather than one process-wide allowlist. Session resolution is a
+// no-op when no session store is configured; the origin tag is not, so a
+// change made by any tool call is reported as the agent's (vfs.OriginAPI)
+// and a trigger rule can leave the agent's own writes out.
 func (s *Server) sessionMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		ctx = vfs.WithOrigin(ctx, "mcp")
 		if s.opt.Sessions == nil {
 			return next(ctx, method, req)
 		}

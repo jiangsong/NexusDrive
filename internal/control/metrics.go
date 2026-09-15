@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"cloudfs/internal/i18n"
+	"cloudfs/internal/vfs"
 )
 
 // Server exposes health, status and metrics over HTTP. It binds to a loopback
@@ -51,9 +52,18 @@ type Server struct {
 func NewServer(c *Collector) *Server {
 	s := &Server{collector: c, mux: http.NewServeMux(), auth: c.Auth, authReg: newAuthRegistry()}
 	for _, r := range s.routes() {
-		s.mux.HandleFunc(r.pattern, r.handler)
+		s.mux.HandleFunc(r.pattern, controlOrigin(r.handler))
 	}
 	return s
+}
+
+// controlOrigin tags the request so every change a control route makes
+// through the VFS (/fs/mkdir, /fs/rename, /fs/delete, /copy, an upload
+// discard) is reported with vfs.OriginAPI rather than as background work.
+func controlOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		next(w, r.WithContext(vfs.WithOrigin(r.Context(), "control")))
+	}
 }
 
 // route is one registered pattern. The table exists so a test can walk every

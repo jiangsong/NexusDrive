@@ -8,13 +8,128 @@ import (
 	"cloudfs/internal/meta"
 )
 
+// ChangeKind names the operation a Change announces. The zero value is
+// deliberately not a real kind: a Change built without one (older tests, a
+// missed emit point) reads as unknown rather than as a kernel write.
+type ChangeKind uint8
+
+const (
+	_          ChangeKind = iota
+	KindWrite             // a write handle committed (FLUSH), WriteFile, truncate
+	KindCreate            // a new file name appeared through a local operation
+	KindMkdir             // a new directory
+	KindRemove            // a name was unlinked
+	KindRename            // Paths[0] moved to Paths[1]
+	KindRemote            // a listing, the delta feed or an upload landing changed the tree
+	KindRescan            // the queue overflowed or a path could not be resolved
+)
+
+// String returns the lower-case name trigger rules and the console use.
+func (k ChangeKind) String() string {
+	switch k {
+	case KindWrite:
+		return "write"
+	case KindCreate:
+		return "create"
+	case KindMkdir:
+		return "mkdir"
+	case KindRemove:
+		return "remove"
+	case KindRename:
+		return "rename"
+	case KindRemote:
+		return "remote"
+	case KindRescan:
+		return "rescan"
+	}
+	return "unknown"
+}
+
+// Origin says who made a change: the kernel through the mount, an API
+// adapter (MCP, the control plane, WebDAV), or the remote itself. As with
+// ChangeKind the zero value is unknown, not kernel.
+type Origin uint8
+
+const (
+	_            Origin = iota
+	OriginKernel        // a request the kernel made, see FromKernel
+	OriginAPI           // a request tagged by WithOrigin
+	OriginRemote        // discovered rather than requested: listings, delta, uploads landing
+)
+
+// String returns the lower-case name trigger rules and the console use.
+func (o Origin) String() string {
+	switch o {
+	case OriginKernel:
+		return "kernel"
+	case OriginAPI:
+		return "api"
+	case OriginRemote:
+		return "remote"
+	}
+	return "unknown"
+}
+
+const apiOriginKey ctxKey = 2
+
+// WithOrigin marks a context as carrying a request from a named API adapter
+// ("mcp", "control", "webdav"). Changes made under it are reported with
+// OriginAPI, which is what lets a trigger rule exclude the agent's own
+// writes. The name is kept for later audit use, see OriginName; an empty
+// name marks nothing.
+func WithOrigin(ctx context.Context, name string) context.Context {
+	if name == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, apiOriginKey, name)
+}
+
+// OriginName returns the adapter name WithOrigin stored, or "".
+func OriginName(ctx context.Context) string {
+	v, _ := ctx.Value(apiOriginKey).(string)
+	return v
+}
+
+// originOf classifies the request behind ctx. Anything neither the kernel
+// nor an API adapter tagged is the daemon's own background work (refresh,
+// uploads, recovery), whose changes come from the remote's point of view.
+func originOf(ctx context.Context) Origin {
+	switch {
+	case fromKernel(ctx):
+		return OriginKernel
+	case OriginName(ctx) != "":
+		return OriginAPI
+	}
+	return OriginRemote
+}
+
+// originFor is originOf for one emit point. A remote change is discovered,
+// not made, by the request that ran the listing or the poll — a kernel
+// readdir that finds a new file did not create it — so those kinds always
+// carry OriginRemote whatever ctx says.
+func originFor(ctx context.Context, kind ChangeKind) Origin {
+	if kind == KindRemote || kind == KindRescan {
+		return OriginRemote
+	}
+	return originOf(ctx)
+}
+
+// rescanChange is the change every "start over" path emits.
+func rescanChange() Change {
+	return Change{Rescan: true, Kind: KindRescan, Origin: OriginRemote}
+}
+
 // Change describes a visible VFS change, not a durable audit record. Consumers
 // must re-read resources; intermediate versions may be coalesced. Paths are
-// virtual paths, never provider IDs or local cache filenames.
+// virtual paths, never provider IDs or local cache filenames. Kind and Origin
+// classify the change for consumers that filter (trigger rules); Affects
+// ignores them.
 type Change struct {
 	Paths   []string
 	Subtree bool // descendants may have moved, disappeared or become stale
 	Rescan  bool // bounded queue overflow or an unavailable metadata path
+	Kind    ChangeKind
+	Origin  Origin
 }
 
 // Affects reports whether a resource or its immediate directory listing may
@@ -76,7 +191,7 @@ func (f *FS) emitChange(change Change) {
 		return
 	}
 	if len(change.Paths) > 128 {
-		change = Change{Rescan: true}
+		change = rescanChange()
 	}
 	f.changeMu.Lock()
 	defer f.changeMu.Unlock()
@@ -95,36 +210,41 @@ func (f *FS) emitChange(change Change) {
 				default:
 				}
 			}
-			ch <- Change{Rescan: true} // only this lock can send or close
+			ch <- rescanChange() // only this lock can send or close
 		}
 	}
 }
 
-func (f *FS) changedNode(ctx context.Context, ino uint64, subtree bool) {
+// changedNode announces kind happening to the node ino itself. Each emit
+// point passes the operation it performed; the origin comes from ctx.
+func (f *FS) changedNode(ctx context.Context, ino uint64, subtree bool, kind ChangeKind) {
 	if !f.hasChangeWatchers.Load() {
 		return
 	}
 	p, err := f.meta.Path(ctx, ino)
 	if err != nil {
-		f.emitChange(Change{Rescan: true})
+		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{p}, Subtree: subtree})
+	f.emitChange(Change{Paths: []string{p}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)})
 }
 
-func (f *FS) changedEntry(ctx context.Context, parent uint64, name string, subtree bool) {
+// changedEntry announces kind happening to the name under parent, which may
+// no longer resolve (a removal) — hence parent plus name, not an inode.
+func (f *FS) changedEntry(ctx context.Context, parent uint64, name string, subtree bool, kind ChangeKind) {
 	f.forgetDirReadAhead(parent)
 	if !f.hasChangeWatchers.Load() {
 		return
 	}
 	p, err := f.meta.Path(ctx, parent)
 	if err != nil {
-		f.emitChange(Change{Rescan: true})
+		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{path.Join(p, name)}, Subtree: subtree})
+	f.emitChange(Change{Paths: []string{path.Join(p, name)}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)})
 }
 
+// changedRename announces a move: Paths[0] is the old name, Paths[1] the new.
 func (f *FS) changedRename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) {
 	f.forgetDirReadAhead(oldParent)
 	if newParent != oldParent {
@@ -136,28 +256,32 @@ func (f *FS) changedRename(ctx context.Context, oldParent uint64, oldName string
 	oldDir, oldErr := f.meta.Path(ctx, oldParent)
 	newDir, newErr := f.meta.Path(ctx, newParent)
 	if oldErr != nil || newErr != nil {
-		f.emitChange(Change{Rescan: true})
+		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{path.Join(oldDir, oldName), path.Join(newDir, newName)}, Subtree: true})
+	f.emitChange(Change{Paths: []string{path.Join(oldDir, oldName), path.Join(newDir, newName)}, Subtree: true,
+		Kind: KindRename, Origin: originFor(ctx, KindRename)})
 }
 
+// changedListing announces what a directory listing found different from
+// the cached view. That is always a remote change: the listing ran on
+// behalf of some reader, but the reader did not make the difference.
 func (f *FS) changedListing(ctx context.Context, dir uint64, change meta.DirChange) {
 	if !f.hasChangeWatchers.Load() || !change.Any() {
 		return
 	}
 	if len(change.Added)+len(change.Removed)+len(change.Updated) > 128 {
-		f.changedNode(ctx, dir, true)
+		f.changedNode(ctx, dir, true, KindRemote)
 		return
 	}
 	p, err := f.meta.Path(ctx, dir)
 	if err != nil {
-		f.emitChange(Change{Rescan: true})
+		f.emitChange(rescanChange())
 		return
 	}
 	// A listing can remove a directory. Retain its old name after the node
 	// was deleted so subscribers to descendants can invalidate their URI.
-	c := Change{Subtree: true}
+	c := Change{Subtree: true, Kind: KindRemote, Origin: OriginRemote}
 	for _, name := range change.Added {
 		c.Paths = append(c.Paths, path.Join(p, name))
 	}
@@ -167,7 +291,7 @@ func (f *FS) changedListing(ctx context.Context, dir uint64, change meta.DirChan
 	for _, ino := range change.Updated {
 		p, err := f.meta.Path(ctx, ino)
 		if err != nil {
-			f.emitChange(Change{Rescan: true})
+			f.emitChange(rescanChange())
 			return
 		}
 		c.Paths = append(c.Paths, p)

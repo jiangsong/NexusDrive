@@ -217,7 +217,7 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 		r.fs.cache.Forget(cache.FileKey{Remote: local.Remote, RemoteID: local.RemoteID, Version: local.Version})
 		r.fs.dropPaths()
 		r.fs.invalidateListing(parent, meta.DirChange{Removed: []string{local.Name}, Updated: []uint64{local.Ino}})
-		r.fs.changedEntry(ctx, parent, local.Name, local.IsDir())
+		r.fs.changedEntry(ctx, parent, local.Name, local.IsDir(), KindRemote)
 		r.fs.wakePins()
 		return true, nil
 	}
@@ -247,7 +247,7 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 				return false, err
 			}
 			r.fs.invalidate(p.Ino)
-			r.fs.changedNode(ctx, p.Ino, true)
+			r.fs.changedNode(ctx, p.Ino, true, KindRemote)
 			return true, nil
 		}
 		return false, nil
@@ -284,9 +284,9 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 	if local.Ino != updated.Ino {
 		r.fs.dropPaths()
 		r.fs.invalidateListing(local.ParentIno, meta.DirChange{Removed: []string{local.Name}})
-		r.fs.changedEntry(ctx, local.ParentIno, local.Name, true)
+		r.fs.changedEntry(ctx, local.ParentIno, local.Name, true, KindRemote)
 	} else {
-		r.fs.changedNode(ctx, local.Ino, false)
+		r.fs.changedNode(ctx, local.Ino, false, KindRemote)
 	}
 	r.fs.wakePins()
 	return true, nil
