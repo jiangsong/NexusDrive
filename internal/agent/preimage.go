@@ -179,13 +179,17 @@ func (p *Preimages) Capture(ctx context.Context, fs FSOps, path string) (Pre, er
 
 // keep makes sure dir/<hash> holds data and marks it in flight: an existing
 // blob is reused, a hydrated cache file is hard-linked, and failing both
-// the bytes are written to a temporary file and renamed into place.
+// the bytes are written to a temporary file and renamed into place. The
+// lock covers the checks and the link, not the copy: a copy of a file at
+// the size limit takes a while, and every other tool's capture would wait
+// on it. The in-flight mark is taken before the lock is dropped, which is
+// what keeps a sweep off the blob and its temporary file meanwhile.
 func (p *Preimages) keep(ctx context.Context, fs FSOps, path, hash string, data []byte) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	blob := filepath.Join(p.dir, hash)
 	if info, err := os.Stat(blob); err == nil && info.Size() == int64(len(data)) {
 		p.inflight[hash]++
+		p.mu.Unlock()
 		return nil
 	} else if err == nil {
 		// Same name, wrong size: cannot be our content. Replace it.
@@ -206,15 +210,17 @@ func (p *Preimages) keep(ctx context.Context, fs FSOps, path, hash string, data 
 			linked = true
 		}
 	}
+	p.inflight[hash]++
+	p.mu.Unlock()
 	if !linked {
 		if err := p.copy(blob, data); err != nil {
+			p.release(hash)
 			return err
 		}
 	}
 	if p.afterLink != nil {
 		p.afterLink()
 	}
-	p.inflight[hash]++
 	return nil
 }
 
@@ -366,8 +372,8 @@ func (p *Preimages) GC(ctx context.Context, retain time.Duration) (GCResult, err
 	return res, err
 }
 
-// sweep removes every blob no row names and is not in flight, plus stray
-// temporary files.
+// sweep removes every blob no row names and is not in flight, plus the
+// temporary files of copies that are not in flight either.
 func (p *Preimages) sweep(ctx context.Context) (int, error) {
 	entries, err := os.ReadDir(p.dir)
 	if err != nil {
@@ -398,8 +404,8 @@ func (p *Preimages) sweep(ctx context.Context) (int, error) {
 		if e.IsDir() {
 			continue
 		}
-		if strings.Contains(name, ".tmp") {
-			if os.Remove(filepath.Join(p.dir, name)) == nil {
+		if base, _, isTmp := strings.Cut(name, ".tmp"); isTmp {
+			if p.inflight[base] == 0 && os.Remove(filepath.Join(p.dir, name)) == nil {
 				removed++
 			}
 			continue
