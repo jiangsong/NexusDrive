@@ -32,6 +32,7 @@ import (
 	"cloudfs/internal/provider"
 	"cloudfs/internal/provider/httpx"
 	"cloudfs/internal/service"
+	"cloudfs/internal/trigger"
 	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 )
@@ -58,6 +59,11 @@ type Daemon struct {
 	// rolled back; the owner recovers orphan blobs at start and collects
 	// expired sessions hourly.
 	Preimages *agent.Preimages
+	// Trigger runs the triggers[] and agents[] rules over the change
+	// stream. Only the owner of agent.db with background work enabled
+	// builds one, and only when the config has a rule or an agent; every
+	// other process leaves it nil.
+	Trigger *trigger.Engine
 	// Index is the content indexer over index.db, nil unless index.enabled.
 	// Every process opens it so a stdio MCP server beside the daemon can
 	// search; only the owner of index.db runs the extraction worker.
@@ -473,6 +479,22 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		// to it; it only lists on its own when search.crawl.enabled.
 		fsys.StartCrawl(ctx, vfs.CrawlOptionsFrom(cfg.Search.Crawl))
 		d.closers = append(d.closers, func() error { fsys.StopCrawl(); return nil })
+	}
+	// The trigger engine starts last: the queue it drains is durable, and
+	// every action it runs may read the VFS, so nothing above may still be
+	// half-built. The owner check is what keeps a stdio MCP process beside
+	// the daemon from running the same rules a second time.
+	if agentStore.Owner() && !opt.NoBackground && len(cfg.Triggers)+len(cfg.Agents) > 0 {
+		eng := trigger.New(trigger.Options{
+			FS: fsys, Rules: cfg.Triggers, Agents: cfg.Agents, Store: agentStore,
+			Secrets: secrets.Get, Proxy: pm,
+		})
+		if err := eng.Run(ctx); err != nil {
+			d.Close()
+			return nil, fmt.Errorf("daemon: triggers: %w", err)
+		}
+		d.Trigger = eng
+		d.closers = append(d.closers, func() error { eng.Close(); return nil })
 	}
 	return d, nil
 }

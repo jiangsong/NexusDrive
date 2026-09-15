@@ -80,3 +80,29 @@ func TestMatchHandlesRepeatedDoubleStars(t *testing.T) {
 		t.Fatal("matched a path that ends in b against a pattern that ends in c")
 	}
 }
+
+func TestMayMatchBelow(t *testing.T) {
+	cases := []struct {
+		pattern, dir string
+		want         bool
+	}{
+		{"/work/inbox/**", "/work", true},
+		{"/work/inbox/**", "/work/inbox", true},
+		{"/work/inbox/**", "/work/inbox/deep", true},
+		{"/work/inbox/**", "/other", false},
+		{"/work/inbox/**", "/", true},
+		{"/work/**/*.md", "/work/inbox", true},
+		{"/work/**/*.md", "/work/inbox/deeper", true},
+		{"/work/inbox/*.md", "/work/inbox/sub", false},
+		{"/work/inbox/*.md", "/work/inbox", true},
+		{"/work/*.md", "/work/notes.md", true},
+		{"/work/*/*.md", "/work/a/b", false},
+		{"**", "/anything/at/all", true},
+		{"/[", "/x", false},
+	}
+	for _, c := range cases {
+		if got := MayMatchBelow(c.pattern, c.dir); got != c.want {
+			t.Errorf("MayMatchBelow(%q, %q) = %v, want %v", c.pattern, c.dir, got, c.want)
+		}
+	}
+}

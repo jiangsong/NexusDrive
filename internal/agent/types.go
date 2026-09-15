@@ -88,11 +88,13 @@ type AuditRow struct {
 	DurationMS  int64           `json:"duration_ms"`
 }
 
-// Event is what Watch delivers: a new audit row or a session that changed.
+// Event is what Watch delivers: a new audit row, a session that changed,
+// or a trigger delivery that changed state.
 type Event struct {
-	Kind    string    `json:"kind"` // audit | session
-	Audit   *AuditRow `json:"audit,omitempty"`
-	Session *Session  `json:"session,omitempty"`
+	Kind     string    `json:"kind"` // audit | session | trigger
+	Audit    *AuditRow `json:"audit,omitempty"`
+	Session  *Session  `json:"session,omitempty"`
+	Delivery *Delivery `json:"delivery,omitempty"`
 }
 
 // Summary is the headline the console and the status endpoint show.
