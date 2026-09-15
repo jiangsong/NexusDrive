@@ -49,6 +49,9 @@ button, input, select, textarea {
   font: inherit;
   color: inherit;
 }
+/* A checkbox with its appearance removed has no box at all; it keeps the
+   native one so the filters and opt-ins that use it can be seen. */
+input[type=checkbox] { appearance: auto; -webkit-appearance: auto; accent-color: var(--accent-text); }
 :focus-visible { outline: 2px solid var(--accent-border); outline-offset: 2px; }
 * { scrollbar-color: var(--btn-border) var(--panel); scrollbar-width: thin; }
 ::-webkit-scrollbar { width: 12px; height: 12px; }

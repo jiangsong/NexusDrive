@@ -7,6 +7,8 @@ import { openAddDrive } from '/ui/add_drive.js';
 import { openConnection } from '/ui/connection.js';
 import { onFsChange } from '/ui/app.js';
 import { get, subscribe } from '/ui/store.js';
+import { workspaceMark, sessionDirOf } from '/ui/workspace_view.js';
+import { openSessionPanel } from '/ui/session_panel.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
@@ -37,8 +39,29 @@ function stateCell(entry) {
   return el('span', { class: 'dim' }, el('span', { class: 'dot' }), ' ' + t('state.remote'));
 }
 
+// workspaceRoot is the agent workspace the daemon reported on its last
+// status tick, or '' before the first one — in which case no row is marked
+// until the next load, which is the honest answer.
+function workspaceRoot() {
+  const s = get().status;
+  return s && s.agent ? s.agent.workspace || '' : '';
+}
+
+// workspaceMarkEl is the small bot beside a workspace or session directory.
+// It carries its meaning as text for assistive technology and as a title
+// for everyone else; a bare icon would be a glyph nobody could look up.
+function workspaceMarkEl(e) {
+  const mark = e.is_dir ? workspaceMark(e.path, workspaceRoot()) : '';
+  return mark ? el('span', { class: 'dim', title: t('workspace.mark.' + mark), 'aria-label': t('workspace.mark.' + mark) }, iconEl('bot')) : null;
+}
+
 export function renderMain(host) {
-  let cwd = '/';
+  // A deep link opens a directory (#/connections?dir=/a) or the parent of
+  // an entry with that entry selected (#/connections?path=/a/b); the
+  // session panel's "show in files" and "open workspace folder" land here.
+  const link = new URLSearchParams(location.hash.split('?')[1] || '');
+  let wanted = link.get('path') || '';
+  let cwd = link.get('dir') || (wanted ? wanted.replace(/\/[^/]*$/, '') || '/' : '/');
   let selected = null;
   let selectedRow = null;
   // True once the reader has asked for more than the first page of this
@@ -85,11 +108,18 @@ export function renderMain(host) {
       default: return '';
     }
   }
+  // markedWith is the workspace the table was last drawn with. On a cold
+  // page the first directory can land before the first status tick, so the
+  // rows would carry no workspace mark; the tick that brings the workspace
+  // redraws them once. The workspace does not change while the daemon runs,
+  // so this is one extra list per page, not one per tick.
+  let markedWith = '';
   const unsubscribeHealth = subscribe(() => {
     for (const [name, dot] of dots) {
       dot.className = 'dot ' + dotClass(remoteState(name));
       dot.title = remoteStateTitle(name);
     }
+    if (!paged && workspaceRoot() !== markedWith) load();
   });
 
   async function loadAccounts() {
@@ -180,6 +210,7 @@ export function renderMain(host) {
     // A continuation appends to what is already on screen; only a fresh load
     // clears the table and redraws the breadcrumb, which cannot have changed.
     if (!cursor) {
+      markedWith = workspaceRoot();
       fill(rows);
       fill(crumb, iconEl('folder'),
         ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
@@ -194,11 +225,12 @@ export function renderMain(host) {
       rows.append(...(page.entries || []).map((e) => {
         const tr = el('tr', { onclick: () => select(e, tr) },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' },
-            el('span', { style: 'color:' + (e.is_dir ? 'var(--accent-text)' : 'var(--muted)') }, iconEl(e.is_dir ? 'folder' : 'file')), e.name)),
+            el('span', { style: 'color:' + (e.is_dir ? 'var(--accent-text)' : 'var(--muted)') }, iconEl(e.is_dir ? 'folder' : 'file')), e.name, workspaceMarkEl(e))),
           el('td', { class: 'num dim' }, e.is_dir ? '—' : bytes(e.size)),
           el('td', { class: 'detail', style: 'padding-left:20px' }, new Date(e.mtime).toLocaleDateString(locale())),
           el('td', { style: 'padding-left:20px;font-size:13px' }, stateCell(e)));
         if (e.is_dir) tr.addEventListener('dblclick', () => { cwd = e.path; load(); });
+        if (wanted && e.path === wanted) { wanted = ''; select(e, tr); }
         return tr;
       }));
       if (!rows.children.length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
@@ -240,7 +272,19 @@ export function renderMain(host) {
         el('button', { onclick: () => rename(e) }, t('action.rename')),
         e.is_dir ? null : el('button', { onclick: () => preview(e) }, t('action.preview')),
         e.is_dir ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
+        sessionDirOf(e.path, workspaceRoot()) ? el('button', { onclick: () => fromSession(e) }, iconEl('bot'), t('inspector.fromsession') + ' ' + sessionDirOf(e.path, workspaceRoot()).split('/').pop()) : null,
         el('button', { class: 'danger', onclick: () => remove(e) }, t('action.delete'))));
+  }
+  // fromSession asks the daemon which session owns this path rather than
+  // parsing the directory name: the name is a convention, the audit trail
+  // is the record.
+  async function fromSession(e) {
+    try {
+      const r = await api.get('/sessions?path=' + encodeURIComponent(e.path) + '&limit=1');
+      const s = (r.sessions || [])[0];
+      if (s) openSessionPanel(s.id);
+      else toast(t('inspector.fromsession.none'));
+    } catch (err) { toast(err.message, 'bad'); }
   }
   function infoRow(k, v) {
     return el('div', { style: 'display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-bottom:10px' },

@@ -10,7 +10,7 @@ import { onAgentEvent } from '/ui/app.js';
 // newest first. Every row comes from GET /sessions and is held by this
 // module alone — the shared store never sees a session, because nothing
 // else on the page wants one and the list can be long.
-const COLUMNS = 5;
+const COLUMNS = 6;
 
 // scopeSummary is the one-line reading of a scope, translated part by part.
 export function scopeSummary(scope) {
@@ -33,6 +33,9 @@ export function renderSessionsTab(host, params) {
   // event it raises reloads again — and each would append its rows to a
   // table the other has already filled. Only the newest load lands.
   let generation = 0;
+  // The sandbox filter is a view choice, kept for the life of the tab:
+  // every reload, including the ones session events trigger, honours it.
+  let sandboxOnly = false;
 
   function card(label, value) {
     return el('div', { class: 'panel pad' },
@@ -62,7 +65,8 @@ export function renderSessionsTab(host, params) {
       el('td', { class: 'detail' }, scopeSummary(s.scope)),
       el('td', {}, stateCell(s)),
       el('td', { class: 'detail tnums' }, when(s.started_at)),
-      el('td', { class: 'num' }, String(s.writes || 0)));
+      el('td', { class: 'num' }, String(s.writes || 0)),
+      el('td', { class: 'num' }, String(s.artifacts || 0)));
   }
 
   function appendResponse(r) {
@@ -79,7 +83,8 @@ export function renderSessionsTab(host, params) {
     if (!cursor) fill(rows);
     const mine = ++generation;
     try {
-      const r = await api.get('/sessions?limit=50' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      const r = await api.get('/sessions?limit=50' + (sandboxOnly ? '&sandbox=1' : '')
+        + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
       if (disposed || mine !== generation) return;
       appendResponse(r);
     } catch (e) {
@@ -96,13 +101,18 @@ export function renderSessionsTab(host, params) {
 
   fill(host,
     cards,
-    el('div', { class: 'pad', style: 'display:flex;justify-content:flex-end;padding-bottom:12px' },
+    el('div', { class: 'pad', style: 'display:flex;align-items:center;gap:14px;padding-bottom:12px' },
+      el('label', { style: 'display:inline-flex;align-items:center;gap:7px;font-size:13px' },
+        el('input', { type: 'checkbox', onchange: (ev) => { sandboxOnly = ev.target.checked; load(); } }),
+        t('session.filter.sandbox')),
+      el('div', { class: 'grow' }),
       el('button', { onclick: () => load() }, t('action.refresh'))),
     el('div', { style: 'padding:0 20px 20px' }, el('div', { class: 'panel', style: 'overflow:auto' },
       el('table', {}, el('thead', {}, el('tr', {},
         el('th', {}, t('session.col.client')), el('th', {}, t('session.col.scope')),
         el('th', {}, t('session.col.state')), el('th', {}, t('session.col.started')),
-        el('th', { class: 'num' }, t('session.col.writes')))), rows))));
+        el('th', { class: 'num' }, t('session.col.writes')),
+        el('th', { class: 'num' }, t('session.col.artifacts')))), rows))));
 
   refreshCards(null);
   load();
