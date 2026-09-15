@@ -98,9 +98,9 @@ func (s *Server) registerCopyTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "forget_copy_job", Description: "With confirm=true, remove terminal preparation history and unreferenced retained bytes. Rejects active/referenced data; never deletes a local/remote file. Failed cleanup may require inspection and retry.", Annotations: mutating}, s.forgetCopyJob)
 }
 
-func (s *Server) copyInfoAllowed(info vfs.CopyInfo) bool {
+func (s *Server) copyInfoAllowed(ctx context.Context, info vfs.CopyInfo) bool {
 	for _, p := range []string{info.Source, info.Target} {
-		clean, err := s.checkPath(p)
+		clean, err := s.checkPath(ctx, p, false)
 		if err != nil || clean != p || !utf8.ValidString(p) {
 			return false
 		}
@@ -116,7 +116,7 @@ func (s *Server) authorizedCopy(ctx context.Context, id string) (vfs.CopyInfo, e
 	if err != nil {
 		return vfs.CopyInfo{}, err
 	}
-	if !s.copyInfoAllowed(info) {
+	if !s.copyInfoAllowed(ctx, info) {
 		return vfs.CopyInfo{}, vfs.ErrNotFound
 	}
 	return info, nil
@@ -160,7 +160,7 @@ func (s *Server) listCopyJobs(ctx context.Context, _ *mcp.CallToolRequest, in co
 	}
 	last := after
 	for i, info := range jobs {
-		if !s.copyInfoAllowed(info) {
+		if !s.copyInfoAllowed(ctx, info) {
 			continue
 		}
 		candidate := copyJobsOutput{Jobs: append(out.Jobs, info)}
@@ -206,7 +206,7 @@ func (s *Server) getCopyJob(ctx context.Context, _ *mcp.CallToolRequest, in copy
 }
 
 func (s *Server) mutateCopyJob(ctx context.Context, id, action string, confirm bool) (*mcp.CallToolResult, copyMutationOutput, error) {
-	if err := s.checkWrite(); err != nil {
+	if err := s.checkWrite(ctx); err != nil {
 		r, _ := fail(err)
 		return r, copyMutationOutput{}, nil
 	}

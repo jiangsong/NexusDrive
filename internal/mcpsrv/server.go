@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/vfs"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -69,6 +70,11 @@ type Options struct {
 	Limits      Limits
 	// Version is reported to the client.
 	Version string
+	// Sessions, when set, gives every call a CloudFS session and scope. nil
+	// keeps today's behaviour: one process-wide scope from Allow/ReadOnly.
+	Sessions *agent.Sessions
+	// Scope overrides the scope derived from Allow/ReadOnly. nil derives it.
+	Scope *agent.Scope
 }
 
 // Server wraps an MCP server bound to a VFS.
@@ -77,10 +83,16 @@ type Server struct {
 	mcp           *mcp.Server
 	subscriptions resourceSubscriptions
 	copyTools     copyToolState
+	// defaultScope is what a call runs under when no session store is
+	// configured, and the scope of the principal every stdio, legacy HTTP
+	// or loopback session belongs to when one is.
+	defaultScope     agent.Scope
+	defaultPrincipal agent.Principal
 }
 
-// ErrDenied is returned for paths outside the allowlist.
-var ErrDenied = errors.New("path is outside the allowed directories")
+// ErrDenied is returned for paths outside the caller's scope. It is the
+// scope package's error so that callers may match either name.
+var ErrDenied = agent.ErrDenied
 
 // New builds the MCP server and registers every tool.
 func New(opt Options) (*Server, error) {
@@ -97,6 +109,17 @@ func New(opt Options) (*Server, error) {
 		opt.Version = "0.1.0"
 	}
 	s := &Server{opt: opt}
+	s.defaultScope = agent.Scope{Read: append([]string(nil), opt.Allow...), ReadOnly: opt.ReadOnly}
+	if opt.Scope != nil {
+		s.defaultScope = *opt.Scope
+	}
+	if opt.Sessions != nil {
+		p, err := opt.Sessions.EnsurePrincipal(context.Background(), "stdio", "local", s.defaultScope)
+		if err != nil {
+			return nil, fmt.Errorf("mcpsrv: agent principal: %w", err)
+		}
+		s.defaultPrincipal = p
+	}
 	if err := s.copyTools.init(); err != nil {
 		return nil, fmt.Errorf("mcpsrv: initialize copy cursor: %w", err)
 	}
@@ -107,9 +130,14 @@ func New(opt Options) (*Server, error) {
 		Version: opt.Version,
 	}, &mcp.ServerOptions{PageSize: opt.Limits.MaxEntries,
 		SubscribeHandler:   s.subscriptions.subscribeHook,
-		UnsubscribeHandler: s.subscriptions.unsubscribeHook})
+		UnsubscribeHandler: s.subscriptions.unsubscribeHook,
+		InitializedHandler: s.onInitialized})
 	s.mcp.AddReceivingMiddleware(privateResourceResponses)
 	s.mcp.AddReceivingMiddleware(s.subscriptions.receive)
+	// Each AddReceivingMiddleware wraps the handler built so far, so the last
+	// one added runs first. The session must be in the context before the
+	// subscription reservation checks paths, hence it is added last.
+	s.mcp.AddReceivingMiddleware(s.sessionMiddleware)
 	s.mcp.AddSendingMiddleware(s.subscriptions.send)
 	s.register()
 	s.registerCopyTools()
@@ -142,28 +170,6 @@ func normalise(p string) string {
 		return "/"
 	}
 	return path.Clean("/" + strings.TrimPrefix(p, "/"))
-}
-
-// checkPath validates a path against the allowlist after cleaning it, which
-// also defeats "..\" traversal attempts.
-func (s *Server) checkPath(p string) (string, error) {
-	clean := normalise(p)
-	if len(s.opt.Allow) == 0 {
-		return clean, nil
-	}
-	for _, a := range s.opt.Allow {
-		if a == "/" || clean == a || strings.HasPrefix(clean, strings.TrimSuffix(a, "/")+"/") {
-			return clean, nil
-		}
-	}
-	return "", fmt.Errorf("%w: %s", ErrDenied, clean)
-}
-
-func (s *Server) checkWrite() error {
-	if s.opt.ReadOnly {
-		return errors.New("this cloudfs MCP server is read-only")
-	}
-	return nil
 }
 
 // entry is one item in a listing or search result.
@@ -504,7 +510,7 @@ func (s *Server) register() {
 // --- tool implementations ---
 
 func (s *Server) listDirectory(ctx context.Context, _ *mcp.CallToolRequest, in listInput) (*mcp.CallToolResult, listOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, listOutput{}, nil
@@ -539,7 +545,7 @@ func (s *Server) listDirectory(ctx context.Context, _ *mcp.CallToolRequest, in l
 }
 
 func (s *Server) stat(ctx context.Context, _ *mcp.CallToolRequest, in statInput) (*mcp.CallToolResult, statOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, statOutput{}, nil
@@ -562,7 +568,7 @@ func (s *Server) statMany(ctx context.Context, _ *mcp.CallToolRequest, in statMa
 	}
 	var out statManyOutput
 	for _, raw := range in.Paths {
-		p, err := s.checkPath(raw)
+		p, err := s.checkPath(ctx, raw, false)
 		if err != nil {
 			out.Results = append(out.Results, statOutput{entry: entry{Path: normalise(raw)}, Error: err.Error()})
 			continue
@@ -581,7 +587,7 @@ func (s *Server) statMany(ctx context.Context, _ *mcp.CallToolRequest, in statMa
 }
 
 func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTextInput) (*mcp.CallToolResult, readTextOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, readTextOutput{}, nil
@@ -658,7 +664,7 @@ func lastLines(s string, n int) string {
 }
 
 func (s *Server) readRange(ctx context.Context, _ *mcp.CallToolRequest, in readRangeInput) (*mcp.CallToolResult, readRangeOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, readRangeOutput{}, nil
@@ -690,11 +696,7 @@ func (s *Server) readRange(ctx context.Context, _ *mcp.CallToolRequest, in readR
 }
 
 func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in writeInput) (*mcp.CallToolResult, writeOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, writeOutput{}, nil
-	}
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, writeOutput{}, nil
@@ -728,11 +730,7 @@ func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in write
 }
 
 func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editInput) (*mcp.CallToolResult, editOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, editOutput{}, nil
-	}
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, editOutput{}, nil
@@ -791,11 +789,7 @@ func truncateLine(s string) string {
 }
 
 func (s *Server) mkdir(ctx context.Context, _ *mcp.CallToolRequest, in mkdirInput) (*mcp.CallToolResult, okOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, okOutput{}, nil
-	}
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -836,16 +830,12 @@ func (s *Server) mkdirAll(ctx context.Context, p string) error {
 }
 
 func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput) (*mcp.CallToolResult, okOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, okOutput{}, nil
-	}
-	from, err := s.checkPath(in.From)
+	from, err := s.checkPath(ctx, in.From, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	to, err := s.checkPath(in.To)
+	to, err := s.checkPath(ctx, in.To, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -868,16 +858,12 @@ func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput)
 }
 
 func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveInput) (*mcp.CallToolResult, okOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, okOutput{}, nil
-	}
-	from, err := s.checkPath(in.From)
+	from, err := s.checkPath(ctx, in.From, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	to, err := s.checkPath(in.To)
+	to, err := s.checkPath(ctx, in.To, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -890,11 +876,7 @@ func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveIn
 }
 
 func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in deleteInput) (*mcp.CallToolResult, okOutput, error) {
-	if err := s.checkWrite(); err != nil {
-		r, _ := fail(err)
-		return r, okOutput{}, nil
-	}
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, true)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -923,7 +905,7 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	root := "/"
 	if in.Path != "" {
 		var err error
-		root, err = s.checkPath(in.Path)
+		root, err = s.checkPath(ctx, in.Path, false)
 		if err != nil {
 			r, _ := fail(err)
 			return r, searchOutput{}, nil
@@ -939,17 +921,7 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	}
 	// Intersect scope before the database limit: hidden matches must not crowd
 	// authorized matches out of a page.
-	roots := []string{root}
-	if len(s.opt.Allow) > 0 {
-		roots = []string{}
-		for _, allowed := range s.opt.Allow {
-			if allowed == "/" || root == allowed || strings.HasPrefix(root, allowed+"/") {
-				roots = append(roots, root)
-			} else if root == "/" || strings.HasPrefix(allowed, root+"/") {
-				roots = append(roots, allowed)
-			}
-		}
-	}
+	roots := s.readRoots(ctx, root)
 	candidateLimit := limit + 1
 	if in.Content != "" {
 		candidateLimit = limit * 4
@@ -980,7 +952,7 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 		if root != "/" && r.Path != root && !strings.HasPrefix(r.Path, strings.TrimSuffix(root, "/")+"/") {
 			continue
 		}
-		if _, err := s.checkPath(r.Path); err != nil {
+		if _, err := s.checkPath(ctx, r.Path, false); err != nil {
 			continue
 		}
 		hit := searchHit{Path: r.Path, Name: r.Name}
@@ -1027,7 +999,7 @@ func firstMatchingLine(content, needle string) string {
 }
 
 func (s *Server) pin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (*mcp.CallToolResult, okOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -1040,7 +1012,7 @@ func (s *Server) pin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (
 }
 
 func (s *Server) unpin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (*mcp.CallToolResult, okOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err == nil {
 		err = s.opt.FS.Unpin(ctx, p)
 	}
@@ -1052,7 +1024,7 @@ func (s *Server) unpin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput)
 }
 
 func (s *Server) cacheStatus(ctx context.Context, _ *mcp.CallToolRequest, in statInput) (*mcp.CallToolResult, cacheStatusOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, cacheStatusOutput{}, nil
@@ -1078,12 +1050,12 @@ func (s *Server) cacheStatus(ctx context.Context, _ *mcp.CallToolRequest, in sta
 func (s *Server) listRoots(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, rootsOutput, error) {
 	var out rootsOutput
 	for _, m := range s.opt.FS.Mounts() {
-		if _, err := s.checkPath(m.Prefix); err != nil {
+		if _, err := s.checkPath(ctx, m.Prefix, false); err != nil {
 			continue
 		}
 		out.Roots = append(out.Roots, rootInfo{
 			Path: m.Prefix, Remote: m.Remote, Mode: string(m.Mode),
-			ReadOnly: s.opt.ReadOnly || string(m.Mode) == "readonly",
+			ReadOnly: s.scopeOf(ctx).ReadOnly || string(m.Mode) == "readonly",
 		})
 	}
 	sort.Slice(out.Roots, func(i, j int) bool { return out.Roots[i].Path < out.Roots[j].Path })
@@ -1091,7 +1063,7 @@ func (s *Server) listRoots(ctx context.Context, _ *mcp.CallToolRequest, _ struct
 }
 
 func (s *Server) getDownloadURL(ctx context.Context, _ *mcp.CallToolRequest, in statInput) (*mcp.CallToolResult, downloadURLOutput, error) {
-	p, err := s.checkPath(in.Path)
+	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
 		return r, downloadURLOutput{}, nil

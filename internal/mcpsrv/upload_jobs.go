@@ -106,14 +106,14 @@ func (s *Server) registerUploadTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "flush_uploads", Description: "Unrestricted servers only. Wait for the current upload queue snapshot, including scheduled retries; fails on retained dead, cancelled or cleanup records.", Annotations: mutating}, s.flushUploads)
 }
 
-func (s *Server) uploadInfoAllowed(info vfs.UploadInfo) bool {
-	if len(s.opt.Allow) == 0 {
+func (s *Server) uploadInfoAllowed(ctx context.Context, info vfs.UploadInfo) bool {
+	if s.unrestricted(ctx) {
 		return true
 	}
 	if info.Path == "" {
 		return false
 	}
-	clean, err := s.checkPath(info.Path)
+	clean, err := s.checkPath(ctx, info.Path, false)
 	return err == nil && clean == info.Path
 }
 
@@ -125,7 +125,7 @@ func (s *Server) authorizedUpload(ctx context.Context, id string) (vfs.UploadInf
 	if err != nil {
 		return vfs.UploadInfo{}, err
 	}
-	if !s.uploadInfoAllowed(info) {
+	if !s.uploadInfoAllowed(ctx, info) {
 		return vfs.UploadInfo{}, journal.ErrNotFound
 	}
 	return info, nil
@@ -174,7 +174,7 @@ func (s *Server) listUploads(ctx context.Context, _ *mcp.CallToolRequest, in upl
 	}
 	last := after
 	for i, info := range rows {
-		if !s.uploadInfoAllowed(info) {
+		if !s.uploadInfoAllowed(ctx, info) {
 			continue
 		}
 		candidate := uploadsOutput{Uploads: append(out.Uploads, info)}
@@ -215,7 +215,7 @@ func (s *Server) getUpload(ctx context.Context, _ *mcp.CallToolRequest, in uploa
 }
 
 func (s *Server) mutateUpload(ctx context.Context, id, action string, confirm bool) (*mcp.CallToolResult, uploadMutationOutput, error) {
-	if err := s.checkWrite(); err != nil {
+	if err := s.checkWrite(ctx); err != nil {
 		r, _ := fail(err)
 		return r, uploadMutationOutput{}, nil
 	}
@@ -234,14 +234,14 @@ func (s *Server) mutateUpload(ctx context.Context, id, action string, confirm bo
 		err = s.opt.FS.RetryUploadAt(ctx, id, info.Path)
 		out.State = journal.StatePending
 	case "cancel":
-		if len(s.opt.Allow) == 0 {
+		if s.unrestricted(ctx) {
 			out.State, err = s.opt.FS.CancelUpload(ctx, id)
 		} else {
 			out.State, err = s.opt.FS.CancelUploadAt(ctx, id, info.Path)
 		}
 		out.Warning = "local content retained; cancellation does not undo or reconcile remote changes"
 	case "resume":
-		if len(s.opt.Allow) == 0 {
+		if s.unrestricted(ctx) {
 			err = s.opt.FS.ResumeUpload(ctx, id, true)
 		} else {
 			err = s.opt.FS.ResumeUploadAt(ctx, id, info.Path, true)
@@ -249,7 +249,7 @@ func (s *Server) mutateUpload(ctx context.Context, id, action string, confirm bo
 		out.State = journal.StatePending
 		out.Warning = "a fresh upload attempt was accepted; remote data may be duplicated or overwritten"
 	case "discard":
-		if len(s.opt.Allow) != 0 {
+		if !s.unrestricted(ctx) {
 			err = fmt.Errorf("%w because a cleanup retry may no longer have a namespace path", errUnrestrictedUploadManagement)
 		} else {
 			err = s.opt.FS.DiscardUpload(ctx, id, true)
@@ -287,11 +287,11 @@ func (s *Server) discardUpload(ctx context.Context, _ *mcp.CallToolRequest, in c
 
 func (s *Server) flushUploads(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, uploadFlushOutput, error) {
 	out := uploadFlushOutput{}
-	if err := s.checkWrite(); err != nil {
+	if err := s.checkWrite(ctx); err != nil {
 		r, _ := fail(err)
 		return r, out, nil
 	}
-	if len(s.opt.Allow) != 0 {
+	if !s.unrestricted(ctx) {
 		r, _ := fail(fmt.Errorf("%w because flush_uploads processes the whole queue", errUnrestrictedUploadManagement))
 		return r, out, nil
 	}

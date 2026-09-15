@@ -18,7 +18,18 @@ const maxResourceSubscriptions = 4096
 type subscriptionToken struct {
 	session *mcp.ServerSession
 	modern  bool
-	cancel  context.CancelFunc
+	// ctx is the request the reservation was made under; its session scope
+	// decides which paths may be watched. nil means the process-wide scope.
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// context returns the request context the token was reserved under.
+func (t *subscriptionToken) context() context.Context {
+	if t.ctx == nil {
+		return context.Background()
+	}
+	return t.ctx
 }
 
 type subscriptionContextKey struct{}
@@ -137,7 +148,7 @@ func (r *resourceSubscriptions) reserve(token *subscriptionToken, uris []string)
 	}
 	paths := make(map[string]string, len(uris))
 	for _, uri := range uris {
-		q, err := r.server.parseResource(uri)
+		q, err := r.server.resourceQueryFor(token.context(), uri)
 		if err != nil {
 			return false, subscriptionError("invalid or inaccessible resource subscription")
 		}
@@ -259,7 +270,7 @@ func (r *resourceSubscriptions) receive(next mcp.MethodHandler) mcp.MethodHandle
 			}
 			streamCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			token := &subscriptionToken{session: q.Session, modern: true, cancel: cancel}
+			token := &subscriptionToken{session: q.Session, modern: true, ctx: streamCtx, cancel: cancel}
 			// Catalog-only listens also block until cancellation. Track them
 			// even though they need neither resource watches nor a VFS stream,
 			// otherwise Server.Close waits forever for a client's auto-listen.
@@ -291,7 +302,7 @@ func (r *resourceSubscriptions) receive(next mcp.MethodHandler) mcp.MethodHandle
 			}
 			r.registrationMu.Lock()
 			defer r.registrationMu.Unlock()
-			token := &subscriptionToken{session: q.Session, cancel: func() {}}
+			token := &subscriptionToken{session: q.Session, ctx: ctx, cancel: func() {}}
 			fresh, err := r.reserve(token, []string{q.Params.URI})
 			if err != nil {
 				return nil, err

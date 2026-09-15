@@ -81,11 +81,7 @@ func (s *Server) registerResources() {
 	roots := map[string]*mcp.Resource{}
 	authorities := map[string]bool{}
 	for _, m := range s.opt.FS.Mounts() {
-		allowed := s.opt.Allow
-		if len(allowed) == 0 {
-			allowed = []string{"/"}
-		}
-		for _, a := range allowed {
+		for _, a := range s.defaultScope.EffectiveRead() {
 			p := m.Prefix
 			if within(a, m.Prefix) {
 				p = a
@@ -119,7 +115,13 @@ type resourceQuery struct {
 	ranged               bool
 }
 
+// parseResource resolves a URI under the process-wide scope. Request paths
+// use resourceQueryFor with their context so a session's own scope applies.
 func (s *Server) parseResource(raw string) (resourceQuery, error) {
+	return s.resourceQueryFor(context.Background(), raw)
+}
+
+func (s *Server) resourceQueryFor(ctx context.Context, raw string) (resourceQuery, error) {
 	var q resourceQuery
 	if len(raw) > 32768 {
 		return q, errors.New("resource URI exceeds length limit")
@@ -134,7 +136,7 @@ func (s *Server) parseResource(raw string) (resourceQuery, error) {
 	if p == "" || len(p) > 4096 || !utf8.ValidString(p) || !strings.HasPrefix(p, "/") || path.Clean(p) != p || strings.ContainsAny(p, "\x00\\") {
 		return q, errors.New("resource requires a canonical absolute virtual path")
 	}
-	if _, err := s.checkPath(p); err != nil {
+	if _, err := s.checkPath(ctx, p, false); err != nil {
 		return q, mcp.ResourceNotFoundError(raw)
 	}
 	m, ok := s.resourceMount(p)
@@ -195,7 +197,7 @@ func resourceReadError(uri string, err error) error {
 }
 
 func (s *Server) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-	q, err := s.parseResource(req.Params.URI)
+	q, err := s.resourceQueryFor(ctx, req.Params.URI)
 	if err != nil {
 		return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: err.Error()}
 	}
@@ -263,7 +265,7 @@ func (s *Server) readDirectoryResource(ctx context.Context, uri string, q resour
 		for _, a := range page.Entries {
 			after = a.Name
 			p := path.Join(q.path, a.Name)
-			if _, err := s.checkPath(p); err != nil {
+			if _, err := s.checkPath(ctx, p, false); err != nil {
 				continue
 			}
 			m, ok := s.resourceMount(p)
