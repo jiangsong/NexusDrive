@@ -79,7 +79,17 @@ type Options struct {
 	// Audit records every tool call. nil uses Sessions.Store(); with both
 	// nil nothing is recorded.
 	Audit AuditWriter
+	// NonOwner says this server runs beside the process that owns the cache
+	// (a stdio server started while `cloudfs mount` is up). Its VFS is a
+	// separate view, so the tools that need the shared journal and session
+	// state refuse with errRequiresOwner and point at the HTTP transport.
+	NonOwner bool
 }
+
+// errRequiresOwner is the refusal a session or rollback tool gives on a
+// NonOwner server: the work has to happen in the process that owns the
+// cache, which the HTTP transport reaches.
+var errRequiresOwner = errors.New("requires the storage owner; use the HTTP transport")
 
 // Server wraps an MCP server bound to a VFS.
 type Server struct {

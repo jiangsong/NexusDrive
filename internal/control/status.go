@@ -222,7 +222,10 @@ type Collector struct {
 	// session events. nil on a daemon without agent.db, and those routes
 	// then answer 503 rather than pretending.
 	Agent AgentView
-	Now   func() time.Time
+	// MCP, when set, serves /mcp/connect and /mcp/tokens. nil on a daemon
+	// without agent.db, and those routes answer 503.
+	MCP MCPView
+	Now func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value

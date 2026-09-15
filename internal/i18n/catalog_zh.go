@@ -123,6 +123,12 @@ var zh = map[string]string{
 	"err.audit_list_failed":             "无法读取审计记录",
 	"err.session_not_found":             "没有这个 Agent 会话",
 	"err.sessions_list_failed":          "无法列出会话",
+	"err.mcp_unavailable":               "这个守护进程没有打开 Agent 存储，无法在这里管理 MCP 令牌",
+	"err.token_invalid":                 "令牌请求被拒绝：%s",
+	"err.token_create_failed":           "无法创建令牌",
+	"err.token_not_found":               "没有这个访问令牌",
+	"err.token_revoke_failed":           "无法吊销令牌",
+	"err.tokens_list_failed":            "无法列出访问令牌",
 	"err.action_invalid":                "action 只能是 clear 或 relist",
 	"err.auth_in_progress":              "这个账号已经有一次授权在进行中；先取消它",
 	"err.auth_port_busy":                "%s 正在授权中；授权回调共用本机的同一个端口，请先完成或取消它",
@@ -217,6 +223,7 @@ var zh = map[string]string{
 	"confirm.remove_mount":   "把挂载布局从配置里移除",
 	"confirm.stop_service":   "停止服务并卸下它的挂载点",
 	"confirm.required":       "这会%s；核对目标后再传 confirm=true",
+	"confirm.token_revoke":   "吊销访问令牌 %s 并关闭所有使用它的会话",
 
 	// 存储池在添加网盘的表单里和其它后端一样。
 	"field.pool.pool": "存储池名称（成员与副本数写在 pools.<name> 下）",

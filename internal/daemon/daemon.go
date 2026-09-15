@@ -67,6 +67,9 @@ type Daemon struct {
 	// the VFS's own; a mounting process wraps it to also drop the kernel's.
 	DropCaches func(ctx context.Context) (int, error)
 
+	// mcp is what the control plane reports about the MCP HTTP transport.
+	mcp mcpHTTP
+
 	version string
 	started time.Time
 	closers []func() error
@@ -462,6 +465,7 @@ func (d *Daemon) Collector() *control.Collector {
 		col.Export = d.Export
 	}
 	col.Agent = d.agentView()
+	col.MCP = d.mcpView()
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that

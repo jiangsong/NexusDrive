@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -636,7 +637,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 			if v := f.str("allow", ""); v != "" {
 				allow = strings.Split(v, ",")
 			}
-			return mcpInstall(f, allow, f.bool("read-only"))
+			return mcpInstall(f, allow, f.bool("read-only"), nil)
 		}
 		return err
 	}
@@ -647,7 +648,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	readOnly := cfg.MCP.ReadOnly || f.bool("read-only")
 
 	if f.arg(0) == "install" {
-		return mcpInstall(f, allow, readOnly)
+		return mcpInstall(f, allow, readOnly, cfg)
 	}
 	if f.arg(0) == "token" {
 		return runMCPToken(ctx, os.Stdout, mcpTokenArgs(args))
@@ -685,10 +686,18 @@ func cmdMCP(ctx context.Context, args []string) error {
 		return serveMCPHTTPWith(ctx, d, allow, readOnly, addr, cfg.MCP.ExportRoots)
 	}
 	// stdio is the default: it is how Claude Code and Codex launch servers.
+	// Beside a running mount this process is not the cache owner: it has
+	// its own VFS, does not see the kernel's writes, and shares neither
+	// sessions nor the journal. Say so on stderr (stdout is the transport)
+	// and let the tools that need the owner refuse with the same advice.
+	nonOwner := d.Journal != nil && !d.Journal.Owner()
+	if nonOwner {
+		fmt.Fprintln(os.Stderr, nonOwnerWarning)
+	}
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
-		Sessions: d.Sessions,
+		Sessions: d.Sessions, NonOwner: nonOwner,
 	})
 	if err != nil {
 		return err
@@ -719,6 +728,12 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 	if err != nil {
 		return err
 	}
+	// Tell the control plane where the transport is and how to register a
+	// client against it; the snippets come from the adapter so the daemon
+	// package does not have to import it. Cleared again when serving ends.
+	d.SetMCPSnippets(mcpSnippets)
+	d.SetMCPHTTP(addr, mcpHTTPToken() != "")
+	defer d.SetMCPHTTP("", false)
 	// Keep the legacy bearer token out of argv and YAML: argv is commonly
 	// visible to other local users, while YAML is deliberately shareable as a
 	// deployment template. Issued tokens live hashed in agent.db; until the
@@ -738,6 +753,41 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 }
 
 func mcpHTTPToken() string { return os.Getenv("CLOUDFS_MCP_TOKEN") }
+
+// nonOwnerWarning is what a stdio MCP server prints when another process
+// owns the cache. The wording matches errRequiresOwner in mcpsrv so a person
+// who sees the tool refusal and the startup line recognise the same advice.
+const nonOwnerWarning = `cloudfs: another process owns this cache (is "cloudfs mount" running?). This stdio server has its own view; use the HTTP transport: cloudfs mcp install --transport http`
+
+// mcpSnippets renders the HTTP registration snippets and add commands for
+// every client, keyed by client name, with the <token> placeholder in the
+// header. Injected into the daemon for /mcp/connect and /mcp/tokens.
+func mcpSnippets(url string) (map[string]string, map[string]string) {
+	snippets, adds := map[string]string{}, map[string]string{}
+	for _, client := range []string{"claude", "codex"} {
+		o := mcpsrv.ClientOptions{Client: client, Transport: "http", URL: url}
+		if snippet, err := mcpsrv.ClientConfigFor(o); err == nil {
+			snippets[client] = snippet
+		}
+		if cmd := mcpsrv.ClientAddCommand(o); cmd != "" {
+			adds[client] = cmd
+		}
+	}
+	return snippets, adds
+}
+
+// mcpHTTPURL is the URL a client registers for the HTTP transport, from
+// --url, the configured mcp.http address or the default one.
+func mcpHTTPURL(f *flags, cfg *config.Config) string {
+	if u := f.str("url", ""); u != "" {
+		return u
+	}
+	addr := "127.0.0.1:8765"
+	if cfg != nil && cfg.MCP.HTTP != "" {
+		addr = cfg.MCP.HTTP
+	}
+	return "http://" + addr + "/"
+}
 
 func startWebDAV(ctx context.Context, d *daemon.Daemon, cfg *config.Config) (*webdavsrv.Running, error) {
 	return webdavsrv.Start(ctx, webdavsrv.Options{
@@ -829,8 +879,19 @@ func strmStartURL(cfg *config.Config, source, override string) (string, error) {
 }
 
 // mcpInstall prints (or writes) the registration snippet for an agent client,
-// so the user does not have to hand-assemble JSON or TOML.
-func mcpInstall(f *flags, allow []string, readOnly bool) error {
+// so the user does not have to hand-assemble JSON or TOML. --transport http
+// registers the daemon's HTTP listener instead of a stdio launch; the token
+// comes from --token or, when that is absent, stays the <token> placeholder
+// with a hint on stderr so the snippet itself never invents one. cfg may be
+// nil when the configuration could not be loaded.
+func mcpInstall(f *flags, allow []string, readOnly bool, cfg *config.Config) error {
+	return mcpInstallTo(os.Stdout, os.Stderr, f, allow, readOnly, cfg)
+}
+
+// mcpInstallTo is mcpInstall with its two streams named: the snippet goes
+// to out, the advice to errOut, so a caller that captures stdout gets the
+// snippet alone.
+func mcpInstallTo(out, errOut io.Writer, f *flags, allow []string, readOnly bool, cfg *config.Config) error {
 	client := f.str("client", "")
 	if client == "" {
 		return errors.New("mcp install: pass --client claude or --client codex")
@@ -839,26 +900,41 @@ func mcpInstall(f *flags, allow []string, readOnly bool) error {
 	if err != nil || binary == "" {
 		binary = "cloudfs"
 	}
-	snippet, err := mcpsrv.ClientConfig(client, binary, allow, readOnly)
+	o := mcpsrv.ClientOptions{Client: client, Binary: binary, Allow: allow, ReadOnly: readOnly, Transport: strings.ToLower(f.str("transport", "stdio"))}
+	switch o.Transport {
+	case "stdio":
+	case "http":
+		o.URL, o.Token = mcpHTTPURL(f, cfg), f.str("token", "")
+	default:
+		return fmt.Errorf("mcp install: unknown transport %q; use stdio or http", o.Transport)
+	}
+	snippet, err := mcpsrv.ClientConfigFor(o)
 	if err != nil {
 		return err
 	}
 	target := f.str("write", "")
 	if target == "" {
-		fmt.Println(snippet)
+		fmt.Fprintln(out, snippet)
 		switch strings.ToLower(client) {
 		case "claude", "claude-code":
-			fmt.Fprintln(os.Stderr, "\nAdd this to .mcp.json in your project, or run:")
-			fmt.Fprintf(os.Stderr, "  claude mcp add --transport stdio cloudfs -- %s mcp --stdio\n", binary)
+			fmt.Fprintln(errOut, "\nAdd this to .mcp.json in your project, or run:")
+			if cmd := mcpsrv.ClientAddCommand(o); cmd != "" {
+				fmt.Fprintf(errOut, "  %s\n", cmd)
+			} else {
+				fmt.Fprintf(errOut, "  claude mcp add --transport stdio cloudfs -- %s mcp --stdio\n", binary)
+			}
 		case "codex":
-			fmt.Fprintln(os.Stderr, "\nAdd this to ~/.codex/config.toml")
+			fmt.Fprintln(errOut, "\nAdd this to ~/.codex/config.toml")
+		}
+		if o.Transport == "http" && o.Token == "" {
+			fmt.Fprintln(errOut, "\nReplace <token> with an access token; create one with: cloudfs mcp token create --name <client> --read <prefix>")
 		}
 		return nil
 	}
 	if err := os.WriteFile(target, []byte(snippet), 0o600); err != nil {
 		return fmt.Errorf("mcp install: write %s: %w", target, err)
 	}
-	fmt.Printf("wrote the %s registration to %s\n", client, target)
+	fmt.Fprintf(out, "wrote the %s registration to %s\n", client, target)
 	return nil
 }
 

@@ -124,6 +124,9 @@ func (s *Server) routes() []route {
 		{pattern: "/audit", handler: s.audit},
 		{pattern: "/sessions", handler: s.sessions},
 		{pattern: "/sessions/", handler: s.sessionByPath, probe: "/sessions/x/finish"},
+		{pattern: "/mcp/connect", handler: s.mcpConnect},
+		{pattern: "/mcp/tokens", handler: s.mcpTokens},
+		{pattern: "/mcp/tokens/", handler: s.mcpTokenByPath, probe: "/mcp/tokens/x/revoke"},
 	}
 }
 

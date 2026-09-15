@@ -124,6 +124,12 @@ var en = map[string]string{
 	"err.audit_list_failed":             "the audit trail could not be read",
 	"err.session_not_found":             "no such agent session",
 	"err.sessions_list_failed":          "the sessions could not be listed",
+	"err.mcp_unavailable":               "the agent store is not open on this daemon, so MCP tokens cannot be managed here",
+	"err.token_invalid":                 "the token request was refused: %s",
+	"err.token_create_failed":           "the token could not be created",
+	"err.token_not_found":               "no such access token",
+	"err.token_revoke_failed":           "the token could not be revoked",
+	"err.tokens_list_failed":            "the access tokens could not be listed",
 	"err.action_invalid":                "action must be clear or relist",
 	"err.auth_in_progress":              "an authorization for this account is already in progress; cancel it first",
 	"err.auth_port_busy":                "%s is being authorized; the authorization callback shares one local port, so finish or cancel that one first",
@@ -218,6 +224,7 @@ var en = map[string]string{
 	"confirm.remove_mount":   "removes the mount layout from the configuration",
 	"confirm.stop_service":   "stops the service and detaches its mount",
 	"confirm.required":       "this %s; send confirm=true after checking the target",
+	"confirm.token_revoke":   "revokes access token %s and closes every session using it",
 
 	// The storage pool is a backend like any other on the add-drive form.
 	"field.pool.pool": "Pool name (its members and replica count live under pools.<name>)",

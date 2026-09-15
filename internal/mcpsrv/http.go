@@ -287,37 +287,134 @@ func isLoopback(addr string) (bool, error) {
 	return ip.IsLoopback(), nil
 }
 
-// ClientConfig renders the registration snippet for an agent client.
+// ClientOptions describes the registration snippet to render for an agent
+// client. Transport "stdio" (the default) launches Binary with --allow and
+// --read-only flags; "http" points the client at URL with a bearer token. An
+// empty Token renders the literal placeholder <token>, so a snippet can be
+// shown before the person has a token in hand without ever carrying one.
+type ClientOptions struct {
+	Client    string // claude | codex
+	Binary    string
+	Allow     []string
+	ReadOnly  bool
+	Transport string // stdio (default) | http
+	URL       string // http: e.g. http://127.0.0.1:8765/
+	Token     string // http: "" renders the literal placeholder <token>
+}
+
+// TokenPlaceholder is what an HTTP snippet carries in place of a token it
+// was not given.
+const TokenPlaceholder = "<token>"
+
+// ClientConfig renders the stdio registration snippet for an agent client.
+// It is ClientConfigFor with the stdio transport and stays for the callers
+// that predate the HTTP one.
 func ClientConfig(client, binary string, allow []string, readOnly bool) (string, error) {
+	return ClientConfigFor(ClientOptions{Client: client, Binary: binary, Allow: allow, ReadOnly: readOnly})
+}
+
+// ClientConfigFor renders the registration snippet for an agent client:
+// JSON for Claude Code's .mcp.json, TOML for Codex's config.toml.
+func ClientConfigFor(o ClientOptions) (string, error) {
+	client, ok := clientName(o.Client)
+	if !ok {
+		return "", fmt.Errorf("mcpsrv: unknown client %q; use claude or codex", o.Client)
+	}
+	switch strings.ToLower(o.Transport) {
+	case "", "stdio":
+		return stdioSnippet(client, o), nil
+	case "http":
+		if o.URL == "" {
+			return "", fmt.Errorf("mcpsrv: the http transport needs a URL")
+		}
+		return httpSnippet(client, o), nil
+	default:
+		return "", fmt.Errorf("mcpsrv: unknown transport %q; use stdio or http", o.Transport)
+	}
+}
+
+// ClientAddCommand is the one-line registration for clients that have one:
+// Claude Code's `claude mcp add` for the HTTP transport. Every other
+// combination returns "" because the snippet is the only way in.
+func ClientAddCommand(o ClientOptions) string {
+	client, ok := clientName(o.Client)
+	if !ok || client != "claude" || !strings.EqualFold(o.Transport, "http") || o.URL == "" {
+		return ""
+	}
+	return fmt.Sprintf("claude mcp add --transport http cloudfs %s --header %q", o.URL, "Authorization: Bearer "+tokenOrPlaceholder(o.Token))
+}
+
+// clientName folds the accepted spellings of a client onto claude or codex.
+func clientName(client string) (string, bool) {
+	switch strings.ToLower(client) {
+	case "claude", "claude-code":
+		return "claude", true
+	case "codex":
+		return "codex", true
+	}
+	return "", false
+}
+
+func tokenOrPlaceholder(token string) string {
+	if token == "" {
+		return TokenPlaceholder
+	}
+	return token
+}
+
+// jsonString quotes s as a JSON string without escaping HTML, so the
+// <token> placeholder survives as written.
+func jsonString(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func stdioSnippet(client string, o ClientOptions) string {
 	args := []string{`"mcp"`, `"--stdio"`}
-	for _, a := range allow {
+	for _, a := range o.Allow {
 		args = append(args, `"--allow"`, `"`+a+`"`)
 	}
-	if readOnly {
+	if o.ReadOnly {
 		args = append(args, `"--read-only"`)
 	}
 	joined := strings.Join(args, ", ")
-
-	switch strings.ToLower(client) {
-	case "claude", "claude-code":
-		return fmt.Sprintf(`{
+	if client == "codex" {
+		return fmt.Sprintf(`[mcp_servers.cloudfs]
+command = %q
+args = [%s]
+`, o.Binary, joined)
+	}
+	return fmt.Sprintf(`{
   "mcpServers": {
     "cloudfs": {
       "command": %q,
       "args": [%s]
     }
   }
-}`, binary, joined), nil
-	case "codex":
-		tomlArgs := make([]string, 0, len(args))
-		for _, a := range args {
-			tomlArgs = append(tomlArgs, a)
-		}
+}`, o.Binary, joined)
+}
+
+func httpSnippet(client string, o ClientOptions) string {
+	bearer := "Bearer " + tokenOrPlaceholder(o.Token)
+	if client == "codex" {
+		// UNVERIFIED: Codex streamable HTTP keys (url, http_headers) against the current Codex config reference
 		return fmt.Sprintf(`[mcp_servers.cloudfs]
-command = %q
-args = [%s]
-`, binary, strings.Join(tomlArgs, ", ")), nil
-	default:
-		return "", fmt.Errorf("mcpsrv: unknown client %q; use claude or codex", client)
+url = %s
+http_headers = { "Authorization" = %s }
+`, jsonString(o.URL), jsonString(bearer))
 	}
+	return fmt.Sprintf(`{
+  "mcpServers": {
+    "cloudfs": {
+      "type": "http",
+      "url": %s,
+      "headers": {
+        "Authorization": %s
+      }
+    }
+  }
+}`, jsonString(o.URL), jsonString(bearer))
 }

@@ -12,12 +12,16 @@ import (
 
 // writeJSON answers with no-store. Every reply on this server names something
 // about this machine — configured remotes, paths, queue contents — and none of
-// it belongs in a cache.
+// it belongs in a cache. The body is never embedded in HTML (the type is
+// declared and nosniff is set), so < and & are written as themselves: a
+// registration snippet reads "<token>" the way a person will paste it.
 func writeJSON(w http.ResponseWriter, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(body)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(body)
 }
 
 // confirmed gates an action that cannot be undone. The uploads resume and
