@@ -392,12 +392,12 @@ F5–F10 属二期。
 
 **F11 —— Everything 式文件名搜索：主窗口全盘搜索、过滤条、覆盖率（T-44 · 一期，前置于 F4-b）**
 
-- [ ] **F11-1** `screens/main.js` 搜索框默认**全盘**（请求不带 `path=`），旁边分段切换"全盘 / 当前目录"，选择存 localStorage；`Ctrl/⌘+K` 聚焦，`Esc` 清空并回到目录视图。搜索逻辑抽到 `content_search.js` 之外的独立模块 `name_search.js`，`main.js` 只接线（F4-b 之后同一个模块再加"内容"分段）。
-- [ ] **F11-2** 结果行填满：名称（命中高亮，片段经文本节点插入，绝不进 `html:`）/ 大小 / 修改时间 / 状态（已缓存点+文字）；表头可点排序 → 改 `sort=` 重新请求；双击结果定位到父目录并选中该行。
-- [ ] **F11-3** 结果上方常驻一行"N 条 · 覆盖 已列举 X / 已知 Y 目录"（来自 `/search` 响应的 `coverage`）；未全覆盖时附"索引整棵树"按钮：`confirmDelete` 键入 `warm` → `POST /cache/warm {path:"/", depth:-1, confirm:true}`；`complete=false` 的常驻说明行不变。
-- [ ] **F11-4** 过滤条：搜索框右侧"筛选"展开为 类型 / 扩展名 / 大小范围 / 修改时间；`search_query.js`（零 import）做过滤条 ↔ 查询串双向转换，用户能看到并手改最终查询串；最近 10 次搜索下拉（localStorage）。
-- [ ] **F11-5** 缓存屏概况卡加"目录覆盖率"卡（已列举 / 已知、最后爬取时间、爬取中进度），SSE `status` 驱动；检查器目录项加"列举整棵子树"（`warm` depth=-1，同一确认门）。
-- [ ] **F11-6** i18n 键 `search.*` 扩充（scope、coverage、filters、sort）；`ui_search_test.go`：默认请求不带 `path=`、分段切换写 localStorage、"索引整棵树"带 `confirm: true`、表头点击改 `sort=`、高亮经文本节点插入、覆盖率文案来自 i18n；`_tests/search_query.test.mjs`：双向转换与非法输入。
+- [x] **F11-1** `screens/main.js` 搜索框默认**全盘**（请求不带 `path=`），旁边分段切换"全盘 / 当前目录"，选择存 localStorage；`Ctrl/⌘+K` 聚焦，`Esc` 清空并回到目录视图。搜索逻辑抽到 `content_search.js` 之外的独立模块 `name_search.js`，`main.js` 只接线（F4-b 之后同一个模块再加"内容"分段）。
+- [x] **F11-2** 结果行填满：名称（命中高亮，片段经文本节点插入，绝不进 `html:`）/ 大小 / 修改时间 / 状态（已缓存点+文字）；表头可点排序 → 改 `sort=` 重新请求；双击结果定位到父目录并选中该行。
+- [x] **F11-3** 结果上方常驻一行"N 条 · 覆盖 已列举 X / 已知 Y 目录"（来自 `/search` 响应的 `coverage`）；未全覆盖时附"索引整棵树"按钮：`confirmDelete` 键入 `warm` → `POST /cache/warm {path:"/", depth:-1, confirm:true}`；`complete=false` 的常驻说明行不变。
+- [x] **F11-4** 过滤条：搜索框右侧"筛选"展开为 类型 / 扩展名 / 大小范围 / 修改时间；`search_query.js`（零 import）做过滤条 ↔ 查询串双向转换，用户能看到并手改最终查询串；最近 10 次搜索下拉（localStorage）。
+- [x] **F11-5** 缓存屏概况卡加"目录覆盖率"卡（已列举 / 已知、最后爬取时间、爬取中进度），SSE `status` 驱动；检查器目录项加"列举整棵子树"（`warm` depth=-1，同一确认门）。
+- [x] **F11-6** i18n 键 `search.*` 扩充（scope、coverage、filters、sort）；`ui_search_test.go`：默认请求不带 `path=`、分段切换写 localStorage、"索引整棵树"带 `confirm: true`、表头点击改 `sort=`、高亮经文本节点插入、覆盖率文案来自 i18n；`_tests/search_query.test.mjs`：双向转换与非法输入。
 
 **关键复用**：模态与确认用 `internal/control/web/ui.js` 的 `openForm`、`openPanel`、`showPanel`、
 `confirmDelete`；表格续页用 `ui.js` 的 `moreRow` 与 `paged.js` 的 `pageCursor`/`pageFailureMode`（续页失败保留

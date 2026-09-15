@@ -337,7 +337,7 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
 | 负缓存 | `.git`、`.DS_Store`、`node_modules` 等探测命中 `absent` 表；该目录任何创建操作清空 |
 | 写直达 | 本地变更先更新 SQLite 并标 `dirty`，同时 `notify_inval`；内核 `entry_timeout / attr_timeout` 设 30 s |
 | 持久化 | 重启后目录树可直接用；避免冷启动刷新风暴 |
-| 搜索 | 文件名 trigram FTS 子串匹配（1／2 字符走短倒排），父链在查询期拼路径，工作预算 + `Complete`；`cloudfs find`、控制面 `/search` 与 MCP `search` 共用。只覆盖已列举的目录；glob／`ext:`／`size:`／`dm:` 过滤、排序、后台全树爬取与覆盖率提示是规划中的 T-44（[agent-roadmap.md](agent-roadmap.md) §7.1） |
+| 搜索 | 文件名 trigram FTS 子串匹配（1／2 字符走短倒排），父链在查询期拼路径，工作预算 + `Complete`；`cloudfs find`、控制面 `/search` 与 MCP `search` 共用。Everything 式语法（`meta/query.go`，页面侧 `search_query.js` 同一张表）：裸词 AND、引号字面量、`*`/`?` 通配转 GLOB、`ext:`/`size:`/`dm:`/`type:`/`path:` 过滤在 `bounded` CTE 之前进 SQL；`sort=name/size/mtime/path` 只排已收集的命中（`Complete=false` 时不是全局顺序）。只覆盖已列举的目录：`meta.Coverage{listed, known}` 随 `/search`、`status` 与 MCP 返回；后台爬取器 `vfs/crawl.go`（`search.crawl`，默认关）在前台空闲时按 `dir_state.complete=0` 补列、风控后休眠，`warm --all` 与界面"索引整棵树"跑同一实现（T-44） |
 
 ### 4.4 数据缓存层 BlockCache
 

@@ -153,6 +153,16 @@ control:
   ui: true               # 同一回环端口的状态页；设 false 可关闭
                          # 页面可以添加网盘账号（公开字段），但凭据只能用 config auth 设置
 
+search:
+  crawl:                 # 文件名索引只覆盖列举过的目录；后台爬取器把没打开过的目录补进来
+    enabled: false       # 默认关：不产生任何远端调用。开了以后在前台空闲 idle_after 之后开始
+    remotes: [nas]       # 只爬这些 remote；省略表示所有已挂载的 remote
+    exclude: ["node_modules", "/work/build/*"]  # path.Match 模式，对虚拟路径和目录名各试一次
+    idle_after: 30s      # 前台 IO 安静多久才开始一轮；有前台请求时让路
+    rescan: 5m           # 一轮跑完后每隔多久再找被 delta 标为 stale 的目录补列
+                         # 非官方接口（如 quark）触发风控后休眠 15 分钟；进度就是元数据库里的
+                         # 目录列举状态，重启后续跑，不重复列举已完整的目录
+
 webdav:
   http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动 WebDAV
   prefix: /dav
@@ -236,6 +246,23 @@ cloudfs config auth nas --check         # 检查已有凭据
 丢弃已经获取或轮换的 token。重新授权后需重启使用该账号的 daemon；重启后旧授权代次下
 尚未完成的上传会停在死信中，不会通过新账号发送，核对后可显式取消/恢复。
 
+### 文件名搜索
+
+```sh
+cloudfs find report                     # 名字含 report；多个词做 AND，"my report" 引号包住才含空格
+cloudfs find '*.md' --size '>1m'         # 通配 + 大小；k/m/g 二进制单位，a..b 闭区间
+cloudfs find --ext go,md --after 2026-09-01 --sort mtime   # 没有词也行：只用过滤条件
+cloudfs find 'ext:go size:>1k dm:>2026-09 type:file'      # 同样的过滤写进查询串也可以
+cloudfs find --type dir --path /work --limit 50 --json
+cloudfs find plan --all                  # 先把索引里还没有的目录都列举一遍再搜
+```
+
+索引只覆盖列举过的目录：从没打开过的目录里的文件搜不到。空结果时 stderr 会给出"已列举 /
+已知"目录数；`cloudfs warm --all`、界面"索引整棵树"或配置 `search.crawl.enabled: true`
+把差距补上。`--sort` 只作用于已收集的那批结果，命中工作预算（stderr 提示）时"最大的 N 个"
+不是全局最大的。有守护进程在跑就问它；没有时只读本地索引，不启动上传与刷新，`--all`
+则必须有运行中的守护进程或取得存储所有权。语法全表见 `docs/mcp.md`。
+
 ### 缓存固定与解除
 
 ```sh
@@ -243,6 +270,7 @@ cloudfs pin /work --timeout 30m         # 保存固定意图并完整下载
 cloudfs cache pins --json              # 查看路径规则，包括配置中的 pin
 cloudfs unpin /work                    # 仅移除该条规则，不删除文件或缓存内容
 cloudfs warm /work 2                   # 只预热目录，不下载内容
+cloudfs warm --all                     # 列举所有挂载里索引还没有的目录；非官方接口的网盘留意风控
 cloudfs cache stats
 cloudfs cache gc
 ```
@@ -329,7 +357,8 @@ ui | open [--print]       在浏览器打开桌面式控制台（需 control.met
 doctor [--fix] [--json]   环境与本地状态诊断
 cache stats | gc | pins   查看缓存、回收未固定内容或列出固定规则
 uploads list | retry | cancel | resume | drop | flush
-find <query>              在本地索引里搜文件名
+find [query] [--ext go,md] [--size >1m] [--after 2026-09-01] [--type dir|file] [--sort name|size|mtime|path] [--path /sub] [--limit N] [--all] [--json]
+                          在本地文件名索引里搜索（Everything 式语法，见下文）；--all 先列举整棵树
 cp <source> <dest>        复制单个文件，可跨 remote；恢复与竞争限制见 docs/copy.md
 copies list | show <id>    查询复制准备状态、检查点及关联上传；list 支持 --limit/--cursor
 copies retry|cancel <id>   重试或取消准备任务，保留内容；不能取消已交接的上传
@@ -337,7 +366,8 @@ copies forget <id> --confirm 清理无引用的准备内容和记录；不删除
 export <vpath>... <dir>   【规划中，T-32】把虚拟路径批量导出到本地/移动硬盘：多文件多流并发、续传、拔盘暂停、校验
 exports list|show|pause|resume|cancel|forget <id>  【规划中，T-32】导出作业管理
 pool rebalance <pool>     【规划中，T-33】按目标偏斜在成员间搬迁副本；加盘后 backfill
-warm <path> [depth]       预列目录，使后续查找本地化
+warm <path> [depth]       预列目录，使后续查找本地化；不给 depth 即整棵子树
+warm --all                列举索引里还没有的每个目录（所有挂载），与界面"索引整棵树"同一实现
 pin <path>                完整下载并钉住，读取与内容搜索变本地操作
 unpin <path>              移除一条固定规则，不删除内容
 proxy test <host>         查看某主机走哪个出口

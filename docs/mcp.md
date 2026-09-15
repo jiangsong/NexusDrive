@@ -71,7 +71,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `stat_many` | `paths[]`（≤100） | 批量。单个路径出错不会让整次调用失败，错误写在该项的 `error` 字段 |
 | `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?` | 文本读。非 UTF-8 会被拒绝并提示改用 `read_range`。截断时返回 `next_offset` |
 | `read_range` | `path`, `offset`, `length` | 任意字节范围，base64 返回。用于二进制或大文件分页 |
-| `search` | `query`, `path?`, `content?`, `max_results?` | 本地元数据名称／路径片段搜索，权限与子树过滤在限量前执行。`content` 只检查完整缓存文件的有界前缀，限制见下文 |
+| `search` | `query?`, `path?`, `glob?`, `ext?`, `min_size?`, `max_size?`, `modified_after?`, `kind?`, `sort?`, `content?`, `max_results?` | 本地文件名索引搜索（Everything 式语法，见下文），权限与子树过滤在限量前执行；给了任一过滤参数时 `query` 可为空。每个命中带 `kind/size/mtime/cached`，响应带 `coverage{listed, known}`。`content` 只检查完整缓存文件的有界前缀，限制见下文 |
 | `cache_status` | `path` | 该路径的缓存比例、整体命中率、待上传数量 |
 | `list_roots` | 无 | 当前可见的挂载点与是否可写 |
 | `get_download_url` | `path` | 直链 + 过期时间 + 必需 headers。大文件让 agent 自己拉，不经过本服务 |
@@ -356,7 +356,25 @@ cloudfs sessions list | show <id> | finish <id> --summary "…"
 
 ## Agent 使用建议
 
-**搜索只覆盖已知目录树。** `query` 不含 `/` 时匹配名称；含 `/` 时按完整虚拟路径的字面子串匹配（例如 `work/src/`），不会把 `%`、`_` 当通配符。匹配忽略大小写，权限路径仍区分大小写。结果按路径深度、路径排序。目录改名后无需重写子树索引，查询在一个数据库快照内重建路径。1～2 个字符使用独立短字符串索引，从不查询待索引记录；较长查询同时检查尚未完成后台索引的记录，
+**搜索只覆盖已列举过的目录，响应里的 `coverage` 说明覆盖了多少。** `coverage.listed` 是索引已列举的目录数，`coverage.known` 是索引知道存在的目录数（含根）；两者相等才说明整棵树都可搜。差距来自从未被打开过的目录：delta 事件只把它们的父目录标 stale，不会补进子节点。缩小差距有两条路：配置 `search.crawl.enabled: true` 让守护进程在前台空闲时后台列举（`idle_after` 之后开始、`rescan` 周期补列被 delta 标 stale 的目录，`Caps.Tier=unofficial` 的网盘遇风控休眠 15 分钟），或一次性 `cloudfs warm --all` / 界面"索引整棵树"。空结果先看 `coverage`，再决定是提示用户 `warm` 还是断定文件不存在。
+
+**`query` 是 Everything 式语法：空白分隔的词做 AND，引号包住才是含空格的字面量。** 这与旧版"整串子串匹配"不同——`my report` 现在要求名字同时含 `my` 与 `report`，要找带空格的名字写 `"my report"`。匹配忽略大小写，权限路径仍区分大小写。
+
+| 写法 | 含义 |
+|---|---|
+| `report` | 名字含 `report` 的子串 |
+| `"my report"` | 含空格的字面量 |
+| `*.md`、`rep?rt*` | 对整个名字做通配（`*` 任意串、`?` 单字符）；与 `glob` 参数等价 |
+| `src/handler`、`path:src` | 虚拟路径子串（裸词含 `/` 即按路径匹配） |
+| `ext:go,md` | 扩展名，逗号是 OR；与 `ext` 参数等价 |
+| `size:>1m`、`size:<=4k`、`size:1m..10m`、`size:0` | 大小；`k/m/g` 为二进制单位，`>`/`<` 严格，`a..b` 与单值为闭区间；与 `min_size`/`max_size` 等价 |
+| `dm:>2026-09-01`、`dm:2026-09`、`dm:2026-01..2026-03` | 修改时间；`YYYY`、`YYYY-MM`、`YYYY-MM-DD` 按本地时区解释为一段时期，单值选中该时期，`>` 从该时期之后开始；与 `modified_after` 等价（RFC 3339 或 `YYYY-MM-DD`） |
+| `type:dir`、`type:file` | 只要目录 / 只要文件；与 `kind` 参数等价 |
+| `-tmp`、`-ext:bak`、`-path:node_modules` | 否定一个词、扩展名或路径 |
+
+`sort` 取 `name`、`size`、`mtime`、`path`，前缀 `-` 反序；默认按路径深度、路径排序。排序只作用于已收集的那批命中：`truncated: true` 时"最大的 N 个"只是预算范围内最大的，不是全局最大的。无法解读的值（`size:lots`、重复给出的 `size:`）整次调用报错而不是静默忽略。
+
+**引擎本身的边界。** 目录改名后无需重写子树索引，查询在一个数据库快照内重建路径。1～2 个字符使用独立短字符串索引，从不查询待索引记录；较长查询同时检查尚未完成后台索引的记录，
 积压超过阈值时先把它合并进索引，而不是每次查询都扫一遍。宽泛的路径查询有工作预算（随
 `max_results` 缩放），达到预算即停止收集并在响应里置 `truncated`——"没有更多匹配"和"我们
 停止查找了"是两句不同的话。因此一次查询的耗时不随子树大小无限增长，但也不保证返回的是
