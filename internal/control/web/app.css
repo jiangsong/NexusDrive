@@ -109,6 +109,9 @@ input[type=checkbox] { appearance: auto; -webkit-appearance: auto; accent-color:
   color: var(--accent-text); font-size: 10px; line-height: 16px; text-align: center;
   font-variant-numeric: tabular-nums;
 }
+/* Dead trigger deliveries: a count that asks for a person, in the same red
+   the diagnostics screen gives a failed check. */
+.nav a .badge.bad { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
 
 .content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 

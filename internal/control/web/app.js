@@ -14,6 +14,7 @@ import { renderDiagnostics } from '/ui/screens/diagnostics.js';
 import { renderSetup } from '/ui/screens/setup.js';
 import { renderAgents } from '/ui/screens/agents.js';
 import { renderIndex } from '/ui/screens/index.js';
+import { renderTriggers } from '/ui/screens/triggers.js';
 
 const screens = {
   'main-window': renderMain,
@@ -27,6 +28,7 @@ const screens = {
   'diagnostics-view': renderDiagnostics,
   'agents-view': renderAgents,
   'index-view': renderIndex,
+  'triggers-view': renderTriggers,
 };
 
 // healthOf reads the structured snapshot, never the warning text: the daemon
@@ -69,13 +71,21 @@ function titlebar(status) {
     languagePicker());
 }
 
-// navBadge is the count drawn over a nav item: today only the agents item,
-// showing how many MCP sessions are active according to the last status
-// tick. Nothing is drawn at zero, so a quiet daemon has a quiet sidebar.
+// navBadge is the count drawn over a nav item, read from the last status
+// tick: the agents item shows how many MCP sessions are active, the
+// triggers item how many deliveries are dead and wait for a retry. A daemon
+// without a trigger engine sends no triggers line, which counts as zero.
+// Nothing is drawn at zero, so a quiet daemon has a quiet sidebar.
 function navBadge(item, status) {
-  if (item.badge !== 'agents') return null;
-  const n = status && status.agent ? status.agent.active_sessions : 0;
-  return n > 0 ? el('span', { class: 'badge', 'aria-label': t('nav.agents.active', n) }, String(n)) : null;
+  if (item.badge === 'agents') {
+    const n = status && status.agent ? status.agent.active_sessions : 0;
+    return n > 0 ? el('span', { class: 'badge', 'aria-label': t('nav.agents.active', n) }, String(n)) : null;
+  }
+  if (item.badge === 'triggers') {
+    const n = status && status.triggers ? (status.triggers.dead || 0) : 0;
+    return n > 0 ? el('span', { class: 'badge bad', 'aria-label': t('nav.triggers.dead', n) }, String(n)) : null;
+  }
+  return null;
 }
 
 function nav(activeTag) {
@@ -160,6 +170,21 @@ export function onAgentEvent(fn) { agentHandlers.add(fn); return () => agentHand
 // progress bar on the index screen.
 const indexHandlers = new Set();
 export function onIndexChange(fn) { indexHandlers.add(fn); return () => indexHandlers.delete(fn); }
+// Trigger deliveries: one event per state change, for the triggers screen
+// and for the dead-count badge between two status ticks.
+const triggerHandlers = new Set();
+export function onTriggerEvent(fn) { triggerHandlers.add(fn); return () => triggerHandlers.delete(fn); }
+
+// deadDeliveryChanged moves the badge as soon as a delivery dies rather
+// than at the next status tick. Only the death is counted here: a retry
+// shows up as a pending row the frame cannot tell from a backoff, so the
+// tick — which recounts from the queue — is what brings the number down.
+function deadDeliveryChanged(ev) {
+  const status = get().status;
+  if (!ev || ev.state !== 'dead' || !status) return;
+  const triggers = status.triggers || { enabled: true, pending: 0, dead: 0 };
+  set({ status: { ...status, triggers: { ...triggers, dead: (triggers.dead || 0) + 1 } } });
+}
 
 subscribe(() => refreshTitlebar());
 startRouter(() => render()); // performs the initial render
@@ -170,4 +195,5 @@ events({
   onAudit: (d) => { for (const fn of agentHandlers) fn({ kind: 'audit', data: d }); },
   onSession: (d) => { for (const fn of agentHandlers) fn({ kind: 'session', data: d }); },
   onIndex: (p) => { for (const fn of indexHandlers) fn(p); },
+  onTrigger: (d) => { deadDeliveryChanged(d); for (const fn of triggerHandlers) fn(d); refreshNavBadges(); },
 });

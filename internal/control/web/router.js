@@ -10,6 +10,7 @@ export const routes = {
   '#/exports': 'exports-view',
   '#/agents': 'agents-view',
   '#/index': 'index-view',
+  '#/triggers': 'triggers-view',
   '#/storage': 'storage-view',
   '#/proxy': 'proxy-view',
   '#/diagnostics': 'diagnostics-view',
@@ -36,6 +37,9 @@ export const navItems = [
   // from /status, so an agent at work is visible from any screen.
   { hash: '#/agents', icon: 'bot', key: 'nav.agents', badge: 'agents' },
   { hash: '#/index', icon: 'layers', key: 'nav.index' },
+  // The triggers badge is the number of dead deliveries, the one queue
+  // state that waits for a person.
+  { hash: '#/triggers', icon: 'bolt', key: 'nav.triggers', badge: 'triggers' },
   { hash: '#/storage', icon: 'db', key: 'nav.storage' },
   { hash: '#/proxy', icon: 'globe', key: 'nav.proxy' },
   { hash: '#/diagnostics', icon: 'wrench', key: 'nav.diagnostics' },
