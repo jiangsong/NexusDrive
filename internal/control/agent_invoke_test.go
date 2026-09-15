@@ -67,7 +67,7 @@ func invokeFixture(t *testing.T, agents []config.Agent, run bool) (*fixture, *ag
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	f.coll.Agent = NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "")
+	f.coll.Agent = NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "", RollbackDeps{})
 	eng := trigger.New(trigger.Options{Store: st, Agents: agents, Tick: 20 * time.Millisecond})
 	t.Cleanup(eng.Close)
 	if run {
