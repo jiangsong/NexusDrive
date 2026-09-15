@@ -37,6 +37,9 @@ type Status struct {
 	Fuse *FuseStatus `json:"fuse,omitempty"`
 	// Durability is what close(2) promises: "power" or "crash".
 	Durability string `json:"durability,omitempty"`
+	// Agent is present when this daemon keeps an agent store: how many MCP
+	// sessions are active and whether the audit trail is keeping up.
+	Agent *AgentStatus `json:"agent,omitempty"`
 	// Warnings names conditions an operator should act on, most urgent first.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -215,7 +218,11 @@ type Collector struct {
 	// Service, when set, installs and removes the per-user mount supervisor.
 	// nil when this daemon does not offer service management.
 	Service *ServiceControl
-	Now     func() time.Time
+	// Agent, when set, serves /audit and /sessions and feeds the audit and
+	// session events. nil on a daemon without agent.db, and those routes
+	// then answer 503 rather than pretending.
+	Agent AgentView
+	Now   func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value
@@ -259,6 +266,12 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 	}
 	if c.Journal != nil {
 		s.Durability = string(c.Journal.Durability())
+	}
+	if c.Agent != nil {
+		s.Agent = &AgentStatus{Workspace: c.Agent.Workspace(), AuditWriteFailures: c.Agent.AuditWriteFailures()}
+		if sum, err := c.Agent.Summary(ctx); err == nil {
+			s.Agent.ActiveSessions = sum.Active
+		}
 	}
 
 	if c.FS != nil {

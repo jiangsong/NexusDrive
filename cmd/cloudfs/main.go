@@ -136,6 +136,10 @@ func main() {
 		err = runExport(ctx, os.Args[2:], os.Stdout)
 	case "exports":
 		err = runExports(ctx, os.Args[2:], os.Stdout)
+	case "audit":
+		err = runAudit(ctx, os.Args[2:], os.Stdout)
+	case "sessions":
+		err = runSessions(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
 	case "ui", "open":
@@ -180,6 +184,10 @@ Agents
                             print or write the client registration snippet
   strm <virtual-path> --out <dir>
                             generate media .strm files through WebDAV; --prune removes verified stale outputs
+  audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
+                            list recorded MCP tool calls, newest first; reads agent.db when no daemon runs
+  sessions list [--state active|finished|expired] | show <id> | finish <id> [--summary text]
+                            inspect agent sessions and their scope; finish needs the running daemon
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)
@@ -672,6 +680,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
+		Sessions: d.Sessions,
 	})
 	if err != nil {
 		return err
@@ -697,6 +706,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
+		Sessions: d.Sessions,
 	})
 	if err != nil {
 		return err

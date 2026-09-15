@@ -16,6 +16,7 @@ import (
 	"sort"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
@@ -43,7 +44,14 @@ type Daemon struct {
 	FS        *vfs.FS
 	Refresher *vfs.Refresher
 	// Export runs `cloudfs export` jobs out of its own queue.
-	Export   *export.Manager
+	Export *export.Manager
+	// Agent is agent.db: the principals, sessions and audit trail of the
+	// agents that talk to this mount over MCP. Every process opens it, so a
+	// stdio MCP server beside the daemon records its own calls; only the
+	// owner runs audit retention.
+	Agent *agent.Store
+	// Sessions maps MCP connections to sessions in Agent.
+	Sessions *agent.Sessions
 	Proxy    *proxy.Manager
 	Limiters *ratelimit.Registry
 	// Providers maps remote name to backend.
@@ -282,6 +290,25 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	d.Refresher = vfs.NewRefresher(fsys, time.Minute)
 	d.closers = append(d.closers, func() error { d.Refresher.Stop(); return nil })
 
+	// The agent store opens before the non-owner early return below: a
+	// stdio MCP process started while `cloudfs mount` owns the journal is
+	// exactly the process whose calls must land in the shared audit trail.
+	agentStore, err := agent.Open(filepath.Join(cacheDir, "agent"))
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("daemon: agent store: %w", err)
+	}
+	d.Agent = agentStore
+	d.Sessions = agent.NewSessions(agentStore, agent.SessionOptions{Idle: cfg.MCP.Session.Idle})
+	d.closers = append(d.closers, agentStore.Close)
+	if agentStore.Owner() && !opt.NoBackground {
+		// Retention purges on start and then daily; RunAuditRetention itself
+		// returns at once in a non-owner, so two processes never race.
+		retentionCtx, stopRetention := context.WithCancel(ctx)
+		go agentStore.RunAuditRetention(retentionCtx, cfg.MCP.Audit.Retain, 24*time.Hour)
+		d.closers = append(d.closers, func() error { stopRetention(); return nil })
+	}
+
 	if !opt.SkipWrite {
 		j := d.Journal
 		if j == nil {
@@ -434,6 +461,7 @@ func (d *Daemon) Collector() *control.Collector {
 	if d.Export != nil {
 		col.Export = d.Export
 	}
+	col.Agent = d.agentView()
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that

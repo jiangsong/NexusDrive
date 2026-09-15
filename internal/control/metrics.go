@@ -121,6 +121,9 @@ func (s *Server) routes() []route {
 		{pattern: "/service/status", handler: s.service},
 		{pattern: "/service/install", handler: s.service},
 		{pattern: "/service/uninstall", handler: s.service},
+		{pattern: "/audit", handler: s.audit},
+		{pattern: "/sessions", handler: s.sessions},
+		{pattern: "/sessions/", handler: s.sessionByPath, probe: "/sessions/x/finish"},
 	}
 }
 
@@ -329,6 +332,12 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 		{name: "cloudfs_meta_negative_entries", help: "Live negative-cache entries", typ: "gauge", value: float64(st.Meta.NegativeCache)},
 		{name: "cloudfs_pins", help: "Pinned paths", typ: "gauge", value: float64(st.Meta.Pins)},
 		{name: "cloudfs_uptime_seconds", help: "Daemon uptime", typ: "gauge", value: time.Duration(st.Uptime).Seconds()},
+	}
+	if st.Agent != nil {
+		ms = append(ms,
+			metric{name: "cloudfs_agent_sessions_active", help: "MCP sessions currently active", typ: "gauge", value: float64(st.Agent.ActiveSessions)},
+			metric{name: "cloudfs_audit_write_failures_total", help: "Audit rows that could not be written to agent.db since start", typ: "counter", value: float64(st.Agent.AuditWriteFailures)},
+		)
 	}
 	for _, p := range st.Proxies {
 		healthy := 0.0

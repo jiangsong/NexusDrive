@@ -276,3 +276,43 @@ func TestSessionContextRoundTrip(t *testing.T) {
 		t.Fatalf("%v %+v", ok, s)
 	}
 }
+
+func TestWriteCountsGroupsSuccessfulWritesBySession(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := newSessions(t, &now)
+	rows := []struct{ session, tool, result string }{
+		{"s1", "write_file", "ok"},
+		{"s1", "delete", "ok"},
+		{"s1", "write_file", "denied"},
+		{"s1", "read_text", "ok"},
+		{"s2", "move", "ok"},
+		{"s3", "read_text", "ok"},
+	}
+	for _, r := range rows {
+		if _, err := m.store.db.Exec(`INSERT INTO audit(ts, session_id, tool, paths, args, result) VALUES (?, ?, ?, '[]', '{}', ?)`,
+			now.UnixNano(), r.session, r.tool, r.result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.WriteCounts(context.Background(), []string{"s1", "s2", "s3", "s4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["s1"] != 2 || got["s2"] != 1 {
+		t.Fatalf("write counts %+v", got)
+	}
+	if empty, err := m.WriteCounts(context.Background(), nil); err != nil || len(empty) != 0 {
+		t.Fatalf("no ids: %+v %v", empty, err)
+	}
+}
+
+func TestPagingRejectsAForeignCursor(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := newSessions(t, &now)
+	if _, _, err := m.List(context.Background(), ListQuery{Cursor: "not-a-cursor!"}); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("session cursor: %v", err)
+	}
+	if _, _, err := m.store.Audit(context.Background(), AuditQuery{Cursor: "zero"}); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("audit cursor: %v", err)
+	}
+}

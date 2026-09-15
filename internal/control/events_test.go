@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/export"
 )
 
@@ -128,4 +129,74 @@ func TestEventsStreamExportProgress(t *testing.T) {
 		}
 	}
 	t.Fatal("export event did not arrive")
+}
+
+// TestEventsStreamCarriesAuditAndSession: a page showing the agent screen
+// hears about a tool call and a session change as they happen, with the
+// session's client name joined onto the audit row the same way GET /audit
+// does.
+func TestEventsStreamCarriesAuditAndSession(t *testing.T) {
+	f, st, m := agentFixture(t)
+	srv := httptest.NewServer(NewServer(f.coll).Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "127.0.0.1"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	events := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		var event string
+		for sc.Scan() {
+			line := sc.Text()
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				events <- event + " " + strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+	if first := <-events; !strings.HasPrefix(first, "status ") {
+		t.Fatalf("first event should be the status document: %s", first)
+	}
+
+	s := openSession(t, m, "stdio:1", "codex")
+	if _, err := st.AppendAudit(context.Background(), agent.AuditRow{SessionID: s.ID, Tool: "delete", Paths: []string{"/x"}, Result: "denied"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Finish(context.Background(), s.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	var sawStart, sawAudit, sawFinish bool
+	deadline := time.After(5 * time.Second)
+	for !(sawStart && sawAudit && sawFinish) {
+		select {
+		case ev := <-events:
+			switch {
+			case strings.HasPrefix(ev, "session ") && strings.Contains(ev, `"state":"active"`):
+				sawStart = true
+			case strings.HasPrefix(ev, "audit "):
+				if !strings.Contains(ev, `"tool":"delete"`) || !strings.Contains(ev, `"client":"codex"`) || !strings.Contains(ev, `"result":"denied"`) {
+					t.Fatalf("audit event lacks the row: %s", ev)
+				}
+				sawAudit = true
+			case strings.HasPrefix(ev, "session ") && strings.Contains(ev, `"state":"finished"`):
+				if !strings.Contains(ev, `"summary":"done"`) || !strings.Contains(ev, `"finished_at"`) {
+					t.Fatalf("finished session lacks its summary: %s", ev)
+				}
+				sawFinish = true
+			}
+		case <-deadline:
+			t.Fatalf("events missing: start=%v audit=%v finish=%v", sawStart, sawAudit, sawFinish)
+		}
+	}
 }

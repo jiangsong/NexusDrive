@@ -96,7 +96,7 @@ func (s *Store) Audit(ctx context.Context, q AuditQuery) ([]AuditRow, string, er
 	if q.Cursor != "" {
 		last, err := strconv.ParseInt(q.Cursor, 10, 64)
 		if err != nil || last <= 0 {
-			return nil, "", errors.New("agent: invalid audit cursor")
+			return nil, "", ErrInvalidCursor
 		}
 		where = append(where, "id < ?")
 		args = append(args, last)

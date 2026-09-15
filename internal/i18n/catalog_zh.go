@@ -119,6 +119,10 @@ var zh = map[string]string{
 
 	// 控制 API 的错误。它们会作为状态页上的提示文字给人看，所以要翻译；
 	// 来自操作系统或网盘的错误串则原样透传。
+	"err.agent_unavailable":             "这个守护进程没有打开 Agent 存储",
+	"err.audit_list_failed":             "无法读取审计记录",
+	"err.session_not_found":             "没有这个 Agent 会话",
+	"err.sessions_list_failed":          "无法列出会话",
 	"err.action_invalid":                "action 只能是 clear 或 relist",
 	"err.auth_in_progress":              "这个账号已经有一次授权在进行中；先取消它",
 	"err.auth_port_busy":                "%s 正在授权中；授权回调共用本机的同一个端口，请先完成或取消它",

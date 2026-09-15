@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/vfs"
 )
 
@@ -28,10 +29,12 @@ type EventChange struct {
 }
 
 // GET /events is a server-sent event stream: "change" events from the VFS's
-// own change feed, a "status" event every statusTick, and an "export" event
-// every exportTick carrying the first page of live job progress. One
-// subscription per open page; the VFS never
-// blocks on a slow one — a full queue collapses into a rescan hint instead.
+// own change feed, a "status" event every statusTick, an "export" event
+// every exportTick carrying the first page of live job progress, and an
+// "audit" or "session" event for every row the agent store records. One
+// subscription per open page; the VFS never blocks on a slow one — a full
+// queue collapses into a rescan hint instead — and the agent store drops
+// its oldest event rather than wait.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
@@ -49,6 +52,14 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		ch, stop := s.collector.FS.WatchChanges()
 		defer stop()
 		changes = ch
+	}
+	var agentEvents <-chan agent.Event
+	var names *clientNames
+	if s.collector.Agent != nil {
+		ch, stop := s.collector.Agent.Watch()
+		defer stop()
+		agentEvents = ch
+		names = newClientNames(s.collector.Agent)
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
@@ -88,6 +99,23 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			}
 			if !send("change", EventChange{Paths: c.Paths, Subtree: c.Subtree, Rescan: c.Rescan}) {
 				return
+			}
+		case ev, ok := <-agentEvents:
+			if !ok {
+				agentEvents = nil
+				continue
+			}
+			switch {
+			case ev.Audit != nil:
+				if !send("audit", names.auditView(r.Context(), *ev.Audit)) {
+					return
+				}
+			case ev.Session != nil:
+				// The session changed, so its cached client name may be stale.
+				names.names[ev.Session.ID] = ev.Session.ClientName
+				if !send("session", sessionView(*ev.Session)) {
+					return
+				}
 			}
 		case <-statusTicker.C:
 			if !send("status", s.collector.Collect(r.Context(), lang)) {

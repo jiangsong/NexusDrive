@@ -21,6 +21,10 @@ var ErrSessionNotFound = errors.New("agent: session not found")
 // ErrPrincipalNotFound is returned when a principal id is unknown.
 var ErrPrincipalNotFound = errors.New("agent: principal not found")
 
+// ErrInvalidCursor is returned when a paging cursor is not one this store
+// handed out, so a control route can answer 400 rather than 500.
+var ErrInvalidCursor = errors.New("agent: invalid cursor")
+
 // WriteTools names the tools whose success counts as a write in Summary and
 // in the per-session write counter. The audit middleware uses the same set.
 var WriteTools = map[string]bool{
@@ -305,12 +309,12 @@ func encodeCursor(startedAt int64, id string) string {
 func decodeCursor(cursor string) (int64, string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return 0, "", errors.New("agent: invalid session cursor")
+		return 0, "", ErrInvalidCursor
 	}
 	ns, id, ok := strings.Cut(string(raw), ":")
 	startedAt, perr := strconv.ParseInt(ns, 10, 64)
 	if !ok || perr != nil || id == "" {
-		return 0, "", errors.New("agent: invalid session cursor")
+		return 0, "", ErrInvalidCursor
 	}
 	return startedAt, id, nil
 }
@@ -333,6 +337,46 @@ func (m *Sessions) Finish(ctx context.Context, id, summary string) (Session, err
 		m.store.publish(Event{Kind: "session", Session: &s})
 	}
 	return s, nil
+}
+
+// WriteCounts reports, for each given session id, how many successful
+// write-tool calls its audit rows record. A session with no writes is absent
+// from the map. The listing fills Session.Writes from it in one query rather
+// than one per row.
+func (m *Sessions) WriteCounts(ctx context.Context, ids []string) (map[string]int, error) {
+	out := map[string]int{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := []any{}
+	tools := make([]string, 0, len(WriteTools))
+	for tool := range WriteTools {
+		tools = append(tools, "?")
+		args = append(args, tool)
+	}
+	marks := make([]string, 0, len(ids))
+	for _, id := range ids {
+		marks = append(marks, "?")
+		args = append(args, id)
+	}
+	rows, err := m.store.db.QueryContext(ctx, `SELECT session_id, count(*) FROM audit WHERE result = 'ok' AND tool IN (`+
+		strings.Join(tools, ",")+`) AND session_id IN (`+strings.Join(marks, ",")+`) GROUP BY session_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("agent: %w", err)
+		}
+		out[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	return out, nil
 }
 
 // Summary counts active sessions and, since the given instant, successful

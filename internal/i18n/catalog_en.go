@@ -120,6 +120,10 @@ var en = map[string]string{
 	// Control API errors. They reach a person as the toast text on the
 	// status page, so they are translated; an error string that came from the
 	// operating system or a remote is passed through instead.
+	"err.agent_unavailable":             "the agent store is not open on this daemon",
+	"err.audit_list_failed":             "the audit trail could not be read",
+	"err.session_not_found":             "no such agent session",
+	"err.sessions_list_failed":          "the sessions could not be listed",
 	"err.action_invalid":                "action must be clear or relist",
 	"err.auth_in_progress":              "an authorization for this account is already in progress; cancel it first",
 	"err.auth_port_busy":                "%s is being authorized; the authorization callback shares one local port, so finish or cancel that one first",
