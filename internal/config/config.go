@@ -210,6 +210,15 @@ type MCPSession struct {
 	// a token connection starts a new one; zero means the default of 30
 	// minutes.
 	Idle time.Duration `yaml:"idle"`
+	// Retain is how long the operation log and preimages of a finished
+	// session are kept, so that it can still be rolled back; zero means the
+	// default of 7 days.
+	Retain time.Duration `yaml:"retain"`
+	// MaxPreimageBytes bounds the size of a file whose content is kept
+	// before a tool overwrites or deletes it. A larger file gets no
+	// preimage and its change cannot be rolled back; zero means the
+	// default of 32 MiB.
+	MaxPreimageBytes Size `yaml:"max_preimage_bytes"`
 }
 
 // DefaultMCPAudit is the audit configuration used when the file sets none.
@@ -217,7 +226,9 @@ func DefaultMCPAudit() MCPAudit { return MCPAudit{Retain: 90 * 24 * time.Hour} }
 
 // DefaultMCPSession is the session configuration used when the file sets
 // none.
-func DefaultMCPSession() MCPSession { return MCPSession{Idle: 30 * time.Minute} }
+func DefaultMCPSession() MCPSession {
+	return MCPSession{Idle: 30 * time.Minute, Retain: 7 * 24 * time.Hour, MaxPreimageBytes: 32 << 20}
+}
 
 // validateAgent fills in the audit and session defaults and rejects
 // durations that would keep nothing or expire everything at once.
@@ -228,11 +239,23 @@ func (m *MCP) validateAgent() error {
 	if m.Session.Idle == 0 {
 		m.Session.Idle = DefaultMCPSession().Idle
 	}
+	if m.Session.Retain == 0 {
+		m.Session.Retain = DefaultMCPSession().Retain
+	}
+	if m.Session.MaxPreimageBytes == 0 {
+		m.Session.MaxPreimageBytes = DefaultMCPSession().MaxPreimageBytes
+	}
 	if m.Audit.Retain < 0 {
 		return fmt.Errorf("config: mcp.audit.retain must not be negative, got %s", m.Audit.Retain)
 	}
 	if m.Session.Idle < 0 {
 		return fmt.Errorf("config: mcp.session.idle must not be negative, got %s", m.Session.Idle)
+	}
+	if m.Session.Retain < 0 {
+		return fmt.Errorf("config: mcp.session.retain must not be negative, got %s", m.Session.Retain)
+	}
+	if m.Session.MaxPreimageBytes < 0 {
+		return fmt.Errorf("config: mcp.session.max_preimage_bytes must not be negative, got %d", m.Session.MaxPreimageBytes)
 	}
 	if w := m.Workspace; w != "" && (!strings.HasPrefix(w, "/") || path.Clean(w) != w || w == "/" || strings.ContainsAny(w, "\x00\\")) {
 		return fmt.Errorf("config: mcp.workspace must be a canonical non-root virtual path, got %q", w)

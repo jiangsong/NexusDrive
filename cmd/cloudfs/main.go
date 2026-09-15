@@ -197,8 +197,10 @@ Agents
                             generate media .strm files through WebDAV; --prune removes verified stale outputs
   audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
                             list recorded MCP tool calls, newest first; reads agent.db when no daemon runs
-  sessions list [--state active|finished|expired] | show <id> | finish <id> [--summary text]
+  sessions list [--state active|finished|expired|rolled_back] | show <id> | finish <id> [--summary text]
                             inspect agent sessions and their scope; finish needs the running daemon
+  sessions rollback <id> --dry-run | --confirm [--json]
+                            undo what a session wrote through MCP: --dry-run prints the restore/skip/conflict plan, --confirm executes it
   index status [--path P] [--json]
                             content index health; reads index.db when no daemon runs
   index rules | add <path> [--include g1,g2] [--max-file-size 20MiB] | rm <path> --confirm
@@ -719,7 +721,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
-		Index: indexOf(d),
+		Index: indexOf(d), Preimages: d.Preimages,
 	})
 	if err != nil {
 		return err
@@ -798,7 +800,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
-		Index: indexOf(d),
+		Index: indexOf(d), Preimages: d.Preimages,
 	})
 	if err != nil {
 		return err

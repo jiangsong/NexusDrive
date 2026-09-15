@@ -126,10 +126,11 @@ func printAudit(out io.Writer, result control.AuditResponse, asJSON bool) error 
 	return nil
 }
 
-// runSessions lists, shows or finishes agent sessions. Listing and showing
-// work offline against agent.db; finishing changes state the daemon owns.
+// runSessions lists, shows, finishes or rolls back agent sessions. Listing
+// and showing work offline against agent.db; finishing and rolling back
+// change state the daemon owns.
 func runSessions(ctx context.Context, args []string, out io.Writer) error {
-	f := parseFlags(args, "json", "sandbox")
+	f := parseFlags(args, "json", "sandbox", "confirm", "dry-run")
 	for k := range f.values {
 		switch k {
 		case "config", "timeout", "limit", "cursor", "state", "path", "summary":
@@ -138,7 +139,9 @@ func runSessions(ctx context.Context, args []string, out io.Writer) error {
 		}
 	}
 	for k := range f.bools {
-		if k != "json" && k != "sandbox" {
+		switch k {
+		case "json", "sandbox", "confirm", "dry-run":
+		default:
 			return fmt.Errorf("sessions: --%s requires a value or is unknown", k)
 		}
 	}
@@ -152,18 +155,21 @@ func runSessions(ctx context.Context, args []string, out io.Writer) error {
 		if len(f.args) > 1 {
 			return errors.New("sessions list: unexpected argument")
 		}
-	case "show", "finish":
+	case "show", "finish", "rollback":
 		if len(f.args) != 2 || id == "" {
 			return fmt.Errorf("sessions %s: give one session ID", action)
 		}
 	default:
 		return fmt.Errorf("sessions: unknown action %q", action)
 	}
+	if action == "rollback" && !f.bools["confirm"] && !f.bools["dry-run"] {
+		return errors.New("sessions rollback: pass --dry-run to preview the plan, or --confirm to execute it")
+	}
 	q := agent.ListQuery{Cursor: f.str("cursor", ""), State: f.str("state", ""), Path: f.str("path", ""), Sandbox: f.bools["sandbox"]}
 	switch q.State {
-	case "", "active", "finished", "expired":
+	case "", "active", "finished", "expired", "rolled_back":
 	default:
-		return errors.New("sessions: --state must be active, finished or expired")
+		return errors.New("sessions: --state must be active, finished, expired or rolled_back")
 	}
 	if raw := f.str("limit", ""); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -185,6 +191,16 @@ func runSessions(ctx context.Context, args []string, out io.Writer) error {
 	socket, tcp := cfg.Control.Socket, cfg.Control.Metrics
 	asJSON := f.bools["json"]
 	switch action {
+	case "rollback":
+		dryRun := f.bools["dry-run"]
+		plan, online, err := control.CallRollbackSession(ctx, socket, tcp, id, dryRun)
+		if err != nil {
+			return err
+		}
+		if !online {
+			return errors.New("sessions rollback requires the running daemon; start `cloudfs mount` or `cloudfs mcp --http` first")
+		}
+		return printRollbackPlan(out, plan, asJSON)
 	case "finish":
 		finished, online, err := control.CallFinishSession(ctx, socket, tcp, id, f.str("summary", ""))
 		if err != nil {
@@ -260,6 +276,39 @@ func printSessions(out io.Writer, result control.SessionsResponse, asJSON bool) 
 	return nil
 }
 
+// printRollbackPlan prints the three groups of a plan: what was (or would
+// be) restored, what was skipped and why, and what conflicts.
+func printRollbackPlan(out io.Writer, plan agent.Plan, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(out).Encode(plan)
+	}
+	restore, skip, conflict := "restored", "skipped", "conflict"
+	if plan.DryRun {
+		fmt.Fprintf(out, "dry run of session %s: nothing was written\n", plan.SessionID)
+		restore, skip = "would restore", "would skip"
+	} else {
+		fmt.Fprintf(out, "rolled back session %s (rollback session %s)\n", plan.SessionID, plan.RollbackSessionID)
+	}
+	printPlanGroup(out, restore, plan.Restored)
+	printPlanGroup(out, skip, plan.Skipped)
+	printPlanGroup(out, conflict, plan.Conflict)
+	return nil
+}
+
+func printPlanGroup(out io.Writer, label string, items []agent.PlanItem) {
+	fmt.Fprintf(out, "%s %d\n", label, len(items))
+	for _, it := range items {
+		line := "  " + it.Op + " " + it.Path
+		if it.ToPath != "" {
+			line += " -> " + it.ToPath
+		}
+		if it.Reason != "" {
+			line += " (" + it.Reason + ")"
+		}
+		fmt.Fprintln(out, line)
+	}
+}
+
 func printSessionDetail(out io.Writer, detail control.SessionDetail, asJSON bool) error {
 	if asJSON {
 		return json.NewEncoder(out).Encode(detail)
@@ -271,17 +320,48 @@ func printSessionDetail(out io.Writer, detail control.SessionDetail, asJSON bool
 	if s.FinishedAt != nil {
 		fmt.Fprintf(out, "  finished: %s\n", s.FinishedAt.Local().Format(time.RFC3339))
 	}
+	if s.RolledBackAt != nil {
+		fmt.Fprintf(out, "  rolled back: %s\n", s.RolledBackAt.Local().Format(time.RFC3339))
+	}
 	if s.Summary != "" {
 		fmt.Fprintf(out, "  summary: %s\n", s.Summary)
 	}
 	if s.Workspace != "" {
 		fmt.Fprintf(out, "  workspace: %s (%d artifacts)\n", s.Workspace, s.ArtifactCount)
 	}
+	if len(detail.Ops) > 0 {
+		fmt.Fprintf(out, "recorded writes (%d, rollback with `sessions rollback %s --dry-run`):\n", len(detail.Ops), s.ID)
+		for _, op := range detail.Ops {
+			line := fmt.Sprintf("  %d %s %s", op.Seq, op.Op, op.Path)
+			if op.ToPath != "" {
+				line += " -> " + op.ToPath
+			}
+			line += " [" + preimageLabel(op) + "]"
+			if op.RollbackResult != "" {
+				line += " " + op.RollbackResult
+			}
+			fmt.Fprintln(out, line)
+		}
+	}
 	if len(detail.Audit) == 0 {
 		return nil
 	}
 	fmt.Fprintln(out, "recent calls:")
 	return printAudit(out, control.AuditResponse{Rows: detail.Audit}, false)
+}
+
+// preimageLabel is the one-word state of an op's preimage: what a
+// rollback has to work with.
+func preimageLabel(op agent.Op) string {
+	switch {
+	case op.PreState == "absent":
+		return "new"
+	case op.PreState == "dir":
+		return "dir"
+	case op.PreReason != "":
+		return op.PreReason
+	}
+	return "restorable"
 }
 
 // scopeSummary is the one-line form of a scope for a table cell.
@@ -329,7 +409,7 @@ func openAgentOffline(cacheDir string) (*offlineAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &offlineAgent{AgentView: control.NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), ""), st: st}, nil
+	return &offlineAgent{AgentView: control.NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "", control.RollbackDeps{}), st: st}, nil
 }
 
 func (o *offlineAgent) close() { _ = o.st.Close() }

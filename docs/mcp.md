@@ -2,7 +2,7 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
-> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，关键词检索，见"[内容索引](#内容索引)"）。**仍在规划中**：会话回滚、嵌入与 hybrid 检索、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-38 ~ T-43）。工具表只列出已实现的工具。
+> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，关键词检索，见"[内容索引](#内容索引)"）。**二期已落地**：会话快照与回滚（`rollback_session`，见"[会话回滚](#会话回滚)"）。**仍在规划中**：嵌入与 hybrid 检索、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-39 ~ T-42）。工具表只列出已实现的工具。
 
 ## 注册
 
@@ -114,9 +114,10 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 |---|---|---|
 | `begin_session` | `name?`, `sandbox?` | 在工作区下建一个本会话专属目录（`<workspace>/<client>-<日期>-<sid前8位>/`，永不复用），写入 `manifest.json` 骨架，返回 `session_id`、`workspace`、`uri`。`sandbox=true` 时本会话的写被收窄到该目录，读不变 |
 | `finish_session` | `session_id?`, `summary?`, `share?` | 结束会话（默认当前会话，只能结束自己 principal 的会话）：从审计里取本会话成功写过的路径作为产物，写全 `manifest.json`，返回 `artifacts[]`。`share=true` 只对已同步（`state=synced`）的文件附 `download_url`，仍在本地的不等待、不请求直链 |
-| `list_sessions` | `cursor?`, `limit?`, `state?` | 列本 principal 的会话，最新在前，含工作区与产物 |
+| `list_sessions` | `cursor?`, `limit?`, `state?` | 列本 principal 的会话，最新在前，含工作区与产物（`state` 可为 `rolled_back`） |
+| `rollback_session` | `session_id`, `confirm`, `dry_run?` | 按记录逆序撤销该会话（须是本 principal 的）经写工具做的修改，返回 `{restored[], skipped[], conflict[]}` 三组清单；`dry_run=true` 只算计划、不写任何东西、不需要 `confirm`；执行时须 `confirm=true`。回滚本身是一个新会话（`rollback_session_id`），可以再回滚。带 `DestructiveHint`，见"[会话回滚](#会话回滚)" |
 
-三个工具只在服务持有 `Sessions`（`cloudfs mount`/`cloudfs mcp` 常规启动都持有）时注册；
+四个工具只在服务持有 `Sessions`（`cloudfs mount`/`cloudfs mcp` 常规启动都持有）时注册（`rollback_session` 还要求前像目录已打开，daemon 常规启动即打开）；
 在非 owner 的 stdio 进程里它们返回 `requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http`（见"与挂载并存"）。
 产物用现有写工具直接写进会话目录即可，没有单独的 `write_artifact`。
 
@@ -354,6 +355,38 @@ stderr 给出可直接执行的 `claude mcp add --transport http cloudfs <url> -
 `share=true` 给出的直链会过期（`expires_at`），只对已同步的文件有；控制台会话浮层的"复制链接"
 也是点击时才向 daemon 要一次链接，不写进页面。
 
+### 会话回滚
+
+**承诺范围**（原文自 [agent-roadmap.md §4.8](agent-roadmap.md)）：
+
+1. 回滚是**经 VFS 发起的一组新写入**，走 journal → upload → 冲突检测，不是远端历史版本恢复。本地立即可见，远端最终一致。
+2. 会话之后又被别人改过的文件**跳过并报 conflict**，不静默覆盖。远端仍有变化时，uploader 会按 `conflictName` 生成冲突副本，这是最后一道网。
+3. 只覆盖 MCP 工具发起的修改。内核写、控制台 `/fs/*` 与 WebDAV 不在会话内。
+
+每个写工具（`write_file`、`edit_file`、`create_directory`、`copy`、`move`、`delete`）在调 VFS **之前**
+把路径当时的状态记进 agent.db 的 `session_ops`：不存在 / 目录 / 文件；文件且不超过
+`mcp.session.max_preimage_bytes`（默认 32 MiB）时先经普通读路径读满（已缓存零远端调用，`edit_file`
+本来就要读），按 sha256 存到 `<cache.dir>/agent/preimages/<sha256>`——能硬链接块缓存的整文件就链接，
+否则写一份副本（经 `cache.ReserveDisk` 记账）。留不住前像（过大、没读满）只在行里记
+`pre_reason=too_large|not_cached`，**写照常执行，绝不因此拒绝**；`delete recursive=true` 删目录只记
+`pre_state=dir`，回滚时报 `skipped: dir`。写完成后回填 `post_version`（内容写入记写入内容的
+sha256，所以上传后版本号变了也不算别人改过）。
+
+回滚按 `seq` 逆序逐条检查再动手：覆盖/编辑/追加要求文件内容仍是会话写下的，否则 `conflict: modified`；
+新建的文件内容未变才删除；`create_directory` 建的目录只有为空才删（否则 `skipped: not_empty`）；
+改名要求原路径现在为空、新路径仍在，否则 conflict；删除的文件要求路径现在为空且有前像，
+否则 `conflict: exists` / `skipped: too_large|not_cached`。每行的结果写回 `rollback_result`，已恢复的行
+再跑一次报 `skipped: already`，所以中途被打断的回滚重跑是幂等的。回滚的每一步写入同样记前像，
+记在一个名为 `rollback of <id>` 的新会话下，因此**回滚可以再回滚**。结束时原会话 `state=rolled_back`
+并带 `rolled_back_at`。
+
+入口：MCP `rollback_session`；控制面 `POST /sessions/{id}/rollback` 传 `{"dry_run":true}` 得计划、
+传 `{"confirm":true}` 执行（控制台先预览再要求键入会话短 ID 确认）；CLI
+`cloudfs sessions rollback <id> --dry-run | --confirm [--json]`。`GET /sessions/{id}` 的 `ops[]` 列出
+每一步与其前像状态；`GET /sessions?path=&since=` 反查在保留期内改过某路径的会话（检查器的
+"被 Agent 修改"）。前像与操作行按 `mcp.session.retain`（默认 7 天）在会话结束、过期或已回滚后回收；
+owner 启动时清理"链接了 blob 但没来得及写行"的孤儿。
+
 ### 审计
 
 每次 `tools/call`（加 `initialize` 与订阅注册）同步写一行：时间、principal、会话、传输、工具、
@@ -363,10 +396,10 @@ stderr 给出可直接执行的 `claude mcp add --transport http cloudfs <url> -
 
 ```sh
 cloudfs audit --result denied --since 24h        # daemon 未运行时直接只读 agent.db
-cloudfs sessions list | show <id> | finish <id> --summary "…"
+cloudfs sessions list | show <id> | finish <id> --summary "…" | rollback <id> --dry-run | --confirm
 ```
 
-控制面：`GET /audit`、`GET /sessions`、`GET /sessions/{id}`、`POST /sessions/{id}/finish`，SSE 事件
+控制面：`GET /audit`、`GET /sessions`、`GET /sessions/{id}`、`POST /sessions/{id}/finish`、`POST /sessions/{id}/rollback`，SSE 事件
 `audit`/`session`；控制台「Agent」屏的"会话"与"审计"标签就是它们的视图（denied 行有文字标签，
 不只靠颜色）。
 

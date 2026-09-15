@@ -25,7 +25,7 @@ func agentFixture(t *testing.T) (*fixture, *agent.Store, *agent.Sessions) {
 	}
 	t.Cleanup(func() { st.Close() })
 	m := agent.NewSessions(st, agent.SessionOptions{})
-	f.coll.Agent = NewAgentView(st, m, "")
+	f.coll.Agent = NewAgentView(st, m, "", RollbackDeps{})
 	return f, st, m
 }
 

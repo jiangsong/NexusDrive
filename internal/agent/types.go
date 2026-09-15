@@ -40,17 +40,22 @@ type Session struct {
 	ConnKey       string     `json:"-"`
 	ClientName    string     `json:"client"`
 	ClientVersion string     `json:"client_version,omitempty"`
-	Transport     string     `json:"transport"` // stdio | http-legacy | http-token | http-loopback
+	Transport     string     `json:"transport"` // stdio | http-legacy | http-token | http-loopback | console (a rollback run from the control plane)
 	Scope         Scope      `json:"scope"`
 	Workspace     string     `json:"workspace,omitempty"`
 	Sandbox       bool       `json:"sandbox"`
-	State         string     `json:"state"` // active | finished | expired
+	State         string     `json:"state"` // active | finished | expired | rolled_back
 	StartedAt     time.Time  `json:"started_at"`
 	LastSeenAt    time.Time  `json:"last_seen_at"`
 	FinishedAt    time.Time  `json:"finished_at,omitempty"`
 	Summary       string     `json:"summary,omitempty"`
 	Writes        int        `json:"writes"`
 	Artifacts     []Artifact `json:"artifacts,omitempty"`
+	// OpsCount is how many writes the session recorded in session_ops,
+	// which is what a rollback would look at.
+	OpsCount int `json:"ops_count"`
+	// RolledBackAt is when the session was rolled back; zero otherwise.
+	RolledBackAt time.Time `json:"rolled_back_at,omitzero"`
 }
 
 // Artifact is a file a session declared as one of its deliverables.

@@ -71,3 +71,16 @@ func setIf(params url.Values, key, value string) {
 		params.Set(key, value)
 	}
 }
+
+// CallRollbackSession previews (dryRun) or executes a session rollback
+// through the running daemon. The route itself refuses an execution that
+// does not carry confirm, so the CLI's --confirm is what sets it.
+func CallRollbackSession(ctx context.Context, socket, tcp, id string, dryRun bool) (agent.Plan, bool, error) {
+	body, err := json.Marshal(SessionRollbackRequest{DryRun: dryRun, Confirm: !dryRun})
+	if err != nil {
+		return agent.Plan{}, false, err
+	}
+	var out agent.Plan
+	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/rollback", body, &out)
+	return out, online, err
+}

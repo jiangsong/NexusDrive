@@ -31,6 +31,9 @@ var ErrInvalidCursor = errors.New("agent: invalid cursor")
 var WriteTools = map[string]bool{
 	"write_file": true, "edit_file": true, "create_directory": true,
 	"copy": true, "move": true, "delete": true,
+	// A rollback writes too; it names no path on its row, so ArtifactPaths
+	// never lists it.
+	"rollback_session": true,
 }
 
 // lastSeenGranularity bounds how often a busy session rewrites its
@@ -63,9 +66,17 @@ type ConnInfo struct {
 type ListQuery struct {
 	Cursor  string
 	Limit   int    // default 50, max 200
-	State   string // "" | active | finished | expired
+	State   string // "" | active | finished | expired | rolled_back
 	Sandbox bool
-	Path    string // sessions whose workspace contains this path
+	// Path keeps the sessions that touched this path: those whose
+	// workspace contains it and those that recorded an op on it (as the
+	// source, or the destination of a rename).
+	Path string
+	// Since keeps the sessions last seen at or after this instant.
+	Since time.Time
+	// opsOnly narrows Path to the sessions that recorded an op on it;
+	// SessionsTouching sets it.
+	opsOnly bool
 	// PrincipalID keeps only the sessions of one principal; the MCP
 	// list_sessions tool sets it so an agent sees its own sessions only.
 	PrincipalID string
@@ -288,8 +299,18 @@ func (m *Sessions) List(ctx context.Context, q ListQuery) ([]Session, string, er
 	}
 	if q.Path != "" {
 		p := Normalise(q.Path)
-		where = append(where, "workspace != '' AND (workspace = ? OR substr(?, 1, length(workspace) + 1) = workspace || '/')")
-		args = append(args, p, p)
+		touched := "EXISTS (SELECT 1 FROM session_ops o WHERE o.session_id = sessions.id AND (o.path = ? OR o.to_path = ?))"
+		if q.opsOnly {
+			where = append(where, touched)
+			args = append(args, p, p)
+		} else {
+			where = append(where, "((workspace != '' AND (workspace = ? OR substr(?, 1, length(workspace) + 1) = workspace || '/')) OR "+touched+")")
+			args = append(args, p, p, p, p)
+		}
+	}
+	if !q.Since.IsZero() {
+		where = append(where, "last_seen_at >= ?")
+		args = append(args, q.Since.UnixNano())
 	}
 	if q.PrincipalID != "" {
 		where = append(where, "principal_id = ?")
@@ -426,6 +447,62 @@ func (m *Sessions) Begin(ctx context.Context, current Session, opt BeginOptions)
 	return s, nil
 }
 
+// insertSession writes a session row as given. Begin and Resolve build
+// their rows inside a transaction of their own; a rollback session has no
+// connection to reconcile with and goes in directly.
+func (m *Sessions) insertSession(ctx context.Context, s Session) error {
+	scope, err := json.Marshal(s.Scope)
+	if err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	if _, err := m.store.db.ExecContext(ctx, `INSERT INTO sessions(id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, summary)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.PrincipalID, s.ConnKey, s.ClientName, s.ClientVersion, s.Transport, string(scope), s.Workspace, boolInt(s.Sandbox),
+		s.State, s.StartedAt.UnixNano(), s.LastSeenAt.UnixNano(), s.Summary); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
+}
+
+// markRolledBack makes rolled_back the session's terminal state and
+// remembers when. The sessions table has no column for that instant and
+// the phase-two schema is frozen, so it lives in the meta table under
+// "rolled_back_at:<id>", which scanSession reads back. A session that
+// was still active is finished by the same update.
+func (m *Sessions) markRolledBack(ctx context.Context, id string) error {
+	now := m.opt.Now().UnixNano()
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET state = 'rolled_back', finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END WHERE id = ?`, now, id); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`, rolledBackKey+id, strconv.FormatInt(now, 10)); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	if s, err := m.Get(ctx, id); err == nil {
+		m.store.publish(Event{Kind: "session", Session: &s})
+	}
+	return nil
+}
+
+// rolledBackKey prefixes the meta rows that hold rollback instants.
+const rolledBackKey = "rolled_back_at:"
+
+// setRollbackResult records what a rollback did with one row; restored
+// rows are marked so a rerun skips them.
+func (s *Store) setRollbackResult(ctx context.Context, seq int64, restored bool, result string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE session_ops SET rolled_back = ?, rollback_result = ? WHERE seq = ?`, boolInt(restored), result, seq); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1
@@ -560,15 +637,21 @@ func (m *Sessions) Summary(ctx context.Context, since time.Time) (Summary, error
 	return out, nil
 }
 
-const sessionColumns = `SELECT id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, finished_at, summary, artifacts FROM sessions`
+// sessionColumns is the row every session query selects: the columns of
+// the table, the number of ops the session recorded, and the rollback
+// instant kept in meta (see markRolledBack). The two subqueries cost a
+// lookup per row on indexed keys, which a page of at most 200 rows bears.
+const sessionColumns = `SELECT id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, finished_at, summary, artifacts,
+	(SELECT count(*) FROM session_ops WHERE session_ops.session_id = sessions.id),
+	COALESCE((SELECT v FROM meta WHERE meta.k = 'rolled_back_at:' || sessions.id), '0') FROM sessions`
 
 func scanSession(row rowScanner) (Session, error) {
 	var s Session
-	var scope, artifacts string
+	var scope, artifacts, rolledBack string
 	var sandbox int
 	var started, lastSeen, finished int64
 	err := row.Scan(&s.ID, &s.PrincipalID, &s.ConnKey, &s.ClientName, &s.ClientVersion, &s.Transport, &scope,
-		&s.Workspace, &sandbox, &s.State, &started, &lastSeen, &finished, &s.Summary, &artifacts)
+		&s.Workspace, &sandbox, &s.State, &started, &lastSeen, &finished, &s.Summary, &artifacts, &s.OpsCount, &rolledBack)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrSessionNotFound
 	}
@@ -583,6 +666,9 @@ func scanSession(row rowScanner) (Session, error) {
 	}
 	s.Sandbox = sandbox != 0
 	s.StartedAt, s.LastSeenAt, s.FinishedAt = fromNanos(started), fromNanos(lastSeen), fromNanos(finished)
+	if ns, err := strconv.ParseInt(rolledBack, 10, 64); err == nil {
+		s.RolledBackAt = fromNanos(ns)
+	}
 	return s, nil
 }
 

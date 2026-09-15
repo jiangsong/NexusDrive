@@ -14,7 +14,7 @@ func (d *Daemon) agentView() control.AgentView {
 	if d.Agent == nil || d.Sessions == nil {
 		return nil
 	}
-	return control.NewAgentView(d.Agent, d.Sessions, d.Workspace())
+	return control.NewAgentView(d.Agent, d.Sessions, d.Workspace(), control.RollbackDeps{FS: agent.VFSOps(d.FS), Preimages: d.Preimages})
 }
 
 // Workspace is the directory MCP sessions deliver into: mcp.workspace, or

@@ -25,6 +25,12 @@ type AgentView interface {
 	// SessionAudit returns the newest audit rows of one session.
 	SessionAudit(ctx context.Context, id string, limit int) ([]agent.AuditRow, error)
 	FinishSession(ctx context.Context, id, summary string) (agent.Session, error)
+	// SessionOps returns the writes one session recorded, in order.
+	SessionOps(ctx context.Context, id string) ([]agent.Op, error)
+	// Rollback undoes a session's writes (or, with dryRun, reports what it
+	// would do). It returns agent.ErrRollbackUnavailable when no VFS is
+	// wired, as in an offline CLI.
+	Rollback(ctx context.Context, id string, dryRun bool) (agent.Plan, agent.Session, error)
 	// Summary counts active sessions and today's writes and denials.
 	Summary(ctx context.Context) (agent.Summary, error)
 	Watch() (<-chan agent.Event, func())
@@ -74,6 +80,10 @@ type SessionView struct {
 	Writes        int         `json:"writes"`
 	ArtifactCount int         `json:"artifacts"`
 	Summary       string      `json:"summary,omitempty"`
+	// OpsCount is how many writes the session recorded for rollback.
+	OpsCount int `json:"ops_count"`
+	// RolledBackAt is set once the session has been rolled back.
+	RolledBackAt *time.Time `json:"rolled_back_at,omitempty"`
 }
 
 // SessionsResponse is GET /sessions.
@@ -83,12 +93,13 @@ type SessionsResponse struct {
 	Summary    agent.Summary `json:"summary"`
 }
 
-// SessionDetail is GET /sessions/{id}: the session, its newest audit rows
-// and the artifacts it declared.
+// SessionDetail is GET /sessions/{id}: the session, its newest audit rows,
+// the artifacts it declared and the writes it recorded for rollback.
 type SessionDetail struct {
 	Session   SessionView      `json:"session"`
 	Audit     []AuditView      `json:"audit"`
 	Artifacts []agent.Artifact `json:"artifacts"`
+	Ops       []agent.Op       `json:"ops"`
 }
 
 // SessionFinishRequest is POST /sessions/{id}/finish.
@@ -120,12 +131,15 @@ type storeAgentView struct {
 	st        *agent.Store
 	m         *agent.Sessions
 	workspace string
+	rollback  RollbackDeps
 }
 
 // NewAgentView adapts an open agent.db to the control plane. workspace is
 // the delivery directory reported by /status; "" when none is configured.
-func NewAgentView(st *agent.Store, m *agent.Sessions, workspace string) AgentView {
-	return &storeAgentView{st: st, m: m, workspace: workspace}
+// rb carries what a rollback writes through; its zero value makes the
+// rollback route answer 503.
+func NewAgentView(st *agent.Store, m *agent.Sessions, workspace string, rb RollbackDeps) AgentView {
+	return &storeAgentView{st: st, m: m, workspace: workspace, rollback: rb}
 }
 
 func (v *storeAgentView) Audit(ctx context.Context, q agent.AuditQuery) ([]agent.AuditRow, string, error) {
@@ -178,6 +192,17 @@ func (v *storeAgentView) SessionAudit(ctx context.Context, id string, limit int)
 
 func (v *storeAgentView) FinishSession(ctx context.Context, id, summary string) (agent.Session, error) {
 	return v.m.Finish(ctx, id, summary)
+}
+
+func (v *storeAgentView) SessionOps(ctx context.Context, id string) ([]agent.Op, error) {
+	return v.st.OpsOf(ctx, id)
+}
+
+func (v *storeAgentView) Rollback(ctx context.Context, id string, dryRun bool) (agent.Plan, agent.Session, error) {
+	if v.rollback.FS == nil || v.rollback.Preimages == nil {
+		return agent.Plan{}, agent.Session{}, agent.ErrRollbackUnavailable
+	}
+	return v.m.Rollback(ctx, v.rollback.FS, v.rollback.Preimages, id, dryRun)
 }
 
 // Summary counts from local midnight: "today" is the day the person looking
@@ -263,11 +288,15 @@ func SessionViewOf(s agent.Session) SessionView {
 		ID: s.ID, Client: s.ClientName, ClientVersion: s.ClientVersion, Transport: s.Transport,
 		State: s.State, Scope: s.Scope, Workspace: s.Workspace, Sandbox: s.Sandbox,
 		StartedAt: s.StartedAt, LastSeenAt: s.LastSeenAt, Writes: s.Writes,
-		ArtifactCount: len(s.Artifacts), Summary: s.Summary,
+		ArtifactCount: len(s.Artifacts), Summary: s.Summary, OpsCount: s.OpsCount,
 	}
 	if !s.FinishedAt.IsZero() {
 		finished := s.FinishedAt
 		v.FinishedAt = &finished
+	}
+	if !s.RolledBackAt.IsZero() {
+		rolledBack := s.RolledBackAt
+		v.RolledBackAt = &rolledBack
 	}
 	return v
 }
@@ -289,9 +318,16 @@ func SessionDetailOf(ctx context.Context, v AgentView, id string) (SessionDetail
 	if artifacts == nil {
 		artifacts = []agent.Artifact{}
 	}
+	ops, err := v.SessionOps(ctx, id)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	if ops == nil {
+		ops = []agent.Op{}
+	}
 	names := newClientNames(v)
 	names.names[sess.ID] = sess.ClientName
-	return SessionDetail{Session: SessionViewOf(sess), Audit: names.auditViews(ctx, rows), Artifacts: artifacts}, nil
+	return SessionDetail{Session: SessionViewOf(sess), Audit: names.auditViews(ctx, rows), Artifacts: artifacts, Ops: ops}, nil
 }
 
 // queryLimit reads ?limit= with a default and a cap, answering the request
@@ -366,7 +402,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, AuditResponse{Rows: newClientNames(v).auditViews(r.Context(), rows), NextCursor: next})
 }
 
-// GET /sessions?cursor=&limit=&state=&sandbox=&path=
+// GET /sessions?cursor=&limit=&state=&sandbox=&path=&since=
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
@@ -381,10 +417,18 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 	q := agent.ListQuery{Cursor: params.Get("cursor"), State: params.Get("state"), Path: params.Get("path")}
 	switch q.State {
-	case "", "active", "finished", "expired":
+	case "", "active", "finished", "expired", "rolled_back":
 	default:
 		httpErrorT(w, r, http.StatusBadRequest, "err.invalid_query_param")
 		return
+	}
+	if raw := params.Get("since"); raw != "" {
+		since, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			httpErrorT(w, r, http.StatusBadRequest, "err.invalid_query_param")
+			return
+		}
+		q.Since = since
 	}
 	switch params.Get("sandbox") {
 	case "", "0", "false":
@@ -413,7 +457,8 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// GET /sessions/<id> and POST /sessions/<id>/finish.
+// GET /sessions/<id>, POST /sessions/<id>/finish and POST
+// /sessions/<id>/rollback.
 func (s *Server) sessionByPath(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
@@ -421,6 +466,10 @@ func (s *Server) sessionByPath(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, "/sessions/")
 	if id, ok := strings.CutSuffix(tail, "/finish"); ok {
 		s.finishSession(w, r, id)
+		return
+	}
+	if id, ok := strings.CutSuffix(tail, "/rollback"); ok {
+		s.rollbackSession(w, r, id)
 		return
 	}
 	if tail == "" || strings.Contains(tail, "/") {

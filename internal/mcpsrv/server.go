@@ -97,6 +97,10 @@ type Options struct {
 	// index_status, index, unindex, read_extracted_text). nil leaves them
 	// unregistered: with index.enabled false there is no index to search.
 	Index IndexService
+	// Preimages, when set with Sessions, makes every write tool record the
+	// state of its path before the write in session_ops and registers
+	// rollback_session. nil records nothing and leaves rollback out.
+	Preimages *agent.Preimages
 }
 
 // IndexService is what the index tools need from the daemon's indexer.
@@ -212,6 +216,7 @@ func New(opt Options) (*Server, error) {
 	s.registerUploadTools()
 	s.registerExportTools()
 	s.registerSessionTools()
+	s.registerRollbackTool()
 	s.registerIndexTools()
 	s.registerResources()
 	if opt.Sessions != nil {
@@ -819,11 +824,14 @@ func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in write
 		r, _ := fail(fmt.Errorf("unknown mode %q; use create, overwrite or append", mode))
 		return r, writeOutput{}, nil
 	}
+	rec := s.beforeWrite(ctx, mode, p, "", "")
 	a, err := s.opt.FS.WriteFile(ctx, p, []byte(in.Content), mode == "append")
 	if err != nil {
+		rec.failed(ctx)
 		r, _ := fail(mapErr(err, p))
 		return r, writeOutput{}, nil
 	}
+	rec.done(ctx, postContent(rec, mode, []byte(in.Content)))
 	state := "synced"
 	if a.LocalOnly {
 		state = "local"
@@ -880,11 +888,14 @@ func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editIn
 	if in.DryRun {
 		return text("dry run: %d edits would apply to %s", len(in.Edits), p), out, nil
 	}
+	rec := s.beforeWrite(ctx, "edit", p, "", "")
 	a, err := s.opt.FS.WriteFile(ctx, p, []byte(content), false)
 	if err != nil {
+		rec.failed(ctx)
 		r, _ := fail(mapErr(err, p))
 		return r, editOutput{}, nil
 	}
+	rec.done(ctx, agent.ContentVersion([]byte(content)))
 	out.Size = a.Size
 	return text("applied %d edits to %s", len(in.Edits), p), out, nil
 }
@@ -906,39 +917,64 @@ func (s *Server) mkdir(ctx context.Context, _ *mcp.CallToolRequest, in mkdirInpu
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	if err := s.mkdirAll(ctx, p); err != nil {
+	if err := s.mkdirAll(ctx, p, true); err != nil {
 		r, _ := fail(mapErr(err, p))
 		return r, okOutput{}, nil
 	}
 	return text("created %s", p), okOutput{Path: p, OK: true}, nil
 }
 
-// mkdirAll creates every missing component of p.
-func (s *Server) mkdirAll(ctx context.Context, p string) error {
-	if p == "/" {
-		return nil
-	}
-	if a, err := s.opt.FS.StatPath(ctx, p); err == nil {
-		if a.IsDir {
-			return nil
-		}
-		return fmt.Errorf("%s exists and is not a directory", p)
-	} else if !errors.Is(err, vfs.ErrNotFound) {
-		return err
-	}
-	parent := path.Dir(p)
-	if err := s.mkdirAll(ctx, parent); err != nil {
-		return err
-	}
-	parentAttr, err := s.opt.FS.StatPath(ctx, parent)
+// mkdirAll creates every missing component of p, shallowest first. With
+// record, each directory it makes is a mkdir row of the session, so a
+// rollback removes them deepest first; begin_session makes its own
+// directory without a row.
+func (s *Server) mkdirAll(ctx context.Context, p string, record bool) error {
+	missing, err := s.missingDirs(ctx, p)
 	if err != nil {
 		return err
 	}
-	_, err = s.opt.FS.Mkdir(ctx, parentAttr.Ino, path.Base(p))
-	if errors.Is(err, vfs.ErrExists) {
-		return nil
+	for i := len(missing) - 1; i >= 0; i-- {
+		dir := missing[i]
+		parentAttr, err := s.opt.FS.StatPath(ctx, path.Dir(dir))
+		if err != nil {
+			return err
+		}
+		var rec *opRecord
+		if record {
+			rec = s.beforeWrite(ctx, "mkdir", dir, "", "")
+		}
+		_, err = s.opt.FS.Mkdir(ctx, parentAttr.Ino, path.Base(dir))
+		if errors.Is(err, vfs.ErrExists) {
+			err = nil
+		}
+		if err != nil {
+			rec.failed(ctx)
+			return err
+		}
+		rec.done(ctx, "")
 	}
-	return err
+	return nil
+}
+
+// missingDirs lists the components of p that do not exist yet, deepest
+// first, and refuses a component that exists as a file.
+func (s *Server) missingDirs(ctx context.Context, p string) ([]string, error) {
+	var missing []string
+	for p != "/" {
+		a, err := s.opt.FS.StatPath(ctx, p)
+		if err == nil {
+			if a.IsDir {
+				break
+			}
+			return nil, fmt.Errorf("%s exists and is not a directory", p)
+		}
+		if !errors.Is(err, vfs.ErrNotFound) {
+			return nil, err
+		}
+		missing = append(missing, p)
+		p = path.Dir(p)
+	}
+	return missing, nil
 }
 
 func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput) (*mcp.CallToolResult, okOutput, error) {
@@ -965,10 +1001,13 @@ func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput)
 		r, _ := fail(mapErr(err, path.Dir(to)))
 		return r, okOutput{}, nil
 	}
+	rec := s.beforeWrite(ctx, "rename", from, to, "")
 	if err := s.opt.FS.Rename(ctx, srcParent.Ino, path.Base(from), dstParent.Ino, path.Base(to)); err != nil {
+		rec.failed(ctx)
 		r, _ := fail(mapErr(err, from))
 		return r, okOutput{}, nil
 	}
+	rec.done(ctx, "")
 	return text("moved %s to %s", from, to), okOutput{Path: to, OK: true}, nil
 }
 
@@ -986,10 +1025,18 @@ func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveIn
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	if _, err := s.opt.FS.Copy(ctx, from, to); err != nil {
+	rec := s.beforeWrite(ctx, "create", to, "", "")
+	a, err := s.opt.FS.Copy(ctx, from, to)
+	if err != nil {
+		rec.failed(ctx)
 		r, _ := fail(mapErr(err, to))
 		return r, okOutput{}, nil
 	}
+	// A copy's bytes never pass through here, so its row keeps the
+	// destination's version rather than a content hash; once the upload
+	// queue re-versions a cross-remote copy, rollback reports it as a
+	// conflict rather than guess.
+	rec.done(ctx, a.Version)
 	return text("copied %s to %s", from, to), okOutput{Path: to, OK: true}, nil
 }
 
@@ -1016,10 +1063,19 @@ func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in dele
 		r, _ := fail(mapErr(err, path.Dir(p)))
 		return r, okOutput{}, nil
 	}
+	reason := ""
+	if in.Recursive {
+		// The contents of a directory deleted recursively are not kept
+		// (phase one); the row says so and rollback skips it.
+		reason = "dir"
+	}
+	rec := s.beforeWrite(ctx, "delete", p, "", reason)
 	if err := s.opt.FS.Remove(ctx, parent.Ino, path.Base(p), in.Recursive); err != nil {
+		rec.failed(ctx)
 		r, _ := fail(mapErr(err, p))
 		return r, okOutput{}, nil
 	}
+	rec.done(ctx, "")
 	return text("deleted %s", p), okOutput{Path: p, OK: true}, nil
 }
 

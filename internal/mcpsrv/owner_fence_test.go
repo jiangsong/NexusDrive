@@ -68,6 +68,7 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"begin_session":     {},
 		"finish_session":    {},
 		"list_sessions":     {},
+		"rollback_session":  {"session_id": "x", "confirm": true},
 	}
 	// Read tools that must succeed outright on the warmed tree.
 	readOK := map[string]map[string]any{

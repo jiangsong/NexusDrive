@@ -104,7 +104,7 @@ func TestAgentPromptMentionsTheRightTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	f.coll.Agent = NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "")
+	f.coll.Agent = NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "", RollbackDeps{})
 	s := NewServer(f.coll)
 
 	_, file, _ := promptFor(t, s, "/agent/prompt?path=/docs/b")

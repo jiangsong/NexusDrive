@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -53,6 +54,10 @@ type Daemon struct {
 	Agent *agent.Store
 	// Sessions maps MCP connections to sessions in Agent.
 	Sessions *agent.Sessions
+	// Preimages keeps what MCP write tools overwrite, so a session can be
+	// rolled back; the owner recovers orphan blobs at start and collects
+	// expired sessions hourly.
+	Preimages *agent.Preimages
 	// Index is the content indexer over index.db, nil unless index.enabled.
 	// Every process opens it so a stdio MCP server beside the daemon can
 	// search; only the owner of index.db runs the extraction worker.
@@ -341,11 +346,30 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	d.Agent = agentStore
 	d.Sessions = agent.NewSessions(agentStore, agent.SessionOptions{Idle: cfg.MCP.Session.Idle})
 	d.closers = append(d.closers, agentStore.Close)
+	preimages, err := agent.NewPreimages(agentStore, filepath.Join(agentStore.Dir(), "preimages"), ca, int64(cfg.MCP.Session.MaxPreimageBytes))
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	d.Preimages = preimages
+	if agentStore.Owner() {
+		// A crash between linking a preimage and recording its row leaves
+		// an orphan blob; sweeping them belongs to the one process that
+		// knows no capture is in flight, before any tool runs.
+		if n, err := preimages.Recover(ctx); err != nil {
+			slog.Warn("daemon: preimage recovery failed", "err", err)
+		} else if n > 0 {
+			slog.Info("daemon: removed orphan preimages", "count", n)
+		}
+	}
 	if agentStore.Owner() && !opt.NoBackground {
 		// Retention purges on start and then daily; RunAuditRetention itself
-		// returns at once in a non-owner, so two processes never race.
+		// returns at once in a non-owner, so two processes never race. The
+		// preimage GC follows the same pattern hourly with the session
+		// retention.
 		retentionCtx, stopRetention := context.WithCancel(ctx)
 		go agentStore.RunAuditRetention(retentionCtx, cfg.MCP.Audit.Retain, 24*time.Hour)
+		go preimages.RunGC(retentionCtx, cfg.MCP.Session.Retain, time.Hour)
 		d.closers = append(d.closers, func() error { stopRetention(); return nil })
 	}
 

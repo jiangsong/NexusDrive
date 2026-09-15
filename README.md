@@ -147,6 +147,8 @@ mcp:
     retain: 2160h       # 工具调用审计（agent.db）的保留期，默认 90 天
   session:
     idle: 30m           # HTTP 令牌会话空闲多久自动结束并轮转，默认 30 分钟
+    retain: 168h        # 会话操作记录与回滚用前像的保留期，默认 7 天
+    max_preimage_bytes: 32MiB   # 超过此大小的文件写前不留前像，无法回滚，默认 32 MiB
 
 control:
   metrics: 127.0.0.1:9101
@@ -379,8 +381,10 @@ mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h
 mcp token list | revoke <name|id> --confirm   列出（只显示指纹）或吊销令牌，吊销同时关闭其会话
 audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
                           查看 MCP 工具调用审计，最新在前；daemon 未运行时直接读 agent.db
-sessions list [--state active|finished|expired] | show <id> | finish <id> [--summary text]
+sessions list [--state active|finished|expired|rolled_back] | show <id> | finish <id> [--summary text]
                           查看 agent 会话及其作用域、产物；finish 需要运行中的 daemon
+sessions rollback <id> --dry-run | --confirm [--json]
+                          撤销会话经 MCP 写工具做的修改：--dry-run 只打印将恢复/跳过/冲突三组，--confirm 执行；需要运行中的 daemon
 strm <virtual-path> --out <dir> [--prune] 通过运行中的 WebDAV 生成媒体库 .strm
 status [--json]           缓存、上传队列、代理、限流状态
 ui | open [--print]       在浏览器打开桌面式控制台（需 control.metrics）

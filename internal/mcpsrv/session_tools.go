@@ -64,7 +64,7 @@ type finishSessionOutput struct {
 type listSessionsInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor from a previous truncated listing"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum sessions to return; the server caps this"`
-	State  string `json:"state,omitempty" jsonschema:"active, finished or expired; default all"`
+	State  string `json:"state,omitempty" jsonschema:"active, finished, expired or rolled_back; default all"`
 }
 
 type listSessionsOutput struct {
@@ -145,7 +145,7 @@ func (s *Server) createSessionDir(ctx context.Context, sess agent.Session) error
 	} else if !errors.Is(err, vfs.ErrNotFound) {
 		return err
 	}
-	if err := s.mkdirAll(ctx, sess.Workspace); err != nil {
+	if err := s.mkdirAll(ctx, sess.Workspace, false); err != nil {
 		return err
 	}
 	return s.writeManifest(ctx, sess)
@@ -290,9 +290,9 @@ func (s *Server) listSessions(ctx context.Context, _ *mcp.CallToolRequest, in li
 		return r, listSessionsOutput{}, nil
 	}
 	switch in.State {
-	case "", "active", "finished", "expired":
+	case "", "active", "finished", "expired", "rolled_back":
 	default:
-		r, _ := fail(fmt.Errorf("unknown state %q; use active, finished or expired", in.State))
+		r, _ := fail(fmt.Errorf("unknown state %q; use active, finished, expired or rolled_back", in.State))
 		return r, listSessionsOutput{}, nil
 	}
 	sessions, next, err := s.opt.Sessions.List(ctx, agent.ListQuery{

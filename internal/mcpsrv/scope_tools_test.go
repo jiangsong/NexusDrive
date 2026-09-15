@@ -167,6 +167,9 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		// The session tools derive their paths from the configuration and
 		// check them internally; list_sessions filters by principal.
 		"begin_session": "workspace checked internally", "finish_session": "session ids only", "list_sessions": "filters by principal",
+		// rollback_session replays the paths its rows recorded, which the
+		// session's own scope checked when they were written.
+		"rollback_session": "session ids only; paths come from the session's own rows",
 		// index_status checks the path it is given (TestIndexStatusChecksItsOptionalPath)
 		// and filters the failure list by scope when given none.
 		"index_status": "optional path checked; failures filtered by scope",

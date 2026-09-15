@@ -92,8 +92,11 @@ func (s *Server) auditMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 			return next(ctx, method, req)
 		}
 		note := &callNote{}
+		// The ops a write records are linked to this row once it exists;
+		// the note collects their seqs while the call runs.
+		callCtx, ops := agent.WithOpNote(context.WithValue(ctx, callNoteKey{}, note))
 		start := time.Now()
-		res, err := next(context.WithValue(ctx, callNoteKey{}, note), method, req)
+		res, err := next(callCtx, method, req)
 		row.TS, row.DurationMS = start, time.Since(start).Milliseconds()
 		if sess, ok := agent.FromContext(ctx); ok {
 			row.SessionID, row.PrincipalID, row.Transport = sess.ID, sess.PrincipalID, sess.Transport
@@ -115,8 +118,10 @@ func (s *Server) auditMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if call != nil {
 			row.BytesOut = contentBytes(call)
 		}
-		if _, werr := s.audit.AppendAudit(context.WithoutCancel(ctx), row); werr != nil {
+		if id, werr := s.audit.AppendAudit(context.WithoutCancel(ctx), row); werr != nil {
 			slog.Warn("mcp audit write failed", "tool", row.Tool, "err", werr)
+		} else {
+			s.linkOps(context.WithoutCancel(ctx), ops, id)
 		}
 		return res, err
 	}

@@ -75,7 +75,7 @@ func TestAuditAndSessionsCLIReadTheStoreOfflineAndOnline(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer st.Close()
-			coll := &control.Collector{Agent: control.NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "")}
+			coll := &control.Collector{Agent: control.NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "", control.RollbackDeps{})}
 			srv, err := control.NewServer(coll).Start(ctx, cfg.Control.Socket, "")
 			if err != nil {
 				t.Fatal(err)
@@ -149,5 +149,102 @@ func TestAuditAndSessionsCLIWithoutAStoreAreEmptyNotErrors(t *testing.T) {
 	}
 	if err := runSessions(context.Background(), []string{"show", "nope", "--config", p}, &out); err == nil {
 		t.Fatal("show without a store should fail")
+	}
+}
+
+// rollbackView answers rollbacks with a canned plan and records what the
+// CLI asked for, so the test covers the command and the route, not the
+// rollback itself (internal/agent has that).
+type rollbackView struct {
+	control.AgentView
+	calls []bool // dryRun per call
+}
+
+func (v *rollbackView) Rollback(_ context.Context, id string, dryRun bool) (agent.Plan, agent.Session, error) {
+	v.calls = append(v.calls, dryRun)
+	if id == "nope" {
+		return agent.Plan{}, agent.Session{}, agent.ErrSessionNotFound
+	}
+	plan := agent.Plan{
+		SessionID: id, DryRun: dryRun,
+		Restored: []agent.PlanItem{{Seq: 3, Op: "overwrite", Path: "/work/a.md"}, {Seq: 2, Op: "rename", Path: "/work/x", ToPath: "/work/y"}},
+		Skipped:  []agent.PlanItem{{Seq: 1, Op: "delete", Path: "/work/dir", Reason: "dir"}},
+		Conflict: []agent.PlanItem{{Seq: 4, Op: "edit", Path: "/work/b.md", Reason: "modified"}},
+	}
+	if !dryRun {
+		plan.RollbackSessionID = "rb-1"
+	}
+	return plan, agent.Session{ID: id}, nil
+}
+
+func TestSessionsRollbackCLI(t *testing.T) {
+	cfg, p := uploadCLIConfig(t)
+	s := agentCLIStore(t, cfg.Cache.Dir)
+	ctx := context.Background()
+	var out bytes.Buffer
+	// Offline there is nothing to write through.
+	err := runSessions(ctx, []string{"rollback", s.ID, "--confirm", "--config", p}, &out)
+	if err == nil || !strings.Contains(err.Error(), "requires the running daemon") {
+		t.Fatalf("offline rollback: %v", err)
+	}
+	st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	view := &rollbackView{AgentView: control.NewAgentView(st, agent.NewSessions(st, agent.SessionOptions{}), "", control.RollbackDeps{})}
+	srv, err := control.NewServer(&control.Collector{Agent: view}).Start(ctx, cfg.Control.Socket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// Neither flag is refused before any request is made.
+	if err := runSessions(ctx, []string{"rollback", s.ID, "--config", p}, &out); err == nil || !strings.Contains(err.Error(), "--confirm") {
+		t.Fatalf("rollback without flags: %v", err)
+	}
+	if len(view.calls) != 0 {
+		t.Fatalf("a refused rollback reached the daemon: %v", view.calls)
+	}
+	out.Reset()
+	if err := runSessions(ctx, []string{"rollback", s.ID, "--dry-run", "--config", p}, &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"dry run", "would restore 2", "/work/a.md", "/work/x -> /work/y", "skip 1", "/work/dir (dir)", "conflict 1", "/work/b.md (modified)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("dry run output lacks %q:\n%s", want, text)
+		}
+	}
+	if len(view.calls) != 1 || !view.calls[0] {
+		t.Fatalf("dry run calls: %v", view.calls)
+	}
+	out.Reset()
+	if err := runSessions(ctx, []string{"rollback", s.ID, "--confirm", "--config", p, "--json"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var plan agent.Plan
+	if err := json.Unmarshal(out.Bytes(), &plan); err != nil || plan.DryRun || plan.RollbackSessionID != "rb-1" || len(plan.Restored) != 2 {
+		t.Fatalf("confirm json: %s %v", out.String(), err)
+	}
+	if len(view.calls) != 2 || view.calls[1] {
+		t.Fatalf("confirm calls: %v", view.calls)
+	}
+	out.Reset()
+	if err := runSessions(ctx, []string{"rollback", s.ID, "--confirm", "--config", p}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"restored 2", "rollback session rb-1"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("confirm output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if err := runSessions(ctx, []string{"rollback", "nope", "--confirm", "--config", p}, &out); err == nil {
+		t.Fatal("unknown session accepted")
+	}
+	for _, bad := range [][]string{{"rollback"}, {"rollback", s.ID, "extra", "--confirm"}} {
+		if err := runSessions(ctx, append(bad, "--config", p), &out); err == nil {
+			t.Fatalf("%v was accepted", bad)
+		}
 	}
 }

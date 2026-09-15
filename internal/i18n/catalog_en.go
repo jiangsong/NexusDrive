@@ -123,6 +123,8 @@ var en = map[string]string{
 	"err.agent_unavailable":             "the agent store is not open on this daemon",
 	"err.audit_list_failed":             "the audit trail could not be read",
 	"err.session_not_found":             "no such agent session",
+	"err.rollback_unavailable":          "this daemon has no writable mount to roll back through",
+	"err.rollback_failed":               "rollback failed: %v",
 	"err.sessions_list_failed":          "the sessions could not be listed",
 	"err.mcp_unavailable":               "the agent store is not open on this daemon, so MCP tokens cannot be managed here",
 	"err.token_invalid":                 "the token request was refused: %s",
@@ -227,6 +229,7 @@ var en = map[string]string{
 	"confirm.warm_all":       "lists every folder under %s, which can be many requests",
 	"confirm.required":       "this %s; send confirm=true after checking the target",
 	"confirm.token_revoke":   "revokes access token %s and closes every session using it",
+	"confirm.rollback":       "restores the files session %s wrote through MCP to what they held before (visible locally at once, on the remote eventually)",
 
 	// Content index routes and diagnostics.
 	"err.index_disabled":             "content indexing is off (index.enabled: false)",

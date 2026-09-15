@@ -122,6 +122,8 @@ var zh = map[string]string{
 	"err.agent_unavailable":             "这个守护进程没有打开 Agent 存储",
 	"err.audit_list_failed":             "无法读取审计记录",
 	"err.session_not_found":             "没有这个 Agent 会话",
+	"err.rollback_unavailable":          "这个守护进程没有可写的挂载，无法回滚",
+	"err.rollback_failed":               "回滚失败：%v",
 	"err.sessions_list_failed":          "无法列出会话",
 	"err.mcp_unavailable":               "这个守护进程没有打开 Agent 存储，无法在这里管理 MCP 令牌",
 	"err.token_invalid":                 "令牌请求被拒绝：%s",
@@ -226,6 +228,7 @@ var zh = map[string]string{
 	"confirm.warm_all":       "对 %s 整棵子树发出目录列举请求，可能是很多次",
 	"confirm.required":       "这会%s；核对目标后再传 confirm=true",
 	"confirm.token_revoke":   "吊销访问令牌 %s 并关闭所有使用它的会话",
+	"confirm.rollback":       "把会话 %s 经 MCP 写入的文件恢复到写入前的内容（本地立即可见，远端最终一致）",
 
 	// 内容索引路由与诊断。
 	"err.index_disabled":             "内容索引未启用（index.enabled: false）",
