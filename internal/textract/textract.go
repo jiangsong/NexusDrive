@@ -218,8 +218,10 @@ func Extract(ctx context.Context, kind Kind, r io.ReaderAt, size int64, opt Opti
 		return extractText(ctx, r, size, opt, false)
 	case KindMarkdown:
 		return extractText(ctx, r, size, opt, true)
-	case KindDocx, KindXlsx, KindPptx, KindPDF:
-		// Container formats land in office.go / pdf.go.
+	case KindDocx, KindXlsx, KindPptx:
+		return extractOffice(ctx, kind, r, size, opt)
+	case KindPDF:
+		// PDF lands in pdf.go.
 		return Doc{}, fmt.Errorf("%w: %s extraction is not built in", ErrUnsupported, kind)
 	default:
 		return Doc{}, ErrUnsupported
