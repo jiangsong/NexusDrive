@@ -1743,7 +1743,31 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ---
 
-### [ ] T-34 Agent 底座：agent.db、会话作用域、审计日志（一期）
+### [x] T-34 Agent 底座：agent.db、会话作用域、审计日志（一期，2026-09-15 完成）
+
+- **2026-09-15 完成**（`feat/agent-phase1`，线 A 提交 e4782fc…59721e8 与 927c0e9、a9e1c44）：
+  新包 `internal/agent`（`agent.db` schema v1：`principals`/`sessions`/`audit`，WAL，任何进程可追加，
+  `agent.lock` 只决定谁跑保留期清理；`Scope{Read,Write,ReadOnly,ExpiresAt,Sandbox}` 的 `Check/Narrow/Covers`，
+  `Narrow` 只收窄，交集为空即刻过期）；`mcpsrv` receiving middleware 解析会话（stdio 一进程一 principal、
+  legacy HTTP 按 `Session.ID()`、无状态 HTTP 按 bearer principal + 30 min 空闲轮转），33 个工具 36 处调用点
+  改为 `checkPath(ctx, p, write)`，`delete/move/copy` 两端按写检查，订阅注册同一 `Scope.Check`；审计 middleware
+  拦 `tools/call` 与 `initialize`/`server/discover`/`resources/subscribe`/`subscriptions/listen`，`args` 脱敏
+  ≤ 4 KiB、不含直链与令牌，写失败只计 `cloudfs_audit_write_failures_total`；控制面 `GET /audit`、`GET /sessions`
+  （`?state&sandbox&path`）、`GET /sessions/{id}`、`POST /sessions/{id}/finish`，SSE `audit`/`session`；
+  CLI `cloudfs audit`、`cloudfs sessions list|show|finish`（离线只读）；界面 `#/agents` 会话/审计标签、
+  导航徽标、会话详情浮层、`scope_view.js`。
+  与原计划不同之处：`Options.Sessions != nil` 且 ctx 无会话时 scope **fail-closed**（不回退全局 scope，
+  否则 middleware 顺序错误不可观测）；go-sdk 1.7 新握手是 `server/discover`，`initialize` 只见于旧客户端。
+- **验收证明**：现有 mcpsrv 测试零修改通过（A2 提交 `git diff --stat` 为空）；`TestScopeNarrowNeverWidens`
+  （400×400 组合矩阵）；`TestDeniedDeleteIsAuditedWithoutContent`、`TestLargeWriteAuditArgsStayBounded`、
+  `TestAuditFailureDoesNotFailTheTool`、`TestAuditWriteFailuresMetric`；`TestEveryRouteIsEitherGuardedOrArguedOpen`
+  自动覆盖新路由，`TestFinishSessionWithoutControlHeaderIs403`；界面 `ui_agents_test.go` 全部、
+  `_tests/scope_view.test.mjs`、i18n 两表一致；e2e `TestAgentTokenSandboxChainAndAuditInTheBrowser`
+  （越界写 → `/audit` denied → 浏览器 `#/agents?tab=audit` 有 `data-result="denied"` 行，真实 Chromium）。
+- **遗留**：stdio 会话在进程退出后仍 `active`，只靠 `mcp.session.idle` 过期；非 owner stdio 进程写进 `agent.db`
+  的审计行不进 owner 的 `Store.Watch`（SSE 看不到，刷新可见，见 T-43）；旧协议客户端 `initialize` 无 `Extra`
+  会多出一条 `http-legacy` 幽灵会话（`session_mw.go` 的 `onInitialized` 应先查 `legacyByPrincipal`）；
+  `Scope/Principal/Session.ExpiresAt` 的 `omitempty` 对结构体无效（前端已按零值当缺失处理，后端可改 `omitzero`）。
 
 - **证据**：`internal/mcpsrv/server.go:149` 的 `checkPath` 不分读写，`Options.Allow`
   进程全局；`internal/mcpsrv/http.go:65` 新版传输 `Stateless: true`，每个 POST 一个 SDK
@@ -1787,7 +1811,24 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     `_tests/scope_view.test.mjs` 覆盖作用域摘要；i18n 两表键一致、screens 无汉字。
   - e2e：MCP 调一次越界写 → 浏览器冒烟（`CLOUDFS_BROWSER=1`）打开 `#/agents` 审计标签可见 denied 行。
 
-### [ ] T-35 访问令牌与 HTTP 接入（一期）
+### [x] T-35 访问令牌与 HTTP 接入（一期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 A 提交 ede1a74、392de08、ccb0ec0）：`internal/agent/token.go`（`cfs_` 前缀 32 字节随机
+  令牌，只存 `sha256` 与 4 位指纹，名字在活令牌中唯一，写前缀必须在读前缀内，过期随 scope 走）；`requireAuth`
+  基于 go-sdk `auth.RequireBearerToken`（环境变量令牌保持全权，签发令牌查表，过期/吊销/未知 401），
+  `requireBearer(next, token)` 签名保留；吊销 2 s 内关闭该 principal 的有状态会话并把其活动会话置 `expired`；
+  CLI `cloudfs mcp token create|list|revoke`（明文只打印一次）；`cloudfs mcp install --client claude|codex
+  --transport http [--url --token]`（Codex 片段带 `UNVERIFIED:`）；stdio 非 owner 打警告，会话工具返回
+  `requires the storage owner; use the HTTP transport`；控制面 `GET /mcp/connect`（不含令牌）、`GET|POST /mcp/tokens`
+  （POST `Cache-Control: no-store`）、`POST /mcp/tokens/{id}/revoke`（confirm）；界面令牌标签、只显示一次的揭示浮层
+  （不 import store、无 localStorage）、接入面板、首次设置完成页"连接 Agent"卡片。
+- **验收证明**：`TestTwoTokensSeeDisjointTrees`（并发 stat 互斥，订阅拒绝经审计行验证——新客户端的 Subscribe 是
+  fire-and-forget）、`TestExpiredTokenInitializeIs401`、`TestRevokeClosesLegacySessionWithin5s`；
+  `TestClaudeAddCommandGolden` + 本机真机 `claude` CLI 2.1.272 `claude mcp add …` 接受并 `✔ Connected`；
+  `TestCreateTokenResponseIsNoStore`、`TestTokensListNeverCarriesAPlainToken`（形状扫描）；
+  `ui_tokens_test.go` 全部、`TestWebAppNeverAsksForACredential`。
+- **遗留**：令牌作用域与 `mcp.allow` 不求交（`docs/mcp.md` 已按实际写明），若要求交在签发时 `Scope.Narrow`；
+  `control.writeJSON` 改为 `SetEscapeHTML(false)`（为 `<token>` 占位符），是包级改动。
 
 - **证据**：`requireBearer`（`internal/mcpsrv/http.go:165`）只认单一 env token，全权；
   stdio 客户端在 `cloudfs mount` 运行时是非 owner 独立 VFS，看不到内核写、会话与审计不共享；
@@ -1820,7 +1861,23 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     吊销带 `confirm: true`；接入面板调用 `/mcp/connect`；`setup.js` 完成页含 `#/agents` 链接；
     全部嵌入字节无 `type="password"`。
 
-### [ ] T-36 交付箱：会话工作区、manifest、sandbox（一期）
+### [x] T-36 交付箱：会话工作区、manifest、sandbox（一期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 A 提交 9358c46、ec31e45、7c32b1a、0a51cdf）：`config.MCP.Workspace`（默认第一个 allow
+  前缀 + `/.agent`）；会话目录 `<workspace>/<client>-<YYYYMMDD>-<sid8>/` 永不复用，唯一受管文件 `manifest.json`
+  （`session_id, client, principal, started_at, finished_at, scope, summary, artifacts[]`）；MCP `begin_session
+  {name?, sandbox?}` / `finish_session{session_id?, summary?, share?}` / `list_sessions`，产物来自审计表的成功写
+  路径，`share=true` 只对已同步文件调 `FS.DownloadURL`（1 s 上限），`sandbox=true` 把 `Scope.Sandbox` 设为会话目录；
+  界面：会话详情产物表（状态由 `/fs/stat` 与 SSE `change` 刷新，"复制链接"仅点击时请求且不入 DOM）、
+  主窗口工作区与会话目录的 `bot` 标记（`aria-label`）、检查器"来自会话"链接（`GET /sessions?path=`）、
+  会话表"产物"列与"仅沙箱"过滤；`?path=`/`?dir=` 深链。
+- **验收证明**：`TestConcurrentSessionsKeepSeparateManifests`、`TestSandboxSessionCannotWriteOutsideItsDirectory`
+  （denied + 审计 `result=denied` + 目录内写成功 + 读成功）、`TestShareSkipsLocalFilesWithoutALinkCall`
+  （`Calls("DownloadURL") == 0`，≤ 1 s）、`TestBeginSessionWithoutWorkspaceIsAConfigError`（`Calls("Mkdir") == 0`）；
+  `ui_sessions_test.go` 全部、`_tests/workspace_view.test.mjs`；e2e 真实挂载 `TestAgentSessionManifestMatchesTheMount`
+  （manifest 与 `ls` 一致）与浏览器冒烟会话浮层恰两行产物。
+- **遗留**：`begin_session` 的 `snapshot?` 参数留给 T-38；`app.css` 顺带修了全局 `appearance:none` 让所有复选框不可见
+  的老问题（`input[type=checkbox]{appearance:auto}`）；`Artifact.ExpiresAt` 已改 `omitzero`。
 
 - **证据**：agent 产物散落在调用方自己选的路径，无约定、无清单、无分享；`--allow` 无法表达
   "只能写自己的目录"。
