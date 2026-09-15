@@ -158,7 +158,7 @@ func (m *Mount) Path() string { return m.path }
 func (m *Mount) OpStats() OpStats { return m.root.snapshot() }
 
 // InvalidateFunc returns a callback for vfs.Options.OnInvalidate that drops the
-// kernel's cached attributes for a changed inode.
+// kernel's cached attributes, pages and directory stream for a changed inode.
 func (m *Mount) InvalidateFunc() func(ino uint64) {
 	return func(ino uint64) {
 		// Sent from a separate goroutine: the VFS calls this from inside the
@@ -166,11 +166,10 @@ func (m *Mount) InvalidateFunc() func(ino uint64) {
 		// inode issued while the kernel still holds that inode's lock can
 		// wait on itself. Local changes are already covered by the kernel
 		// (it drops its own directory cache on create/unlink/rename); this
-		// carries the ones that arrived from the backend.
-		go func() {
-			// Best effort: the kernel may not have the inode cached.
-			_ = m.server.InodeNotify(ino, 0, -1)
-		}()
+		// carries the ones that arrived from the backend or another
+		// adapter. The inode is resolved to the node the kernel holds
+		// (kernel_nodes.go); one the kernel never looked up needs nothing.
+		go m.root.notifyContent(ino)
 	}
 }
 
@@ -180,9 +179,7 @@ func (m *Mount) InvalidateFunc() func(ino uint64) {
 // timeout.
 func (m *Mount) InvalidateEntryFunc() func(parent uint64, name string) {
 	return func(parent uint64, name string) {
-		go func() {
-			_ = m.server.EntryNotify(parent, name)
-		}()
+		go m.root.notifyEntry(parent, name)
 	}
 }
 

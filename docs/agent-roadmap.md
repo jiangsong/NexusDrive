@@ -605,6 +605,7 @@ Claude Code 的 HTTP 注册只支持静态 header，所以**令牌是身份，�
 
 - **一期**：新增 `cloudfs mcp install --client claude|codex --transport http`，只是 `ClientConfig` 多一种输出。文档改为"mount 在跑就用 HTTP"。`cmdMCP` 发现自己不是 owner 时打警告，会话与回滚类工具返回 `requires the storage owner; use the HTTP transport`，审计照写（§1.3）。
 - **T-43 结论（2026-09-15）**：e2e 复现失败——非 owner stdio 的 `write_file` 报 `journal: publication requires storage ownership`，但节点已进共享 meta，挂载侧 `cat` 得 EIO，journal 行停在 `needs_publish=1`，owner 重启后复活。桥提前；细节见 TODO.md T-43 与 `docs/mcp.md`"与挂载并存"。
+- **T-43 处置（2026-09-15，线 C C0.5/C3）**：桥落地前，非 owner 的 mcpsrv 写工具在 scope 检查之后、碰 VFS/export/index 之前一律返回 `… requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http`（`internal/mcpsrv/owner_fence.go`），`internal/vfs` 的 `ErrNotOwner` 兜底；e2e 改为 `TestStdioBesideMountRefusesWritesCleanly`，把每条观察到的现象变成否定断言。条目保持开放，只等桥。
 - **T-43 验证缺口（原文）**：先写 e2e 复现。mount 与 stdio MCP 同时写同一目录，然后读回、排空、重启，确认有没有丢失、复活或延迟可见。journal 行由 owner uploader 领走，但 `needs_publish` 在另一个进程，这一点尚未核实。结论写回 T-43，并据此决定 stdio→HTTP 桥是否提前。该桥用 SDK `StreamableClientTransport` + 原始 schema `AddTool`，约 300 行。
 - **修正文档**：`docs/mcp.md`"与挂载并存"一节的"共用同一个 VFS 实例"只对 owner 进程内的 HTTP 传输成立，已补注。
 
@@ -1003,20 +1004,20 @@ func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
 
 ### 7.2 二期（约 4–5 周）
 
-| 顺序 | 条目 | 依赖 | 界面 |
-|---|---|---|---|
-| 1 | T-43 核实 stdio 与 mount 并存行为 | 无；结论决定 stdio→HTTP 桥是否提前 | F10 |
-| 2 | T-38 快照与回滚 | T-34、T-43 | F5 |
-| 3 | T-39 嵌入与 hybrid | T-37 | F6 |
-| 4 | T-40 记忆库 | T-37（keyword 即可先上），T-39 可选 | F7 |
-| 5 | T-41 触发器 | 无（vfs 字段 + 引擎） | F8 |
-| 6 | T-42 发送给 Agent（运行） | T-41 exec 执行器 | F9 |
+| 顺序 | 条目 | 依赖 | 界面 | 状态（2026-09-15） |
+|---|---|---|---|---|
+| 1 | T-43 核实 stdio 与 mount 并存行为 | 无；结论决定 stdio→HTTP 桥是否提前 | F10 | **验证与栅栏已交付，条目保持开放**：e2e `TestStdioBesideMountRefusesWritesCleanly`（并存下 stdio 写一律在碰 meta/journal 前被拒）、doctor `agent_stdio` warn、接入面板横幅、F10 全勾；结论是**桥提前到三期首位**（§4.5、§7.3） |
+| 2 | T-38 快照与回滚 | T-34、T-43 | F5 | **完成**（线 C：0bfea3d 后端、cfe49b6 界面、收口提交 chaos/e2e）：`session_ops` + 前像 + 逆序回滚 + dry_run + 冲突 + 保留期 GC；MCP/控制面/CLI 三入口；F5 全勾；证据见 TODO.md T-38"验收证明"。顺带修了 fusefs 失效通知用 VFS ino 当内核 nodeid 的错位（`kernel_nodes.go`） |
+| 3 | T-39 嵌入与 hybrid | T-37 | F6 | 线 D |
+| 4 | T-40 记忆库 | T-37（keyword 即可先上），T-39 可选 | F7 | 线 D |
+| 5 | T-41 触发器 | 无（vfs 字段 + 引擎） | F8 | 线 E |
+| 6 | T-42 发送给 Agent（运行） | T-41 exec 执行器 | F9 | 线 E |
 
 T-38/T-39/T-41 三条彼此独立，可以并行给不同 agent 做。
 
 ### 7.3 三期（按需）
 
-- stdio→HTTP 桥（若 T-43 结论显示并存有数据风险，则提前到二期）。
+- **stdio→HTTP 桥（T-43 结论：并存有数据风险，C0.5 已用写栅栏封住；桥排在三期其他条目之前，落地后关闭 T-43）**。
 - 递归删除目录的逐文件前像，按文件数与字节预算记录。
 - 控制台 `/fs/*` 与 WebDAV 操作进审计。
 - `_meta["cloudfs/session"]` 显式会话。

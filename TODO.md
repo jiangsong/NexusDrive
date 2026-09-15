@@ -2005,7 +2005,75 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     `_tests/snippet.test.mjs` 覆盖高亮、CJK 截断不切半字、HTML 转义（片段来自文件内容，必须当文本插入）。
   - e2e：真实挂载写 md → 3 s 内 `semantic_search` 命中；浏览器冒烟主窗口内容搜索命中同一文件。
 
-### [ ] T-38 会话快照与回滚（二期）
+### [x] T-38 会话快照与回滚（二期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 C 提交 0bfea3d、cfe49b6 与本条收口提交）：agent.db v2 的 `session_ops` 表（P0）+
+  `internal/agent/ops.go` DAO（`RecordOp/CompleteOp/AbandonOp/OpsOf/LinkOpsToAudit/SessionsTouching`）；
+  `internal/agent/preimage.go`：写工具调 VFS **之前** `Capture`（`StatPath` → absent/dir/file；文件 ≤
+  `mcp.session.max_preimage_bytes`（默认 32 MiB）经普通读路径读满 → sha256 → 优先 `os.Link` 块缓存的
+  hydrated 文件到 `<cache.dir>/agent/preimages/<sha256>`，否则把已读字节经 `ReserveDisk` 记账写副本；
+  **链接成功才写行**；留不住只记 `pre_reason=too_large|not_cached`，写照常执行）、`Recover` 清孤儿 blob、
+  `GC` 按 `mcp.session.retain`（默认 7 天）回收已结束会话的行与 blob，daemon owner 启动时 `Recover`、每小时 GC；
+  `internal/agent/rollback.go`：`Sessions.Rollback(ctx, fs, pre, id, dryRun)` 按 `seq` 逆序、前置检查照
+  `docs/agent-roadmap.md` §4.8 的表（覆盖/编辑/追加比对**写入内容的 sha256**（`post_version` 记
+  `sha256:<hash>`，上传后版本号变了不算他人改过）、新建内容未变才删、mkdir 只删空目录、改名要求原路径为空、
+  删除要求路径为空且有前像）、回滚本身是名为 `rollback of <id>` 的新会话并同样记前像（可再回滚）、`dry_run`
+  零写入、已恢复行重跑报 `skipped: already` 且**不覆盖原记录**（C3 chaos 发现并修：重跑曾把已恢复行改写成
+  `rolled_back=0`，第三次运行会再次尝试并报 conflict）；`FSOps` 最小接口 + `VFSOps` 适配；
+  `internal/mcpsrv/preimage.go`：`beforeWrite` 钩子进 `write_file`/`edit_file`/`create_directory`/`move`/`copy`/
+  `delete`（递归删目录记 `dir`）、审计中间件把行链到 `audit_id`、`rollback_session{session_id, confirm, dry_run?}`
+  （`DestructiveHint`，非 owner 拒绝，只回滚本 principal 的会话）；控制面 `POST /sessions/{id}/rollback
+  {dry_run|confirm}`（`confirmed("confirm.rollback")`）、`GET /sessions/{id}` 带 `ops[]`、`GET /sessions?path=&since=`；
+  CLI `cloudfs sessions rollback <id> --dry-run | --confirm [--json]`；`Session.State` 加 `rolled_back` 与
+  `rolled_back_at`。界面（F5）：会话详情操作表（序号/操作/路径（改名旧→新）/前像点+文字/回滚结果，路径走文本节点）、
+  "回滚此会话"（`undo`）→ 先 `dry_run` 预览浮层（`rollback_plan.js` 三组 + 承诺三句）→ `confirmDelete` 键入
+  短 ID → `confirm:true` → 结果浮层 + "回滚这次回滚"；`agents_sessions.js` 状态"已回滚"与行内回滚；主窗口
+  检查器 `agent_touch.js`"被 Agent 修改 · client · 时间"（`GET /sessions?path=`）点击打开会话详情。
+  `docs/mcp.md`"会话回滚"一节写了承诺三句话与逐条前置检查。
+- **验收证明**：
+  - 覆盖 1 MiB 已缓存文件后回滚得原内容、fakeprovider 下载 +0：`TestRollbackSessionRestoresContentWithoutRedownload`
+    （`ReadRange`/`DownloadURL` 增量 0，排空后网盘内容为原文）；未缓存文件 +1 次且读取字节 ≤ 文件大小、回滚本身 0 次：
+    `TestRollbackSessionOnUncachedFileDownloadsOnce`；真实挂载 `TestRollbackRestoresWhatTheShellSees`
+    （终端写 1 MiB → MCP 覆盖 → 终端 `cat` 新内容 → 控制面 `dry_run` → `confirm` → 终端 `cat` 原内容，全程
+    `ReadRange`/`DownloadURL` 增量 0，排空后网盘为原文，原会话 `rolled_back`，回滚会话自己的 `dry_run` 报 1 条可恢复）。
+  - 会话写 → 内核路径再改同文件 → 回滚 conflict 未覆盖、其余 restored：`TestRollbackSkipsConflictingFiles`（agent）、
+    `TestRollbackSessionReportsConflictsWithoutOverwriting`（mcpsrv）、e2e `TestRollbackRestoresWhatTheShellSees`
+    第三段（终端经内核改 `c1.txt` → `dry_run` 与 `confirm` 都报 `/c1.txt conflict: modified`、`/c2.txt restored`，
+    `c1.txt` 仍是终端的内容，行的 `rollback_result` 分别为 `conflict: modified`/`restored`）。
+  - `create → move → delete` 后回滚路径树与会话前一致：`TestRollbackRestoresInReverseOrder`（agent，fake 树逐项相等）、
+    e2e `TestRollbackRestoresWhatTheShellSees` 第二段（真实挂载 `WalkDir` 的 "d/f 路径 内容" 列表逐项相等，
+    排空后网盘也回到 `keep.txt`/`old.txt`）。
+  - chaos：`test/chaos/rollback_chaos_test.go` `TestPreimageLinkThenCrashLeavesNoFalsePreimage`（真实 VFS + 块缓存
+    hydrated 文件，`HookAfterLink` 在 `os.Link` 之后、插行之前 panic 模拟 kill -9 → 重开 owner `Recover` 恰删 1 个
+    孤儿、无行、`SessionsTouching` 为空、缓存 hydrated 文件仍在且再读 0 次 `ReadRange`、之后正常捕获的 blob 不被误删）；
+    `TestRollbackInterruptedIsIdempotent`（fake FSOps 在第 2 次写阻塞、取消 ctx → 重跑：树与会话前逐项相等、
+    两轮合计 5 次写（每 op 恰一次）、4 行 `skipped: already`、原会话 `rolled_back`、第一轮回滚会话 4 完成 + 1 abandoned、
+    第二轮只记 1 行、第三轮 0 写入）。`-race` 通过。
+  - `dry_run` 零写入：`TestDryRunWritesNothing`（fake 写计数 0）、`TestRollbackRouteDryRunThenConfirm`、e2e 里 journal
+    各状态行数之和与 `BeginUpload` 计数在 `dry_run` 前后不变。
+  - 界面：`ui_rollback_test.go` `TestRollbackButtonPreviewsBeforeConfirming`（`dry_run: true` 先于 `confirm: true`，
+    无直接 confirm 路径）、`TestRollbackConfirmTypesTheShortID`、`TestRollbackPlanGroupsAndPromise`、`TestSessionOpsRenderAsText`、
+    `TestInspectorShowsAgentTouch`（调用 `/sessions?path=`）、`TestRollbackModulesStayShort`；`_tests/rollback_plan.test.mjs`
+    分组与空计划。
+  - e2e 浏览器：`TestRollbackInTheBrowser`（`CLOUDFS_BROWSER=1`，本机 Playwright Chromium 通过）：MCP 写 → 终端 `cat`
+    新内容 → 打开 `#/agents?session=<id>` → 点 `[data-action=rollback]` → 预览浮层含路径与 `execute` → 键入短 ID →
+    `.sheet.danger button.danger` → `[data-rollback=result]` 含 `rollback-again` → 终端 `cat` 原内容 → 排空后网盘为原文。
+  - 顺带发现并修复（真实挂载才暴露）：`internal/fusefs` 的 `InvalidateFunc`/`InvalidateEntryFunc` 把 VFS ino 当内核
+    nodeid 发 `InodeNotify`/`EntryNotify`，而 go-fuse v2.11 的 nodeid 按 lookup 顺序自行编号——任何"内核没 lookup 过的
+    inode"（MCP/控制面写的文件、VFS 自己列举的目录）之后两者错位，MCP 改过的目录在内核 `FOPEN_CACHE_DIR` 里一直是旧
+    列表（`ls` 看不到 create/move/delete，只有 `CLOUDFS_NO_DIRCACHE=1` 才对）。修法 `internal/fusefs/kernel_nodes.go`：
+    ino → 内核持有的 `*fs.Inode` 注册表（`newInode` 登记、`OnForget` 注销、通知时按 `Forgotten()` 剔除 go-fuse 丢弃的
+    候选），回调改走 `Inode.NotifyContent/NotifyEntry`；回归用例 `TestInvalidationReachesTheKernelNodeWhenInosDiverge`。
+- **遗留**：
+  - `rolled_back_at` 存在 agent.db `meta` 表的 `rolled_back_at:<id>` 键（二期冻结 schema，v3 迁移时才进 `sessions` 列）。
+  - `post_version` 对内容写入是 `sha256:<hash>` 而非 provider 版本，`copy` 记目的地版本，mkdir/rename/delete 为空。
+  - `delete recursive=true` 删目录只记 `pre_state=dir`，回滚报 `skipped: dir`（逐文件前像在三期）；mkdir 的 `dry_run`
+    不能预知目录是否为空，按"将尝试"报 restored，真跑非空报 `skipped: not_empty`。
+  - `GET /sessions?path=` 同时匹配"工作区包含该路径"的会话（`SessionsTouching` 只按 `session_ops`，检查器用后者）。
+  - 回滚中途被打断时，那一轮的回滚会话保持 `active`（靠空闲过期），其未落地的一步记 `write_failed`；重跑开新回滚会话。
+  - 已执行过的回滚中 conflict 的行重跑不再重试（`skipped: <上次结果>`），要重试需先解决冲突再回滚"回滚会话"。
+  - 上传后 `Version` 变化不算冲突是靠内容 hash；追加写在前像留不住时 `post_version` 为空（行本身因无前像报
+    `skipped: not_cached`）；记了行但进程在工具返回前退出、没回填 `post_version` 的行报 `conflict: incomplete`。
 
 - **证据**：`journal.Succeed`（`internal/journal/journal.go:864-893`）清空 `blob_path` 释放 blob，
   旧版本只作为可被淘汰的读缓存存在；网盘普遍无"按版本取内容"接口，`Caps` 无此能力位。
@@ -2179,8 +2247,17 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   - 界面：`ui_send_to_agent_test.go` 断言复制按钮不发网络请求以外的写操作、运行按钮仅在 `/agent/endpoints`
     非空时渲染、运行前确认并带 `confirm: true`、提示词 `textarea` 内容按文本插入；检查器与搜索结果两个入口都存在。
 
-### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成）
+### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成；验证与栅栏已交付，桥待三期提前）
 
+- **状态（2026-09-15 线 C 收口，提交 ab59d2f、19fef9f 与本条收口提交）**：本条的验证目标已达成——
+  e2e 复现存在并给出结论（下文 C0 观察），写栅栏落地（C0.5：`internal/mcpsrv/owner_fence.go` + `internal/vfs`
+  `ErrNotOwner`，`TestStdioBesideMountRefusesWritesCleanly` 把每条观察到的现象变成否定断言，随 `./gow test ./test/e2e/`
+  常跑），doctor `agent_stdio` warn 与接入面板横幅落地（`docs/ui-plan.md` F10-1～F10-4 已勾，`#/agents` 浏览器冒烟
+  `TestAgentTokenSandboxChainAndAuditInTheBrowser`、`TestRollbackInTheBrowser` 在 `CLOUDFS_BROWSER=1` 下通过）。
+  **未关闭的唯一原因是 stdio→HTTP 桥**：并存拓扑下 stdio 进程现在是"只读 + 明确拒绝写"，不是"写入被转发给 owner"。
+  **决定**：桥（SDK `StreamableClientTransport` + 原始 schema `AddTool`，约 300 行，见 `docs/agent-roadmap.md` §4.5/§7.3）
+  **排在三期其他条目之前**，落地后把 `TestStdioBesideMountRefusesWritesCleanly` 改回"写入经桥可见且只上传一次"的
+  肯定断言并关闭本条。T-38 的回滚不依赖桥（非 owner 的 `rollback_session` 返回 owner 错误，控制面路由只在 owner 进程）。
 - **2026-09-15 结论（线 C C0.5，写栅栏已落地，e2e 转绿）**：并存拓扑下 stdio 的写入**一律被拒绝**，且拒绝发生在碰
   meta / journal / 网盘之前。`test/e2e/coexist_e2e_test.go` 改名 `TestStdioBesideMountRefusesWritesCleanly`，
   固定契约：stdio 的 `write_file`/`edit_file`/`create_directory`/`move`/`copy`/`delete` 全部返回
@@ -2512,9 +2589,10 @@ T-03（慢客户端隔离）、T-06（交互式向导）、T-17（Web 加账号�
 15. **一期（并行两线）**：线 A T-34 → T-35 → T-36；线 B T-44 → T-37（T-44 改造主窗口搜索框，T-37 在它
     之上加"内容"分段）。每条后端任务后紧跟界面任务，界面不落地不关条目。**2026-09-15 全部完成**，34 个提交在
     `feat/agent-phase1`，一期总验证见各条"验收证明"。
-16. **二期**：T-43（先核实拓扑）→ T-38；T-39 → T-40（记忆检索依赖嵌入可选，keyword 即可先上）；
+16. **二期**：T-43（先核实拓扑）→ T-38（线 C，2026-09-15 完成：T-38 关闭，T-43 的验证与栅栏交付、桥转三期首位）；
+    T-39 → T-40（记忆检索依赖嵌入可选，keyword 即可先上）；
     T-41 → T-42（运行按钮依赖 exec 执行器，复制提示词可提前到一期末）。
-17. **三期**：stdio→HTTP 桥；递归删除逐文件前像；control/WebDAV 操作进审计；`pull_events`；
+17. **三期**：**stdio→HTTP 桥（T-43 结论，排第一）**；递归删除逐文件前像；control/WebDAV 操作进审计；`pull_events`；
     HNSW（仅实测 p95 > 200 ms）；团队 principal owner；多选文件发送给 Agent。
 
 **不建议做的事**：靠限制挂载数量收费（CloudDrive2 的 freemium 模式）。

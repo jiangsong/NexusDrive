@@ -375,13 +375,20 @@ sha256，所以上传后版本号变了也不算别人改过）。
 回滚按 `seq` 逆序逐条检查再动手：覆盖/编辑/追加要求文件内容仍是会话写下的，否则 `conflict: modified`；
 新建的文件内容未变才删除；`create_directory` 建的目录只有为空才删（否则 `skipped: not_empty`）；
 改名要求原路径现在为空、新路径仍在，否则 conflict；删除的文件要求路径现在为空且有前像，
-否则 `conflict: exists` / `skipped: too_large|not_cached`。每行的结果写回 `rollback_result`，已恢复的行
-再跑一次报 `skipped: already`，所以中途被打断的回滚重跑是幂等的。回滚的每一步写入同样记前像，
-记在一个名为 `rollback of <id>` 的新会话下，因此**回滚可以再回滚**。结束时原会话 `state=rolled_back`
-并带 `rolled_back_at`。
+否则 `conflict: exists` / `skipped: too_large|not_cached`。每行的结果写回 `rollback_result`，词汇固定：
+`restored`；`skipped: already|too_large|not_cached|dir|not_empty|missing`（`missing`＝要删的路径已经不在，或删除
+时的前像是"不存在"）；`conflict: modified|missing|exists|from_exists|incomplete|<写入返回的错误>`（`incomplete`＝
+行记了但工具没来得及回填 `post_version`）。已恢复的行再跑一次报 `skipped: already` 且**原记录不被改写**，
+conflict 的行重跑会再次检查，所以中途被打断的回滚重跑是幂等的（`test/chaos` `TestRollbackInterruptedIsIdempotent`：
+两轮合计每个 op 恰被撤销一次；被打断那一轮的回滚会话留在 `active` 直到空闲过期，它没落地的那一步记 `write_failed`）。
+回滚的每一步写入同样记前像，记在一个名为 `rollback of <id>` 的新会话下，因此**回滚可以再回滚**。结束时原会话
+`state=rolled_back` 并带 `rolled_back_at`。`dry_run` 对 `create_directory` 建的目录不能预知是否为空，按"将尝试"
+报 restored，真跑非空才报 `skipped: not_empty`。
 
-入口：MCP `rollback_session`；控制面 `POST /sessions/{id}/rollback` 传 `{"dry_run":true}` 得计划、
-传 `{"confirm":true}` 执行（控制台先预览再要求键入会话短 ID 确认）；CLI
+入口：MCP `rollback_session`（非 owner 进程返回 owner 错误；只能回滚本 principal 的会话，否则
+`session belongs to another principal`）；控制面 `POST /sessions/{id}/rollback` 传 `{"dry_run":true}` 得计划、
+传 `{"confirm":true}` 执行，两者都不带则 `400`（`confirm.required`），无 VFS 的离线进程 `503`（控制台先预览再要求
+键入会话短 ID 确认；真实挂载 + 浏览器的整条链见 `test/e2e` `TestRollbackInTheBrowser`）；CLI
 `cloudfs sessions rollback <id> --dry-run | --confirm [--json]`。`GET /sessions/{id}` 的 `ops[]` 列出
 每一步与其前像状态；`GET /sessions?path=&since=` 反查在保留期内改过某路径的会话（检查器的
 "被 Agent 修改"）。前像与操作行按 `mcp.session.retain`（默认 7 天）在会话结束、过期或已回滚后回收；

@@ -56,6 +56,9 @@ type Root struct {
 	// opCounters tallies every request this process serves; passthrough
 	// reads never show up here, which is how a test can tell the two apart.
 	opCounters
+	// kernel is the inode → kernel node registry the invalidation
+	// callbacks resolve through (kernel_nodes.go).
+	kernel kernelNodes
 }
 
 // New builds the root node for mounting.
@@ -123,7 +126,13 @@ func (r *Root) Ino() uint64 { return r.node }
 
 // RootNode returns the root inode. MountFS wires it through rawFS so backing
 // registrations retain their cache leases; bare fs.Mount lacks that proxy.
-func (r *Root) RootNode() *node { return &node{root: r, ino: r.node} }
+// The root is tracked here so a notification for the root inode reaches
+// the kernel like any other.
+func (r *Root) RootNode() *node {
+	n := &node{root: r, ino: r.node}
+	r.kernel.track(n)
+	return n
+}
 
 // newNode wraps a VFS inode as a kernel node.
 func (r *Root) newNode(ino uint64, isDir bool) (*node, fs.StableAttr) {
@@ -233,8 +242,7 @@ func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	if err != nil {
 		return nil, errno(err)
 	}
-	child, stable := n.root.newNode(at.Ino, at.IsDir)
-	inode := n.NewInode(ctx, child, stable)
+	inode := n.newInode(ctx, at.Ino, at.IsDir)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)
@@ -355,8 +363,7 @@ func (d *dirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	if d.idx > 0 && d.idx <= len(d.entries) && d.entries[d.idx-1].Name == name {
 		d.n.root.count(opDirLookup)
 		at := d.entries[d.idx-1]
-		child, stable := d.n.root.newNode(at.Ino, at.IsDir)
-		inode := d.n.NewInode(ctx, child, stable)
+		inode := d.n.newInode(ctx, at.Ino, at.IsDir)
 		d.n.root.fillAttr(&out.Attr, at)
 		out.SetEntryTimeout(d.n.root.opt.EntryTimeout)
 		out.SetAttrTimeout(d.n.root.opt.AttrTimeout)
@@ -450,8 +457,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, errno(err)
 	}
 	at := n.root.opt.FS.HandleAttr(ctx, h)
-	child, stable := n.root.newNode(at.Ino, false)
-	inode := n.NewInode(ctx, child, stable)
+	inode := n.newInode(ctx, at.Ino, false)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)
@@ -466,8 +472,7 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	if err != nil {
 		return nil, errno(err)
 	}
-	child, stable := n.root.newNode(at.Ino, true)
-	inode := n.NewInode(ctx, child, stable)
+	inode := n.newInode(ctx, at.Ino, true)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)

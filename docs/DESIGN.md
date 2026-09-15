@@ -773,8 +773,12 @@ sshfs 与本地磁盘上，数字见 `docs/perf-report.html`。这一轮测试�
   删除与在途上传竞争时给行打墓碑，上传完成后由 uploader 删除后端文件。
   冲突判定以节点当前的 `RemoteVersion` 为准，自己的上一次上传不算冲突。
 - **元数据**（§4.3 补充）：`PutDir` 批量写入，FTS 索引延后合并；内核通过
-  `FOPEN_CACHE_DIR` 缓存目录流，本地改动由内核自行失效，后端改动经 `OnInvalidate`
-  失效。列举不得删除「列举开始之后出现」或「后端尚不知道」的条目。
+  `FOPEN_CACHE_DIR` 缓存目录流，本地改动由内核自行失效，后端与其他适配层（MCP、控制面）
+  的改动经 `OnInvalidate` 失效。失效通知必须用**内核自己的 nodeid**：go-fuse 按 lookup 顺序
+  给节点编号，与 `StableAttr.Ino`（VFS ino）无关，只要有一个 inode 是内核没 lookup 过就
+  错位，所以 `fusefs` 维护 ino → 内核持有的 `*fs.Inode` 注册表（`kernel_nodes.go`），
+  回调走 `Inode.NotifyContent/NotifyEntry`（2026-09-15 T-38 e2e 暴露）。列举不得删除
+  「列举开始之后出现」或「后端尚不知道」的条目。
 - **读路径的顺序判定**：预读窗口只在连续 3 次读「落在上一块或下一块、且起点在上一次
   读结束的 1 MiB 内」之后才打开；块相邻本身不算顺序，否则大文件上的随机读会不断误触发
   整块预读。

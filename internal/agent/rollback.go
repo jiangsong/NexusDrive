@@ -101,7 +101,13 @@ func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id st
 		default:
 			plan.Conflict = append(plan.Conflict, item)
 		}
-		if dryRun {
+		// A row an earlier run already settled (restored, or abandoned
+		// because its write failed) keeps that record: writing "skipped:
+		// already" over it would clear rolled_back and make the next run
+		// try the undo again, against content that is no longer what the
+		// session wrote. That is what makes a rerun idempotent beyond the
+		// second run.
+		if dryRun || op.RolledBack {
 			continue
 		}
 		result := outcome.String()

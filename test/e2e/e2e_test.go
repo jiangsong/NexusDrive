@@ -102,7 +102,10 @@ func newStack(t *testing.T, mode string) *stack {
 		t.Fatalf("mount: %v", err)
 	}
 
-	srv, err := mcpsrv.New(mcpsrv.Options{FS: d.FS, Version: "e2e"})
+	// The same options cmd/cloudfs hands the server: sessions, preimages
+	// and the workspace come from the daemon, so every call is audited and
+	// every write tool records what it is about to change.
+	srv, err := mcpsrv.New(mcpsrv.Options{FS: d.FS, Version: "e2e", Sessions: d.Sessions, Preimages: d.Preimages, Workspace: cfg.MCP.Workspace})
 	if err != nil {
 		m.Unmount()
 		cancel()

@@ -338,13 +338,13 @@ F5–F10 属二期。
 
 **F5 —— 会话操作表 + 回滚预览 / 确认 / 结果 + 检查器"被 Agent 修改"（T-38 · 二期）**
 
-- [ ] **F5-1** `icons.js` 加 `undo`。
-- [ ] **F5-2** `session_panel.js` 操作表：序号 / 操作（新建、覆盖、编辑、改名、删除、建目录）/ 路径（改名显示旧、新路径）/ 前像（可恢复、过大、未缓存、目录，点+文字）/ 回滚结果。
-- [ ] **F5-3** "回滚此会话"先 `POST /sessions/{id}/rollback {dry_run: true}` → 预览浮层：将恢复 / 将跳过（原因）/ 冲突三组 + 回滚承诺三句话；无预览不能执行。
-- [ ] **F5-4** 预览确认：`confirmDelete` 键入会话短 ID → `{confirm: true}`；结果浮层同三组并提供"回滚这次回滚"。
-- [ ] **F5-5** `rollback_plan.js`（dry-run 结果 → 分组，含空计划）+ `_tests/rollback_plan.test.mjs`。
-- [ ] **F5-6** 会话表状态新增"已回滚"、行内快捷"回滚"；检查器"被 Agent 修改 · <client> · <时间>"（`GET /sessions?path=`）。
-- [ ] **F5-7** `ui_rollback_test.go`：先 `dry_run: true` 后 `confirm: true` 的请求顺序；检查器标记调用 `/sessions?path=`。
+- [x] **F5-1** `icons.js` 加 `undo`（P0 统一加，`TestPhaseTwoSharedHooksExist`）。
+- [x] **F5-2** `session_panel.js` 操作表：序号 / 操作（新建、覆盖、编辑、改名、删除、建目录）/ 路径（改名显示旧、新路径）/ 前像（可恢复、过大、未缓存、目录，点+文字）/ 回滚结果（C2：行 `data-op`，路径走文本节点，`TestSessionOpsRenderAsText`）。
+- [x] **F5-3** "回滚此会话"先 `POST /sessions/{id}/rollback {dry_run: true}` → 预览浮层：将恢复 / 将跳过（原因）/ 冲突三组 + 回滚承诺三句话；无预览不能执行（C2：`openRollback` 是唯一调该路由的代码，`TestRollbackButtonPreviewsBeforeConfirming`）。
+- [x] **F5-4** 预览确认：`confirmDelete` 键入会话短 ID → `{confirm: true}`；结果浮层同三组并提供"回滚这次回滚"（C2：`TestRollbackConfirmTypesTheShortID`；C3 浏览器冒烟 `TestRollbackInTheBrowser` 真点过整条链）。
+- [x] **F5-5** `rollback_plan.js`（dry-run 结果 → 分组，含空计划）+ `_tests/rollback_plan.test.mjs`（C2）。
+- [x] **F5-6** 会话表状态新增"已回滚"、行内快捷"回滚"；检查器"被 Agent 修改 · <client> · <时间>"（`GET /sessions?path=`）（C2：`agents_sessions.js`、`agent_touch.js` + `main.js` 一行接线，`TestInspectorShowsAgentTouch`）。
+- [x] **F5-7** `ui_rollback_test.go`：先 `dry_run: true` 后 `confirm: true` 的请求顺序；检查器标记调用 `/sessions?path=`（C2，六个用例；C3 的 e2e 证据见 TODO.md T-38"验收证明"）。
 
 **F6 —— 嵌入端点面板 + 远端横幅 + 语义模式（T-39 · 二期）**
 
@@ -385,10 +385,10 @@ F5–F10 属二期。
 
 **F10 —— 诊断项与横幅联动（T-43 · 二期回滚之前）**
 
-- [ ] **F10-1** 诊断屏不改 JS：doctor 新检查"MCP stdio 进程与挂载并存"、agent.db、index.db、嵌入端点自动出现；确认 `diagnostics.js` 对新检查项的 detail 与命令文本正常换行。
+- [x] **F10-1** 诊断屏不改 JS：doctor 新检查"MCP stdio 进程与挂载并存"、agent.db、index.db、嵌入端点自动出现；确认 `diagnostics.js` 对新检查项的 detail 与命令文本正常换行（C0/C3：`agent_db`、`agent_stdio` 两项经 `checkRow` 自动渲染，`detail` 是普通文本节点自然换行，`fix` 命令走等宽 `dim` 行；`TestDoctorOnALiveSystem` 断言两项存在。index.db 一期已有，嵌入端点由线 D 的 D2 加）。
 - [x] **F10-2** 接入面板在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染黄色横幅"请改用 HTTP 传输"，链到 `#/diagnostics`（C0：决策在 `connect_view.js`，`/mcp/connect` 按心跳文件填 `stdio_non_owner`）。
 - [x] **F10-3** `ui_agents_test.go` 补断言：横幅条件渲染并链到 `#/diagnostics`（`TestConnectPanelWarnsAboutStdioNonOwner` + `_tests/connect_view.test.mjs`）。
-- [ ] **F10-4** `test/e2e` 的 `CLOUDFS_BROWSER=1` 冒烟加 `#/agents`、`#/index`、`#/triggers` 可达；`browser_modules_test.go` 自动覆盖新增 `_tests/*.test.mjs`；`ui_icons_test.go` 覆盖 `bot/layers/bolt/undo`。
+- [x] **F10-4** `test/e2e` 的 `CLOUDFS_BROWSER=1` 冒烟加 `#/agents`、`#/index`、`#/triggers` 可达；`browser_modules_test.go` 自动覆盖新增 `_tests/*.test.mjs`；`ui_icons_test.go` 覆盖 `bot/layers/bolt/undo`（C3：`#/agents` 的浏览器冒烟通过——`TestAgentTokenSandboxChainAndAuditInTheBrowser`（审计标签 + 会话详情）与 `TestRollbackInTheBrowser`（会话详情 → 回滚全流程）；`browser_modules_test.go` 按目录枚举 `_tests/*.test.mjs`，`rollback_plan.test.mjs` 已被覆盖；`TestPhaseTwoSharedHooksExist` 覆盖 `undo`/`bolt`，`bot`/`layers` 一期已覆盖。`#/index` 的可达冒烟是一期的 `TestContentSearchInTheBrowser`，`#/triggers` 属线 E（E6），不在本线勾选范围）。
 
 **F11 —— Everything 式文件名搜索：主窗口全盘搜索、过滤条、覆盖率（T-44 · 一期，前置于 F4-b）**
 

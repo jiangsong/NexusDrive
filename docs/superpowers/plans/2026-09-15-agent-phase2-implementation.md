@@ -171,11 +171,11 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `docs/mcp.md`（回滚承诺三句话，逐字自 roadmap §4.8）
 
 **Steps:**
-- [ ] RED（agent 包，fake FSOps）：`TestCapturePrefersALinkAndFallsBackToACopy`、`TestCaptureNeverRefusesTheWrite`（too_large → `pre_reason`，行照写）、`TestRecoverDropsOrphanBlobs`、`TestRollbackRestoresInReverseOrder`（create→move→delete 后回滚，路径树与会话前逐项相等）、`TestRollbackSkipsConflictingFiles`（`post_version` ≠ 当前 → conflict，内容未被覆盖）、`TestDryRunWritesNothing`（fake 的写计数为 0）、`TestRollbackOfARollbackRestoresTheEdit`、`TestGCKeepsBlobsInsideRetention`
-- [ ] RED（mcpsrv）：`TestWriteToolsRecordOpsWithPreimages`（write/edit/mkdir/move/delete 各一行，`pre_state` 正确）、`TestRollbackSessionNeedsConfirm`、`TestRollbackSessionRestoresContentWithoutRedownload`（fakeprovider `Calls("ReadRange")` 与 `DownloadURL` 增量 0——文件已缓存）、`TestRollbackSessionOnUncachedFileDownloadsOnce`、`TestEveryToolChecksItsPaths` 仍绿
-- [ ] RED（control/cmd）：`TestRollbackRouteDryRunThenConfirm`、`TestSessionsByPathListsTouchingSessions`、`TestSessionsRollbackCLI`
-- [ ] GREEN：`./gow test ./internal/agent/ ./internal/mcpsrv/ ./internal/control/ ./internal/config/ ./internal/daemon/ ./cmd/cloudfs/ -count=1 && ./gow test -race ./internal/agent/ ./internal/mcpsrv/`
-- [ ] 提交：`feat(agent,mcpsrv): session preimages and rollback with dry-run, conflicts and retention`
+- [x] RED（agent 包，fake FSOps）：`TestCapturePrefersALinkAndFallsBackToACopy`、`TestCaptureNeverRefusesTheWrite`（too_large → `pre_reason`，行照写）、`TestRecoverDropsOrphanBlobs`、`TestRollbackRestoresInReverseOrder`（create→move→delete 后回滚，路径树与会话前逐项相等）、`TestRollbackSkipsConflictingFiles`（`post_version` ≠ 当前 → conflict，内容未被覆盖）、`TestDryRunWritesNothing`（fake 的写计数为 0）、`TestRollbackOfARollbackRestoresTheEdit`、`TestGCKeepsBlobsInsideRetention`
+- [x] RED（mcpsrv）：`TestWriteToolsRecordOpsWithPreimages`（write/edit/mkdir/move/delete 各一行，`pre_state` 正确）、`TestRollbackSessionNeedsConfirm`、`TestRollbackSessionRestoresContentWithoutRedownload`（fakeprovider `Calls("ReadRange")` 与 `DownloadURL` 增量 0——文件已缓存）、`TestRollbackSessionOnUncachedFileDownloadsOnce`、`TestEveryToolChecksItsPaths` 仍绿
+- [x] RED（control/cmd）：`TestRollbackRouteDryRunThenConfirm`、`TestSessionsByPathListsTouchingSessions`、`TestSessionsRollbackCLI`
+- [x] GREEN：`./gow test ./internal/agent/ ./internal/mcpsrv/ ./internal/control/ ./internal/config/ ./internal/daemon/ ./cmd/cloudfs/ -count=1 && ./gow test -race ./internal/agent/ ./internal/mcpsrv/`
+- [x] 提交：`feat(agent,mcpsrv): session preimages and rollback with dry-run, conflicts and retention`
 
 ## Task C2：T-38 界面 — 操作表、回滚预览/确认/结果、检查器"被 Agent 修改"（F5）
 
@@ -188,9 +188,9 @@ test/perf/embed_perf_test.go（D1）
 - Create: `internal/control/ui_rollback_test.go`
 
 **Steps:**
-- [ ] RED：`TestRollbackButtonPreviewsBeforeConfirming`（源码断言：`dry_run: true` 请求先于 `confirm: true`；不存在直接 `confirm` 的路径）、`TestRollbackPlanGroupsAndPromise`、`TestInspectorShowsAgentTouch`（调用 `/sessions?path=`）、`TestSessionOpsRenderAsText`（路径经文本节点）；`rollback_plan.test.mjs` 分组/空计划
-- [ ] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestRollback|TestInspector|TestSession|TestEveryRoute' -count=1`
-- [ ] 提交：`feat(ui): session operation table and the preview-then-confirm rollback flow`
+- [x] RED：`TestRollbackButtonPreviewsBeforeConfirming`（源码断言：`dry_run: true` 请求先于 `confirm: true`；不存在直接 `confirm` 的路径）、`TestRollbackPlanGroupsAndPromise`、`TestInspectorShowsAgentTouch`（调用 `/sessions?path=`）、`TestSessionOpsRenderAsText`（路径经文本节点）；`rollback_plan.test.mjs` 分组/空计划
+- [x] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestRollback|TestInspector|TestSession|TestEveryRoute' -count=1`
+- [x] 提交：`feat(ui): session operation table and the preview-then-confirm rollback flow`
 
 ## Task C3：线 C 收口 — chaos、e2e、浏览器冒烟、文档、TODO
 
@@ -198,8 +198,11 @@ test/perf/embed_perf_test.go（D1）
 - Create: `test/chaos/rollback_chaos_test.go`（`TestPreimageLinkThenCrashLeavesNoFalsePreimage`：注入 `os.Link` 后、插行前 kill（用 `agent.Preimages` 的测试钩子 `afterLink`）→ 重启 `Recover` 无假前像、孤儿回收；`TestRollbackInterruptedIsIdempotent`：回滚中途取消 ctx → 重跑结果一致）
 - Create: `test/e2e/rollback_e2e_test.go`（`TestRollbackInTheBrowser`：MCP 写 → 终端 `cat` 新内容 → 浏览器点回滚（`CLOUDFS_BROWSER=1`）→ 终端 `cat` 旧内容；无浏览器时走控制面路由的非浏览器版 `TestRollbackRestoresWhatTheShellSees` 必须跑）
 - Modify: `TODO.md`（T-38 `[x]` 与 T-43 结论，写法同 T-44：完成 / 验收证明 / 遗留）、`docs/ui-plan.md`（F5、F10 打勾）、`docs/agent-roadmap.md` §7.2 状态、`docs/mcp.md` 工具表加 `rollback_session`
-- [ ] GREEN：`./gow test ./test/chaos/ -run Rollback -race -count=1 && ./gow test ./test/e2e/ -run 'Rollback|Coexist|StdioBeside' -count=1 -v && CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestRollbackInTheBrowser|TestAgent' -count=1 -v`
-- [ ] 提交：`docs: close T-38 and T-43 with their chaos and e2e evidence`
+- [x] chaos `TestPreimageLinkThenCrashLeavesNoFalsePreimage`（真实 VFS + 块缓存，`HookAfterLink` panic）、`TestRollbackInterruptedIsIdempotent`（fake FSOps 第 2 次写阻塞 + 取消 ctx；**发现并修**：重跑把已恢复行改写成 `skipped: already`/`rolled_back=0`，第三轮会再试并报 conflict——`rollback.go` 已恢复的行不再改写）
+- [x] e2e `TestRollbackRestoresWhatTheShellSees`（覆盖 1 MiB 缓存文件 0 下载；`create → move → delete` 树逐项相等；内核改过的文件 conflict）、`TestRollbackInTheBrowser`（`CLOUDFS_BROWSER=1` 本机通过）；`newStack` 改为像 cmd/cloudfs 一样传 `Sessions`/`Preimages`/`Workspace`。**顺带发现并修** `internal/fusefs` 失效通知把 VFS ino 当内核 nodeid（go-fuse 按 lookup 顺序编号）——MCP 改过的目录在内核目录缓存里一直是旧列表；`kernel_nodes.go` + `TestInvalidationReachesTheKernelNodeWhenInosDiverge`
+- [x] GREEN：`./gow test ./test/chaos/ -run 'Rollback|Preimage' -race -count=1 && ./gow test ./test/e2e/ -count=1 -v && CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestRollbackInTheBrowser|TestAgent' -count=1 -v && ./gow test ./internal/agent/ ./internal/mcpsrv/ ./internal/control/ ./internal/fusefs/ -count=1 && ./gow test -race ./internal/fusefs/ ./internal/agent/`
+- [x] 文档：TODO.md T-38 `[x]`（完成 / 验收证明 / 遗留）、T-43 头注改写（验证与栅栏已交付、桥转三期首位、保持开放）、`docs/ui-plan.md` F5-1～F5-7 与 F10-1～F10-4、`docs/agent-roadmap.md` §7.2 状态列 + §4.5/§7.3、`docs/mcp.md` 回滚一节结果词汇与入口状态码、`docs/DESIGN.md` 内核 nodeid 注
+- [x] 提交：`docs: close T-38 and record the T-43 verdict with their chaos and e2e evidence`
 
 ---
 
@@ -429,3 +432,7 @@ test/perf/embed_perf_test.go（D1）
   审计记 `denied`；vfs 同时加 `ErrNotOwner` 兜底（journal 存在且非 owner）。实测：挂载侧无幽灵条目（`ENOENT`）、
   journal 无新行、网盘无文件、stdio 读工具照常、owner 重启不复活。**并存拓扑下 stdio 只读**是当前契约；
   让 stdio 进程把写转发给 owner 的 stdio→HTTP 桥仍是根治方案——**三期提前候选，见本节上一条**，本次未实现。
+- 线 C 收口（2026-09-15，C3）：T-38 关闭；T-43 保持开放、只等 stdio→HTTP 桥，**决定桥排三期第一项**。C3 的 chaos 与
+  e2e 各暴露一个真实缺陷并已修：(1) `agent.Rollback` 重跑改写已恢复行导致第三轮回滚误报 conflict；(2) `fusefs` 失效通知
+  用 VFS ino 当内核 nodeid，内核没 lookup 过的 inode 之后全部错位，MCP/控制面改过的目录在 `FOPEN_CACHE_DIR` 里
+  永远是旧列表（`CLOUDFS_NO_DIRCACHE=1` 才正确）。两处都有回归用例。
