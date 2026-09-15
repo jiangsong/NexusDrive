@@ -2,7 +2,7 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
-> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"。**仍在规划中**：会话回滚、内容索引与 `semantic_search`、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-37 ~ T-43）。工具表只列出已实现的工具。
+> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，关键词检索，见"[内容索引](#内容索引)"）。**仍在规划中**：会话回滚、嵌入与 hybrid 检索、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-38 ~ T-43）。工具表只列出已实现的工具。
 
 ## 注册
 
@@ -119,6 +119,22 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 三个工具只在服务持有 `Sessions`（`cloudfs mount`/`cloudfs mcp` 常规启动都持有）时注册；
 在非 owner 的 stdio 进程里它们返回 `requires the storage owner; use the HTTP transport`（见"与挂载并存"）。
 产物用现有写工具直接写进会话目录即可，没有单独的 `write_artifact`。
+
+### 内容索引
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `semantic_search` | `query`, `path?`, `top_k?`, `mode?`, `max_snippet_bytes?` | 在**已索引文件的抽取文本**里找分块：每个 hit 带 `path`、`heading`（标题路径）、`snippet`、`start_off`/`end_off`、`offset_kind`（`file` / `text`）、`score`、`stale`。只覆盖索引范围（`index.pinned` / `index.rules` / `index` 工具加的规则），不是全盘 grep；响应带 `docs`（可搜文档数）、`pending`（待抽取数）、`truncated`。**本期只有关键词检索**：`mode` 给 `hybrid` 或 `vector` 时按 `keyword` 执行并在 `degraded` 里说明（`mode_used: keyword`），嵌入是二期 T-39 |
+| `index_status` | `path?` | 不带 `path`：文档数（正常 / dirty / 失败）、分块数、待抽取队列、最近失败列表（按作用域过滤）、文本占用与 `max_total_text`、本小时下载与 `fetch_budget`、worker 进度（`paused` 为 `busy` / `risk_control` / `budget` / `text_budget` 及 `resume_at`）。带 `path`：`covered`（覆盖它的规则路径）、`rule_source`（`config` / `ui` / `tool`）、`state`（`ok` / `dirty` / `failed` / `pending` / `uncovered`）、`chunks`、`error` |
+| `index` | `path`, `include?`, `max_file_size?` | 加一条运行时规则（来源 `tool`）：文件或目录，`include` 是相对 `path` 的 glob（默认文本、代码与 Office 集合），匹配文件按小时预算下载并后台抽取。只需读权限；返回 `pending` |
+| `unindex` | `path` | 移除 `index` 工具或界面加的规则并丢弃无其它规则覆盖的文本；配置文件里的规则只能改配置（`ErrConfigRule`） |
+| `read_extracted_text` | `path`, `offset?`, `max_bytes?` | 按字节偏移分页读抽取文本，返回 `text`、`next_offset`、`eof`、`kind`。PDF / docx / xlsx / pptx 就是这样变成可读的；纯文本文件的偏移就是文件偏移。未索引返回 `this file is not indexed; call index_status to see coverage` |
+
+五个工具只在守护进程 `index.enabled: true` 时注册（`tools/list` 里没有就是索引关着，`index.db` 也不存在）。
+每个入参路径过 `checkPath`，每个返回的 hit 与失败记录都按调用者作用域过滤：`--allow /work` 或
+只读 `/work` 的令牌永远看不到 `/private` 下的分块（`TestSearchNeverLeaksOutsideRoots`、
+`TestSemanticSearchRespectsTokenScope`）。目录改名后 hit 路径立即是新路径（查询时按 `(remote, remote_id)`
+回到当前树）；`stale: true` 表示索引的是旧版本，文件已经在挂载里变了、抽取还没跟上。
 
 ### 复制任务管理
 
@@ -381,6 +397,8 @@ cloudfs sessions list | show <id> | finish <id> --summary "…"
 全局最浅的那一页。
 
 **先 `pin` 再做内容搜索，但它不是完整 grep。** `content` 只检查完整缓存文件的前 `MaxBytes` 字节，并有最多 `4 × max_results` 个已授权名称候选的预算。预算耗尽时返回 `truncated` 和说明；未缓存文件会跳过并提示先 `pin`。文件后半部分、候选预算外或尚未列举的文件可能不被检查。需要完整内容检索时应逐文件分页读取；当前搜索没有跨请求内容快照。
+
+**`semantic_search` 只搜索引范围内的文本，先看 `index_status`。** 空结果不等于"没有这个内容"：文件可能不在任何规则或 pin 之下（`index_status{path}` 的 `state: uncovered`），或还在队列里（`pending`）。范围之外先用 `index{path}` 加规则，再等 `index_status` 报 `ok`；不要为了一次查询把整棵树加进索引——规则会按小时预算真的下载文件。命中的 `offset_kind=file` 时 `start_off` 可直接传给 `read_text` 的 `offset` 读原文；`offset_kind=text`（PDF / Office）时用 `read_extracted_text` 分页，原文件里没有对应偏移。`degraded` 非空表示本期只有关键词检索，`hybrid` / `vector` 会按关键词执行；查询词全部都要出现，同义表达不会命中。`Caps.Tier=unofficial` 的网盘（如 quark）不建议配 `rules`，用 `index.pinned` 只处理已经完整缓存的文件，零额外下载。不做 OCR：扫描版 PDF 与图片没有文本。中文 PDF 的抽取质量在真实样本上尚未验证（`UNVERIFIED`），命中不到时用 `read_extracted_text` 看抽出来的是不是乱码。
 
 **用 `stat_many` 而不是循环 `stat`。** 一次调用检查最多 100 个路径，缺失的路径在结果里单独标注，不会中断整批。
 

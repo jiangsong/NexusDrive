@@ -585,9 +585,11 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 **v2（设计稿，未实现）**：带宽融合（请求合并、`Transfer` 令牌类、目录读序预取；副本块级扇出已实现，见 `docs/pool.md`）、`cloudfs export` 导出作业、CRUSH-lite 放置（按路径规则、成员 class、故障域、配额满换盘、rebalance/backfill、`min_replicas` 诚实化）见 `docs/pool-v2.md`，对应 `TODO.md` T-29 ~ T-33。
 
-### 4.12 内容索引与语义检索（规划中）
+### 4.12 内容索引与语义检索（phase 1 已实现，2026-09-15；嵌入与 hybrid 规划中）
 
-`internal/textract`（txt/md/代码原样、docx/xlsx/pptx 经 `archive/zip`+`encoding/xml`、PDF 经纯 Go 库）抽取文本并按 rune 窗口、标题感知分块；`internal/index` 把文档、分块与 FTS5 trigram 索引写进独立的 `<cache.dir>/index.db`（派生数据，可整库重建，不进 meta 以免拖住 FLUSH 等待的写锁）。范围默认为空：`index.pinned` 只处理已完整缓存的文件（零额外下载），`index.rules` 才经 `vfs.ReadFileRange` 主动拉取并受限流、预算与风控熔断约束。二期 `internal/embed` 接 OpenAI 兼容/ollama 端点，int8 向量内存暴力 cosine，与 `bm25()` 做 RRF 融合；端点缺失或故障降级为关键词。MCP 工具 `semantic_search`/`index_status`/`index`/`unindex`/`read_extracted_text`。详见 [agent-roadmap.md](agent-roadmap.md) §3，对应 TODO.md T-37、T-39。
+**已实现（T-37）**：`internal/textract` 抽取文本（txt/md/代码原样并保 CRLF，offset 即文件偏移；docx/xlsx/pptx 经 `archive/zip`+`encoding/xml`，zip 条目数、单条目与总解压量三重上限；PDF 经 `github.com/ledongthuc/pdf`，recover + 30 s 超时 + 乱码启发式；不做 OCR），按 800 rune / 重叠 100 的标题感知窗口分块。`internal/index` 把文档、分块与 FTS5 trigram（external content）写进独立的 `<cache.dir>/index.db`——派生数据，可整库重建；不进 meta 是因为 meta 单写者、FLUSH 等它的锁，抽取不能排在内核写之前。文档身份是 `(remote, remote_id)` + `version`：目录改名只改路径列、`indexed_at` 不变；查询时按身份回到当前树，路径过期的 hit 标 `stale`。范围默认为空：`index.pinned` 只处理已完整缓存的文件（零远端调用，`TestIndexPinnedFilesCostNoReads`），`index.rules` 才经 `vfs.ReadFileRange` 拉取，受三维限流、`fetch_budget`（`Caps.Tier=unofficial` 减半）与 `ErrRiskControl` 休眠 15 min 约束；worker 轮询 `FS.Busy()` 为前台 IO 让路（最多 5 s，`TestBusyForegroundMakesTheWorkerYield`）。工作来源是 `FS.WatchChanges()` 的变更流加启动 30 s 与每 10 min 的本地对账（只读 `meta.WalkSubtree`，从不列举远端）。检索是 `bm25()` + 范围过滤 + 字节预算，< 3 rune 的查询走有预算的 LIKE 扫描并如实报 `truncated`。MCP 工具 `semantic_search`/`index_status`/`index`/`unindex`/`read_extracted_text`（每个 hit 过作用域）、控制面 `/index/*` 与 SSE `index`、CLI `cloudfs index`、metrics `cloudfs_index_*`、doctor `index_db`/`index_failed`/`index_text_budget`/`index_identity`、控制台「索引」屏与主窗口"文件名 / 内容"切换。与 `search.content`（只扫完整缓存文件前缀）的区别：索引是持久的、分块的、跨格式的，且在文件变化时增量维护。可靠性见 §5 两行；接口见 [mcp.md](mcp.md)"内容索引"；实现细节见 [agent-roadmap.md](agent-roadmap.md) §3。
+
+**规划中（T-39）**：`internal/embed` 接 OpenAI 兼容/ollama 端点，int8 向量内存暴力 cosine，与 `bm25()` 做 RRF 融合；端点缺失或故障降级为关键词。本期 `mode: hybrid|vector` 已按关键词执行并在 `degraded` 里说明，接口不变。
 
 ### 4.13 Agent 记忆库（规划中）
 
@@ -617,6 +619,8 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 | 存储池成员永久丢失 | down 超过 out_after 转 out；其上副本不再计数，扫描把它持有的文件排队，在其余成员从活副本重建，全程可读 |
 | 官方 App 里带外删除 / 改名 | 删除视为副本丢失，核对后补回；改名报告为分歧（带新名字），不猜 |
 | 两台机器共用同一批网盘 | 各自索引 + op-log，靠成员 delta/TTL 收敛；同文件并发写成为冲突副本；裁剪只在哈希一致且过 trim_grace 后 |
+| 内容索引抽取中进程被 `kill -9` | index.db 是 WAL 模式的独立库，重启后 `integrity_check` 为 ok，已提交的文档保留，`index_pending` 里的队列续跑；只是派生数据，最坏整库重建（`TestIndexSurvivesAnUncleanStopMidExtraction`） |
+| 恶意文档（zip 炸弹、超多条目、假扩展名） | 抽取器先按 zip 目录条目数、声明大小与实际解压量拒绝，再有 recover 兜底；该文档记 `failed` 并带原因，worker 继续下一个，daemon 不受影响（`TestMaliciousArchiveFailsTheDocumentNotTheDaemon`） |
 
 ---
 
@@ -644,12 +648,17 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 │   │   ├── ratelimit/           # token bucket + AIMD + 熔断
 │   │   └── retry/               # 错误分类与退避
 │   ├── mcp/                     # 工具 / 资源实现、stdio & http
+│   ├── agent/                   # agent.db：principal、会话、审计（§4.14）
+│   ├── textract/                # 文本 / Office / PDF 抽取与分块，纯函数（§4.12）
+│   ├── index/                   # index.db：文档、分块、FTS、Indexer、检索（§4.12）
 │   ├── control/                 # 控制 API、metrics、doctor
 │   └── config/                  # YAML 配置、密钥存储
 ├── test/
 │   ├── fakeprovider/            # 可注入延迟 / 429 / 断网的模拟 Provider
 │   ├── conformance/             # 文件系统语义测试
-│   └── e2e/                     # 挂载 + MCP 端到端
+│   ├── chaos/                   # §5 可靠性矩阵
+│   ├── perf/                    # provider 调用次数基线
+│   └── e2e/                     # 挂载 + MCP 端到端 + 浏览器冒烟
 └── docs/
     ├── DESIGN.md                # 本文
     ├── providers/               # 各驱动接入说明

@@ -977,14 +977,14 @@ func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
 
 每条后端任务之后紧跟对应界面任务；界面不落地，条目不关。
 
-| 线 | 顺序 | 交付 | 界面 | 理由 |
-|---|---|---|---|---|
-| A | T-34 | `internal/agent` 底座、agent.db、`Scope`、隐式会话、审计 middleware、`checkPath(ctx,p,write)` 重构、`/audit`、`/sessions`、CLI | F1 | 审计零风险、立刻有价值；Scope 重构是机械替换，被现有测试兜底 |
-| A | T-35 | 令牌 principal、读写分离、过期、`mcp install --transport http`、`/mcp/*` | F2 | HTTP 注册让"单 owner 进程"成为默认拓扑 |
-| A | T-36 | `begin/finish/list_sessions`、工作区 manifest、sandbox | F3 | 有了会话与 scope，交付箱几乎只是约定 |
-| B | T-44 | Everything 式文件名搜索：后台全树爬取器 + 覆盖率、`SearchResult` 加 size/mtime/kind、`ext:/size:/dm:/type:` 与通配、排序、MCP／控制面／CLI 参数、百万节点基线 | F11 | 2026-09-15 追加。引擎已是 Everything 形态（父链拼路径、trigram、预算），缺的是覆盖率与体验；T-37 的"文件名 / 内容"切换建在它改造过的搜索框上，所以前置 |
-| B | T-37 | textract（文本 → Office → PDF → 分块）、index.db v1、Indexer、FTS 检索、5 个 MCP 工具、`/index/*`、CLI、metrics、doctor | F4 | 独立于线 A，只依赖 vfs 与 meta；界面在 T-44 之后 |
-| 可选 | T-42 前半 | `GET /agent/prompt` + 检查器"复制提示词" | F9 前半 | 无 exec 依赖 |
+| 线 | 顺序 | 交付 | 界面 | 理由 | 状态 |
+|---|---|---|---|---|---|
+| A | T-34 | `internal/agent` 底座、agent.db、`Scope`、隐式会话、审计 middleware、`checkPath(ctx,p,write)` 重构、`/audit`、`/sessions`、CLI | F1 | 审计零风险、立刻有价值；Scope 重构是机械替换，被现有测试兜底 | 一期已实现（2026-09-15，TODO.md 已关） |
+| A | T-35 | 令牌 principal、读写分离、过期、`mcp install --transport http`、`/mcp/*` | F2 | HTTP 注册让"单 owner 进程"成为默认拓扑 | 一期已实现（2026-09-15，TODO.md 已关） |
+| A | T-36 | `begin/finish/list_sessions`、工作区 manifest、sandbox | F3 | 有了会话与 scope，交付箱几乎只是约定 | 一期已实现（2026-09-15，TODO.md 已关） |
+| B | T-44 | Everything 式文件名搜索：后台全树爬取器 + 覆盖率、`SearchResult` 加 size/mtime/kind、`ext:/size:/dm:/type:` 与通配、排序、MCP／控制面／CLI 参数、百万节点基线 | F11 | 2026-09-15 追加。引擎已是 Everything 形态（父链拼路径、trigram、预算），缺的是覆盖率与体验；T-37 的"文件名 / 内容"切换建在它改造过的搜索框上，所以前置 | 一期已实现（2026-09-15） |
+| B | T-37 | textract（文本 → Office → PDF → 分块）、index.db v1、Indexer、FTS 检索、5 个 MCP 工具、`/index/*`、CLI、metrics、doctor | F4 | 独立于线 A，只依赖 vfs 与 meta；界面在 T-44 之后 | 一期已实现（2026-09-15） |
+| 可选 | T-42 前半 | `GET /agent/prompt` + 检查器"复制提示词" | F9 前半 | 无 exec 依赖 | 未开始（可选） |
 
 **一期总验收**：
 
@@ -996,7 +996,9 @@ func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
   2. 在工作区写两个文件；一次越界写被 denied。
   3. `finish_session`。
   4. 浏览器冒烟确认审计 denied 行与产物表两行都可见。
+  （已落地：`test/e2e/agent_e2e_test.go` `TestAgentTokenSandboxChainAndAuditInTheBrowser`、`TestAgentSessionManifestMatchesTheMount`）
 - 另一条链路：写 md 后 3 s 内 `semantic_search` 命中，浏览器冒烟里主窗口内容搜索命中同一文件。
+  （已落地：`test/e2e/index_e2e_test.go` `TestContentSearchFindsAFreshMarkdownFile`（真实 FUSE 挂载）、`TestContentSearchInTheBrowser`（`CLOUDFS_BROWSER=1`）；chaos：`test/chaos/index_test.go` `TestIndexSurvivesAnUncleanStopMidExtraction`、`TestMaliciousArchiveFailsTheDocumentNotTheDaemon`）
 
 ### 7.2 二期（约 4–5 周）
 

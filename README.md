@@ -163,6 +163,19 @@ search:
                          # 非官方接口（如 quark）触发风控后休眠 15 分钟；进度就是元数据库里的
                          # 目录列举状态，重启后续跑，不重复列举已完整的目录
 
+index:                   # 内容索引（PDF / Office / 文本抽取 + 全文检索），给 semantic_search 与界面"内容"搜索用
+  enabled: false         # 默认关：不建 index.db，MCP 也不注册 5 个索引工具
+  pinned: true           # 已固定且完整缓存的文件直接从缓存抽取，零远端调用；非官方接口的网盘只建议用这一项
+  rules:                 # 主动拉取并索引的子树；按小时预算下载，前台 IO 繁忙时让路，风控后休眠 15 分钟
+    - path: /work/docs
+      include: ["**/*.md", "**/*.pdf", "**/*.docx"]   # 相对 path 的 glob；省略时为文本、代码与 Office 的默认集合
+      exclude: ["**/drafts/**"]
+      max_file_size: 20MiB                              # 超过的文件不下载、不抽取
+  exclude: ["**/.env", "**/*.pem", "**/id_rsa*", "**/.git/**", "**/node_modules/**"]  # 全局排除，省略即这组默认值
+  max_text_bytes: 2MiB   # 单个文件最多抽多少文本
+  max_total_text: 4GiB   # 整个索引的文本上限，到了就暂停并在 doctor 里提示
+  fetch_budget: 2GiB/h   # 规则每小时最多下载多少；Caps.Tier=unofficial 的网盘自动减半
+
 webdav:
   http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动 WebDAV
   prefix: /dav
@@ -263,6 +276,23 @@ cloudfs find plan --all                  # 先把索引里还没有的目录都�
 不是全局最大的。有守护进程在跑就问它；没有时只读本地索引，不启动上传与刷新，`--all`
 则必须有运行中的守护进程或取得存储所有权。语法全表见 `docs/mcp.md`。
 
+### 内容索引
+
+```sh
+cloudfs index status                      # 文档数、待抽取、失败、文本占用、本小时下载
+cloudfs index add /work/docs --include '**/*.pdf,**/*.docx'
+cloudfs index search 季度 复盘 --path /work  # 关键词都要出现；命中带标题路径、片段与偏移
+cloudfs index status --path /work/docs/plan.pdf   # ok / pending / failed / uncovered
+```
+
+`index.enabled: true` 后守护进程把 `index.pinned`（已完整缓存的固定文件，零下载）与 `index.rules`
+（按小时预算下载）覆盖的文件抽成文本，写进独立的 `<cache.dir>/index.db`；MCP 多出
+`semantic_search`、`index_status`、`index`、`unindex`、`read_extracted_text` 五个工具，控制台多出
+「索引」屏，主窗口搜索框多出"文件名 / 内容"切换，PDF 与 Office 文件在检查器里可以"查看抽取文本"。
+本期只有关键词检索（`hybrid` / `vector` 按关键词执行并标 `degraded`），不做 OCR。抽取器对 zip
+条目数、解压量与 PDF 解析都有上限，坏文件只会让自己 `failed`；抽取中断电或 `kill -9`，重启后队列续跑。
+接口与 agent 使用建议见 `docs/mcp.md`"内容索引"。
+
 ### 缓存固定与解除
 
 ```sh
@@ -359,6 +389,15 @@ cache stats | gc | pins   查看缓存、回收未固定内容或列出固定规
 uploads list | retry | cancel | resume | drop | flush
 find [query] [--ext go,md] [--size >1m] [--after 2026-09-01] [--type dir|file] [--sort name|size|mtime|path] [--path /sub] [--limit N] [--all] [--json]
                           在本地文件名索引里搜索（Everything 式语法，见下文）；--all 先列举整棵树
+index status [--path P] [--json]   内容索引概况（文档 / 分块 / 队列 / 预算）；--path 看单个路径是否覆盖、已索引还是失败
+index rules [--json]      列出索引规则及来源（配置文件 / 控制台 / Agent 工具）与已覆盖文档数
+index add <path> [--include "**/*.md,**/*.pdf"] [--max-file-size 20MiB]
+                          运行时加一条规则并立即入队；需要运行中的守护进程
+index rm <path> --confirm 移除运行时规则并丢弃只有它覆盖的文本；配置文件里的规则只能改配置
+index rebuild --confirm   清空索引并按规则重新下载、抽取
+index retry [path]        把失败文档（可限定子树）重新排队
+index search <query> [--path P] [--mode keyword|hybrid|vector] [--limit N] [--json]
+                          在抽取文本里检索；没有守护进程时只读 index.db。本期 hybrid/vector 按 keyword 执行
 cp <source> <dest>        复制单个文件，可跨 remote；恢复与竞争限制见 docs/copy.md
 copies list | show <id>    查询复制准备状态、检查点及关联上传；list 支持 --limit/--cursor
 copies retry|cancel <id>   重试或取消准备任务，保留内容；不能取消已交接的上传
