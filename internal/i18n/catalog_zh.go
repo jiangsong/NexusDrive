@@ -247,6 +247,16 @@ var zh = map[string]string{
 	"doctor.index.budget.fix":        "调高 index.max_total_text 或收窄规则；达到上限后新文档不再索引",
 	"fix.index_requeued":             "已把 %d 个失败文档重新排队抽取",
 
+	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。
+	// 每一句对应守护进程真的提供的一个工具；没有的功能不提。
+	"err.prompt_path":        "找不到这个路径",
+	"agent.prompt.intro":     "请处理 CloudFS 挂载中的 %s（MCP 资源 %s）。",
+	"agent.prompt.heading":   "关注的段落：%s",
+	"agent.prompt.dir":       "这是一个目录：先用 list_directory 列出内容，再决定处理哪些文件。",
+	"agent.prompt.read":      "用 read_text 读取文件；需要修改时用 edit_file 做局部替换，不要整份重写。",
+	"agent.prompt.extracted": "PDF / Office 文档用 read_extracted_text 读取抽取后的文本。",
+	"agent.prompt.session":   "开始前先调用 begin_session，结束时调用 finish_session 并写一段 summary。",
+
 	// 存储池在添加网盘的表单里和其它后端一样。
 	"field.pool.pool": "存储池名称（成员与副本数写在 pools.<name> 下）",
 	"creds.pool.note": "无：存储池通过它的成员网盘完成认证",

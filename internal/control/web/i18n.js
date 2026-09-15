@@ -340,6 +340,9 @@ const zh = {
   'index.rebuild': '重建索引', 'index.rebuild.title': '重建整个索引',
   'index.rebuild.body': '输入 rebuild 确认。索引会被清空，规则覆盖的文件会按限流重新下载。',
   'index.rebuild.started': '索引已清空，正在重新抽取',
+  'action.sendtoagent': '发送给 Agent', 'agent.prompt.title': '发送给 Agent',
+  'agent.prompt.body': '复制下面的提示词，粘贴到 Claude Code 或 Codex。可以先修改。',
+  'agent.prompt.copy': '复制提示词', 'agent.prompt.copied': '已复制', 'agent.prompt.copyfailed': '无法访问剪贴板',
 };
 
 const en = {
@@ -674,6 +677,9 @@ const en = {
   'index.rebuild': 'Rebuild index', 'index.rebuild.title': 'Rebuild the whole index',
   'index.rebuild.body': 'Type rebuild to confirm. The index is cleared and rule-covered files are downloaded again, rate-limited.',
   'index.rebuild.started': 'The index was cleared and extraction starts again',
+  'action.sendtoagent': 'Send to agent', 'agent.prompt.title': 'Send to agent',
+  'agent.prompt.body': 'Copy this prompt into Claude Code or Codex. You can edit it first.',
+  'agent.prompt.copy': 'Copy prompt', 'agent.prompt.copied': 'Copied', 'agent.prompt.copyfailed': 'Could not reach the clipboard',
 };
 
 // Exported so the catalogs can be compared against each other: identical key

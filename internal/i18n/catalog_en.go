@@ -248,6 +248,17 @@ var en = map[string]string{
 	"doctor.index.budget.fix":        "raise index.max_total_text or narrow the rules; new documents stop being indexed at the limit",
 	"fix.index_requeued":             "requeued %d failed documents for extraction",
 
+	// Send to agent: the console hands this prompt to the person to paste
+	// into their own MCP client. Each sentence names a tool the daemon
+	// really offers; a feature that is off is not mentioned.
+	"err.prompt_path":        "no such path",
+	"agent.prompt.intro":     "Work on %s in the CloudFS mount (MCP resource %s).",
+	"agent.prompt.heading":   "Section of interest: %s",
+	"agent.prompt.dir":       "This is a directory: list it with list_directory first, then decide which files to work on.",
+	"agent.prompt.read":      "Read files with read_text; to change one, use edit_file for a targeted replacement rather than rewriting the whole file.",
+	"agent.prompt.extracted": "PDF and Office documents: read the extracted text with read_extracted_text.",
+	"agent.prompt.session":   "Call begin_session before you start and finish_session with a summary when you are done.",
+
 	// The storage pool is a backend like any other on the add-drive form.
 	"field.pool.pool": "Pool name (its members and replica count live under pools.<name>)",
 	"creds.pool.note": "none: a pool authenticates through its member remotes",

@@ -13,6 +13,7 @@ import { openSessionPanel } from '/ui/session_panel.js';
 import { readSearchMode, writeSearchMode, runContentSearch, contentSearchHeader } from '/ui/content_search.js';
 import { openExtractedText } from '/ui/extracted_text.js';
 import { renderIndexInfo } from '/ui/index_inspector.js';
+import { openSendToAgent } from '/ui/send_to_agent.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
@@ -307,6 +308,8 @@ export function renderMain(host) {
         e.is_dir ? null : el('button', { onclick: () => preview(e) }, t('action.preview')),
         e.is_dir ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
         sessionDirOf(e.path, workspaceRoot()) ? el('button', { onclick: () => fromSession(e) }, iconEl('bot'), t('inspector.fromsession') + ' ' + sessionDirOf(e.path, workspaceRoot()).split('/').pop()) : null,
+        // Files and directories alike: the prompt tells a directory to list itself first.
+        el('button', { onclick: () => openSendToAgent({ path: e.path }) }, iconEl('bot'), t('action.sendtoagent')),
         el('button', { class: 'danger', onclick: () => remove(e) }, t('action.delete'))));
   }
   // fromSession asks the daemon which session owns this path rather than

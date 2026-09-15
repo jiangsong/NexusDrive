@@ -136,6 +136,7 @@ func (s *Server) routes() []route {
 		{pattern: "/index/failed", handler: s.indexFailed},
 		{pattern: "/index/search", handler: s.indexSearch},
 		{pattern: "/index/text", handler: s.indexText},
+		{pattern: "/agent/prompt", handler: s.agentPrompt},
 	}
 }
 

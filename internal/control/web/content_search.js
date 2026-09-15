@@ -2,6 +2,7 @@ import { api } from '/ui/api.js';
 import { el, fill, iconEl, toast } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { snippetParts } from '/ui/snippet.js';
+import { openSendToAgent } from '/ui/send_to_agent.js';
 
 // The "content" mode of the main window's search box: the same box and the
 // same result table as the name search, answered by the content index
@@ -63,7 +64,14 @@ function resultRow(hit, query, onOpen) {
     el('td', { class: 'detail', style: 'font-size:12.5px;overflow-wrap:anywhere' },
       ...snippetParts(hit.snippet || '', query).map((p) => (p.hit ? el('mark', {}, p.text) : p.text))),
     el('td', { style: 'padding-left:20px;font-size:13px' },
-      hit.stale ? el('span', { class: 'chip', title: t('search.content.stale.title') }, t('search.content.stale')) : null));
+      el('span', { style: 'display:flex;align-items:center;gap:8px;justify-content:space-between' },
+        hit.stale ? el('span', { class: 'chip', title: t('search.content.stale.title') }, t('search.content.stale')) : el('span', {}),
+        // The row itself opens the extracted text; this button hands the
+        // hit to an agent instead, so its click stops here.
+        el('button', {
+          style: 'padding:4px 8px;flex-shrink:0', title: t('action.sendtoagent'), 'aria-label': t('action.sendtoagent'),
+          onclick: (ev) => { ev.stopPropagation(); openSendToAgent({ path: hit.path, heading: hit.heading }); },
+        }, iconEl('bot')))));
 }
 
 // runContentSearch asks the index for the query and fills the rows.

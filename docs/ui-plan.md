@@ -378,8 +378,8 @@ F5–F10 属二期。
 
 **F9 —— 发送给 Agent 浮层（检查器 + 搜索结果两入口）（T-42 · 二期，复制部分可提前）**
 
-- [ ] **F9-1** `send_to_agent.js`（`openPanel`）：`GET /agent/prompt?path=` 预填 `textarea`（按文本填充、可编辑）+ "复制"（始终可用，除读取提示词外不发请求）。
-- [ ] **F9-2** 检查器"发送给 Agent"按钮（图标 `bot`，文件与目录都有）；内容搜索结果行右侧同一入口，预填命中路径与标题。
+- [x] **F9-1** `send_to_agent.js`（`openPanel`）：`GET /agent/prompt?path=` 预填 `textarea`（按文本填充、可编辑）+ "复制"（始终可用，除读取提示词外不发请求）。
+- [x] **F9-2** 检查器"发送给 Agent"按钮（图标 `bot`，文件与目录都有）；内容搜索结果行右侧同一入口，预填命中路径与标题。
 - [ ] **F9-3** `GET /agent/endpoints` 非空时才渲染 agent 下拉 + "运行"；运行前 `confirmDelete` 键入 agent 名称 → `POST /agent/invoke` 带 `confirm: true` → toast"已提交"附"查看投递"跳 `#/triggers?delivery=<id>`。
 - [ ] **F9-4** i18n 键 `send.*`；`ui_send_to_agent_test.go`：运行按钮条件渲染、运行前确认并带 `confirm: true`、提示词按文本插入、两个入口都存在。
 
