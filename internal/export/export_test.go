@@ -169,9 +169,12 @@ func TestExportSpreadsAcrossMembers(t *testing.T) {
 	// Give every member the same latency. The picker prefers the member
 	// that has been measurably faster, and on fakes that answer instantly
 	// "faster" is scheduling noise — which is exactly what a spread
-	// assertion must not be measuring.
+	// assertion must not be measuring. The latency has to dwarf that
+	// noise: at 2 ms a loaded box jitters past the picker's 20% tie band
+	// and one member takes most of the reads; at 20 ms the same jitter is
+	// well inside it.
 	for _, mem := range h.Members {
-		mem.SetFaults(func(ft *fakeprovider.Faults) { ft.Latency = 2 * time.Millisecond })
+		mem.SetFaults(func(ft *fakeprovider.Faults) { ft.Latency = 20 * time.Millisecond })
 	}
 	const files, size = 30, 3000
 	total := int64(0)

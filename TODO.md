@@ -1163,9 +1163,10 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 - **2026-09-15 晚补充（非 race，负载下的计时 flake）**：`internal/cache` `TestSparseLayoutWritesTheFileOnce`
   （"wrote 245760 bytes … want 262144"）——根因与早上的 `TestSmallFilesKeepTheBlockLayout` 相同：`HydrateAfter=1ms`
   让管家在最后一块采样前就合并并删掉块文件，少计一块；已改为填充期 `HydrateAfter=time.Hour` + 手动 `hydrateDue()`，
-  30 次重跑稳定。仍待处理：`internal/export` `TestExportSpreadsAcrossMembers`（基线 2/12 失败，读扩散计时）；
-  `test/e2e` `TestStressWithForcedRefreshKeepsReadYourWrites` 在 race 全包下偶发 `input/output error`。
-  两处都与本期改动无关，要么改成不依赖墙钟的断言，要么在 race/负载下跳过。
+  30 次重跑稳定。`internal/export` `TestExportSpreadsAcrossMembers`（基线 2/12 失败）根因是 fake 延迟 2 ms 在负载下
+  抖动超过 `pickReplica` 的 20% 平局带，某成员被判更快拿走多数读；改为 20 ms 后 30 次（含并发负载与 race）稳定。
+  仍待处理：`test/e2e` `TestStressWithForcedRefreshKeepsReadYourWrites` 在 race 全包下偶发 `input/output error`，
+  与本期改动无关。
 - **验收**：空闲机器上述命令全绿；`grep -c 'DATA RACE'` = 0。
 
 ## P3 — 采用缺口（能力已具备，但用户接触不到）
