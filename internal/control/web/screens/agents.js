@@ -2,6 +2,8 @@ import { el, fill } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { renderSessionsTab } from '/ui/screens/agents_sessions.js';
 import { renderAuditTab } from '/ui/screens/agents_audit.js';
+import { renderTokensTab } from '/ui/screens/agents_tokens.js';
+import { renderConnectPanel } from '/ui/connect_panel.js';
 
 // The agents screen: what MCP clients are doing inside the mount. It is a
 // tab container and nothing more — each tab is its own module with its own
@@ -12,8 +14,8 @@ import { renderAuditTab } from '/ui/screens/agents_audit.js';
 // for a change that only concerns this screen.
 const TABS = ['sessions', 'audit', 'tokens', 'memory'];
 
-// Tokens and memory arrive with later tasks; until then they are a short
-// note, so the tab strip already has its final shape.
+// Memory arrives with a later task; until then it is a short note, so the
+// tab strip already has its final shape.
 function renderPlaceholder(host) {
   fill(host, el('div', { class: 'pad dim' }, t('agents.tab.placeholder')));
   return () => {};
@@ -22,12 +24,13 @@ function renderPlaceholder(host) {
 const RENDER = {
   sessions: renderSessionsTab,
   audit: renderAuditTab,
-  tokens: renderPlaceholder,
+  tokens: renderTokensTab,
   memory: renderPlaceholder,
 };
 
 // hashParams reads the query part of the hash, which is where this screen
-// keeps its tab and any deep link (?session=<id>).
+// keeps its tab and any deep link (?session=<id>, ?connect=1 to open the
+// connect panel).
 export function hashParams() {
   return new URLSearchParams((location.hash.split('?')[1]) || '');
 }
@@ -42,6 +45,7 @@ export function renderAgents(host) {
   let dispose = null;
   const body = el('div', {});
   const bar = el('div', { class: 'tabs', role: 'tablist' });
+  const connect = el('div', { style: 'padding:0 20px 14px' });
 
   function show(name, params) {
     tab = name;
@@ -64,7 +68,11 @@ export function renderAgents(host) {
     el('div', { class: 'pad', style: 'padding-bottom:12px' },
       el('div', { class: 'eyebrow' }, t('agents.eyebrow')),
       el('h2', { class: 'section', style: 'margin:6px 0 0' }, t('agents.title'))),
-    bar, body);
-  show(tab, hashParams());
-  return () => { if (dispose) dispose(); };
+    connect, bar, body);
+  // The connect panel is above the tabs and outlives a tab switch; the
+  // setup finish page opens it with ?connect=1.
+  const params = hashParams();
+  const disposeConnect = renderConnectPanel(connect, { open: params.get('connect') === '1' });
+  show(tab, params);
+  return () => { disposeConnect(); if (dispose) dispose(); };
 }

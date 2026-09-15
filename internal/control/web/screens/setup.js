@@ -24,7 +24,7 @@
 // config add in a terminal" the same case.
 
 import { api, ApiError } from '/ui/api.js';
-import { el, fill, toast, bytes } from '/ui/ui.js';
+import { el, fill, toast, bytes, iconEl } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { planSetup, nextAuthTarget } from '/ui/setup_plan.js';
 import { startAuthorization } from '/ui/auth_step.js';
@@ -594,6 +594,7 @@ export function renderSetup(host) {
         el('h3', { style: 'margin:0' }, t('setup.finish.title')),
         el('p', { class: 'detail' }, t('setup.finish.done', intent.mountPath || '~/CloudFS')),
         el('div', { class: 'row' }, el('a', { class: 'btn', href: '#/pool' }, t('setup.finish.open'))),
+        agentCard(),
       ));
       return;
     }
@@ -608,7 +609,18 @@ export function renderSetup(host) {
       el('div', { class: 'row', style: 'gap:9px' }, restart,
         el('a', { class: 'btn', href: '#/pool' }, t('setup.finish.open'))),
       status,
+      agentCard(),
     ));
+  }
+
+  // agentCard points at the agents screen with the connect panel open: the
+  // pool is mounted, and the next thing most people set up is the client
+  // that works inside it. It carries no state of its own.
+  function agentCard() {
+    return el('div', { class: 'card', style: 'margin-top:14px' },
+      el('h4', { style: 'margin:0 0 6px' }, t('setup.finish.agent.title')),
+      el('p', { class: 'detail', style: 'margin:0 0 10px' }, t('setup.finish.agent.body')),
+      el('a', { class: 'btn', href: '#/agents?connect=1' }, iconEl('bot'), t('setup.finish.agent.open')));
   }
 
   async function waitForDaemon(status) {

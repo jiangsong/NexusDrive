@@ -179,3 +179,25 @@ input::placeholder { color: var(--dim); }
 .grow { flex-grow: 1; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 [hidden] { display: none !important; }
+
+/* Agent access: the connect panel, the one-time token reveal and the card
+   the setup finish page points at it with. A textarea takes the text-input
+   styling so the token form's prefix lists read like its name field. */
+textarea {
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #121a25; width: 100%; font: inherit; resize: vertical;
+}
+.card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 16px 18px; }
+.banner { padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); font-size: 13px; }
+.banner.warn { border-color: var(--warn); background: #16120b; color: var(--warn-text); }
+.banner a { color: inherit; text-decoration: underline; }
+.warn-text { color: var(--warn-text); font-weight: 600; }
+pre.snippet { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #121a25; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
+.plain-token { padding: 8px 12px; border: 1px solid var(--accent-border); border-radius: var(--radius-sm); background: #121a25; overflow-wrap: anywhere; font-size: 14px; user-select: all; }
+details.connect { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 0 18px; }
+details.connect > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; cursor: pointer; list-style: none; }
+details.connect > summary::-webkit-details-marker { display: none; }
+details.connect > summary::before { content: ""; width: 7px; height: 7px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); margin-right: 4px; flex-shrink: 0; transition: transform .15s; }
+details.connect[open] > summary::before { transform: rotate(45deg); }
+details.connect > summary .connect-title { flex-grow: 1; font-weight: 600; }
+details.connect > .connect-body { padding: 0 0 16px 21px; }
