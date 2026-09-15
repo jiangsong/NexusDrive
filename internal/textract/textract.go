@@ -3,17 +3,17 @@
 // T-37). Callers classify a file with KindOf and hand the bytes to Extract;
 // the returned Doc is what the chunker (chunk.go) and the index consume.
 //
-// The package is deliberately standard-library only so that a malformed file
-// can at worst cost CPU inside the limits in Options, never a crash of the
-// daemon: every extractor is bounded by MaxTextBytes, the archive limits and
-// the context deadline derived from Options.Timeout.
+// The package is standard-library only apart from the PDF parser (pdf.go),
+// so that a malformed file can at worst cost CPU inside the limits in
+// Options, never a crash of the daemon: every extractor is bounded by
+// MaxTextBytes, the archive limits and the context deadline derived from
+// Options.Timeout, and the PDF parser additionally runs behind a recover.
 package textract
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -221,8 +221,7 @@ func Extract(ctx context.Context, kind Kind, r io.ReaderAt, size int64, opt Opti
 	case KindDocx, KindXlsx, KindPptx:
 		return extractOffice(ctx, kind, r, size, opt)
 	case KindPDF:
-		// PDF lands in pdf.go.
-		return Doc{}, fmt.Errorf("%w: %s extraction is not built in", ErrUnsupported, kind)
+		return extractPDF(ctx, r, size, opt)
 	default:
 		return Doc{}, ErrUnsupported
 	}
