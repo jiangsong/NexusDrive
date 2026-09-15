@@ -1387,11 +1387,21 @@ func (s *Store) IsPinned(ctx context.Context, p string) (bool, error) {
 	return false, nil
 }
 
-// SearchResult is one metadata name or path match.
+// SearchResult is one metadata name or path match, with the facts a result
+// row shows: the nodes columns come through the bounded CTE at no extra
+// query.
 type SearchResult struct {
-	Ino  uint64
-	Name string
-	Path string
+	Ino   uint64
+	Name  string
+	Path  string
+	Kind  provider.Kind
+	Size  int64
+	MTime time.Time
+	// Remote, RemoteID and Version identify the content so a caller can ask
+	// the block cache; Cached is filled by vfs.FS.Search, never read from
+	// meta, which knows nothing about the cache.
+	Remote, RemoteID, Version string
+	Cached                    bool
 }
 
 // Stats summarises the cache for `cloudfs status`.

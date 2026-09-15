@@ -202,7 +202,8 @@ Inspection
   cache stats | gc | pins   inspect or trim the block cache; list pin rules
   uploads list | retry | cancel | resume | drop | flush
 	                       drop <id> --confirm removes a stopped local version, not remote data
-  find <query>              search cached file names
+  find [query] [--ext go,md] [--size >1m] [--after 2026-09-01] [--type dir|file] [--sort name|size|mtime|path] [--all]
+                            search indexed file names; --all lists the whole tree first
   cp <source> <destination> copy a file to an absent virtual path
   copies list | show <id>   inspect persistent copy preparations and handoffs
   copies retry|cancel <id>  retry or stop preparation while retaining its content
@@ -1062,41 +1063,7 @@ func cmdWarm(ctx context.Context, args []string) error {
 }
 
 func cmdFind(ctx context.Context, args []string) error {
-	f := parseFlags(args)
-	query := f.arg(0)
-	if query == "" {
-		return errors.New("find: give a search string")
-	}
-	cfg, _, err := loadConfig(f)
-	if err != nil {
-		return err
-	}
-	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version})
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	limit := 100
-	if v := f.str("limit", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
-		}
-	}
-	report, err := d.FS.Meta().SearchReport(ctx, query, nil, limit)
-	if err != nil {
-		return err
-	}
-	for _, r := range report.Results {
-		fmt.Println(r.Path)
-	}
-	if len(report.Results) == 0 {
-		fmt.Fprintln(os.Stderr, "no matches in the local index; run 'cloudfs warm' to list more of the tree first")
-	}
-	if !report.Complete {
-		// Saying nothing here would present a partial answer as the whole one.
-		fmt.Fprintln(os.Stderr, "the index stopped at its work budget; there may be more matches — narrow the query or use --limit")
-	}
-	return nil
+	return runFind(ctx, args, os.Stdout)
 }
 
 // cmdBench runs the built-in IO benchmark. Pointed at a cloudfs mount with

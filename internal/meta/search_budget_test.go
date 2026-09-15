@@ -191,7 +191,7 @@ INSERT INTO nodes(parent_ino,name,kind) SELECT ?,printf('zz%06d',i),0 FROM seq`,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stmt, _ := searchSQL("zz", nil, 10, matchBudget(10))
+	stmt, _ := searchSQL(SearchQuery{Filter: mustParse(t, "zz"), Limit: 10}, matchBudget(10))
 	if strings.Contains(stmt, "name_index_pending") {
 		t.Fatal("a short query consulted the deferred index; its postings are written synchronously")
 	}

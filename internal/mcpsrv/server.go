@@ -18,6 +18,8 @@ import (
 	"unicode/utf8"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/meta"
+	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -388,17 +390,37 @@ type okOutput struct {
 }
 
 type searchInput struct {
-	Path       string `json:"path,omitempty" jsonschema:"Subtree to search; default the whole mount"`
-	Query      string `json:"query" jsonschema:"Substring matched against file names"`
-	Content    string `json:"content,omitempty" jsonschema:"Also require this text inside the file; only searches locally cached files"`
-	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum hits; the server caps this"`
+	Path          string `json:"path,omitempty" jsonschema:"Subtree to search; default the whole mount"`
+	Query         string `json:"query,omitempty" jsonschema:"Name query: words are AND-ed substrings, quotes keep spaces, * and ? are wildcards, and ext: size: dm: type: path: filter (e.g. 'report ext:md size:>1m dm:>2026-09'); may be empty when another filter is given"`
+	Content       string `json:"content,omitempty" jsonschema:"Also require this text inside the file; only searches locally cached files"`
+	Glob          string `json:"glob,omitempty" jsonschema:"Wildcard pattern the whole file name must match, such as *.md"`
+	Ext           string `json:"ext,omitempty" jsonschema:"Comma-separated extensions without the dot, any of which matches"`
+	MinSize       int64  `json:"min_size,omitempty" jsonschema:"Smallest size in bytes, inclusive"`
+	MaxSize       int64  `json:"max_size,omitempty" jsonschema:"Largest size in bytes, inclusive"`
+	ModifiedAfter string `json:"modified_after,omitempty" jsonschema:"Only entries modified at or after this RFC 3339 time or YYYY-MM-DD date"`
+	Kind          string `json:"kind,omitempty" jsonschema:"dir or file"`
+	Sort          string `json:"sort,omitempty" jsonschema:"name, size, mtime or path; prefix - to reverse; default shallowest first. Orders only the hits collected, so with truncated=true the top of the list is not the global top"`
+	MaxResults    int    `json:"max_results,omitempty" jsonschema:"Maximum hits; the server caps this"`
 }
 
 type searchHit struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path  string    `json:"path"`
+	Name  string    `json:"name"`
+	Kind  string    `json:"kind"`
+	Size  int64     `json:"size"`
+	MTime time.Time `json:"mtime"`
+	// Cached says the whole file is in the local block cache, which is
+	// what content search needs.
+	Cached bool `json:"cached"`
 	// Line is the first matching line when content was searched.
 	Line string `json:"line,omitempty"`
+}
+
+type searchCoverage struct {
+	// Listed directories are in the index; Known ones exist. The gap is
+	// what a search cannot see until warm or the crawler lists it.
+	Listed int64 `json:"listed"`
+	Known  int64 `json:"known"`
 }
 
 type searchOutput struct {
@@ -406,7 +428,8 @@ type searchOutput struct {
 	Truncated bool        `json:"truncated"`
 	// Note explains any limitation that applied, such as content search
 	// skipping files that are not cached locally.
-	Note string `json:"note,omitempty"`
+	Note     string         `json:"note,omitempty"`
+	Coverage searchCoverage `json:"coverage"`
 }
 
 type pinInput struct {
@@ -493,7 +516,7 @@ func (s *Server) register() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "search",
-		Description: "Find files by name across the mount. Name matching uses a local index and is fast; content matching only inspects files already cached locally.",
+		Description: "Find files by name across the mount. Name matching uses a local index and is fast: words AND, quotes keep spaces, * and ? are wildcards, and ext: size: dm: type: path: filter inline or through the structured fields. The index holds only listed directories (see coverage in the output); content matching only inspects files already cached locally.",
 		Annotations: ro,
 	}, s.search)
 
@@ -967,7 +990,12 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 			return r, searchOutput{}, nil
 		}
 	}
-	if strings.TrimSpace(in.Query) == "" {
+	filter, err := searchFilter(in)
+	if err != nil {
+		r, _ := fail(err)
+		return r, searchOutput{}, nil
+	}
+	if filter.Empty() {
 		r, _ := fail(errors.New("query must not be empty"))
 		return r, searchOutput{}, nil
 	}
@@ -982,14 +1010,14 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 	if in.Content != "" {
 		candidateLimit = limit * 4
 	}
-	report, err := s.opt.FS.Meta().SearchReport(ctx, in.Query, roots, candidateLimit)
+	answer, err := s.opt.FS.Search(ctx, meta.SearchQuery{Filter: filter, Roots: roots, Limit: candidateLimit, Sort: in.Sort})
 	if err != nil {
 		r, _ := fail(err)
 		return r, searchOutput{}, nil
 	}
-	results := report.Results
-	var out searchOutput
-	if !report.Complete {
+	results := answer.Results
+	out := searchOutput{Coverage: searchCoverage{Listed: answer.Coverage.Listed, Known: answer.Coverage.Known}}
+	if !answer.Complete {
 		// The index stopped at its work budget, so "no more hits" would be a
 		// claim this call cannot make.
 		out.Truncated = true
@@ -1011,13 +1039,15 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 		if !s.visible(ctx, r.Path) {
 			continue
 		}
-		hit := searchHit{Path: r.Path, Name: r.Name}
+		hit := searchHit{Path: r.Path, Name: r.Name, Kind: "file", Size: r.Size, MTime: r.MTime, Cached: r.Cached}
+		if r.Kind == provider.KindDir {
+			hit.Kind = "dir"
+		}
 		if in.Content != "" {
-			a, err := s.opt.FS.StatPath(ctx, r.Path)
-			if err != nil || a.IsDir {
+			if r.Kind == provider.KindDir {
 				continue
 			}
-			if a.Cached < 1 {
+			if !r.Cached {
 				skippedUncached++
 				continue
 			}
@@ -1035,11 +1065,81 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 		}
 		out.Note += fmt.Sprintf("skipped %d files that are not cached locally; call pin on the directory first to search their contents", skippedUncached)
 	}
-	msg := fmt.Sprintf("%d matches for %q", len(out.Hits), in.Query)
+	if out.Coverage.Listed < out.Coverage.Known {
+		if out.Note != "" {
+			out.Note += "; "
+		}
+		out.Note += fmt.Sprintf("the index holds %d of %d known directories; entries under the rest are invisible until warm lists them", out.Coverage.Listed, out.Coverage.Known)
+	}
+	msg := fmt.Sprintf("%d matches for %q", len(out.Hits), searchDescription(in))
 	if out.Note != "" {
 		msg += ". " + out.Note
 	}
 	return text("%s", msg), out, nil
+}
+
+// searchFilter parses the query and layers the structured parameters over
+// it, so an agent can pass either form or both.
+func searchFilter(in searchInput) (meta.Filter, error) {
+	f, err := meta.ParseQuery(in.Query)
+	if err != nil {
+		return f, err
+	}
+	if in.Glob != "" {
+		f.Terms = append(f.Terms, meta.Term{Text: in.Glob, Glob: true})
+	}
+	for _, ext := range strings.Split(in.Ext, ",") {
+		if ext = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ext)), "."); ext != "" {
+			f.Ext = append(f.Ext, ext)
+		}
+	}
+	if in.MinSize > 0 {
+		f.MinSize = in.MinSize
+	}
+	if in.MaxSize > 0 {
+		f.MaxSize = in.MaxSize
+	}
+	if in.ModifiedAfter != "" {
+		t, err := time.Parse(time.RFC3339, in.ModifiedAfter)
+		if err != nil {
+			if t, err = time.ParseInLocation("2006-01-02", in.ModifiedAfter, time.Local); err != nil {
+				return f, fmt.Errorf("modified_after must be RFC 3339 or YYYY-MM-DD: %q", in.ModifiedAfter)
+			}
+		}
+		f.ModifiedAfter = t
+	}
+	if in.Kind != "" {
+		switch in.Kind {
+		case "dir", "file":
+			f.Kind = in.Kind
+		default:
+			return f, fmt.Errorf("kind must be dir or file, not %q", in.Kind)
+		}
+	}
+	return f, nil
+}
+
+func searchDescription(in searchInput) string {
+	parts := []string{}
+	if q := strings.TrimSpace(in.Query); q != "" {
+		parts = append(parts, q)
+	}
+	if in.Glob != "" {
+		parts = append(parts, in.Glob)
+	}
+	if in.Ext != "" {
+		parts = append(parts, "ext:"+in.Ext)
+	}
+	if in.Kind != "" {
+		parts = append(parts, "type:"+in.Kind)
+	}
+	if in.MinSize > 0 || in.MaxSize > 0 {
+		parts = append(parts, fmt.Sprintf("size:%d..%d", in.MinSize, in.MaxSize))
+	}
+	if in.ModifiedAfter != "" {
+		parts = append(parts, "modified_after:"+in.ModifiedAfter)
+	}
+	return strings.Join(parts, " ")
 }
 
 func firstMatchingLine(content, needle string) string {

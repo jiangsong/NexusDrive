@@ -265,3 +265,52 @@ func TestDownloadURLIsTheOneDeliberateSignedURL(t *testing.T) {
 	}
 	_ = vfs.ErrNotFound
 }
+
+// TestSearchCarriesCoverageAndRowFacts: every row carries what a results
+// table shows, the answer says how much of the tree it could see, and the
+// filters are validated at the door.
+func TestSearchCarriesCoverageAndRowFacts(t *testing.T) {
+	f, _ := fsControl(t)
+	s := NewServer(f.coll)
+	ctx := context.Background()
+	if _, err := f.coll.FS.ReadDirPath(ctx, "/docs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.coll.FS.ReadFileRange(ctx, "/docs/b", 0, 6); err != nil { // one block: fully cached
+		t.Fatal(err)
+	}
+	if err := f.coll.FS.Meta().FlushIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	out := decode[SearchResponse](t, call(t, s, "GET", "/search?q=b&sort=size", ""))
+	if out.Coverage.Known == 0 || out.Coverage.Listed == 0 || out.Coverage.Listed > out.Coverage.Known || out.Coverage.Crawling {
+		t.Fatalf("coverage: %+v", out.Coverage)
+	}
+	var hit *SearchHit
+	for i := range out.Results {
+		if out.Results[i].Path == "/docs/b" {
+			hit = &out.Results[i]
+		}
+	}
+	if hit == nil || hit.Size != 6 || hit.Kind != "file" || hit.MTime.IsZero() || !hit.Cached {
+		t.Fatalf("thin hit: %+v", out.Results)
+	}
+	dirs := decode[SearchResponse](t, call(t, s, "GET", "/search?kind=dir", ""))
+	if len(dirs.Results) < 2 {
+		t.Fatalf("filter-only search: %+v", dirs)
+	}
+	for _, r := range dirs.Results {
+		if r.Kind != "dir" || r.Cached {
+			t.Fatalf("kind=dir returned %+v", r)
+		}
+	}
+	cold := decode[SearchResponse](t, call(t, s, "GET", "/search?path=/docs&ext=&glob=*&min_size=6&max_size=6&after=2000-01-01", ""))
+	if len(cold.Results) != 1 || cold.Results[0].Path != "/docs/b" {
+		t.Fatalf("structured filters: %+v", cold.Results)
+	}
+	for _, bad := range []string{"/search", "/search?q=", "/search?q=a&sort=bogus", "/search?q=a&min_size=x", "/search?q=a&max_size=-1", "/search?ext=go&kind=link", "/search?q=size:lots", "/search?q=a&after=yesterday"} {
+		if w := call(t, s, "GET", bad, ""); w.Code != 400 {
+			t.Fatalf("%s: %d %s", bad, w.Code, w.Body.String())
+		}
+	}
+}

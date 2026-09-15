@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -140,4 +140,11 @@ END;`,
 	// update use the soft fence instead of refusing the listing outright; see
 	// listing_fence.go.
 	`ALTER TABLE nodes ADD COLUMN applied_gen INTEGER NOT NULL DEFAULT 0;`,
+	// v11 -> v12: directories are a few percent of nodes, and three things
+	// count or page over them alone: search coverage (every search answer),
+	// Stats.Dirs (every status tick) and the crawler's IncompleteDirs. Each
+	// was a scan of the whole table, 116 ms at a million nodes. A partial
+	// index over directories only costs a row per directory insert and
+	// makes all three index-only; kind = 1 is provider.KindDir.
+	`CREATE INDEX nodes_dirs ON nodes(ino) WHERE kind = 1;`,
 }

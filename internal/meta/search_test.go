@@ -169,7 +169,7 @@ INSERT INTO nodes(parent_ino,name,kind) SELECT ?,printf('entry-%06d',i),0 FROM s
 		t.Fatal(err)
 	}
 	t.Logf("insert 100K nodes with synchronous short postings: %s", time.Since(start))
-	stmt, args := searchSQL("99", nil, 20, matchBudget(20))
+	stmt, args := searchSQL(SearchQuery{Filter: mustParse(t, "99"), Limit: 20}, matchBudget(20))
 	rows, err := s.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+stmt, args...)
 	if err != nil {
 		t.Fatal(err)
