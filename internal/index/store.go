@@ -1,6 +1,7 @@
 // Package index holds the content index (docs/agent-roadmap.md §3): the
 // extracted text of selected files, cut into chunks, searchable through an
-// FTS5 trigram index. It lives in its own SQLite database, index.db, next to
+// FTS5 trigram index and, once an embedder has seen them, by cosine over
+// int8 vectors (vectors.go, hybrid.go). It lives in its own SQLite database, index.db, next to
 // the metadata store rather than inside it: meta has a single writer that
 // FLUSH waits on, and indexing must never sit in that path.
 //
@@ -116,6 +117,10 @@ type Stats struct {
 	Chunks                        int
 	TextBytes                     int64
 	Pending                       int
+	// Vectors is how many chunks have an embedding; EmbedPending how many
+	// wait for one.
+	Vectors      int
+	EmbedPending int
 }
 
 // FailedDoc is one entry of the failure list.
@@ -163,6 +168,7 @@ type Store struct {
 	// writeMu serialises writers. SQLite would serialise them anyway, with
 	// SQLITE_BUSY instead of a queue.
 	writeMu sync.Mutex
+	vectorStore
 }
 
 // OpenStore creates or opens <dir>/index.db, migrating it to this build's
@@ -330,7 +336,7 @@ func (s *Store) Identity(ctx context.Context) (string, error) {
 // the rules, records the new identity and reports reset == true so the
 // indexer knows to rebuild.
 func (s *Store) EnsureIdentity(ctx context.Context, metaIdentity string) (reset bool, err error) {
-	err = s.write(ctx, func(tx *sql.Tx) error {
+	err = s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error {
 		var current string
 		err := tx.QueryRowContext(ctx, `SELECT value FROM index_meta WHERE key = ?`, identityKey).Scan(&current)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -340,7 +346,7 @@ func (s *Store) EnsureIdentity(ctx context.Context, metaIdentity string) (reset 
 			return nil
 		}
 		if err == nil {
-			if err := resetTx(ctx, tx); err != nil {
+			if err := resetTx(ctx, tx, ch); err != nil {
 				return err
 			}
 			reset = true
@@ -355,13 +361,17 @@ func (s *Store) EnsureIdentity(ctx context.Context, metaIdentity string) (reset 
 	return reset, err
 }
 
-// Reset drops every document, chunk and queued item. Rules and the recorded
-// identity stay: a rebuild re-walks the same rules.
+// Reset drops every document, chunk, vector and queued item. Rules, the
+// recorded identity and the recorded embedding model stay: a rebuild
+// re-walks the same rules and embeds with the same model.
 func (s *Store) Reset(ctx context.Context) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return resetTx(ctx, tx) })
+	return s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error { return resetTx(ctx, tx, ch) })
 }
 
-func resetTx(ctx context.Context, tx *sql.Tx) error {
+func resetTx(ctx context.Context, tx *sql.Tx, ch *vecChange) error {
+	if err := dropAllVectorsTx(ctx, tx, ch); err != nil {
+		return err
+	}
 	// chunks first so the delete trigger sees every row; the FK cascade
 	// would do the same, explicitly is clearer.
 	for _, q := range []string{`DELETE FROM chunks`, `DELETE FROM documents`, `DELETE FROM index_pending`} {
@@ -375,15 +385,17 @@ func resetTx(ctx context.Context, tx *sql.Tx) error {
 // UpsertDocument records d's extracted text and replaces its chunks in one
 // transaction. The document is keyed by (Remote, RemoteID); a second call
 // for the same key updates the row (state ok, error cleared, IndexedAt now)
-// and drops the old chunks before inserting the new ones, so the FTS index
-// never holds both versions. It returns the document id.
+// and drops the old chunks, their vectors and their queue rows before
+// inserting the new ones, so the FTS index never holds both versions. The
+// new chunks are queued for embedding as far as the embed cap allows. It
+// returns the document id.
 func (s *Store) UpsertDocument(ctx context.Context, d Document, text string, chunks []textract.Chunk) (int64, error) {
 	if d.Remote == "" || d.RemoteID == "" {
 		return 0, errors.New("index: a document needs a remote and a remote id")
 	}
 	sum := sha256.Sum256([]byte(text))
 	var id int64
-	err := s.write(ctx, func(tx *sql.Tx) error {
+	err := s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error {
 		err := tx.QueryRowContext(ctx, `INSERT INTO documents
 			(remote, remote_id, version, path, ino, kind, size, mtime_ns, text, text_hash, truncated,
 			 extractor_ver, chunker_ver, state, error, indexed_at)
@@ -400,6 +412,9 @@ func (s *Store) UpsertDocument(ctx context.Context, d Document, text string, chu
 			int(DocOK), s.now().UnixNano()).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("index: %w", err)
+		}
+		if err := dropDocVectorsTx(ctx, tx, id, ch); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE doc_id = ?`, id); err != nil {
 			return fmt.Errorf("index: %w", err)
@@ -418,7 +433,8 @@ func (s *Store) UpsertDocument(ctx context.Context, d Document, text string, chu
 				return fmt.Errorf("index: chunk %d: %w", c.Seq, err)
 			}
 		}
-		return nil
+		_, err = s.queueChunksTx(ctx, tx, id)
+		return err
 	})
 	return id, err
 }
@@ -451,7 +467,7 @@ func (s *Store) MarkFailed(ctx context.Context, d Document, cause error) error {
 	if cause != nil {
 		msg = truncateRunes(cause.Error(), maxErrorBytes)
 	}
-	return s.write(ctx, func(tx *sql.Tx) error {
+	return s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error {
 		var id int64
 		err := tx.QueryRowContext(ctx, `INSERT INTO documents
 			(remote, remote_id, version, path, ino, kind, size, mtime_ns, text, text_hash, truncated,
@@ -467,6 +483,9 @@ func (s *Store) MarkFailed(ctx context.Context, d Document, cause error) error {
 			textract.ExtractorVer, textract.ChunkerVer, int(DocFailed), msg, s.now().UnixNano()).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("index: %w", err)
+		}
+		if err := dropDocVectorsTx(ctx, tx, id, ch); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE doc_id = ?`, id); err != nil {
 			return fmt.Errorf("index: %w", err)
@@ -567,12 +586,15 @@ func (s *Store) RenamePrefix(ctx context.Context, oldPrefix, newPrefix string) (
 	return n, err
 }
 
-// DeleteDocument removes a document and its chunks.
+// DeleteDocument removes a document, its chunks and their vectors.
 func (s *Store) DeleteDocument(ctx context.Context, id int64) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return deleteDocumentTx(ctx, tx, id) })
+	return s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error { return deleteDocumentTx(ctx, tx, id, ch) })
 }
 
-func deleteDocumentTx(ctx context.Context, tx *sql.Tx, id int64) error {
+func deleteDocumentTx(ctx context.Context, tx *sql.Tx, id int64, ch *vecChange) error {
+	if err := dropDocVectorsTx(ctx, tx, id, ch); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE doc_id = ?`, id); err != nil {
 		return fmt.Errorf("index: %w", err)
 	}
@@ -586,7 +608,7 @@ func deleteDocumentTx(ctx context.Context, tx *sql.Tx, id int64) error {
 // full reconcile walk just visited. It returns how many were removed.
 func (s *Store) DeleteMissing(ctx context.Context, seen map[int64]bool) (int64, error) {
 	var n int64
-	err := s.write(ctx, func(tx *sql.Tx) error {
+	err := s.writeVec(ctx, func(tx *sql.Tx, ch *vecChange) error {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM documents`)
 		if err != nil {
 			return fmt.Errorf("index: %w", err)
@@ -607,7 +629,7 @@ func (s *Store) DeleteMissing(ctx context.Context, seen map[int64]bool) (int64, 
 			return fmt.Errorf("index: %w", err)
 		}
 		for _, id := range gone {
-			if err := deleteDocumentTx(ctx, tx, id); err != nil {
+			if err := deleteDocumentTx(ctx, tx, id, ch); err != nil {
 				return err
 			}
 		}
@@ -836,9 +858,11 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		(SELECT count(*) FROM documents WHERE state = ?),
 		(SELECT count(*) FROM chunks),
 		(SELECT coalesce(sum(octet_length(text)), 0) FROM documents),
-		(SELECT count(*) FROM index_pending)`,
+		(SELECT count(*) FROM index_pending),
+		(SELECT count(*) FROM vectors),
+		(SELECT count(*) FROM embed_pending)`,
 		int(DocOK), int(DocDirty), int(DocFailed)).
-		Scan(&st.DocsOK, &st.DocsDirty, &st.DocsFailed, &st.Chunks, &st.TextBytes, &st.Pending)
+		Scan(&st.DocsOK, &st.DocsDirty, &st.DocsFailed, &st.Chunks, &st.TextBytes, &st.Pending, &st.Vectors, &st.EmbedPending)
 	if err != nil {
 		return Stats{}, fmt.Errorf("index: %w", err)
 	}

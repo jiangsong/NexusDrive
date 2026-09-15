@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"time"
 
 	"cloudfs/internal/meta"
 	"cloudfs/internal/vfs"
@@ -44,6 +45,39 @@ type Status struct {
 	// process started, for cloudfs_index_fetch_bytes_total.
 	FetchBytesTotal int64    `json:"fetch_bytes_total"`
 	Progress        Progress `json:"progress"`
+	// Vectors is how many chunks have an embedding; MaxChunks the hard
+	// cap on that number (index.max_chunks).
+	Vectors   int             `json:"vectors"`
+	MaxChunks int             `json:"max_chunks"`
+	Embedding EmbeddingStatus `json:"embedding"`
+}
+
+// EmbeddingStatus is the embedding side of a Status (docs/agent-roadmap.md
+// §3.5): what index_status.embedding, the console's endpoint panel and
+// doctor read. Remote says chunk text leaves this machine, and Host where
+// it goes; CharsThisMonth is what was sent this calendar month, for the
+// cost estimate.
+type EmbeddingStatus struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"`
+	// Dim is the vector size: the endpoint's once probed, else the one
+	// the index recorded, else 0.
+	Dim    int    `json:"dim"`
+	Remote bool   `json:"remote"`
+	Host   string `json:"host,omitempty"`
+	// Healthy is false without an embedder, while the breaker is open,
+	// after a failed call, and once the worker stopped on a mismatch.
+	Healthy          bool      `json:"healthy"`
+	LastError        string    `json:"last_error,omitempty"`
+	BreakerOpenUntil time.Time `json:"breaker_open_until,omitzero"`
+	// Embedded is the number of chunks with a vector; Pending the number
+	// queued for one.
+	Embedded       int   `json:"embedded"`
+	Pending        int   `json:"pending"`
+	CharsThisMonth int64 `json:"chars_this_month"`
+	// Capped reports that chunks exist beyond max_chunks which will never
+	// be embedded; they stay searchable by keyword.
+	Capped bool `json:"capped"`
 }
 
 // DocCounts splits the documents by state.
@@ -80,9 +114,22 @@ const maxStatusFailed = 20
 
 // Search runs q against the index, resolving every hit against the live
 // tree so a renamed file is reported at its current path and an outdated
-// document is marked stale.
+// document is marked stale. The embedder serves the vector and hybrid
+// modes; while the embed worker is stopped on a dimension mismatch it is
+// withheld, and a semantic request degrades with that reason.
 func (x *Indexer) Search(ctx context.Context, q SearchQuery) (SearchResult, error) {
-	return x.store.Search(ctx, q, x.current(ctx))
+	e := x.embedder
+	stopped := ""
+	if e != nil {
+		if stopped = x.embedStopped(); stopped != "" {
+			e = nil
+		}
+	}
+	res, err := x.store.SearchWith(ctx, q, x.current(ctx), e)
+	if err == nil && stopped != "" && res.Degraded != "" {
+		res.Degraded = stopped + "; results use keyword matching"
+	}
+	return res, err
 }
 
 // current is the Current the searches use: the node meta holds for a
@@ -127,6 +174,9 @@ func (x *Indexer) Status(ctx context.Context, p string) (Status, error) {
 		FetchBudget:     BudgetUse{Used: used, Limit: limit},
 		FetchBytesTotal: x.fetched.Load(),
 		Progress:        x.Progress(),
+		Vectors:         st.Vectors,
+		MaxChunks:       x.opt.Config.MaxChunks,
+		Embedding:       x.embeddingStatus(ctx, st),
 	}
 	if p == "" {
 		return out, nil

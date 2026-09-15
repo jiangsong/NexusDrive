@@ -21,6 +21,7 @@ import (
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
+	"cloudfs/internal/embed"
 	"cloudfs/internal/export"
 	"cloudfs/internal/index"
 	"cloudfs/internal/journal"
@@ -307,13 +308,18 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// lock, so extraction must not queue behind it. With index.enabled
 	// false nothing is opened and no index.db appears.
 	if cfg.Index.Enabled {
+		embedder, err := buildEmbedder(cfg, secrets, d.Proxy)
+		if err != nil {
+			d.Close()
+			return nil, err
+		}
 		indexStore, err := index.OpenStore(cacheDir)
 		if err != nil {
 			d.Close()
 			return nil, fmt.Errorf("daemon: index store: %w", err)
 		}
 		x, err := index.New(index.Options{
-			FS: fsys, Store: indexStore, Config: cfg.Index,
+			FS: fsys, Store: indexStore, Config: cfg.Index, Embedder: embedder,
 			Unofficial: func(remote string) bool {
 				p, ok := d.Providers[remote]
 				return ok && p.Capabilities().Tier == provider.TierUnofficial
@@ -695,6 +701,37 @@ func (d *Daemon) holdBudget() int64 {
 		}
 	}
 	return max
+}
+
+// buildEmbedder builds the embedding client index.embedding names, or nil
+// for provider none. The api_key reference is resolved through the secret
+// store the way a remote's credentials are; a reference that cannot be
+// resolved fails the start with the same "run cloudfs index auth" advice,
+// since an index that silently ran keyword-only would hide the mistake.
+// The client goes through the proxy manager so proxy rules apply to the
+// endpoint. A non-owner process (a stdio MCP server) builds one too: it
+// runs no worker, but its searches embed their queries.
+func buildEmbedder(cfg *config.Config, secrets *config.SecretStore, pm *proxy.Manager) (embed.Embedder, error) {
+	ec := cfg.Index.Embedding
+	if !ec.Enabled() {
+		return nil, nil
+	}
+	apiKey := ""
+	if ec.APIKey != "" {
+		v, err := secrets.Get(ec.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("daemon: index.embedding.api_key: %w", err)
+		}
+		apiKey = v
+	}
+	c, err := embed.New(embed.Options{Config: ec, APIKey: apiKey, Proxy: pm})
+	if err != nil {
+		return nil, fmt.Errorf("daemon: index.embedding: %w", err)
+	}
+	if c == nil {
+		return nil, nil
+	}
+	return c, nil
 }
 
 func buildProxy(cfg *config.Config) (*proxy.Manager, error) {

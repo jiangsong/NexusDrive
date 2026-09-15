@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"cloudfs/internal/embed"
 	"cloudfs/internal/textract"
 )
 
@@ -22,8 +23,10 @@ type SearchQuery struct {
 	Roots []string
 	// TopK caps the number of hits; 0 takes defaultTopK.
 	TopK int
-	// Mode is hybrid, keyword or vector. Phase 1 has no embeddings, so
-	// every mode runs as keyword and hybrid/vector report Degraded.
+	// Mode is hybrid, keyword or vector; "" is hybrid when an embedder and
+	// vectors are available and keyword otherwise. hybrid and vector run
+	// as keyword, reporting Degraded, when the embedder is missing or
+	// unhealthy or nothing is embedded yet (docs/agent-roadmap.md §3.7).
 	Mode string
 	// MaxSnippetBytes bounds each snippet; 0 takes defaultSnippetBytes.
 	MaxSnippetBytes int
@@ -80,7 +83,7 @@ const (
 	// hitOverhead approximates the JSON framing of one hit when charging
 	// the response budget.
 	hitOverhead = 64
-	// modeKeyword is the only mode phase 1 can run.
+	// modeKeyword is the mode every index can run.
 	modeKeyword = "keyword"
 )
 
@@ -96,24 +99,29 @@ var ErrEmptyQuery = errors.New("index: empty query")
 // ranked by bm25; a query with a shorter term (two Chinese characters,
 // say) cannot use trigrams and falls back to a substring scan over at most
 // shortQueryRowBudget chunks, reporting Truncated rather than an empty
-// "no match" when the budget runs out first.
+// "no match" when the budget runs out first. hybrid and vector requests
+// run as keyword with Degraded set: there is no embedder here.
 func (s *Store) Search(ctx context.Context, q SearchQuery, current Current) (SearchResult, error) {
-	return s.searchWithRowBudget(ctx, q, current, shortQueryRowBudget)
+	return s.searchWithRowBudget(ctx, q, current, nil, shortQueryRowBudget)
+}
+
+// SearchWith is Search with an embedder for the vector and hybrid modes
+// (hybrid.go). A nil e is Search. When e cannot be used (unhealthy, no
+// vectors yet, the query fails to embed) the search runs as keyword and
+// says why in Degraded; ModeUsed always names the mode that ran.
+func (s *Store) SearchWith(ctx context.Context, q SearchQuery, current Current, e embed.Embedder) (SearchResult, error) {
+	return s.searchWithRowBudget(ctx, q, current, e, shortQueryRowBudget)
 }
 
 // searchWithRowBudget is Search with the short-query scan budget as a
 // parameter, so a test can exhaust it with a handful of rows.
-func (s *Store) searchWithRowBudget(ctx context.Context, q SearchQuery, current Current, budget int) (SearchResult, error) {
+func (s *Store) searchWithRowBudget(ctx context.Context, q SearchQuery, current Current, e embed.Embedder, budget int) (SearchResult, error) {
 	res := SearchResult{Hits: []Hit{}, ModeUsed: modeKeyword}
-	switch q.Mode {
-	case "", modeKeyword:
-	case "hybrid", "vector":
-		res.Degraded = DegradedNoEmbedding
-	default:
-		return SearchResult{}, fmt.Errorf("index: unknown search mode %q", q.Mode)
-	}
 	terms := strings.Fields(q.Query)
 	if len(terms) == 0 {
+		if _, _, err := resolveMode(q.Mode, false, "", false); err != nil {
+			return SearchResult{}, err
+		}
 		return SearchResult{}, ErrEmptyQuery
 	}
 	if q.TopK <= 0 {
@@ -127,12 +135,30 @@ func (s *Store) searchWithRowBudget(ctx context.Context, q SearchQuery, current 
 		return SearchResult{}, err
 	}
 	res.Docs, res.Pending = st.DocsOK, st.Pending
+	semantic, why := s.semanticCheck(ctx, e, st)
+	short := shortQuery(terms)
+	mode, degraded, err := resolveMode(q.Mode, semantic, why, short)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	res.Degraded = degraded
 
 	scope, ok := newScope(q.Roots)
 	if !ok {
 		return res, nil
 	}
-	if shortQuery(terms) {
+	if mode != modeKeyword {
+		degraded, err := s.searchSemantic(ctx, q, terms, scope, st, current, e, mode, &res)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if degraded == "" {
+			return res, nil
+		}
+		// The vector side failed after all: keyword, and say so.
+		res.Degraded, res.ModeUsed = degraded, modeKeyword
+	}
+	if short {
 		err = s.scanShort(ctx, q, terms, scope, current, budget, &res)
 	} else {
 		err = s.searchFTS(ctx, q, terms, scope, current, &res)

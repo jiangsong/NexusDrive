@@ -11,6 +11,7 @@ import (
 
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
+	"cloudfs/internal/embed"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/textract"
@@ -76,6 +77,10 @@ type Options struct {
 	// RiskSleep is how long the worker sleeps after provider.ErrRiskControl.
 	// Default 15m.
 	RiskSleep time.Duration
+	// Embedder turns chunk text into vectors for semantic search
+	// (embed_worker.go, hybrid.go). Nil keeps the index keyword-only:
+	// nothing is queued for embedding and hybrid/vector searches degrade.
+	Embedder embed.Embedder
 }
 
 // Progress is what index_status and the console show. The counters are
@@ -141,12 +146,19 @@ type Indexer struct {
 	// what cloudfs_index_fetch_bytes_total reports.
 	fetched atomic.Int64
 
-	lifeMu    sync.Mutex
-	cancel    context.CancelFunc
-	done      chan struct{}
-	wake      chan struct{}
-	full      atomic.Bool
-	stopWatch func()
+	lifeMu sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
+	// goroutines is how many Start began and Close waits for.
+	goroutines int
+	wake       chan struct{}
+	full       atomic.Bool
+	stopWatch  func()
+
+	// embedder and emb are the embedding side (embed_worker.go); embedder
+	// is nil for a keyword-only index.
+	embedder embed.Embedder
+	emb      embedState
 }
 
 // New binds the index to the FS. It records the meta store identity (a
@@ -177,6 +189,13 @@ func New(opt Options) (*Indexer, error) {
 		extract:  textract.DefaultOptions(),
 		watchers: map[chan Progress]struct{}{},
 		wake:     make(chan struct{}, 1),
+		embedder: opt.Embedder,
+		emb:      embedState{wake: make(chan struct{}, 1)},
+	}
+	if opt.Embedder != nil {
+		// Chunks are queued for embedding only while something will
+		// drain the queue, and never past max_chunks.
+		opt.Store.SetEmbedCap(opt.Config.MaxChunks)
 	}
 	if opt.Config.MaxTextBytes > 0 {
 		x.extract.MaxTextBytes = int64(opt.Config.MaxTextBytes)
@@ -212,6 +231,9 @@ func New(opt Options) (*Indexer, error) {
 // Store returns the index store.
 func (x *Indexer) Store() *Store { return x.store }
 
+// Embedder returns the configured embedder, nil for a keyword-only index.
+func (x *Indexer) Embedder() embed.Embedder { return x.embedder }
+
 // Yields reports how often the worker stood aside for foreground IO.
 func (x *Indexer) Yields() int64 { return x.yields.Load() }
 
@@ -238,12 +260,18 @@ func (x *Indexer) Start(ctx context.Context) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	x.cancel = cancel
-	x.done = make(chan struct{}, 2)
+	x.done = make(chan struct{}, 3)
 	ch, stop := x.fs.WatchChanges()
 	x.stopWatch = stop
 	x.update(func(p *Progress) { p.Running = true })
 	go x.consume(ctx, ch)
 	go x.work(ctx)
+	x.goroutines = 2
+	if x.embedder != nil {
+		go x.embedWork(ctx)
+		x.goroutines++
+		x.kickEmbed()
+	}
 }
 
 // Close stops the goroutines Start began and waits for them. The store is
@@ -256,8 +284,9 @@ func (x *Indexer) Close() error {
 	}
 	x.cancel()
 	x.stopWatch()
-	<-x.done
-	<-x.done
+	for range x.goroutines {
+		<-x.done
+	}
 	x.cancel, x.stopWatch = nil, nil
 	x.update(func(p *Progress) { p.Running = false })
 	return nil

@@ -147,7 +147,7 @@ func TestShortQueryScanStopsAtItsBudget(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		seedDoc(t, s, fmt.Sprint(i), fmt.Sprintf("/w/%02d.md", i), "无关内容")
 	}
-	r, err := s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", Roots: []string{"/"}}, same, 10)
+	r, err := s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", Roots: []string{"/"}}, same, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestShortQueryScanStopsAtItsBudget(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	// A budget that covers every row answers definitively.
-	r, err = s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", Roots: []string{"/"}}, same, 30)
+	r, err = s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", Roots: []string{"/"}}, same, nil, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestShortQueryScanStopsAtItsBudget(t *testing.T) {
 	}
 	// Enough hits inside the budget is not a truncation either.
 	seedDoc(t, s, "hit", "/a/hit.md", "网盘 first in path order")
-	r, err = s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", TopK: 1}, same, 10)
+	r, err = s.searchWithRowBudget(context.Background(), SearchQuery{Query: "网盘", TopK: 1}, same, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

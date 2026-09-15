@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ func ftsCount(t *testing.T, db *sql.DB, phrase string) int {
 	return n
 }
 
-func TestIndexSchemaV1AndFTSTriggers(t *testing.T) {
+func TestIndexSchemaAndFTSTriggers(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	id, err := s.UpsertDocument(ctx, Document{Remote: "demo", RemoteID: "r1", Version: "v1", Path: "/work/a.md", Kind: "markdown"},
@@ -74,7 +75,7 @@ func TestIndexSchemaV1AndFTSTriggers(t *testing.T) {
 		t.Fatalf("user_version %d %v", version, err)
 	}
 	var recorded string
-	if err := s.db.QueryRow(`SELECT value FROM index_meta WHERE key = 'schema_version'`).Scan(&recorded); err != nil || recorded != "1" {
+	if err := s.db.QueryRow(`SELECT value FROM index_meta WHERE key = 'schema_version'`).Scan(&recorded); err != nil || recorded != strconv.Itoa(schemaVersion) {
 		t.Fatalf("index_meta schema_version %q %v", recorded, err)
 	}
 	if out, err := s.IntegrityCheck(ctx); err != nil || out != "ok" {

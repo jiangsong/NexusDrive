@@ -3,7 +3,7 @@ package index
 // schemaVersion is the index.db layout this build writes. It is recorded
 // both in PRAGMA user_version and in index_meta('schema_version'); a
 // database at a newer version is refused rather than reinterpreted.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrations[i] carries the database from schema version i to i+1. Every
 // step runs inside one transaction together with the version bump, so a
@@ -78,6 +78,30 @@ END`,
   path TEXT NOT NULL,
   reason INTEGER NOT NULL,
   queued_at INTEGER NOT NULL
+)`,
+	},
+	// v1 -> v2: vectors and the embedding queue (docs/agent-roadmap.md
+	// §3.6, T-39). Only tables are added.
+	//
+	// vectors holds one L2-normalised vector per embedded chunk, int8 with
+	// a per-vector scale by default or float32 LE with quantize none; it
+	// cascades with the chunk. embed_pending is the queue the embed worker
+	// drains; every writer that deletes chunks deletes their queue rows
+	// in the same transaction, and the worker's prepare pass drops any
+	// orphan a crash left. The model index makes count(*) a small-index
+	// walk, which the max_chunks check runs on every upsert.
+	{
+		`CREATE TABLE IF NOT EXISTS vectors (
+  chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  scale REAL NOT NULL,
+  vec BLOB NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS vectors_model ON vectors(model)`,
+		`CREATE TABLE IF NOT EXISTS embed_pending (
+  chunk_id INTEGER PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_at INTEGER NOT NULL DEFAULT 0
 )`,
 	},
 }

@@ -210,6 +210,9 @@ func (x *Indexer) process(ctx context.Context, it PendingItem, rep *ReconcileRep
 	if _, err := x.store.UpsertDocument(ctx, d, doc.Text, chunks); err != nil {
 		return err
 	}
+	// The upsert queued the new chunks for embedding; the embed worker
+	// takes them from here.
+	x.kickEmbed()
 	x.update(func(p *Progress) { p.Extracted++ })
 	if rep != nil {
 		rep.Extracted++

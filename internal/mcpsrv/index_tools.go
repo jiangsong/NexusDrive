@@ -31,7 +31,7 @@ type semanticSearchInput struct {
 	Query           string `json:"query" jsonschema:"Words to find in the indexed text; all must match"`
 	Path            string `json:"path,omitempty" jsonschema:"Subtree to search; default the whole mount"`
 	TopK            int    `json:"top_k,omitempty" jsonschema:"Maximum hits; default 10, the server caps this"`
-	Mode            string `json:"mode,omitempty" jsonschema:"keyword, hybrid or vector; without an embedding backend hybrid and vector run as keyword and say so in degraded"`
+	Mode            string `json:"mode,omitempty" jsonschema:"keyword, hybrid or vector; default hybrid when an embedding backend is configured, else keyword. mode_used says what ran: hybrid and vector fall back to keyword and explain in degraded when the backend is missing, unhealthy or has embedded nothing yet"`
 	MaxSnippetBytes int    `json:"max_snippet_bytes,omitempty" jsonschema:"Longest snippet per hit; default 1024"`
 }
 

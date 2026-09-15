@@ -26,6 +26,8 @@ type harness struct {
 	up    *upload.Uploader
 	store *Store
 	x     *Indexer
+	cfg   config.Index
+	opts  func(*Options)
 	// offset is added to the wall clock every component sees, so a test
 	// can move past a listing's one-second protection window without
 	// sleeping through it.
@@ -38,6 +40,13 @@ func (h *harness) now() time.Time { return time.Now().Add(time.Duration(h.offset
 func (h *harness) advance(d time.Duration) { h.offset.Add(int64(d)) }
 
 func newHarness(t *testing.T, cfg config.Index) *harness {
+	t.Helper()
+	return newHarnessOpt(t, cfg, nil)
+}
+
+// newHarnessOpt is newHarness with a hook over the Indexer options, so a
+// test can hand in an embedder or shorten a delay.
+func newHarnessOpt(t *testing.T, cfg config.Index, opts func(*Options)) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	if err := cfg.Validate(); err != nil {
@@ -96,17 +105,41 @@ func newHarness(t *testing.T, cfg config.Index) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	x, err := New(Options{
-		FS: fsys, Store: st, Config: cfg, Now: h.now,
+	h.fs, h.fake, h.up, h.store = fsys, fake, up, st
+	h.cfg, h.opts = cfg, opts
+	h.x = h.newIndexer(t)
+	return h
+}
+
+// newIndexer builds an Indexer over the harness's FS and store with the
+// harness's options; reopenIndexer replaces the current one, the way a
+// daemon restart with a changed configuration would.
+func (h *harness) newIndexer(t *testing.T) *Indexer {
+	t.Helper()
+	opt := Options{
+		FS: h.fs, Store: h.store, Config: h.cfg, Now: h.now,
 		StartDelay: time.Millisecond, ReconcileEvery: time.Hour,
 		YieldMax: 200 * time.Millisecond, RiskSleep: time.Second,
-	})
+	}
+	if h.opts != nil {
+		h.opts(&opt)
+	}
+	x, err := New(opt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { x.Close() })
-	h.fs, h.fake, h.up, h.store, h.x = fsys, fake, up, st, x
-	return h
+	return x
+}
+
+func (h *harness) reopenIndexer(t *testing.T, opts func(*Options)) *Indexer {
+	t.Helper()
+	if err := h.x.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.opts = opts
+	h.x = h.newIndexer(t)
+	return h.x
 }
 
 // list warms a directory listing so meta knows the tree the way a readdir
