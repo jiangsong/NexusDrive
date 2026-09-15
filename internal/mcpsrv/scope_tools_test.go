@@ -10,6 +10,7 @@ import (
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
+	"cloudfs/internal/memory"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -126,8 +127,13 @@ func TestOptionsWithoutSessionsKeepTheProcessWideScope(t *testing.T) {
 // is listed as path-less with a reason.
 func TestEveryToolChecksItsPaths(t *testing.T) {
 	root := t.TempDir()
-	// The env carries an index so that the index tools are listed too.
-	e, _, _ := newIndexAgentEnv(t, Options{Export: newFakeExportJobs(), ExportRoots: []string{root}}, agent.Scope{Read: []string{"/work"}}, config.Index{Enabled: true})
+	// The env carries an index so that the index tools are listed too, and
+	// a memory store rooted outside the scope so that the memory tools,
+	// whose paths come from the configuration, are refused like the rest.
+	fsShell := &lateFS{}
+	mem := memory.New(memory.Options{FS: fsShell, Config: memoryConfig("/gd/.agent")})
+	e, _, _ := newIndexAgentEnv(t, Options{Export: newFakeExportJobs(), ExportRoots: []string{root}, Memory: mem}, agent.Scope{Read: []string{"/work"}}, config.Index{Enabled: true})
+	fsShell.fs = e.fs
 	e.fake.Seed("gd/x.txt", []byte("secret"))
 	e.fake.Seed("work/nope.txt", []byte("here"))
 	outside := map[string]map[string]any{
@@ -154,6 +160,13 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"index":               {"path": "/gd"},
 		"unindex":             {"path": "/gd"},
 		"read_extracted_text": {"path": "/gd/x.txt"},
+		// The memory tools: every path is under memory.root, here
+		// /gd/.agent, which the scope does not contain.
+		"memory_list":   {},
+		"memory_get":    {"name": "x"},
+		"memory_put":    {"name": "x", "content": "x"},
+		"memory_delete": {"name": "x", "confirm": true},
+		"memory_search": {"query": "x"},
 	}
 	// Path-less tools: they take ids or nothing, and filter their results by
 	// scope internally (list_roots, upload/copy/export job listings).

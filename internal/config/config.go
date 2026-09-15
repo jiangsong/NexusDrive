@@ -547,6 +547,7 @@ type Config struct {
 	Export     Export            `yaml:"export"`
 	Index      Index             `yaml:"index"`
 	Search     Search            `yaml:"search"`
+	Memory     Memory            `yaml:"memory"`
 	Triggers   []Trigger         `yaml:"triggers"`
 	Agents     []Agent           `yaml:"agents"`
 	// Warnings collects what Validate accepted but would rather not have:
@@ -651,6 +652,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MCP.validateAgent(); err != nil {
+		return err
+	}
+	if err := c.Memory.validate(c.MCP.Workspace, c.MCP.Allow); err != nil {
 		return err
 	}
 	if err := c.Index.Validate(); err != nil {

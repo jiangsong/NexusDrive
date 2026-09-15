@@ -25,6 +25,7 @@ import (
 	"cloudfs/internal/export"
 	"cloudfs/internal/index"
 	"cloudfs/internal/journal"
+	"cloudfs/internal/memory"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
@@ -68,7 +69,11 @@ type Daemon struct {
 	// Index is the content indexer over index.db, nil unless index.enabled.
 	// Every process opens it so a stdio MCP server beside the daemon can
 	// search; only the owner of index.db runs the extraction worker.
-	Index    *index.Indexer
+	Index *index.Indexer
+	// Memory is the agent memory store over the VFS (and the index when
+	// there is one). It always exists: with no memory.root its tools
+	// register and explain what to configure.
+	Memory   *memory.Store
 	Proxy    *proxy.Manager
 	Limiters *ratelimit.Registry
 	// Providers maps remote name to backend.
@@ -318,8 +323,14 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			d.Close()
 			return nil, fmt.Errorf("daemon: index store: %w", err)
 		}
+		// The memory tree is indexed by a built-in rule, so memory_search
+		// works without anyone adding a rule for it.
+		var builtin []index.Rule
+		if cfg.Memory.Root != "" {
+			builtin = append(builtin, memory.IndexRule(cfg.Memory.Root))
+		}
 		x, err := index.New(index.Options{
-			FS: fsys, Store: indexStore, Config: cfg.Index, Embedder: embedder,
+			FS: fsys, Store: indexStore, Config: cfg.Index, Embedder: embedder, Builtin: builtin,
 			Unofficial: func(remote string) bool {
 				p, ok := d.Providers[remote]
 				return ok && p.Capabilities().Tier == provider.TierUnofficial
@@ -339,6 +350,15 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			x.Start(ctx)
 		}
 	}
+
+	// The memory store shares the VFS and, when there is one, the index.
+	// A nil *Indexer must stay a nil Searcher, or memory_search would call
+	// through a nil pointer instead of explaining that the index is off.
+	memOpt := memory.Options{FS: fsys, Config: cfg.Memory}
+	if d.Index != nil {
+		memOpt.Searcher = d.Index
+	}
+	d.Memory = memory.New(memOpt)
 
 	// Remotes with a change feed follow the provider within a poll interval;
 	// the rest rely on the directory TTL. Polling a full listing on a

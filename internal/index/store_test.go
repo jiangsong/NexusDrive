@@ -535,3 +535,42 @@ func TestMatchQueryQuotesEveryWord(t *testing.T) {
 		t.Fatalf("words not ANDed: %d", n)
 	}
 }
+
+func TestBuiltinRulesFollowTheConfigurationAndCannotBeRemoved(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SyncBuiltinRules(ctx, []Rule{{Path: "/work/.agent/memory", Include: []string{"**/*.md"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddRule(ctx, Rule{Path: "/work/.agent/memory"}); !errors.Is(err, ErrBuiltinRule) {
+		t.Fatalf("builtin rule overridden: %v", err)
+	}
+	if err := s.RemoveRule(ctx, "/work/.agent/memory"); !errors.Is(err, ErrBuiltinRule) {
+		t.Fatalf("builtin rule removed: %v", err)
+	}
+	rules, err := s.Rules(ctx)
+	if err != nil || len(rules) != 1 || rules[0].Source != SourceBuiltin || rules[0].Include[0] != "**/*.md" {
+		t.Fatalf("%+v %v", rules, err)
+	}
+	// A configuration rule at the same path wins over the derived one, and
+	// a builtin sync with nothing drops the rule (memory.root unset).
+	if err := s.SyncConfigRules(ctx, []Rule{{Path: "/work/.agent/memory", Include: []string{"*.txt"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncBuiltinRules(ctx, []Rule{{Path: "/work/.agent/memory", Include: []string{"**/*.md"}}}); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ = s.Rules(ctx)
+	if len(rules) != 1 || rules[0].Source != SourceConfig || rules[0].Include[0] != "*.txt" {
+		t.Fatalf("config must win over builtin: %+v", rules)
+	}
+	if err := s.SyncConfigRules(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncBuiltinRules(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rules, _ = s.Rules(ctx); len(rules) != 0 {
+		t.Fatalf("rules after both syncs emptied: %+v", rules)
+	}
+}

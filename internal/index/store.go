@@ -82,14 +82,26 @@ type Document struct {
 
 // Rule selects a subtree for indexing. Source records where it came from:
 // "config" rules mirror the configuration file and can only be removed
-// there; "ui" and "tool" rules were added at run time and persist here.
+// there; "builtin" rules follow another part of the configuration (the
+// memory root of memory.root, docs/agent-roadmap.md §3.11) and are just as
+// fixed; "ui" and "tool" rules were added at run time and persist here.
 type Rule struct {
 	Path        string   `json:"path"`
 	Include     []string `json:"include"`
 	Exclude     []string `json:"exclude"`
 	MaxFileSize int64    `json:"max_file_size"`
-	Source      string   `json:"source"` // config | ui | tool
+	Source      string   `json:"source"` // config | builtin | ui | tool
 }
+
+// The rule sources that follow the configuration rather than a run-time
+// request.
+const (
+	SourceConfig  = "config"
+	SourceBuiltin = "builtin"
+)
+
+// managed reports whether a rule source is owned by the configuration.
+func managed(source string) bool { return source == SourceConfig || source == SourceBuiltin }
 
 // PendingReason says why a file waits in index_pending.
 type PendingReason int
@@ -146,6 +158,9 @@ var (
 	// ErrConfigRule is returned when a rule mirrored from the configuration
 	// file is removed or overridden through the store.
 	ErrConfigRule = errors.New("index: this rule comes from the configuration file; remove it there")
+	// ErrBuiltinRule is returned when a built-in rule (the memory root's)
+	// is removed or overridden through the store.
+	ErrBuiltinRule = errors.New("index: this rule is built in for memory.root and follows the configuration file")
 	// ErrNotIndexed is returned by Text for a path with no document.
 	ErrNotIndexed = errors.New("index: this file is not indexed")
 	// ErrNoRule is returned when removing a rule that does not exist.
@@ -709,12 +724,33 @@ func upsertRuleTx(ctx context.Context, tx *sql.Tx, r Rule) error {
 // at the same path is taken over by the configuration. Rules added at run
 // time elsewhere are untouched.
 func (s *Store) SyncConfigRules(ctx context.Context, rules []Rule) error {
+	return s.syncManaged(ctx, SourceConfig, rules)
+}
+
+// SyncBuiltinRules is SyncConfigRules for the "builtin" source. A config
+// rule at the same path keeps its source: the configuration file wins
+// over a rule derived from it.
+func (s *Store) SyncBuiltinRules(ctx context.Context, rules []Rule) error {
+	return s.syncManaged(ctx, SourceBuiltin, rules)
+}
+
+func (s *Store) syncManaged(ctx context.Context, source string, rules []Rule) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE source = 'config'`); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE source = ?`, source); err != nil {
 			return fmt.Errorf("index: %w", err)
 		}
 		for _, r := range rules {
-			r.Source = "config"
+			r.Source = source
+			if source == SourceBuiltin {
+				var existing string
+				err := tx.QueryRowContext(ctx, `SELECT source FROM rules WHERE path = ?`, r.Path).Scan(&existing)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("index: %w", err)
+				}
+				if err == nil && existing == SourceConfig {
+					continue
+				}
+			}
 			if err := upsertRuleTx(ctx, tx, r); err != nil {
 				return err
 			}
@@ -724,7 +760,8 @@ func (s *Store) SyncConfigRules(ctx context.Context, rules []Rule) error {
 }
 
 // AddRule persists a run-time rule (Source defaults to "tool"). A path the
-// configuration already covers cannot be overridden: ErrConfigRule.
+// configuration already covers cannot be overridden: ErrConfigRule, or
+// ErrBuiltinRule for the built-in memory rule.
 func (s *Store) AddRule(ctx context.Context, r Rule) error {
 	if r.Path == "" {
 		return errors.New("index: a rule needs a path")
@@ -732,8 +769,8 @@ func (s *Store) AddRule(ctx context.Context, r Rule) error {
 	if r.Source == "" {
 		r.Source = "tool"
 	}
-	if r.Source == "config" {
-		return errors.New("index: config rules are synchronised with SyncConfigRules")
+	if managed(r.Source) {
+		return errors.New("index: config and builtin rules are synchronised with SyncConfigRules and SyncBuiltinRules")
 	}
 	return s.write(ctx, func(tx *sql.Tx) error {
 		var source string
@@ -741,15 +778,23 @@ func (s *Store) AddRule(ctx context.Context, r Rule) error {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("index: %w", err)
 		}
-		if err == nil && source == "config" {
-			return ErrConfigRule
+		if err == nil && managed(source) {
+			return managedErr(source)
 		}
 		return upsertRuleTx(ctx, tx, r)
 	})
 }
 
+// managedErr is the refusal for touching a managed rule.
+func managedErr(source string) error {
+	if source == SourceBuiltin {
+		return ErrBuiltinRule
+	}
+	return ErrConfigRule
+}
+
 // RemoveRule deletes a run-time rule. Config rules answer ErrConfigRule,
-// unknown paths ErrNoRule.
+// the built-in memory rule ErrBuiltinRule, unknown paths ErrNoRule.
 func (s *Store) RemoveRule(ctx context.Context, p string) error {
 	return s.write(ctx, func(tx *sql.Tx) error {
 		var source string
@@ -760,8 +805,8 @@ func (s *Store) RemoveRule(ctx context.Context, p string) error {
 		if err != nil {
 			return fmt.Errorf("index: %w", err)
 		}
-		if source == "config" {
-			return ErrConfigRule
+		if managed(source) {
+			return managedErr(source)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE path = ?`, p); err != nil {
 			return fmt.Errorf("index: %w", err)

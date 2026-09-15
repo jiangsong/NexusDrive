@@ -319,7 +319,7 @@ export const en = {
   'index.rules.help': 'Rules from the configuration file are read again at every start, so change them there; rules added here can be removed here.',
   'index.rule.col.path': 'Path', 'index.rule.col.include': 'Include', 'index.rule.col.exclude': 'Exclude',
   'index.rule.col.maxsize': 'Max file size', 'index.rule.col.source': 'Source', 'index.rule.col.documents': 'Documents',
-  'index.rule.source.config': 'Configuration', 'index.rule.source.ui': 'Console', 'index.rule.source.tool': 'Agent tool',
+  'index.rule.source.config': 'Configuration', 'index.rule.source.ui': 'Console', 'index.rule.source.tool': 'Agent tool', 'index.rule.source.builtin': 'Built in (memory.root)',
   'index.rule.defaults': 'Default', 'index.rule.inconfig': 'Change it in the configuration file',
   'index.rule.add': 'Add rule', 'index.rule.added': 'Rule %s added', 'index.rule.preset': 'File types',
   'index.preset.docs': 'Documents', 'index.preset.code': 'Code', 'index.preset.text': 'All text',

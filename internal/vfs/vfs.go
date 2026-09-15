@@ -877,7 +877,13 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 	// either. Without the second rule a background prefetch that listed a
 	// directory just before a local mkdir would apply its stale view and
 	// delete the new directory, and the next create in it failed with ENOENT.
+	// A node that lost a conflict is the exception to both rules: its
+	// content already went to the drive under a conflict name, and the
+	// listing is what brings the remote's version back to it.
 	protect := func(n meta.Node) bool {
+		if f.conflictLoser(n) {
+			return f.isMountDir(n.Ino)
+		}
 		return f.protectRemoteNode(n) || f.isMountDir(n.Ino) || !n.FetchedAt.Before(started.Truncate(time.Second))
 	}
 	f.remotePublishMu.Lock()

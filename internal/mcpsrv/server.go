@@ -19,6 +19,7 @@ import (
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/index"
+	"cloudfs/internal/memory"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
@@ -101,6 +102,12 @@ type Options struct {
 	// state of its path before the write in session_ops and registers
 	// rollback_session. nil records nothing and leaves rollback out.
 	Preimages *agent.Preimages
+	// Memory, when set, exposes the memory_* tools over the agent memory
+	// store (docs/agent-roadmap.md §3.11). nil leaves them unregistered.
+	Memory *memory.Store
+	// Agent overrides the memory agent name derived from the client
+	// (`cloudfs mcp --agent`); empty derives it per session.
+	Agent string
 }
 
 // IndexService is what the index tools need from the daemon's indexer.
@@ -218,6 +225,7 @@ func New(opt Options) (*Server, error) {
 	s.registerSessionTools()
 	s.registerRollbackTool()
 	s.registerIndexTools()
+	s.registerMemoryTools()
 	s.registerResources()
 	if opt.Sessions != nil {
 		s.revokeStop = make(chan struct{})

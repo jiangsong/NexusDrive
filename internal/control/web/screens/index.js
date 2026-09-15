@@ -181,7 +181,7 @@ export function renderIndex(host) {
       el('td', { class: 'detail tnums' }, rule.max_file_size > 0 ? bytes(rule.max_file_size) : t('index.rule.defaults')),
       el('td', { class: 'muted' }, t('index.rule.source.' + rule.source)),
       el('td', { class: 'tnums' }, String(rule.documents || 0)),
-      el('td', { style: 'text-align:right' }, rule.source === 'config'
+      el('td', { style: 'text-align:right' }, rule.source === 'config' || rule.source === 'builtin'
         ? el('span', { class: 'dimmer' }, t('index.rule.inconfig'))
         : btn(t('index.rule.remove'), () => removeRule(rule))));
   }

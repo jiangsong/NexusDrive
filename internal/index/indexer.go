@@ -82,6 +82,10 @@ type Options struct {
 	// (embed_worker.go, hybrid.go). Nil keeps the index keyword-only:
 	// nothing is queued for embedding and hybrid/vector searches degrade.
 	Embedder embed.Embedder
+	// Builtin are the rules derived from other parts of the configuration
+	// (memory.IndexRule for memory.root); they are mirrored into the store
+	// with Source "builtin" the way Config.Rules are with "config".
+	Builtin []Rule
 }
 
 // Progress is what index_status and the console show. The counters are
@@ -221,6 +225,14 @@ func New(opt Options) (*Indexer, error) {
 		return nil, err
 	}
 	if err := opt.Store.SyncConfigRules(ctx, RulesFromConfig(opt.Config.Rules)); err != nil {
+		return nil, err
+	}
+	builtin := make([]Rule, 0, len(opt.Builtin))
+	for _, r := range opt.Builtin {
+		r.Path = cleanRulePath(r.Path)
+		builtin = append(builtin, r)
+	}
+	if err := opt.Store.SyncBuiltinRules(ctx, builtin); err != nil {
 		return nil, err
 	}
 	if err := x.ReloadRules(ctx); err != nil {

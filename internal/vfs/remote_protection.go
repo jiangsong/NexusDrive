@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 
+	"cloudfs/internal/cache"
 	"cloudfs/internal/meta"
 )
 
@@ -30,13 +31,35 @@ func (f *FS) removeWriter(ino uint64) {
 // is editing staging. Keep its original conflict baseline and ancestors, even
 // before the first write; the next write can still arrive on this handle.
 func (f *FS) protectRemoteNode(n meta.Node) bool {
-	if localOnlyNode(n) {
+	if f.hasWriter(n.Ino) {
 		return true
 	}
+	if localOnlyNode(n) {
+		return !f.conflictLoser(n)
+	}
+	return false
+}
+
+// hasWriter reports whether a write handle on ino is open or committing.
+func (f *FS) hasWriter(ino uint64) bool {
 	f.mu.Lock()
-	protected := f.writers[n.Ino] > 0
-	f.mu.Unlock()
-	return protected
+	defer f.mu.Unlock()
+	return f.writers[ino] > 0
+}
+
+// conflictLoser reports whether a local-only node has lost its blob: the
+// upload landed as a conflict copy (the upload hook released the local
+// cache entry and invalidated the parent so the next listing could restore
+// the remote's version), or the blob is gone for some other reason and
+// the remote's version is the only content left to show. Every other
+// local-only node keeps its cache entry, pinned, until its upload is
+// adopted, so protecting it from a listing is still right.
+func (f *FS) conflictLoser(n meta.Node) bool {
+	if !IsLocalOnly(n.RemoteID) || f.hasWriter(n.Ino) {
+		return false
+	}
+	_, known := f.cache.Present(cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version})
+	return known == 0
 }
 
 func (f *FS) applyRemoteNode(ctx context.Context, old meta.Node, next *meta.Node) (meta.Node, bool, error) {

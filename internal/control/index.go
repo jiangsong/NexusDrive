@@ -175,7 +175,7 @@ func (s *Server) indexReady(w http.ResponseWriter, r *http.Request, method strin
 // indexError maps an indexer error onto a status code and catalog key.
 func indexError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, index.ErrConfigRule):
+	case errors.Is(err, index.ErrConfigRule), errors.Is(err, index.ErrBuiltinRule):
 		httpErrorT(w, r, http.StatusConflict, "err.index_config_rule")
 	case errors.Is(err, index.ErrNoRule):
 		httpErrorT(w, r, http.StatusNotFound, "err.index_no_rule")

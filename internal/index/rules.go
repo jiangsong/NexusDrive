@@ -10,7 +10,8 @@ import (
 
 // DefaultMaxFileSize bounds a rule that names no max_file_size, the same
 // 20 MiB config.Index.Validate fills in for configured rules; run-time
-// rules (Source "ui" or "tool") reach the matcher without that pass.
+// rules (Source "ui" or "tool") and built-in ones reach the matcher
+// without that pass.
 const DefaultMaxFileSize int64 = 20 << 20
 
 // Matcher decides which files the rules cover. It is immutable once built:
@@ -150,7 +151,7 @@ func RulesFromConfig(c []config.IndexRule) []Rule {
 			Include:     append([]string(nil), r.Include...),
 			Exclude:     append([]string(nil), r.Exclude...),
 			MaxFileSize: int64(r.MaxFileSize),
-			Source:      "config",
+			Source:      SourceConfig,
 		})
 	}
 	return out

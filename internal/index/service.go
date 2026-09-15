@@ -22,7 +22,7 @@ type Status struct {
 	Enabled bool `json:"enabled"`
 	// Covered is the path of the rule covering the queried path.
 	Covered string `json:"covered,omitempty"`
-	// RuleSource is where that rule came from: config | ui | tool.
+	// RuleSource is where that rule came from: config | builtin | ui | tool.
 	RuleSource string `json:"rule_source,omitempty"`
 	// State is ok | dirty | failed | pending | uncovered for the queried
 	// file. A directory, or a path meta does not know, has no state of
@@ -273,8 +273,9 @@ func (x *Indexer) AddRule(ctx context.Context, r Rule) error {
 	return err
 }
 
-// RemoveRule deletes a run-time rule (ErrConfigRule for a configured one)
-// and drops the documents no rule or pin covers any more.
+// RemoveRule deletes a run-time rule (ErrConfigRule for a configured one,
+// ErrBuiltinRule for the memory root's) and drops the documents no rule or
+// pin covers any more.
 func (x *Indexer) RemoveRule(ctx context.Context, p string) error {
 	if err := x.store.RemoveRule(ctx, cleanRulePath(p)); err != nil {
 		return err

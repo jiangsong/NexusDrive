@@ -33,6 +33,7 @@ import (
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/mcpsrv"
+	"cloudfs/internal/memory"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/service"
@@ -186,7 +187,7 @@ Mounting
                             manage the per-user systemd/launchd mount service
 
 Agents
-  mcp --stdio               serve MCP over stdin/stdout (for Claude Code, Codex)
+  mcp --stdio [--agent ID]  serve MCP over stdin/stdout (for Claude Code, Codex); --agent names the memory directory
   mcp --http [addr]         serve MCP over Streamable HTTP on a loopback address
   mcp install --client claude|codex [--write <file>]
                             print or write the client registration snippet
@@ -687,6 +688,9 @@ func cmdMCP(ctx context.Context, args []string) error {
 		allow = strings.Split(v, ",")
 	}
 	readOnly := cfg.MCP.ReadOnly || f.bool("read-only")
+	if a := f.str("agent", ""); a != "" && !memory.ValidName(a) {
+		return fmt.Errorf("--agent %q: %w", a, memory.ErrBadName)
+	}
 
 	if f.arg(0) == "install" {
 		return mcpInstall(f, allow, readOnly, cfg)
@@ -745,7 +749,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
-		Index: indexOf(d), Preimages: d.Preimages,
+		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory, Agent: f.str("agent", ""),
 	})
 	if err != nil {
 		return err
@@ -824,7 +828,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
-		Index: indexOf(d), Preimages: d.Preimages,
+		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory,
 	})
 	if err != nil {
 		return err

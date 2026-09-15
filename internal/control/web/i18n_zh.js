@@ -320,7 +320,7 @@ export const zh = {
   'index.rules.help': '配置文件里的规则每次启动都会重新读取，要改请改配置文件；这里添加的规则可以在这里移除。',
   'index.rule.col.path': '路径', 'index.rule.col.include': '包含', 'index.rule.col.exclude': '排除',
   'index.rule.col.maxsize': '单文件上限', 'index.rule.col.source': '来源', 'index.rule.col.documents': '已覆盖文档',
-  'index.rule.source.config': '配置文件', 'index.rule.source.ui': '控制台', 'index.rule.source.tool': 'Agent 工具',
+  'index.rule.source.config': '配置文件', 'index.rule.source.ui': '控制台', 'index.rule.source.tool': 'Agent 工具', 'index.rule.source.builtin': '内置（memory.root）',
   'index.rule.defaults': '默认', 'index.rule.inconfig': '在配置文件中修改',
   'index.rule.add': '添加规则', 'index.rule.added': '已添加规则 %s', 'index.rule.preset': '文件类型',
   'index.preset.docs': '文档', 'index.preset.code': '代码', 'index.preset.text': '全部文本',
