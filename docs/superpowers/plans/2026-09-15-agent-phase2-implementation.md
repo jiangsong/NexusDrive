@@ -306,12 +306,12 @@ test/perf/embed_perf_test.go（D1）
 **Files:**
 - Modify: `internal/vfs/changes.go`（`ChangeKind`：`KindWrite/KindCreate/KindMkdir/KindRemove/KindRename/KindRemote/KindRescan`；`Origin`：`OriginKernel/OriginAPI/OriginRemote`；`Change` 加 `Kind`、`Origin`；`WithOrigin(ctx, name string)`（`"mcp"|"control"|"webdav"` → API）；`originOf(ctx)`：`fromKernel` → Kernel，`WithOrigin` → API，否则 Remote）；helper `changedNode/changedEntry/changedRename/changedListing` 加 `kind` 参数（`changedListing` 固定 `KindRemote`，`Rescan` 固定 `KindRescan`）
 - Modify: 所有调用点（write.go 9 处按操作填 kind；vfs.go 909/920、copy_jobs.go、copy_reconcile.go、publication.go、refresh.go、upload_cleanup.go 填 `KindRemote` 或对应操作）
-- Modify: `internal/mcpsrv/session_mw.go`（middleware 里 `vfs.WithOrigin(ctx, "mcp")`）、`internal/control/fs.go`（`"control"`）、`internal/webdav`（`"webdav"`）
+- Modify: `internal/mcpsrv/session_mw.go`（middleware 里 `vfs.WithOrigin(ctx, "mcp")`）、`internal/control/fs.go`（`"control"`）、`internal/webdavsrv`（`"webdav"`）
 - Test: `internal/vfs/changes_kind_test.go`（**9 个 emit 点各断言 kind/origin**：写句柄 flush → write/kernel（`FromKernel` ctx）；`WriteFile` via MCP ctx → write/api；`Mkdir` → mkdir；`Remove` → remove；`Rename` → rename；delta 刷新 → remote/remote；队列溢出 → rescan）
 
 **Steps:**
 - [ ] RED：上述用例 + `TestAffectsIgnoresKindAndOrigin`（旧消费者不受影响）
-- [ ] GREEN：`./gow test ./internal/vfs/ -count=1 -race && ./gow test ./internal/mcpsrv/ ./internal/control/ ./internal/webdav/ -count=1`；`./gow test ./test/perf/ -count=1`（调用次数基线不变）
+- [ ] GREEN：`./gow test ./internal/vfs/ -count=1 -race && ./gow test ./internal/mcpsrv/ ./internal/control/ ./internal/webdavsrv/ -count=1`；`./gow test ./test/perf/ -count=1`（调用次数基线不变）
 - [ ] 提交：`feat(vfs): tag every change with its kind and origin`
 
 ## Task E1：配置 `triggers[]`、`agents[]`、glob 与自激 warning
