@@ -8,6 +8,7 @@ export const routes = {
   '#/transfers': 'transfers-view',
   '#/copies': 'copies-view',
   '#/exports': 'exports-view',
+  '#/agents': 'agents-view',
   '#/storage': 'storage-view',
   '#/proxy': 'proxy-view',
   '#/diagnostics': 'diagnostics-view',
@@ -30,6 +31,9 @@ export const navItems = [
   { hash: '#/transfers', icon: 'transfer', key: 'nav.transfers' },
   { hash: '#/copies', icon: 'file', key: 'nav.copies' },
   { hash: '#/exports', icon: 'download', key: 'nav.exports' },
+  // badge names the count the shell draws on the item: the active sessions
+  // from /status, so an agent at work is visible from any screen.
+  { hash: '#/agents', icon: 'bot', key: 'nav.agents', badge: 'agents' },
   { hash: '#/storage', icon: 'db', key: 'nav.storage' },
   { hash: '#/proxy', icon: 'globe', key: 'nav.proxy' },
   { hash: '#/diagnostics', icon: 'wrench', key: 'nav.diagnostics' },

@@ -12,6 +12,7 @@ import { renderStorage } from '/ui/screens/storage.js';
 import { renderProxy } from '/ui/screens/proxy.js';
 import { renderDiagnostics } from '/ui/screens/diagnostics.js';
 import { renderSetup } from '/ui/screens/setup.js';
+import { renderAgents } from '/ui/screens/agents.js';
 
 const screens = {
   'main-window': renderMain,
@@ -23,6 +24,7 @@ const screens = {
   'storage-view': renderStorage,
   'proxy-view': renderProxy,
   'diagnostics-view': renderDiagnostics,
+  'agents-view': renderAgents,
 };
 
 // healthOf reads the structured snapshot, never the warning text: the daemon
@@ -65,10 +67,19 @@ function titlebar(status) {
     languagePicker());
 }
 
+// navBadge is the count drawn over a nav item: today only the agents item,
+// showing how many MCP sessions are active according to the last status
+// tick. Nothing is drawn at zero, so a quiet daemon has a quiet sidebar.
+function navBadge(item, status) {
+  if (item.badge !== 'agents') return null;
+  const n = status && status.agent ? status.agent.active_sessions : 0;
+  return n > 0 ? el('span', { class: 'badge', 'aria-label': t('nav.agents.active', n) }, String(n)) : null;
+}
+
 function nav(activeTag) {
   return el('nav', { class: 'nav' },
     navItems.map((item) => {
-      const a = el('a', { href: item.hash }, iconEl(item.icon), el('span', {}, t(item.key)));
+      const a = el('a', { href: item.hash }, iconEl(item.icon), el('span', {}, t(item.key)), navBadge(item, get().status));
       // The router owns the hash-to-screen table; a second copy here meant
       // every new screen had to be added in two places or silently never
       // highlighted.
@@ -112,6 +123,22 @@ function refreshTitlebar() {
   const next = titlebar(get().status);
   titlebarEl.replaceWith(next);
   titlebarEl = next;
+  refreshNavBadges();
+}
+
+// The nav is drawn once per screen, not per status tick, so the badge a
+// status tick changes is swapped in place: the old one comes off the link
+// and the new one — or nothing — goes on.
+function refreshNavBadges() {
+  for (const item of navItems) {
+    if (!item.badge) continue;
+    const link = document.querySelector('.nav a[href="' + item.hash + '"]');
+    if (!link) continue;
+    const old = link.querySelector('.badge');
+    if (old) old.remove();
+    const badge = navBadge(item, get().status);
+    if (badge) link.append(badge);
+  }
 }
 
 // One event stream feeds the whole app: status ticks update the title bar and
@@ -123,6 +150,10 @@ const changeHandlers = new Set();
 export function onFsChange(fn) { changeHandlers.add(fn); return () => changeHandlers.delete(fn); }
 const exportHandlers = new Set();
 export function onExportChange(fn) { exportHandlers.add(fn); return () => exportHandlers.delete(fn); }
+// Audit rows and session changes share one subscription: a listener gets
+// { kind: 'audit' | 'session', data } and picks what it shows.
+const agentHandlers = new Set();
+export function onAgentEvent(fn) { agentHandlers.add(fn); return () => agentHandlers.delete(fn); }
 
 subscribe(() => refreshTitlebar());
 startRouter(() => render()); // performs the initial render
@@ -130,4 +161,6 @@ events({
   onStatus: (s) => set({ status: s, health: healthOf(s), connected: true }),
   onChange: (c) => { for (const fn of changeHandlers) fn(c); },
   onExport: (e) => { for (const fn of exportHandlers) fn(e); },
+  onAudit: (d) => { for (const fn of agentHandlers) fn({ kind: 'audit', data: d }); },
+  onSession: (d) => { for (const fn of agentHandlers) fn({ kind: 'session', data: d }); },
 });

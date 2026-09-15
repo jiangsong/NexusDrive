@@ -96,6 +96,16 @@ button, input, select, textarea {
 .nav a:hover { background: #131c28; color: var(--detail); }
 .nav a.active { background: #1a2735; border-color: #2f4257; color: var(--text); }
 .nav a .ico { width: 20px; height: 20px; }
+/* The count of active agent sessions, pinned to the corner of its nav item.
+   The item is a 52px square laid out as a column, so the badge floats over
+   it rather than sitting in the flow beside the label. */
+.nav a { position: relative; }
+.nav a .badge {
+  position: absolute; top: 4px; right: 4px; min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px; background: var(--accent-bg); border: 1px solid var(--accent-border);
+  color: var(--accent-text); font-size: 10px; line-height: 16px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 
 .content { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -113,6 +123,14 @@ th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--ha
 thead th { color: var(--muted); font-weight: 550; font-size: 13px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
 tbody tr:hover { background: #121a25; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* A refused agent call: the same red ground the diagnostics screen gives a
+   failed check. The row also carries the word, so the colour is not the
+   only signal. */
+tr.denied td { background: var(--danger-bg); color: var(--danger-text); }
+tbody tr.denied:hover td { background: #1f1414; }
+/* Tabs on a screen that holds several tables. */
+.tabs { display: flex; gap: 6px; padding: 0 20px 14px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tabs button[aria-selected="true"] { border-color: var(--accent-border); background: var(--accent-bg); font-weight: 600; }
 
 button, .btn {
   display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px;
