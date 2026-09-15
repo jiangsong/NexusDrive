@@ -2144,6 +2144,16 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ### [ ] T-42 发送给 Agent（二期）
 
+- **2026-09-15 一期前半已完成**（提交 fd9aad2）：`GET /agent/prompt?path=[&heading=]`（`internal/control/agent_prompt.go`）
+  返回 `{path, uri, prompt}`：虚拟路径 + 与 `mcpsrv/resources.go` 同规则的 `cloudfs://<remote>/<path>` URI +
+  `read_text`/`edit_file`；仅 `Collector.Index` 存在时提 `read_extracted_text`，仅 `Collector.Agent` 存在时提
+  `begin_session`/`finish_session`，目录加 `list_directory`；零依赖、总是注册；不存在的路径 404 且不泄露缓存目录/remote 名
+  （`TestAgentPromptMissingPathIs404WithoutInternals`、`TestAgentPromptMentionsTheRightTools`）。界面：检查器"发送给
+  Agent"（`bot`，文件与目录）与内容搜索结果行同一入口（带命中标题）→ `send_to_agent.js`（`openPanel`，`textarea`
+  预填可编辑，"复制"只写剪贴板，除 GET 提示词外无请求；`TestSendToAgentOnlyReadsAndCopies`、
+  `TestSendToAgentHasBothEntrances`）。i18n 键为 `action.sendtoagent`/`agent.prompt.*`（非原计划的 `send.*`）。
+  **未做**：`agents[]` 配置、`/agent/endpoints`、`/agent/invoke`、运行按钮与确认（随 T-41 二期）。
+
 - **证据**：控制台文件检查器（`internal/control/web/screens/main.js:238-243`）只有固定/预热/改名/预览/
   链接/删除；用户选中文件后无法把任务交给本机 agent，只能自己拼路径与提示词。
 - **做法（后端）**：
