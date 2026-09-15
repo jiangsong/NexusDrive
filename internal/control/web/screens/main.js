@@ -14,6 +14,7 @@ import { readSearchMode, writeSearchMode, runContentSearch, contentSearchHeader 
 import { openExtractedText } from '/ui/extracted_text.js';
 import { renderIndexInfo } from '/ui/index_inspector.js';
 import { openSendToAgent } from '/ui/send_to_agent.js';
+import { mountAgentTouch } from '/ui/agent_touch.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
@@ -289,6 +290,10 @@ export function renderMain(host) {
     // daemon and fills the host, or leaves it empty when there is no index.
     const indexHost = el('div', {});
     if (indexEnabled()) renderIndexInfo(e, indexHost);
+    // So does the "modified by an agent" marker: agent_touch.js asks which
+    // session wrote the file lately and fills the host, or leaves it empty.
+    const touchHost = el('div', {});
+    if (!e.is_dir) mountAgentTouch(touchHost, e.path, { api, openSession: openSessionPanel });
     fill(inspector,
       el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, t('inspector.title')),
       el('div', { style: 'font-weight:620;overflow-wrap:anywhere' }, e.name),
@@ -299,6 +304,7 @@ export function renderMain(host) {
         ? t('inspector.replicas.reason', t('avail.' + e.availability), e.replicas_live, e.replicas_target, e.degraded_reason)
         : `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}`) : null,
       indexHost,
+      touchHost,
       e.is_dir ? null : el('div', { class: 'progress' + (e.cached < 1 ? ' warn' : ''), style: 'margin:12px 0' }, el('span', { style: `width:${Math.round((e.cached || 0) * 100)}%` })),
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),

@@ -1,16 +1,16 @@
 import { api } from '/ui/api.js';
-import { el, fill, moreRow } from '/ui/ui.js';
+import { el, fill, iconEl, moreRow } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
 import { pageCursor, pageFailureMode } from '/ui/paged.js';
 import { scopeParts } from '/ui/scope_view.js';
-import { openSessionPanel } from '/ui/session_panel.js';
+import { openSessionPanel, openRollback } from '/ui/session_panel.js';
 import { onAgentEvent } from '/ui/app.js';
 
 // The sessions tab: three headline counts and the list of MCP sessions,
 // newest first. Every row comes from GET /sessions and is held by this
 // module alone — the shared store never sees a session, because nothing
 // else on the page wants one and the list can be long.
-const COLUMNS = 6;
+const COLUMNS = 7;
 
 // scopeSummary is the one-line reading of a scope, translated part by part.
 export function scopeSummary(scope) {
@@ -52,21 +52,37 @@ export function renderSessionsTab(host, params) {
   }
 
   function stateCell(s) {
-    const dot = s.state === 'active' ? 'ok' : s.state === 'expired' ? 'warn' : '';
-    return el('span', { style: 'display:inline-flex;align-items:center;gap:7px' },
+    const dot = s.state === 'active' ? 'ok' : s.state === 'expired' ? 'warn' : s.state === 'rolled_back' ? 'warn' : '';
+    return el('span', { style: 'display:inline-flex;align-items:center;gap:7px;white-space:nowrap' },
       el('span', { class: 'dot ' + dot }), t('session.state.' + s.state));
+  }
+
+  // transportLabel names a transport. "console" is a rollback the control
+  // plane ran, and has a phrase; the MCP transports are shown by name.
+  function transportLabel(s) {
+    return s.transport === 'console' ? t('session.transport.' + s.transport) : (s.transport || '');
+  }
+
+  // canRollBack: a session that is over, recorded writes, and has not been
+  // rolled back yet. The quick entry opens the same preview-then-confirm
+  // flow the panel does; there is no shorter way.
+  function canRollBack(s) {
+    return (s.state === 'finished' || s.state === 'expired') && (s.ops_count || 0) > 0;
   }
 
   function sessionRow(s) {
     return el('tr', { 'data-session': s.id, style: 'cursor:pointer', onclick: () => open(s.id) },
       el('td', {},
         el('div', {}, s.client || s.id),
-        el('div', { class: 'dim', style: 'font-size:12px' }, (s.transport || '') + (s.client_version ? ' · ' + s.client_version : ''))),
+        el('div', { class: 'dim', style: 'font-size:12px' }, transportLabel(s) + (s.client_version ? ' · ' + s.client_version : ''))),
       el('td', { class: 'detail' }, scopeSummary(s.scope)),
       el('td', {}, stateCell(s)),
       el('td', { class: 'detail tnums' }, when(s.started_at)),
       el('td', { class: 'num' }, String(s.writes || 0)),
-      el('td', { class: 'num' }, String(s.artifacts || 0)));
+      el('td', { class: 'num' }, String(s.artifacts || 0)),
+      el('td', { style: 'white-space:nowrap' },
+        canRollBack(s) ? el('button', { 'data-action': 'rollback', onclick: (ev) => { ev.stopPropagation(); openRollback(s.id, () => load()); } },
+          iconEl('undo'), t('session.rollback.quick')) : null));
   }
 
   function appendResponse(r) {
@@ -112,7 +128,7 @@ export function renderSessionsTab(host, params) {
         el('th', {}, t('session.col.client')), el('th', {}, t('session.col.scope')),
         el('th', {}, t('session.col.state')), el('th', {}, t('session.col.started')),
         el('th', { class: 'num' }, t('session.col.writes')),
-        el('th', { class: 'num' }, t('session.col.artifacts')))), rows))));
+        el('th', { class: 'num' }, t('session.col.artifacts')), el('th', {}))), rows))));
 
   refreshCards(null);
   load();
