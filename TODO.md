@@ -1075,7 +1075,8 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 ### [ ] T-11 92 处 `UNVERIFIED` 待真实账号核对
 
 按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
-`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **92 处 / 31 个文件**（2026-09-12 重数；
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **96 处**（2026-09-15 重数：一期加了 4 处——PDF 中文抽取质量、
+爬取器与索引 worker 的 quark 风控映射、Codex HTTP 配置键；此前为 92 处 / 31 个文件，2026-09-12 重数；
 其中 5 处是 T-33 配额哨兵新加的驱动映射，其余差额来自此前未计入的测试与工具文件），
 不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
 从来没有进过这张表，驱动侧的计数也偏低。下表按当前实测重列。不能在实际核验前笼统
@@ -1159,6 +1160,12 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   `t.Skip`；e2e 不跳过——它 96 s 的非 race 用时在 race 下本来就要 8～10 分钟，`CLAUDE.md` 的 race 命令改为
   `-timeout 30m`。
 - **仍缺**：在空闲机器上跑一次 `./gow test -race -timeout 30m ./... -count=1`，确认除这三处外没有别的超时。
+- **2026-09-15 晚补充（非 race，负载下的计时 flake）**：`internal/cache` `TestSparseLayoutWritesTheFileOnce`
+  （"wrote 245760 bytes … want 262144"）——根因与早上的 `TestSmallFilesKeepTheBlockLayout` 相同：`HydrateAfter=1ms`
+  让管家在最后一块采样前就合并并删掉块文件，少计一块；已改为填充期 `HydrateAfter=time.Hour` + 手动 `hydrateDue()`，
+  30 次重跑稳定。仍待处理：`internal/export` `TestExportSpreadsAcrossMembers`（基线 2/12 失败，读扩散计时）；
+  `test/e2e` `TestStressWithForcedRefreshKeepsReadYourWrites` 在 race 全包下偶发 `input/output error`。
+  两处都与本期改动无关，要么改成不依赖墙钟的断言，要么在 race/负载下跳过。
 - **验收**：空闲机器上述命令全绿；`grep -c 'DATA RACE'` = 0。
 
 ## P3 — 采用缺口（能力已具备，但用户接触不到）
@@ -1907,7 +1914,38 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   - e2e：真实挂载 `begin_session` → 写两文件 → `finish_session`，终端 `cat manifest.json` 与 `ls` 一致，
     浏览器冒烟会话详情产物表两行。
 
-### [ ] T-37 内容索引 phase 1：抽取 + FTS + semantic_search（一期）
+### [x] T-37 内容索引 phase 1：抽取 + FTS + semantic_search（一期，2026-09-15 完成）
+
+- **2026-09-15 完成**（`feat/agent-phase1`，线 B 提交 955727e…ce7bc7a）：`internal/textract`（文本类原样保 CRLF、
+  docx/xlsx/pptx 经 `archive/zip`+`encoding/xml` 流式解析并有条目数/单条/总量三重上限、PDF 经 `ledongthuc/pdf` +
+  recover + 超时 + 乱码启发式并标 `UNVERIFIED: 中文 PDF 抽取质量`、800 rune/100 重叠标题感知分块）；`internal/index`
+  （独立 `<cache.dir>/index.db` v1：`index_meta/rules/documents/chunks/chunks_fts(trigram, external content)/index_pending`，
+  身份与 meta 对账不符即重建；规则 `**` glob 自写、全局 exclude 默认含 `.env/*.pem/id_rsa*/.git/node_modules`、
+  每小时抓取预算且 `Caps.Tier=unofficial` 双倍计费；Indexer 消费 `FS.WatchChanges()`、启动 30 s 与每 10 min 对账、
+  轮询 `FS.Busy()` 让路、`ErrRiskControl` 休眠 15 min、pinned 模式零 provider 调用、目录改名走 `RenamePrefix`
+  不重抽；检索 FTS `bm25()` + 范围 + `stale` + 字节预算，< 3 rune 词走预算 LIKE 扫描）；MCP `semantic_search`
+  （hybrid/vector 降级 keyword 并带 `degraded`）、`index_status`、`index`、`unindex`、`read_extracted_text`，
+  每 hit 过 `visible`；控制面 `/index/status|rules|add|remove|rebuild|retry|failed|search|text`（remove/rebuild
+  confirm），SSE `index`（1 s 节流），CLI `cloudfs index status|rules|add|rm|rebuild|retry|search`，metrics
+  `cloudfs_index_*`，doctor `index_db/index_identity/index_failed/index_text_budget`；界面 `#/index` 屏（未启用时只显示
+  说明与配置示例、四张卡、进度条、规则表、失败表、重建）、主窗口"内容"分段（`content_search.js`、`snippet.js`）、
+  检查器索引行与三个动作、抽取文本浮层。
+- **验收证明**：`TestIndexToolsAbsentWhenDisabled`、`TestIndexDisabledCreatesNoIndexDB`、`TestIndexStatusWhenDisabled`；
+  `TestIndexPinnedFilesCostNoReads`（500 pinned 文件 `Calls("ReadRange")` 增量 0）、`TestIndexRulesFetchOncePerVersion`
+  （100 → 0 → 1）；`TestDocxHeading1BecomesAMarkdownHeading`、`TestDocxHeadingIsReturnedWithTheHit`、
+  `TestMarkdownHitOffsetFeedsReadText`；`TestRenamePrefixKeepsIndexedAt`、`TestRenameKeepsIndexedAtAndUpdatesThePath`；
+  `TestSearchNeverLeaksOutsideRoots`、`TestSemanticSearchRespectsAllow`、`TestSemanticSearchRespectsTokenScope`；
+  `TestTwoRuneChineseQueryReturnsHitsOrTruncated`、`TestShortQueryScanStopsAtItsBudget`；
+  `TestZipWithTooManyEntriesFails` + chaos `TestMaliciousArchiveFailsTheDocumentNotTheDaemon`、
+  `TestIndexSurvivesAnUncleanStopMidExtraction`（运行中拷 db/wal/shm 作崩溃镜像，`IntegrityCheck=="ok"`，续跑）；
+  `TestBusyForegroundMakesTheWorkerYield`；界面 `ui_index_test.go`、`ui_content_search_test.go`、
+  `_tests/index_presets.test.mjs`、`_tests/snippet.test.mjs`（高亮、CJK 不切半字、HTML 当文本）；e2e 真实挂载
+  `TestContentSearchFindsAFreshMarkdownFile`（3 s 内命中且 `start_off` 喂 `read_text` 同前缀）、浏览器
+  `TestContentSearchInTheBrowser`（真实 Chromium headless shell）。
+- **遗留**：pinned 范围由 `FS.PinPolicies()` 推导（unpin 后仍完整缓存的文件不再索引）；`index_status` 无 `path` 时只给
+  全局计数且失败列表截 20 条；`SearchQuery.Roots` nil = 不限制、空 = 全拒（同 `meta.SearchWithin`）；
+  `Current` 签名 `(path, version, ok)`；`go mod tidy` 把 `webview_go`/`cgofuse`/`x/sync` 提为直接依赖；
+  中文 PDF 真实样本与 quark 风控是否以 `ErrRiskControl` 到达 worker 待真机（`UNVERIFIED`）；嵌入/hybrid 见 T-39。
 
 - **证据**：`internal/meta/schema.go` 只有文件名 trigram 索引；`search.content` 只扫完整缓存文件
   前 `MaxBytes`；PDF/docx/xlsx 对 agent 不可读；全仓库无文档解析代码。
@@ -2149,7 +2187,34 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ---
 
-### [ ] T-44 Everything 式文件名搜索：覆盖率、过滤与排序、全盘即时搜索（一期）
+### [x] T-44 Everything 式文件名搜索：覆盖率、过滤与排序、全盘即时搜索（一期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 B 提交 227d207、0c485dd、b3a00de、be96520、b94d8a7）：`internal/vfs/crawl.go` 后台爬取器
+  （每 remote 串行、按 ino 单调扫 `dir_state.complete=0`、`yieldToForeground` 让路、风控休眠 15 min、进度只在
+  `dir_state`、默认关闭；`search.crawl{enabled,remotes,exclude,idle_after,rescan}`；`warm --all` 与界面"索引整棵树"
+  `{path:"/",depth:-1,all:true,confirm:true}` 同一实现，`depth<0` 必须 confirm）；`meta.Coverage`/`IncompleteDirs`/
+  `Stats.LastCrawl`，`/search` 与 `/status` 带 `coverage`；`SearchResult` 加 `Kind/Size/MTime/Remote/RemoteID/Version/Cached`；
+  `meta/query.go` 语法 `ext: size: dm: type: path:`、`-` 取反、引号字面量、`*`/`?` → GLOB（最长字面段走 trigram，
+  否则短索引）、裸词空白切分 AND；`sort=name|size|mtime|path`（`-` 反转）；MCP `search` 加 `glob/ext/min_size/max_size/
+  modified_after/kind/sort` 与 `coverage`；控制面 `/search` 同参数并每行带 `size/mtime/kind/cached`；CLI `find
+  --ext --size --after --sort --type --path --json --all`；meta 迁移 v12 加 `nodes_dirs` 部分索引；查询形状改为按候选
+  相关子查询重建路径，`bounded` 前进过滤；界面 `name_search.js`（默认全盘、"全盘/当前目录"分段存 localStorage、
+  Ctrl/⌘+K、Esc、命中高亮文本节点、大小/时间/状态列、表头排序三态、覆盖率行、"索引整棵树"）、`search_query.js`
+  过滤条双向转换、最近 10 次搜索、缓存屏"目录覆盖率"卡、检查器"列举整棵子树"。
+- **验收证明**：`TestCrawlListsEveryDirectoryExactlyOnce`（1023 目录 `List` 恰 1023、二轮 0）、`TestCrawlerOffCostsNoCalls`、
+  `TestCrawlYieldsToForegroundIO`、`TestCrawlSleepsAfterRiskControl`、`TestCrawlResumesAfterAnUncleanStop`；
+  `TestFindFiltersByExtensionAndSize`、`TestFindSortsByModifiedTime`、`TestFindKindDirReturnsOnlyDirectories`、
+  `TestGlobAndExtensionAgree`、`TestFilteredQueryStillReportsItsBudget`、`TestLegacySearchSignaturesStillWork`；
+  `TestSearchScaleMillionNodeTree`（默认 50 万节点，`CLOUDFS_SCALE_DIRS=200` 跑满 100 万：名字 5.4 ms、2 字符
+  35.6 ms、`ext:go size:>1k` sort=mtime 36.5 ms、`*.pdf` sort=size 46.7 ms，EXPLAIN 无 `SCAN nodes`）；
+  `TestSearchGlobRespectsAllowlist`、`TestSearchCarriesCoverageAndRowFacts`、`TestFindCLIFiltersAndSorts`；
+  界面 `ui_search_test.go` 十个用例、`_tests/search_query.test.mjs`；e2e 真实挂载 `TestNeverOpenedDirectoryBecomesSearchable`
+  （0.3～0.5 s 可搜）、浏览器 `TestNameSearchInTheBrowser`（大小列非空）；`docs/DESIGN.md` §4.3 搜索行已改。
+- **遗留**：规模基线默认 50 万节点（1M ingest 约 7 min 超包超时，`CLOUDFS_SCALE_DIRS=200` 才是整百万）；无锚点的纯过滤
+  查询（如单独 `type:dir`）在 1M 上约 2 s，若过滤条常用需加 `size`/`mtime` 索引；路径子串锚点命中多数名字时（如
+  `dir1/file-1`）约 6 s，是既有形状；排序作用于预算内收集集，`Complete=false` 时 top-N 不保证全局；第四列是状态
+  而非路径（父路径为第二行），`sort=path` 未暴露；"索引整棵树"按钮分支未在浏览器实测（fake 无法从外部造未列举
+  子树），请求体经 curl 与 `TestIndexWholeTreeAsksForConfirmation` 验证。
 
 对照 Everything（voidtools）核对：它的两条原则是"索引等于整个卷"与"输入即结果"，附带按扩展名/大小/
 日期过滤与排序。CloudFS 的引擎已经是这个形态——`internal/meta/search.go` 用父链在查询期拼路径
@@ -2382,7 +2447,8 @@ T-03（慢客户端隔离）、T-06（交互式向导）、T-17（Web 加账号�
 **阶段 4 — Agent 工作底座**（2026-09-14 登记，T-44 于 2026-09-15 追加，见 P4 节与 `docs/agent-roadmap.md`）
 
 15. **一期（并行两线）**：线 A T-34 → T-35 → T-36；线 B T-44 → T-37（T-44 改造主窗口搜索框，T-37 在它
-    之上加"内容"分段）。每条后端任务后紧跟界面任务，界面不落地不关条目。
+    之上加"内容"分段）。每条后端任务后紧跟界面任务，界面不落地不关条目。**2026-09-15 全部完成**，34 个提交在
+    `feat/agent-phase1`，一期总验证见各条"验收证明"。
 16. **二期**：T-43（先核实拓扑）→ T-38；T-39 → T-40（记忆检索依赖嵌入可选，keyword 即可先上）；
     T-41 → T-42（运行按钮依赖 exec 执行器，复制提示词可提前到一期末）。
 17. **三期**：stdio→HTTP 桥；递归删除逐文件前像；control/WebDAV 操作进审计；`pull_events`；
