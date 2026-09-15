@@ -75,6 +75,9 @@ type Options struct {
 	Sessions *agent.Sessions
 	// Scope overrides the scope derived from Allow/ReadOnly. nil derives it.
 	Scope *agent.Scope
+	// Audit records every tool call. nil uses Sessions.Store(); with both
+	// nil nothing is recorded.
+	Audit AuditWriter
 }
 
 // Server wraps an MCP server bound to a VFS.
@@ -88,6 +91,8 @@ type Server struct {
 	// or loopback session belongs to when one is.
 	defaultScope     agent.Scope
 	defaultPrincipal agent.Principal
+	// audit is where auditMiddleware writes; nil means no audit trail.
+	audit AuditWriter
 }
 
 // ErrDenied is returned for paths outside the caller's scope. It is the
@@ -120,6 +125,10 @@ func New(opt Options) (*Server, error) {
 		}
 		s.defaultPrincipal = p
 	}
+	s.audit = opt.Audit
+	if s.audit == nil && opt.Sessions != nil {
+		s.audit = opt.Sessions.Store()
+	}
 	if err := s.copyTools.init(); err != nil {
 		return nil, fmt.Errorf("mcpsrv: initialize copy cursor: %w", err)
 	}
@@ -136,7 +145,10 @@ func New(opt Options) (*Server, error) {
 	s.mcp.AddReceivingMiddleware(s.subscriptions.receive)
 	// Each AddReceivingMiddleware wraps the handler built so far, so the last
 	// one added runs first. The session must be in the context before the
-	// subscription reservation checks paths, hence it is added last.
+	// audit row is built and before the subscription reservation checks
+	// paths, hence it is added last; the audit sits between the two so the
+	// reservation's checks are recorded on the row.
+	s.mcp.AddReceivingMiddleware(s.auditMiddleware)
 	s.mcp.AddReceivingMiddleware(s.sessionMiddleware)
 	s.mcp.AddSendingMiddleware(s.subscriptions.send)
 	s.register()
@@ -952,7 +964,7 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 		if root != "/" && r.Path != root && !strings.HasPrefix(r.Path, strings.TrimSuffix(root, "/")+"/") {
 			continue
 		}
-		if _, err := s.checkPath(ctx, r.Path, false); err != nil {
+		if !s.visible(ctx, r.Path) {
 			continue
 		}
 		hit := searchHit{Path: r.Path, Name: r.Name}
@@ -1050,7 +1062,7 @@ func (s *Server) cacheStatus(ctx context.Context, _ *mcp.CallToolRequest, in sta
 func (s *Server) listRoots(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, rootsOutput, error) {
 	var out rootsOutput
 	for _, m := range s.opt.FS.Mounts() {
-		if _, err := s.checkPath(ctx, m.Prefix, false); err != nil {
+		if !s.visible(ctx, m.Prefix) {
 			continue
 		}
 		out.Roots = append(out.Roots, rootInfo{

@@ -115,15 +115,33 @@ func (s *Server) scopeOf(ctx context.Context) agent.Scope {
 }
 
 // checkPath cleans p and checks it against the caller's scope for reading
-// or writing. Cleaning also defeats "..\" traversal attempts.
+// or writing. Cleaning also defeats "..\" traversal attempts. The outcome
+// is noted for the audit row: the path either way, a refusal as denied.
 func (s *Server) checkPath(ctx context.Context, p string, write bool) (string, error) {
-	return s.scopeOf(ctx).Check(p, write)
+	clean, err := s.scopeOf(ctx).Check(p, write)
+	if err != nil {
+		recordCheck(ctx, agent.Normalise(p), err)
+		return "", err
+	}
+	recordCheck(ctx, clean, nil)
+	return clean, nil
 }
 
 // checkWrite is the path-free half of a write check, for tools that mutate
 // server state by id rather than by path.
 func (s *Server) checkWrite(ctx context.Context) error {
-	return s.scopeOf(ctx).CheckWriteAllowed(time.Now())
+	err := s.scopeOf(ctx).CheckWriteAllowed(time.Now())
+	recordCheck(ctx, "", err)
+	return err
+}
+
+// visible reports whether the caller may read p. It is for tools that
+// filter a listing by scope rather than act on a path the caller named, so
+// it leaves nothing on the audit row: an entry hidden from a search result
+// or a directory page is not a refusal.
+func (s *Server) visible(ctx context.Context, p string) bool {
+	_, err := s.scopeOf(ctx).Check(p, false)
+	return err == nil
 }
 
 // unrestricted reports whether the caller may read the whole mount, which

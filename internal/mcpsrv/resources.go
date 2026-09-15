@@ -265,7 +265,7 @@ func (s *Server) readDirectoryResource(ctx context.Context, uri string, q resour
 		for _, a := range page.Entries {
 			after = a.Name
 			p := path.Join(q.path, a.Name)
-			if _, err := s.checkPath(ctx, p, false); err != nil {
+			if !s.visible(ctx, p) {
 				continue
 			}
 			m, ok := s.resourceMount(p)
