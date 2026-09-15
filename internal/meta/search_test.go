@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"cloudfs/internal/testx"
 	"context"
 	"database/sql"
 	"errors"
@@ -149,6 +150,9 @@ INSERT INTO name_indexed(ino,name) VALUES(2,'obsolete');`); err != nil {
 func TestShortSearchUsesPostingsAt100KNodes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("100K-node query plan and timing")
+	}
+	if testx.RaceEnabled {
+		t.Skip("inserting 100K nodes is a timing test; under -race it alone exceeds the package timeout")
 	}
 	s, _ := openTest(t)
 	ctx := context.Background()

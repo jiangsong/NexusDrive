@@ -2,6 +2,7 @@ package perf
 
 import (
 	"bytes"
+	"cloudfs/internal/testx"
 	"context"
 	"fmt"
 	"io"
@@ -274,6 +275,9 @@ func TestRepairCostIsOneUploadPerReplica(t *testing.T) {
 // counts cannot show bandwidth. The pool is driven directly so the VFS
 // window policy does not blur what the replica picker adds.
 func TestPoolReadFanoutAddsBandwidth(t *testing.T) {
+	if testx.RaceEnabled {
+		t.Skip("a wall-clock ratio between one and three members says nothing under -race")
+	}
 	const (
 		blockSize = 4 << 20
 		blocks    = 12 // 48 MiB

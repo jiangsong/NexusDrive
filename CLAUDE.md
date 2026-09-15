@@ -15,7 +15,7 @@ Go 1.27，模块名 `cloudfs`，约 105k 行、41 个包目录、1141 个测试�
 ./gow build ./...
 ./gow vet ./...            # 基线是干净的，不要引入新告警
 ./gow test ./...           # 全量
-./gow test -race ./...     # 基线无竞态告警
+./gow test -race -timeout 30m ./...   # 基线无竞态告警；计时类用例经 internal/testx.RaceEnabled 在 race 下跳过，e2e 在 race 下要 30 分钟
 
 ./gow test ./test/chaos/        # 可靠性矩阵：断网、kill -9、限流、缓存满、冲突
 ./gow test ./test/conformance/  # 与本地目录逐项比对 POSIX 行为
