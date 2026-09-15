@@ -410,6 +410,26 @@ cloudfs sessions list | show <id> | finish <id> --summary "…" | rollback <id> 
 `audit`/`session`；控制台「Agent」屏的"会话"与"审计"标签就是它们的视图（denied 行有文字标签，
 不只靠颜色）。
 
+**从控制台运行 agent 也进审计。** 配置了 `agents:` 后，控制台"发送给 Agent"浮层的"运行"按钮（`POST /agent/invoke`）
+每次到达引擎的调用写一行 `principal=console`、`transport=console`、`tool=agent.invoke`，`paths` 是交给命令的路径，
+参数只记 agent 名与提示词长度（提示词是用户自己的文字，不进审计）；这些行没有 MCP 会话，`session` 与客户端列为空，
+按 principal `console` 过滤即可。命令本身的输出在触发器投递记录里（`#/triggers?delivery=<id>`），不在审计里。
+
+### 事件触发器
+
+`triggers[]`（`docs/agent-roadmap.md` §5）把 VFS 变更流变成本机命令或签名 webhook，只在拥有存储的 mount 进程里运行；
+MCP 不新增通知动作——资源订阅已经覆盖"通知 agent 某路径变了"。给 agent 作者的两条限制：
+
+- **至少一次，不是恰好一次。** 投递记录先写进 `agent.db` 再执行；进程在执行中死掉，重启后同一条会再跑一次（`attempts`
+  加一）。同一路径在 `debounce` 窗口内的多次变化合并成一次，但动作执行期间的新变化会再投一次。命令自身要幂等。
+- **队列溢出只以 rescan 送达。** 变更流的队列是 64 条；消费不及时会被压成一条整树 rescan 提示，被压掉的具体路径不可
+  恢复，每条规则只收到一行 `path=""`、`kind=rescan`（`on_rescan: ignore` 可关掉），命令要按"整棵子树可能变了"处理。
+
+agent 自己通过 MCP 写入的变更带 `origin=api`；规则 `origins: [kernel, remote]` 就不会被 agent 触发（未排除时启动有
+warning，控制台规则卡有黄标）。`{path}`/`{kind}`/`{uri}` 只能是独立的 argv 元素，没有 shell。CLI `cloudfs triggers
+list|deliveries|show|test|retry`，控制面 `GET /triggers`、`GET /triggers/deliveries`、`GET /triggers/deliveries/{id}`、
+`POST /triggers/test|retry`，SSE `trigger`。
+
 ## Agent 使用建议
 
 **搜索只覆盖已列举过的目录，响应里的 `coverage` 说明覆盖了多少。** `coverage.listed` 是索引已列举的目录数，`coverage.known` 是索引知道存在的目录数（含根）；两者相等才说明整棵树都可搜。差距来自从未被打开过的目录：delta 事件只把它们的父目录标 stale，不会补进子节点。缩小差距有两条路：配置 `search.crawl.enabled: true` 让守护进程在前台空闲时后台列举（`idle_after` 之后开始、`rescan` 周期补列被 delta 标 stale 的目录，`Caps.Tier=unofficial` 的网盘遇风控休眠 15 分钟），或一次性 `cloudfs warm --all` / 界面"索引整棵树"。空结果先看 `coverage`，再决定是提示用户 `warm` 还是断定文件不存在。

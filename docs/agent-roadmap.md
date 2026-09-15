@@ -1012,8 +1012,8 @@ func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
 | 2 | T-38 快照与回滚 | T-34、T-43 | F5 | **完成**（线 C：0bfea3d 后端、cfe49b6 界面、收口提交 chaos/e2e）：`session_ops` + 前像 + 逆序回滚 + dry_run + 冲突 + 保留期 GC；MCP/控制面/CLI 三入口；F5 全勾；证据见 TODO.md T-38"验收证明"。顺带修了 fusefs 失效通知用 VFS ino 当内核 nodeid 的错位（`kernel_nodes.go`） |
 | 3 | T-39 嵌入与 hybrid | T-37 | F6 | 线 D |
 | 4 | T-40 记忆库 | T-37（keyword 即可先上），T-39 可选 | F7 | 线 D |
-| 5 | T-41 触发器 | 无（vfs 字段 + 引擎） | F8 | 线 E |
-| 6 | T-42 发送给 Agent（运行） | T-41 exec 执行器 | F9 | 线 E |
+| 5 | T-41 触发器 | 无（vfs 字段 + 引擎） | F8 | **完成**（线 E，TODO.md 已关）：chaos `TestDeliveryRunningAtCrashIsRedelivered`/`TestStormUnderOverflowDeliversOneRescan`，e2e `TestKernelWriteFiresAnExecTrigger`/`TestMCPWriteDoesNotFireWhenAPIIsExcluded`/`TestTriggersScreenInTheBrowser` |
+| 6 | T-42 发送给 Agent（运行） | T-41 exec 执行器 | F9 | **完成**（线 E，TODO.md 已关）：`/agent/endpoints`、`/agent/invoke`、运行按钮 |
 
 T-38/T-39/T-41 三条彼此独立，可以并行给不同 agent 做。
 

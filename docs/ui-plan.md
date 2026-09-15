@@ -365,23 +365,23 @@ F5–F10 属二期。
 - [ ] **F7-6** 未配置 `memory.root` 或不在 allow 内：标签页显示说明与配置示例。
 - [ ] **F7-7** i18n 键 `memory.*`；`ui_memory_test.go`：保存带 `expected_version`、删除带 `confirm: true`、冲突浮层三动作各自路由、正文按文本插入。
 
-**F8 —— `#/triggers` 屏 + 投递详情 + 测试投递（T-41 · 二期）**
+**F8 —— `#/triggers` 屏 + 投递详情 + 测试投递（T-41 · 二期，2026-09-15 完成）**
 
-- [ ] **F8-1** `icons.js` 加 `bolt`；`routes`/`navItems` 加 `#/triggers`（位于 `#/index` 之后）；导航徽标显示 dead 投递数。
-- [ ] **F8-2** `screens/triggers.js` 规则卡片（`GET /triggers`，只读）：名称 / 路径 glob / 事件 / 来源 / 动作类型；exec argv 逐元素等宽渲染不拼接；webhook 显示 URL 与"签名密钥已配置"；卡片底部"在配置文件中修改"。
-- [ ] **F8-3** `trigger_view.js`（规则 → 自激风险）+ `_tests/trigger_view.test.mjs`；风险规则黄色标记。
-- [ ] **F8-4** 投递表（`GET /triggers/deliveries`）：时间 / 规则 / 路径 / 事件 / 来源 / 次数 / 状态（点+文字）/ dead 行"重试"（`POST /triggers/retry`）；规则与状态过滤；`events()` 增加 `onTrigger`，未翻页时刷新。
-- [ ] **F8-5** 投递详情 `showPanel`（`GET /triggers/deliveries/{id}`）：stdout/stderr 与截断提示，或 webhook 响应码与错误；支持 `#/triggers?delivery=<id>` 直接打开。
-- [ ] **F8-6** "测试投递"`openForm`（规则 + 路径）→ `confirmDelete` 键入规则名 → `POST /triggers/test` 带 `confirm: true`，完成后打开该投递详情。
-- [ ] **F8-7** 未配置规则：exec、webhook 两个配置示例与 webhook 校验代码片段。
-- [ ] **F8-8** i18n 键 `triggers.*`；`ui_triggers_test.go`：无编辑规则的表单与 PUT 请求、argv 逐元素渲染、webhook secret 不出现在 DOM、测试投递带 `confirm: true`、重试调用 `/triggers/retry`。
+- [x] **F8-1** `icons.js` 加 `bolt`；`routes`/`navItems` 加 `#/triggers`（位于 `#/index` 之后）；导航徽标显示 dead 投递数。
+- [x] **F8-2** `screens/triggers.js` 规则卡片（`GET /triggers`，只读）：名称 / 路径 glob / 事件 / 来源 / 动作类型；exec argv 逐元素等宽渲染不拼接；webhook 显示 URL 与"签名密钥已配置"；卡片底部"在配置文件中修改"。
+- [x] **F8-3** `trigger_view.js`（规则 → 自激风险）+ `_tests/trigger_view.test.mjs`；风险规则黄色标记。
+- [x] **F8-4** 投递表（`GET /triggers/deliveries`）：时间 / 规则 / 路径 / 事件 / 来源 / 次数 / 状态（点+文字）/ dead 行"重试"（`POST /triggers/retry`）；规则与状态过滤；`events()` 增加 `onTrigger`，未翻页时刷新。
+- [x] **F8-5** 投递详情 `showPanel`（`GET /triggers/deliveries/{id}`）：stdout/stderr 与截断提示，或 webhook 响应码与错误；支持 `#/triggers?delivery=<id>` 直接打开。
+- [x] **F8-6** "测试投递"`openForm`（规则 + 路径）→ `confirmDelete` 键入规则名 → `POST /triggers/test` 带 `confirm: true`，完成后打开该投递详情。
+- [x] **F8-7** 未配置规则：exec、webhook 两个配置示例与 webhook 校验代码片段。
+- [x] **F8-8** i18n 键 `triggers.*`；`ui_triggers_test.go`：无编辑规则的表单与 PUT 请求、argv 逐元素渲染、webhook secret 不出现在 DOM、测试投递带 `confirm: true`、重试调用 `/triggers/retry`。
 
-**F9 —— 发送给 Agent 浮层（检查器 + 搜索结果两入口）（T-42 · 二期，复制部分可提前）**
+**F9 —— 发送给 Agent 浮层（检查器 + 搜索结果两入口）（T-42 · 二期，复制部分可提前；2026-09-15 完成）**
 
 - [x] **F9-1** `send_to_agent.js`（`openPanel`）：`GET /agent/prompt?path=` 预填 `textarea`（按文本填充、可编辑）+ "复制"（始终可用，除读取提示词外不发请求）。
 - [x] **F9-2** 检查器"发送给 Agent"按钮（图标 `bot`，文件与目录都有）；内容搜索结果行右侧同一入口，预填命中路径与标题。
-- [ ] **F9-3** `GET /agent/endpoints` 非空时才渲染 agent 下拉 + "运行"；运行前 `confirmDelete` 键入 agent 名称 → `POST /agent/invoke` 带 `confirm: true` → toast"已提交"附"查看投递"跳 `#/triggers?delivery=<id>`。
-- [ ] **F9-4** i18n 键 `action.sendtoagent`/`agent.prompt.*`（一期前半已用此命名，2026-09-15）；`ui_send_to_agent_test.go`：运行按钮条件渲染、运行前确认并带 `confirm: true`、提示词按文本插入、两个入口都存在。
+- [x] **F9-3** `GET /agent/endpoints` 非空时才渲染 agent 下拉 + "运行"；运行前 `confirmDelete` 键入 agent 名称 → `POST /agent/invoke` 带 `confirm: true` → toast"已提交"附"查看投递"跳 `#/triggers?delivery=<id>`。
+- [x] **F9-4** i18n 键 `action.sendtoagent`/`agent.prompt.*`（一期前半已用此命名，2026-09-15）；`ui_send_to_agent_test.go`：运行按钮条件渲染、运行前确认并带 `confirm: true`、提示词按文本插入、两个入口都存在。
 
 **F10 —— 诊断项与横幅联动（T-43 · 二期回滚之前）**
 

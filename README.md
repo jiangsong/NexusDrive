@@ -178,6 +178,32 @@ index:                   # 内容索引（PDF / Office / 文本抽取 + 全文�
   max_total_text: 4GiB   # 整个索引的文本上限，到了就暂停并在 doctor 里提示
   fetch_budget: 2GiB/h   # 规则每小时最多下载多少；Caps.Tier=unofficial 的网盘自动减半
 
+triggers:                # 事件触发器：文件变化 → 本机命令或签名 webhook；只在拥有存储的 mount 进程里运行
+  - name: inbox-to-agent # 名字只能是 [a-z0-9-]，是投递记录、控制台与 CLI 里的标识
+    paths: ["/work/inbox/**"]        # 虚拟路径 glob（`**` 跨目录，`*` 不跨），与 index.rules 同一套匹配器
+    events: [create, write, rename]  # write/create/mkdir/remove/rename/remote/rescan；省略 = 全部
+    origins: [kernel, remote]        # kernel/api/remote；排除 api 就不会被 agent 自己的写入触发（否则启动时 warning）
+    debounce: 2s                     # 同一路径在窗口内的多次变化合并成一次投递
+    on_rescan: ignore                # 队列溢出/路径无法解析时的整树 rescan：deliver（默认，一行 path=""）| ignore
+    action:
+      exec:
+        command: ["/usr/local/bin/summarize", "{path}"]  # 无 shell；{path}/{kind}/{uri} 只能是独立的 argv 元素
+        cwd: ~/work
+        timeout: 10m                 # 超时杀整个进程组；stdout/stderr 各截 64 KiB 存进投递记录
+  - name: notify
+    paths: ["/work/reports/**"]
+    events: [write]
+    action:
+      webhook:
+        url: https://hooks.example/cloudfs   # 只许 https 或回环 http；其它 http 要 insecure: true
+        secret: keyring:cloudfs/hook         # 必须是 keyring:/secretfile: 引用，不能写明文
+        timeout: 15s
+        include_download_url: false          # true 才把签名直链交给接收方
+        proxy: direct                        # 出站走 proxy 的哪个出口；省略按 proxy.rules
+agents:                  # 控制台"发送给 Agent"浮层里可以"运行"的本机命令；{prompt} 只有这里能用
+  - name: claude
+    exec: { command: ["claude", "-p", "{prompt}"], cwd: "~", timeout: 30m }   # 选中的路径逐个追加为独立 argv
+
 webdav:
   http: 127.0.0.1:8080   # 可选：随 mount/mcp 进程启动 WebDAV
   prefix: /dav
@@ -295,6 +321,45 @@ cloudfs index status --path /work/docs/plan.pdf   # ok / pending / failed / unco
 条目数、解压量与 PDF 解析都有上限，坏文件只会让自己 `failed`；抽取中断电或 `kill -9`，重启后队列续跑。
 接口与 agent 使用建议见 `docs/mcp.md`"内容索引"。
 
+### 事件触发器与发送给 Agent
+
+```sh
+cloudfs triggers list                            # 配置里的规则（只读；webhook 只显示 URL 与"已配置密钥"）
+cloudfs triggers deliveries --rule inbox-to-agent --state dead   # 投递记录：pending / running / done / dead
+cloudfs triggers show 42                         # 一条投递的 stdout/stderr 或 webhook 响应
+cloudfs triggers test inbox-to-agent /work/inbox/a.md --confirm  # 立刻投递一次（exec 会真的执行）
+cloudfs triggers retry 42                        # 重新排队一条 dead 投递
+```
+
+规则只能在配置文件里改：控制台「触发器」屏（`#/triggers`）、控制面 `/triggers/*` 与 CLI 都是只读视图加"测试投递"
+与"重试"两个动作，命令白名单就是配置文件本身。投递**至少一次**：记录先落进 `agent.db` 再执行，进程在执行中被
+`kill -9`，重启后同一条会再跑一次（`attempts` 加一），所以命令自身要幂等；变更队列溢出时被压掉的事件只以一条
+`path=""` 的 rescan 送达（`on_rescan: ignore` 可关掉）。失败按 1 s→5 min 退避重试 8 次后标 `dead`，控制台导航徽标
+显示 dead 数。exec 的子进程环境只有 `PATH`/`HOME`/`LANG` 与 `CLOUDFS_PATH`/`CLOUDFS_KIND`/`CLOUDFS_URI`。
+
+配置了 `agents:` 后，主窗口检查器与内容搜索结果行的"发送给 Agent"浮层多出 agent 下拉与"运行"按钮：键入 agent 名
+确认后 `POST /agent/invoke` 把提示词作为 `{prompt}`、选中路径作为独立 argv 交给该命令，投递记在
+`rule=agent:<name>` 下，审计里是 `principal=console`、`tool=agent.invoke`；失败不重试，重启后提示词不保留，需重新运行。
+
+webhook 请求体是 `{rule, path, uri, kind, origin, ts, size?, download_url?}`，头 `X-CloudFS-Timestamp`（Unix 秒）与
+`X-CloudFS-Signature: sha256=<hex(HMAC-SHA256(secret, ts + "." + body))>`。接收端这样校验（与
+`internal/trigger.Verify`、控制台空状态展示的片段一致）：
+
+```go
+func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
+	ts := r.Header.Get("X-CloudFS-Timestamp")
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || now.Sub(time.Unix(sec, 0)).Abs() > 5*time.Minute {
+		return false // 拒绝重放
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(ts + "."))
+	mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(want), []byte(r.Header.Get("X-CloudFS-Signature")))
+}
+```
+
 ### 缓存固定与解除
 
 ```sh
@@ -402,6 +467,9 @@ index rebuild --confirm   清空索引并按规则重新下载、抽取
 index retry [path]        把失败文档（可限定子树）重新排队
 index search <query> [--path P] [--mode keyword|hybrid|vector] [--limit N] [--json]
                           在抽取文本里检索；没有守护进程时只读 index.db。本期 hybrid/vector 按 keyword 执行
+triggers list | deliveries [--rule R] [--state S] [--limit N] [--cursor C] | show <id> [--json]
+                          事件触发器的规则（只读）与投递记录；没有守护进程时只读 agent.db
+triggers test <rule> <path> --confirm | retry <id>   立刻投递一次 / 重排一条 dead 投递；需要运行中的守护进程
 cp <source> <dest>        复制单个文件，可跨 remote；恢复与竞争限制见 docs/copy.md
 copies list | show <id>    查询复制准备状态、检查点及关联上传；list 支持 --limit/--cursor
 copies retry|cancel <id>   重试或取消准备任务，保留内容；不能取消已交接的上传

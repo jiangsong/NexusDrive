@@ -1075,7 +1075,8 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 ### [ ] T-11 92 处 `UNVERIFIED` 待真实账号核对
 
 按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
-`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **96 处**（2026-09-15 重数：一期加了 4 处——PDF 中文抽取质量、
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **97 处**（2026-09-15 二期线 E 加 1 处：`internal/trigger/exec_windows.go`
+Windows 无 `Setpgid` 的进程组终止；此前 96 处：一期加了 4 处——PDF 中文抽取质量、
 爬取器与索引 worker 的 quark 风控映射、Codex HTTP 配置键；此前为 92 处 / 31 个文件，2026-09-12 重数；
 其中 5 处是 T-33 配额哨兵新加的驱动映射，其余差额来自此前未计入的测试与工具文件），
 不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
@@ -2171,7 +2172,71 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     对应路由；`_tests/memory_conflicts.test.mjs` 覆盖副本配对（不猜 provider 命名，只按前缀与同目录）；
     编辑浮层正文作为文本插入不作为 HTML。
 
-### [ ] T-41 事件触发器：exec / webhook（二期）
+### [x] T-41 事件触发器：exec / webhook（二期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 E 提交 c6f476a、94a8bd9、db29d6a、ffd3153、654392f 与本条收口提交）：`vfs.Change` 加
+  `Kind`（write/create/mkdir/remove/rename/remote/rescan）与 `Origin`（kernel/api/remote），`WithOrigin(ctx, name)` 由
+  mcpsrv 中间件（`"mcp"`）、控制面（`"control"`）、WebDAV（`"webdav"`）各打一次，9 个 emit 点各填自己的 kind，
+  `changedListing`/rescan 固定 remote，`Affects` 不变；glob 抽到 `internal/pathglob`（索引与触发器共用）；配置
+  `triggers[]{name, paths, events, origins, debounce, on_rescan, action: exec|webhook}`（`internal/config/triggers.go`：
+  name 唯一且 `^[a-z0-9][a-z0-9-]{0,63}$`、恰一个 action、占位符只能是独立 argv 元素、webhook 只许 https/回环 http 否则
+  `insecure: true`、secret 必须 `keyring:`/`secretfile:` 引用、未排除 `api` 的 exec 规则进 `Config.Warnings` 并由
+  `cloudfs mount` 打到 stderr）；`internal/agent/deliveries.go`（`trigger_deliveries` DAO，`(rule,path)` pending 部分唯一
+  索引 = 去抖合并，`Claim/Done/Fail/Dead/Retry/ResetRunning/List/Get/Counts`，`Store.Watch` 发 `trigger` 事件）；
+  `internal/trigger`（仅 owner 且 `!NoBackground` 才启动：一个 goroutine 消费 `WatchChanges` 按 kind/origin/glob 匹配，
+  `Subtree` 事件按 `MayMatchBelow` 命中根在其下的规则，rescan 每规则一行 `path=''` 除非 `on_rescan: ignore`；每规则
+  串行 worker，退避 1 s×2ⁿ 封顶 5 min、8 次 dead，启动 `ResetRunning`；exec 无 shell、环境只留 PATH/HOME/LANG +
+  `CLOUDFS_PATH/KIND/URI`、`Setpgid` 杀进程组、stdout/stderr 各截 64 KiB；webhook `X-CloudFS-Timestamp` +
+  `X-CloudFS-Signature: sha256=HMAC(secret, ts+"."+body)`，`Verify` 导出供文档与界面，出站走 `proxy.Manager`）；
+  控制面 `GET /triggers`（永不返回 secret）、`GET /triggers/deliveries?cursor&rule&state`、`GET /triggers/deliveries/{id}`
+  （含 `truncated`）、`POST /triggers/test`（`confirm.trigger.test`）、`POST /triggers/retry`，`/status` 带
+  `triggers{pending, dead}`，SSE `trigger`，doctor `checkTriggers` 把配置 warning 变成 warn；CLI `cloudfs triggers
+  list|deliveries|show|test|retry`（无 daemon 时只读 agent.db）；界面 `#/triggers`（`screens/triggers.js` +
+  `delivery_panel.js` + `trigger_view.js`：只读规则卡、argv 逐元素 `<code>`、webhook"签名密钥已配置"、自激黄标
+  `data-risk="self-trigger"`、投递表 + 过滤 + 分页 + SSE 刷新、详情 `showPanel` 文本节点、`#/triggers?delivery=<id>`
+  深链、测试投递键入规则名确认、空状态两个示例 + 校验片段，导航徽标 = dead 数）。
+- **验收证明**（每条验收 → 用例）：
+  - 50 ms 内 20 次内核写只 1 行且 `kind=write`：`internal/trigger` `TestDebounceCollapsesABurstIntoOneDelivery`；
+    真实挂载下 `echo >` 的 create + FLUSH 合并成 1 行：`test/e2e` `TestKernelWriteFiresAnExecTrigger`（5 s 内 done，
+    output 逐行是虚拟路径与 kind）。
+  - argv 字面 `"/work/a.txt; rm -rf /"` 无 shell：`TestExecArgvIsNeverAShell`；环境最小：`TestExecEnvironmentIsMinimal`；
+    超时杀进程组无孙进程：`TestExecTimeoutKillsTheProcessGroup`；输出截断：`TestExecOutputIsCapped`。
+  - webhook 错 secret 拒、对的过、ts 偏差 > 5 min 拒：`TestWebhookSignatureVerifies`；非 2xx 计失败：`TestWebhookNon2xxIsAFailure`。
+  - running 时 kill -9，重启同 `(rule,path)` 再投一次且 `attempts=2`：`test/chaos` `TestDeliveryRunningAtCrashIsRedelivered`
+    （第一个引擎在子进程阻塞时关闭、行仍 running，同一 agent.db 上第二个引擎 `ResetRunning` 后跑完 done，行数仍 1）；
+    单元层 `TestRunningDeliveriesRestartAsPending`、`internal/agent` `TestResetRunningRepends`。
+  - 1 万事件风暴行数 ≤ 规则 × 路径、溢出 rescan 只一行：`TestStormStaysBounded`；真实 `vfs.FS` 64 槽队列被 400 个变更
+    压溢出后 `deliver` 规则恰 1 行 pending `path=''`、`on_rescan: ignore` 规则 0 行、每路径不重复、rescan 跑完 output
+    以 `rescan` 开头：`test/chaos` `TestStormUnderOverflowDeliversOneRescan`。
+  - `origins` 排除 api 时 MCP 写入不触发：`TestAPIOriginCanBeExcluded`；真实挂载 + 进程内 MCP `write_file` 2 s 内无投递、
+    随后 shell 写恰 1 行：`test/e2e` `TestMCPWriteDoesNotFireWhenAPIIsExcluded`。
+  - 9 个 emit 点各断言 kind/origin：`internal/vfs/changes_kind_test.go`（`TestKernelCreateAndFlushAreTaggedKernel`、
+    `TestWriteFileViaAPIIsCreateThenWrite`、`TestMkdirRemoveAndRenameCarryTheirKind`、`TestDeltaRefreshIsRemote`、
+    `TestListingChangesAreRemoteEvenForAKernelReaddir`、`TestUploadLandingIsRemote`、`TestCopyAnnouncesACreate`、
+    `TestQueueOverflowIsARescanFromRemote`、`TestAffectsIgnoresKindAndOrigin`）；三个适配层的打标：
+    `TestToolCallsAreTaggedAsAPIChanges`、`TestFSRoutesTagTheirChangesAsControlOrigin`、`TestWriteRequestsCarryTheWebDAVOrigin`；
+    `test/perf` 调用次数基线不变。
+  - 配置：`TestTriggerNeedsExactlyOneAction`、`TestWebhookSecretMustBeAReference`、`TestPlainHTTPWebhookNeedsInsecure`、
+    `TestExecRuleWithoutOriginFilterWarns`、`TestPlaceholdersMustBeWholeArgvElements`、`TestRoadmapTriggerExampleParses`、
+    `TestMountPrintsConfigWarnings`；引擎只在 owner 跑：`internal/daemon` `TestTriggerEngineRunsOnlyInTheOwner`、
+    `TestNoBackgroundSkipsTheTriggerEngine`。
+  - 控制面：`TestTriggersViewNeverContainsTheSecret`、`TestTriggerTestNeedsConfirm`、`TestRetryOnlyDeadDeliveries`、
+    `TestDeliveryDetailCarriesOutputAndTruncation`、`TestTriggerEventsReachSSE`、`TestDoctorSurfacesConfigWarnings`、
+    `TestStatusCountsDeliveries`、`TestTriggersRoutesWhenNoEngine`、`TestEveryRouteIsGuarded`；CLI `TestTriggersCLIListsAndRetries`。
+  - 界面：`ui_triggers_test.go` `TestTriggersScreenHasNoRuleEditor`（无编辑表单、无 PUT）、`TestArgvRendersPerElement`、
+    `TestWebhookSecretNeverInDOM`、`TestTestDeliveryConfirms`（`confirm: true`）、`TestDeadRowRetries`（`/triggers/retry`）、
+    `TestDeliveryOutputIsText`、`TestTriggersNavAndBadge`；`_tests/trigger_view.test.mjs` 自激判断；浏览器
+    `test/e2e` `TestTriggersScreenInTheBrowser`（`CLOUDFS_BROWSER=1`：规则卡 `data-rule`、投递行 `data-delivery`/
+    `data-state="done"`、导航在 `#/index` 之后，深链打开详情并以文本显示 printf 的三行输出）。
+- **遗留**：
+  - Windows 没有 `Setpgid`：`internal/trigger/exec_windows.go` 只杀直接子进程，超时后孙进程会活下来
+    （`UNVERIFIED`：Job object 或 `CREATE_NEW_PROCESS_GROUP` 方案要在 Windows 真机验证）。
+  - 改名事件带 `Subtree`，`Subtree` 事件按"glob 根在其下"匹配，所以 `**/*.md` 规则会被非 `.md` 文件的改名触发
+    （一次多余投递，不会漏）。
+  - 队列溢出压成的 rescan 只以 `path=''` 送达，被压掉的具体路径不可恢复（文档已写明）；至少一次意味着重启后
+    同一动作可能再跑一遍，动作自身要幂等。
+  - webhook `download_url` 只在提供方能给出可分享直链时出现（其它提供方在 output 里记 `download_url unavailable`）。
+  - 不新增 MCP notification 动作；`pull_events` 留三期。
 
 - **证据**：`vfs.Change` 只有 `Paths/Subtree/Rescan`，无种类与来源；9 个 emit 点
   （`internal/vfs/write.go:417/617/708/788/801/1027/1060/1148/1212`）各知道操作；
@@ -2212,7 +2277,31 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     不出现在响应与 DOM；测试投递带 `confirm: true`；dead 行重试调用 `/triggers/retry`；
     `_tests/trigger_view.test.mjs` 覆盖自激判断。
 
-### [ ] T-42 发送给 Agent（二期）
+### [x] T-42 发送给 Agent（二期，2026-09-15 完成）
+
+- **2026-09-15 后半完成**（线 E 提交 e2297a1，前半见下）：配置 `agents[]{name, exec{command, cwd, timeout}}`（与
+  `triggers[].action.exec` 同一套校验，只有 agents 可用 `{prompt}`）；`internal/control/agent_invoke.go`
+  `GET /agent/endpoints` 只返回名字、`POST /agent/invoke {agent, paths[], prompt?, confirm}`：无引擎或无此 agent → 404
+  且不启动任何进程，`confirmed`（`confirm.agent.invoke`）后经 `trigger.Engine.Invoke` 入队 `rule="agent:<name>"`
+  并立即执行（`{prompt}` 整体替换、`paths` 逐个作为独立 argv 追加、失败直接 dead 不重试、同路径重复调用返回
+  `ErrAlreadyQueued`），每次到达引擎的调用写审计行 `principal=console`、`transport=console`、`tool=agent.invoke`
+  （参数只记 agent 名与 prompt 长度）；界面 `send_to_agent.js` 在 `/agent/endpoints` 非空时渲染 agent 下拉 + "运行"，
+  `confirmDelete` 键入 agent 名 → 带 `confirm: true` 提交 → toast + "查看投递"链到 `#/triggers?delivery=<id>`，
+  复制按钮行为不变。
+- **验收证明**：
+  - 未配置 agents 时 404 且无子进程：`internal/control` `TestInvokeWithoutAgentsIs404AndSpawnsNothing`；执行 argv 与配置
+    逐元素相等、`paths` 只作为独立元素：`TestInvokePassesPathsAsSeparateArgv`、`internal/trigger`
+    `TestInvokeAppendsPathsAsSeparateArgv`；未确认不执行：`TestInvokeNeedsConfirm`；失败即 dead：`TestInvokeFailureIsDeadAtOnce`。
+  - `GET /agent/prompt` 不存在路径 404 不泄露内部路径：`TestAgentPromptMissingPathIs404WithoutInternals`（一期）。
+  - 审计 `principal=console`、`tool=agent.invoke`：`TestInvokeIsAudited`；端点只有名字：`TestEndpointsListNamesOnly`。
+  - 界面 `ui_send_to_agent_test.go`：`TestCopyStillMakesNoWrite`、`TestRunButtonOnlyWithEndpoints`、
+    `TestRunConfirmsWithConfirmTrue`、`TestSendToAgentOnlyReadsAndCopies`（文本插入）、`TestSendToAgentHasBothEntrances`；
+    投递详情在浏览器里的渲染由 T-41 的 `TestTriggersScreenInTheBrowser` 覆盖（运行按钮跳的就是同一深链）。
+- **遗留**：
+  - agent 调用不跨重启：`{prompt}` 与第 2 个起的路径只保存在引擎内存里（表只存首路径），重启后重试会以
+    "the prompt of an agent run is not kept across restarts" 直接 dead，需从控制台重新运行。
+  - 控制台发起的审计行 `session` 与 client 列为空（没有 MCP 会话在背后），审计屏按 principal `console` 区分。
+  - 一次只发送一个文件（多选留三期）；`cwd` 只在配置里指定。
 
 - **2026-09-15 一期前半已完成**（提交 fd9aad2）：`GET /agent/prompt?path=[&heading=]`（`internal/control/agent_prompt.go`）
   返回 `{path, uri, prompt}`：虚拟路径 + 与 `mcpsrv/resources.go` 同规则的 `cloudfs://<remote>/<path>` URI +

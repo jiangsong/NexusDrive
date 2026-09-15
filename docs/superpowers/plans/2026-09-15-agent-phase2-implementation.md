@@ -321,9 +321,9 @@ test/perf/embed_perf_test.go（D1）
 - Test: `internal/vfs/changes_kind_test.go`（**9 个 emit 点各断言 kind/origin**：写句柄 flush → write/kernel（`FromKernel` ctx）；`WriteFile` via MCP ctx → write/api；`Mkdir` → mkdir；`Remove` → remove；`Rename` → rename；delta 刷新 → remote/remote；队列溢出 → rescan）
 
 **Steps:**
-- [ ] RED：上述用例 + `TestAffectsIgnoresKindAndOrigin`（旧消费者不受影响）
-- [ ] GREEN：`./gow test ./internal/vfs/ -count=1 -race && ./gow test ./internal/mcpsrv/ ./internal/control/ ./internal/webdavsrv/ -count=1`；`./gow test ./test/perf/ -count=1`（调用次数基线不变）
-- [ ] 提交：`feat(vfs): tag every change with its kind and origin`
+- [x] RED：上述用例 + `TestAffectsIgnoresKindAndOrigin`（旧消费者不受影响）
+- [x] GREEN：`./gow test ./internal/vfs/ -count=1 -race && ./gow test ./internal/mcpsrv/ ./internal/control/ ./internal/webdavsrv/ -count=1`；`./gow test ./test/perf/ -count=1`（调用次数基线不变）
+- [x] 提交：`feat(vfs): tag every change with its kind and origin`
 
 ## Task E1：配置 `triggers[]`、`agents[]`、glob 与自激 warning
 
@@ -332,9 +332,9 @@ test/perf/embed_perf_test.go（D1）
 - glob：复用 `internal/index/glob.go` 的匹配器——**把它抽到 `internal/pathglob`**（index 与 trigger 都 import；纯搬家 + 一次性改 import，不改逻辑）
 
 **Steps:**
-- [ ] RED：`TestTriggerNeedsExactlyOneAction`、`TestWebhookSecretMustBeAReference`、`TestPlainHTTPWebhookNeedsInsecure`、`TestExecRuleWithoutOriginFilterWarns`、`TestAgentsShareTheExecRules`、`pathglob` 包测试原样通过
-- [ ] GREEN：`./gow test ./internal/config/ ./internal/pathglob/ ./internal/index/ -count=1`
-- [ ] 提交：`feat(config): trigger and agent rules with a shared path glob package`
+- [x] RED：`TestTriggerNeedsExactlyOneAction`、`TestWebhookSecretMustBeAReference`、`TestPlainHTTPWebhookNeedsInsecure`、`TestExecRuleWithoutOriginFilterWarns`、`TestAgentsShareTheExecRules`、`pathglob` 包测试原样通过
+- [x] GREEN：`./gow test ./internal/config/ ./internal/pathglob/ ./internal/index/ -count=1`
+- [x] 提交：`feat(config): trigger and agent rules with a shared path glob package`
 
 ## Task E2：`internal/trigger` 引擎、exec、webhook、`agent.Deliveries`
 
@@ -346,9 +346,9 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `internal/daemon/daemon.go`（owner 且规则非空才 `d.Trigger = trigger.New(...)` 并 `Run`）
 
 **Steps:**
-- [ ] RED：`TestDebounceCollapsesABurstIntoOneDelivery`（同路径 50 ms 内 20 次 → 1 行，`kind=write`）、`TestExecArgvIsNeverAShell`（`["echo","{path}; rm -rf /"]` → argv[1] 字面等于 `"/work/a.txt; rm -rf /"`，用一个回显 argv 的测试二进制/`os.Args` 自举）、`TestExecEnvironmentIsMinimal`、`TestExecTimeoutKillsTheProcessGroup`（`sh -c 'sleep 60 & wait'` 后无孙进程）、`TestWebhookSignatureVerifies`（错 secret 拒、对的过、ts 偏差 > 5 min 拒）、`TestRunningDeliveriesRestartAsPending`（`attempts=2`）、`TestStormStaysBounded`（1 万事件 → 行数 ≤ 规则×路径，溢出 rescan 只一行）、`TestAPIOriginCanBeExcluded`、`TestBackoffThenDead`
-- [ ] GREEN：`./gow test ./internal/agent/ ./internal/trigger/ ./internal/daemon/ -count=1 -race`
-- [ ] 提交：`feat(trigger): at-least-once deliveries with debounce, a shell-free exec runner and signed webhooks`
+- [x] RED：`TestDebounceCollapsesABurstIntoOneDelivery`（同路径 50 ms 内 20 次 → 1 行，`kind=write`）、`TestExecArgvIsNeverAShell`（`["echo","{path}; rm -rf /"]` → argv[1] 字面等于 `"/work/a.txt; rm -rf /"`，用一个回显 argv 的测试二进制/`os.Args` 自举）、`TestExecEnvironmentIsMinimal`、`TestExecTimeoutKillsTheProcessGroup`（`sh -c 'sleep 60 & wait'` 后无孙进程）、`TestWebhookSignatureVerifies`（错 secret 拒、对的过、ts 偏差 > 5 min 拒）、`TestRunningDeliveriesRestartAsPending`（`attempts=2`）、`TestStormStaysBounded`（1 万事件 → 行数 ≤ 规则×路径，溢出 rescan 只一行）、`TestAPIOriginCanBeExcluded`、`TestBackoffThenDead`
+- [x] GREEN：`./gow test ./internal/agent/ ./internal/trigger/ ./internal/daemon/ -count=1 -race`
+- [x] 提交：`feat(trigger): at-least-once deliveries with debounce, a shell-free exec runner and signed webhooks`
 
 ## Task E3：控制面 `/triggers/*`、SSE `trigger`、CLI、doctor
 
@@ -358,9 +358,9 @@ test/perf/embed_perf_test.go（D1）
 - Create: `cmd/cloudfs/triggers.go`（`triggers list|deliveries|test|retry`）
 
 **Steps:**
-- [ ] RED：`TestTriggersViewNeverContainsTheSecret`、`TestTriggerTestNeedsConfirm`、`TestRetryOnlyDeadDeliveries`、`TestTriggerEventsReachSSE`、`TestDoctorSurfacesConfigWarnings`、`TestEveryRouteIsGuarded` 自动覆盖
-- [ ] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ -count=1`
-- [ ] 提交：`feat(control,cli): read-only trigger rules, delivery listing, test and retry`
+- [x] RED：`TestTriggersViewNeverContainsTheSecret`、`TestTriggerTestNeedsConfirm`、`TestRetryOnlyDeadDeliveries`、`TestTriggerEventsReachSSE`、`TestDoctorSurfacesConfigWarnings`、`TestEveryRouteIsGuarded` 自动覆盖
+- [x] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ -count=1`
+- [x] 提交：`feat(control,cli): read-only trigger rules, delivery listing, test and retry`
 
 ## Task E4：UI F8 — `#/triggers` 屏
 
@@ -372,9 +372,9 @@ test/perf/embed_perf_test.go（D1）
 - Create: `internal/control/ui_triggers_test.go`
 
 **Steps:**
-- [ ] RED：`TestTriggersScreenHasNoRuleEditor`（无 form 提交 PUT/POST 规则）、`TestArgvRendersPerElement`、`TestWebhookSecretNeverInDOM`、`TestTestDeliveryConfirms`（`confirm: true`）、`TestDeadRowRetries`（`/triggers/retry`）、`TestDeliveryOutputIsText`；`trigger_view.test.mjs` 自激判断
-- [ ] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestTrigger|TestEveryRoute|TestNav' -count=1`
-- [ ] 提交：`feat(ui): triggers screen with read-only rules, deliveries and a confirmed test run`
+- [x] RED：`TestTriggersScreenHasNoRuleEditor`（无 form 提交 PUT/POST 规则）、`TestArgvRendersPerElement`、`TestWebhookSecretNeverInDOM`、`TestTestDeliveryConfirms`（`confirm: true`）、`TestDeadRowRetries`（`/triggers/retry`）、`TestDeliveryOutputIsText`；`trigger_view.test.mjs` 自激判断
+- [x] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestTrigger|TestEveryRoute|TestNav' -count=1`
+- [x] 提交：`feat(ui): triggers screen with read-only rules, deliveries and a confirmed test run`
 
 ## Task E5：T-42 后半 — `/agent/endpoints`、`/agent/invoke`、运行按钮（F9-3/F9-4）
 
@@ -385,17 +385,17 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `internal/control/ui_send_to_agent_test.go`、`i18n_*.js`（`agent.run.*`）
 
 **Steps:**
-- [ ] RED：`TestInvokeWithoutAgentsIs404AndSpawnsNothing`、`TestInvokePassesPathsAsSeparateArgv`、`TestInvokeIsAudited`、UI：`TestRunButtonOnlyWithEndpoints`、`TestRunConfirmsWithConfirmTrue`、`TestCopyStillMakesNoWrite`
-- [ ] GREEN：`./gow test ./internal/control/ ./internal/trigger/ -count=1 && node --test internal/control/web/_tests/*.test.mjs`
-- [ ] 提交：`feat(control,ui): run a configured agent on a file from the send-to-agent panel`
+- [x] RED：`TestInvokeWithoutAgentsIs404AndSpawnsNothing`、`TestInvokePassesPathsAsSeparateArgv`、`TestInvokeIsAudited`、UI：`TestRunButtonOnlyWithEndpoints`、`TestRunConfirmsWithConfirmTrue`、`TestCopyStillMakesNoWrite`
+- [x] GREEN：`./gow test ./internal/control/ ./internal/trigger/ -count=1 && node --test internal/control/web/_tests/*.test.mjs`
+- [x] 提交：`feat(control,ui): run a configured agent on a file from the send-to-agent panel`
 
 ## Task E6：线 E 收口 — chaos、e2e、文档、TODO
 
 - Create: `test/chaos/trigger_chaos_test.go`（`TestDeliveryRunningAtCrashIsRedelivered`：running 时关闭引擎（模拟 kill -9：不走 Done）→ 重启 `attempts=2`）
 - Create: `test/e2e/trigger_e2e_test.go`（`TestKernelWriteFiresAnExecTrigger`：真实挂载下 `echo > mnt/inbox/a.txt` → exec 规则（`sh` 不用；用 `/bin/cat` 写到 tmp 文件的 argv）在 5 s 内投递 done 且 argv 含虚拟路径；`TestMCPWriteDoesNotFireWhenAPIIsExcluded`；`CLOUDFS_BROWSER=1` 下 `#/triggers` 可达且投递行渲染）
 - Modify: `TODO.md`（T-41、T-42 `[x]`；本线 `UNVERIFIED`：Windows 下 `Setpgid` 等价物）、`docs/ui-plan.md`（F8、F9-3/F9-4 打勾）、`docs/agent-roadmap.md` §7.2、`README.md`（`triggers`/`agents` 配置示例 + webhook 校验代码）、`docs/mcp.md`（至少一次投递与溢出 rescan 的限制）
-- [ ] GREEN：`./gow test ./test/chaos/ -run Trigger -race -count=1 && ./gow test ./test/e2e/ -run 'Trigger' -count=1 -v && CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestTriggersScreen' -count=1 -v`
-- [ ] 提交：`docs: close T-41 and T-42 with their chaos and e2e evidence`
+- [x] GREEN：`./gow test ./test/chaos/ -run Trigger -race -count=1 && ./gow test ./test/e2e/ -run 'Trigger' -count=1 -v && CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestTriggersScreen' -count=1 -v`
+- [x] 提交：`docs: close T-41 and T-42 with their chaos and e2e evidence`
 
 ---
 
