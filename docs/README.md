@@ -25,6 +25,7 @@
 - [实施记录](IMPLEMENTATION.md) — 逐条实现进展。
 - [界面计划](ui-plan.md) — 控制台的界面结构。
 - [Agent 工作底座路线图](agent-roadmap.md) — 规划中：会话与交付箱、内容索引与记忆库、作用域/令牌/回滚/审计、触发器，以及各自的控制台界面。
+- [Agent-first 设计](agent-first-design.md) — 规划中：把底座能力送到 agent 手边——运行时指引、token 预算、来源与读热度、生命周期 hooks、分享面与多人记忆；含 BearDrive 与业界同类产品的对比。
 - 子系统笔记：[复制准备](copy-preparation.md)、[目录刷新](directory-refresh.md)、
   [FUSE passthrough](fuse-passthrough.md)、[SFTP 目录流](sftp-directory-stream.md)、
   [上传清理](upload-cleanup.md)、[VFS 变更](vfs-changes.md)、[基准](bench.md)。
