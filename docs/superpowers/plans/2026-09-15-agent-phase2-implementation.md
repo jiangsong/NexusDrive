@@ -216,9 +216,9 @@ test/perf/embed_perf_test.go（D1）
 - Tests: `internal/embed/*_test.go`（`httptest.Server` 假端点）、`internal/config/embedding_test.go`
 
 **Steps:**
-- [ ] RED：`TestOpenAIBatchesAndSendsDimensions`、`TestOllamaUsesTheBatchEndpoint`、`TestDimIsProbedOnceAndPinned`、`TestBreakerOpensAfterFiveServerErrors`（60 s 内 0 请求，`Health().Healthy=false`）、`TestThrottledHonoursRetryAfter`、`TestRemoteEndpointNeedsAllowRemote`（`config.Parse` 报错）、`TestAPIKeyMustBeAReference`
-- [ ] GREEN：`./gow test ./internal/embed/ ./internal/config/ -count=1 -race`
-- [ ] 提交：`feat(embed): embedding client for openai-compatible and ollama endpoints with breaker and privacy gate`
+- [x] RED：`TestOpenAIBatchesAndSendsDimensions`、`TestOllamaUsesTheBatchEndpoint`、`TestDimIsProbedOnceAndPinned`、`TestBreakerOpensAfterFiveServerErrors`（60 s 内 0 请求，`Health().Healthy=false`）、`TestThrottledHonoursRetryAfter`、`TestRemoteEndpointNeedsAllowRemote`（`config.Parse` 报错）、`TestAPIKeyMustBeAReference`
+- [x] GREEN：`./gow test ./internal/embed/ ./internal/config/ -count=1 -race`
+- [x] 提交：`feat(embed): embedding client for openai-compatible and ollama endpoints with breaker and privacy gate`
 
 ## Task D1：index.db v2 — 向量、嵌入 worker、hybrid 检索、perf 基线
 
@@ -231,9 +231,9 @@ test/perf/embed_perf_test.go（D1）
 - Create: `test/perf/embed_perf_test.go`（`TestEmbedCallsEqualCeilChunksOverBatch`、重跑 0 次）
 
 **Steps:**
-- [ ] RED：`TestSchemaV2AddsVectorTables`、`TestHybridRRFOrdersByFusedRank`（构造 BM25 与 cosine 结论相反的数据，断言 RRF 顺序）、`TestVectorModeNeedsAnEmbedder`（provider=none → `mode_used: keyword`、`degraded` 非空、无错误）、`TestChangingTheModelReembedsEverything`（`vectors` 清空、`embed_pending == chunks`、`chunks_fts` 行数不变）、`TestEmbedWorkerSleepsWhileTheBreakerIsOpen`、`TestMaxChunksIsAHardCap`
-- [ ] GREEN：`./gow test ./internal/index/ -count=1 -race && ./gow test ./test/perf/ -run Embed -count=1`
-- [ ] 提交：`feat(index): int8 vectors, an embedding worker and RRF hybrid search that degrade to keyword honestly`
+- [x] RED：`TestSchemaV2AddsVectorTables`、`TestHybridRRFOrdersByFusedRank`（构造 BM25 与 cosine 结论相反的数据，断言 RRF 顺序）、`TestVectorModeNeedsAnEmbedder`（provider=none → `mode_used: keyword`、`degraded` 非空、无错误）、`TestChangingTheModelReembedsEverything`（`vectors` 清空、`embed_pending == chunks`、`chunks_fts` 行数不变）、`TestEmbedWorkerSleepsWhileTheBreakerIsOpen`、`TestMaxChunksIsAHardCap`
+- [x] GREEN：`./gow test ./internal/index/ -count=1 -race && ./gow test ./test/perf/ -run Embed -count=1`
+- [x] 提交：`feat(index): int8 vectors, an embedding worker and RRF hybrid search that degrade to keyword honestly`
 
 ## Task D2：控制面 `/index/embedding`、`check`、doctor、CLI `index auth|embedding`
 
@@ -244,9 +244,9 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `internal/mcpsrv/index_tools.go`（`index_status.embedding`、`semantic_search.mode` 透传，`TestSemanticSearchReportsModeUsed`）
 
 **Steps:**
-- [ ] RED：`TestEmbeddingStatusNeverLeaksTheKey`（响应无 `api_key` 值、无 `Authorization`）、`TestEmbeddingCheckCallsTheEndpointOnce`、`TestDoctorFlagsDimensionMismatch`、`TestIndexAuthWritesAReference`
-- [ ] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ ./internal/mcpsrv/ -count=1`
-- [ ] 提交：`feat(control,cli): embedding endpoint status, a one-shot check and cloudfs index auth`
+- [x] RED：`TestEmbeddingStatusNeverLeaksTheKey`（响应无 `api_key` 值、无 `Authorization`）、`TestEmbeddingCheckCallsTheEndpointOnce`、`TestDoctorFlagsDimensionMismatch`、`TestIndexAuthWritesAReference`
+- [x] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ ./internal/mcpsrv/ -count=1`
+- [x] 提交：`feat(control,cli): embedding endpoint status, a one-shot check and cloudfs index auth`
 
 ## Task D3：UI F6 — 嵌入面板、远端横幅、语义模式
 
@@ -257,9 +257,9 @@ test/perf/embed_perf_test.go（D1）
 - Create: `internal/control/ui_embedding_test.go`
 
 **Steps:**
-- [ ] RED：`TestRemoteBannerHasNoCloseButton`、`TestEmbeddingPanelHasNoKeyInput`（源码无 `input` 用于 key、无 `api_key` 字段名）、`TestEndpointCheckOnlyOnClick`、`TestSemanticModeShowsDegradedNote`
-- [ ] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestEmbedding|TestSemantic|TestContentSearch' -count=1`
-- [ ] 提交：`feat(ui): embedding endpoint panel with the remote-data banner and a semantic search mode`
+- [x] RED：`TestRemoteBannerHasNoCloseButton`、`TestEmbeddingPanelHasNoKeyInput`（源码无 `input` 用于 key、无 `api_key` 字段名）、`TestEndpointCheckOnlyOnClick`、`TestSemanticModeShowsDegradedNote`
+- [x] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestEmbedding|TestSemantic|TestContentSearch' -count=1`
+- [x] 提交：`feat(ui): embedding endpoint panel with the remote-data banner and a semantic search mode`
 
 ## Task D4：T-40 后端 — `internal/memory` 与 5 个 MCP 工具
 
@@ -271,9 +271,9 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `internal/daemon/daemon.go`（`d.Memory`）、`cmd/cloudfs/main.go`（两处 `Options.Memory`）
 
 **Steps:**
-- [ ] RED：`TestPutCreatesTheFactAndOneIndexLine`（重复 put 不增行）、`TestStaleExpectedVersionIsRefused`、`TestGetListsConflictCopies`（fakeprovider 注入版本冲突 → 副本出现在 `conflicts`）、`TestBudgetsAreEnforcedWithUsage`、`TestRootOutsideScopeFailsEveryToolTheSameWay`、`TestReadOnlyAllowsReadsOnly`、`TestMemorySearchFindsAFreshFact`（≤ 3 s）、`TestAgentNameIsNormalised`
-- [ ] GREEN：`./gow test ./internal/memory/ ./internal/mcpsrv/ ./internal/config/ ./internal/index/ ./internal/daemon/ -count=1 -race`
-- [ ] 提交：`feat(memory,mcpsrv): file-backed agent memory with versioned puts, conflict listing and scoped search`
+- [x] RED：`TestPutCreatesTheFactAndOneIndexLine`（重复 put 不增行）、`TestStaleExpectedVersionIsRefused`、`TestGetListsConflictCopies`（fakeprovider 注入版本冲突 → 副本出现在 `conflicts`）、`TestBudgetsAreEnforcedWithUsage`、`TestRootOutsideScopeFailsEveryToolTheSameWay`、`TestReadOnlyAllowsReadsOnly`、`TestMemorySearchFindsAFreshFact`（≤ 3 s）、`TestAgentNameIsNormalised`
+- [x] GREEN：`./gow test ./internal/memory/ ./internal/mcpsrv/ ./internal/config/ ./internal/index/ ./internal/daemon/ -count=1 -race`
+- [x] 提交：`feat(memory,mcpsrv): file-backed agent memory with versioned puts, conflict listing and scoped search`
 
 ## Task D5：记忆库控制面路由与 CLI
 
@@ -283,9 +283,9 @@ test/perf/embed_perf_test.go（D1）
 - Tests: `internal/control/memory_test.go`、`cmd/cloudfs/memory_test.go`
 
 **Steps:**
-- [ ] RED：`TestMemoryPutRequiresExpectedVersionWhenGiven`、`TestMemoryDeleteNeedsConfirm`、`TestMemoryRoutesRefuseBadNames`（`..`、`/`、大写）、`TestEveryRouteIsGuarded` 自动覆盖
-- [ ] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ -count=1`
-- [ ] 提交：`feat(control,cli): memory routes and the cloudfs memory command on the same store as the MCP tools`
+- [x] RED：`TestMemoryPutRequiresExpectedVersionWhenGiven`、`TestMemoryDeleteNeedsConfirm`、`TestMemoryRoutesRefuseBadNames`（`..`、`/`、大写）、`TestEveryRouteIsGuarded` 自动覆盖
+- [x] GREEN：`./gow test ./internal/control/ ./cmd/cloudfs/ -count=1`
+- [x] 提交：`feat(control,cli): memory routes and the cloudfs memory command on the same store as the MCP tools`
 
 ## Task D6：UI F7 — 记忆标签、编辑浮层、冲突合并浮层
 
@@ -297,16 +297,16 @@ test/perf/embed_perf_test.go（D1）
 - Create: `internal/control/ui_memory_test.go`
 
 **Steps:**
-- [ ] RED：`TestMemorySaveCarriesExpectedVersion`、`TestMemoryDeleteConfirms`、`TestConflictActionsHitTheirRoutes`（三动作各自路由）、`TestMemoryBodyIsInsertedAsText`、`TestMemoryTabExplainsMissingRoot`；`memory_conflicts.test.mjs` 配对与不配对样例
-- [ ] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestMemory|TestConflict' -count=1`
-- [ ] 提交：`feat(ui): memory tab with versioned editing and a conflict merge overlay`
+- [x] RED：`TestMemorySaveCarriesExpectedVersion`、`TestMemoryDeleteConfirms`、`TestConflictActionsHitTheirRoutes`（三动作各自路由）、`TestMemoryBodyIsInsertedAsText`、`TestMemoryTabExplainsMissingRoot`；`memory_conflicts.test.mjs` 配对与不配对样例
+- [x] GREEN：`node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestWeb|TestBrowserModule|TestMemory|TestConflict' -count=1`
+- [x] 提交：`feat(ui): memory tab with versioned editing and a conflict merge overlay`
 
 ## Task D7：线 D 收口 — e2e、文档、TODO
 
 - Create: `test/e2e/memory_e2e_test.go`（`TestMemoryPutIsVisibleInTheMountAndSearchable`：`memory_put` → 终端 `cat facts/<name>.md` 与 `MEMORY.md` 一行 → 3 s 内 `memory_search` 命中；`TestHybridSearchWithAFakeEmbedder`：`withIndex` + `embed.Fake` → `mode_used: hybrid`）
 - Modify: `TODO.md`（T-39、T-40 `[x]`：完成/验收证明/遗留；`UNVERIFIED` 计数——本线新增：openai 真实端点 `dimensions` 行为、ollama 批量接口返回顺序）、`docs/ui-plan.md`（F6、F7 打勾）、`docs/mcp.md`（工具表加 5 个 `memory_*`、`semantic_search.mode` 说明与隐私一段）、`docs/agent-roadmap.md` §7.2 状态、`README.md`（`index.embedding` 与 `memory` 配置示例）
-- [ ] GREEN：`./gow test ./test/e2e/ -run 'Memory|Hybrid' -count=1 -v && ./gow test ./test/perf/ -count=1`
-- [ ] 提交：`docs: close T-39 and T-40 with their e2e evidence`
+- [x] GREEN：`./gow test ./test/e2e/ -run 'Memory|Hybrid' -count=1 -v && ./gow test ./test/perf/ -count=1`
+- [x] 提交：`docs: close T-39 and T-40 with their e2e evidence`
 
 ---
 

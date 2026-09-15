@@ -1010,8 +1010,8 @@ func verify(secret []byte, r *http.Request, body []byte, now time.Time) bool {
 |---|---|---|---|---|
 | 1 | T-43 核实 stdio 与 mount 并存行为 | 无；结论决定 stdio→HTTP 桥是否提前 | F10 | **验证与栅栏已交付，条目保持开放**：e2e `TestStdioBesideMountRefusesWritesCleanly`（并存下 stdio 写一律在碰 meta/journal 前被拒）、doctor `agent_stdio` warn、接入面板横幅、F10 全勾；结论是**桥提前到三期首位**（§4.5、§7.3） |
 | 2 | T-38 快照与回滚 | T-34、T-43 | F5 | **完成**（线 C：0bfea3d 后端、cfe49b6 界面、收口提交 chaos/e2e）：`session_ops` + 前像 + 逆序回滚 + dry_run + 冲突 + 保留期 GC；MCP/控制面/CLI 三入口；F5 全勾；证据见 TODO.md T-38"验收证明"。顺带修了 fusefs 失效通知用 VFS ino 当内核 nodeid 的错位（`kernel_nodes.go`） |
-| 3 | T-39 嵌入与 hybrid | T-37 | F6 | 线 D |
-| 4 | T-40 记忆库 | T-37（keyword 即可先上），T-39 可选 | F7 | 线 D |
+| 3 | T-39 嵌入与 hybrid | T-37 | F6 | **已实现（2026-09-15，线 D）**：`internal/embed`（openai / ollama / fake，限流 + breaker + 远端门）、index.db v2 `vectors` + `embed_pending`、嵌入 worker、RRF hybrid 诚实降级、`/index/embedding` + `check`、doctor、`cloudfs index auth |
+| 4 | T-40 记忆库 | T-37（keyword 即可先上），T-39 可选 | F7 | **已实现（2026-09-15，线 D）**：`internal/memory` 一份实现供 5 个 `memory_*` 工具、`/memory/*` 路由与 `cloudfs memory` 共用，内置索引规则跟随 `memory.root`，F7 全勾；顺带修了冲突输家节点被列举一直保护的 VFS 缺口；证据见 TODO.md T-40"验收证明"，e2e `TestMemoryPutIsVisibleInTheMountAndSearchable`、浏览器 `TestMemoryTabInTheBrowser` |
 | 5 | T-41 触发器 | 无（vfs 字段 + 引擎） | F8 | **完成**（线 E，TODO.md 已关）：chaos `TestDeliveryRunningAtCrashIsRedelivered`/`TestStormUnderOverflowDeliversOneRescan`，e2e `TestKernelWriteFiresAnExecTrigger`/`TestMCPWriteDoesNotFireWhenAPIIsExcluded`/`TestTriggersScreenInTheBrowser` |
 | 6 | T-42 发送给 Agent（运行） | T-41 exec 执行器 | F9 | **完成**（线 E，TODO.md 已关）：`/agent/endpoints`、`/agent/invoke`、运行按钮 |
 

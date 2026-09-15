@@ -346,24 +346,24 @@ F5–F10 属二期。
 - [x] **F5-6** 会话表状态新增"已回滚"、行内快捷"回滚"；检查器"被 Agent 修改 · <client> · <时间>"（`GET /sessions?path=`）（C2：`agents_sessions.js`、`agent_touch.js` + `main.js` 一行接线，`TestInspectorShowsAgentTouch`）。
 - [x] **F5-7** `ui_rollback_test.go`：先 `dry_run: true` 后 `confirm: true` 的请求顺序；检查器标记调用 `/sessions?path=`（C2，六个用例；C3 的 e2e 证据见 TODO.md T-38"验收证明"）。
 
-**F6 —— 嵌入端点面板 + 远端横幅 + 语义模式（T-39 · 二期）**
+**F6 —— 嵌入端点面板 + 远端横幅 + 语义模式（T-39 · 二期，2026-09-15 完成）**
 
-- [ ] **F6-1** `screens/index.js` 嵌入端点面板（`GET /index/embedding`）：provider / 模型 / 维度 / 地址、健康点 + 最后错误 + 熔断恢复时间、已嵌入 / 待嵌入、本月字符数与标明"估算"的费用。
-- [ ] **F6-2** `remote=true` 时黄色横幅"文件内容会发送到 <host>"常驻，无关闭按钮。
-- [ ] **F6-3** "测试端点"：说明"会产生一次调用"后才 `POST /index/embedding/check`，仅点击时请求。
-- [ ] **F6-4** 未配置 `api_key`：显示 `cloudfs index auth` + `copyBtn`，无输入框、无秘密字段名；面板底部"在配置文件中修改"。
-- [ ] **F6-5** 概况卡加"向量 N / max_chunks"；主窗口搜索切换扩为"文件名 / 关键词 / 语义"，降级时显示"已降级为关键词"。
-- [ ] **F6-6** `ui_embedding_test.go`：横幅条件渲染且无关闭按钮、无 key 输入、测试端点仅点击请求、降级说明行。
+- [x] **F6-1** `screens/index.js` 嵌入端点面板（`GET /index/embedding`）：provider / 模型 / 维度 / 地址、健康点 + 最后错误 + 熔断恢复时间、已嵌入 / 待嵌入、本月字符数与标明"估算"的费用。
+- [x] **F6-2** `remote=true` 时黄色横幅"文件内容会发送到 <host>"常驻，无关闭按钮。
+- [x] **F6-3** "测试端点"：说明"会产生一次调用"后才 `POST /index/embedding/check`，仅点击时请求。
+- [x] **F6-4** 未配置 `api_key`：显示 `cloudfs index auth` + `copyBtn`，无输入框、无秘密字段名；面板底部"在配置文件中修改"。
+- [x] **F6-5** 概况卡加"向量 N / max_chunks"；主窗口搜索切换扩为"文件名 / 关键词 / 语义"，降级时显示"已降级为关键词"。
+- [x] **F6-6** `ui_embedding_test.go`：横幅条件渲染且无关闭按钮、无 key 输入、测试端点仅点击请求、降级说明行。
 
-**F7 —— 记忆标签 + 编辑浮层 + 冲突合并浮层（T-40 · 二期）**
+**F7 —— 记忆标签 + 编辑浮层 + 冲突合并浮层（T-40 · 二期，2026-09-15 完成）**
 
-- [ ] **F7-1** `screens/agents.js` 记忆标签：左侧 agent 列表（`GET /memory/agents`，条数与占用 / 上限）；右侧表格 名称 / 描述 / 类型 / 更新时间 / 冲突标记（红点+"有冲突副本"）；顶部记忆搜索框。
-- [ ] **F7-2** 记忆编辑浮层：frontmatter（名称只读、描述、类型）+ 正文 `textarea`（按文本填充）+ 字节计数 / 上限；`PUT /memory/{agent}/{name}` 带 `expected_version`，版本冲突提示"已在其他设备修改"并提供"重新载入"。
-- [ ] **F7-3** `memory_conflicts.js`（同目录文件名 → 本体与副本配对，只按前缀与同目录）+ `_tests/memory_conflicts.test.mjs`。
-- [ ] **F7-4** 冲突合并浮层：左右只读并排；"保留本体并删除副本"（`POST /fs/delete`，path 取自 `conflicts[]`，`confirmDelete` + `confirm: true`）、"用副本覆盖本体"（`GET /fs/preview` 读副本 → `PUT` 带 `expected_version` → 删副本）、"手动合并"（编辑浮层预填两段）。
-- [ ] **F7-5** "新建记忆"`openForm`：agent、名称（前端 `^[a-z0-9][a-z0-9-]{0,63}$` 校验）、描述、类型；删除记忆 `confirmDelete` 键入名称 → `DELETE /memory/{agent}/{name}` 带 `confirm: true`。
-- [ ] **F7-6** 未配置 `memory.root` 或不在 allow 内：标签页显示说明与配置示例。
-- [ ] **F7-7** i18n 键 `memory.*`；`ui_memory_test.go`：保存带 `expected_version`、删除带 `confirm: true`、冲突浮层三动作各自路由、正文按文本插入。
+- [x] **F7-1** `screens/agents.js` 记忆标签：左侧 agent 列表（`GET /memory/agents`，条数与占用 / 上限）；右侧表格 名称 / 描述 / 类型 / 更新时间 / 冲突标记（红点+"有冲突副本"）；顶部记忆搜索框。
+- [x] **F7-2** 记忆编辑浮层：frontmatter（名称只读、描述、类型）+ 正文 `textarea`（按文本填充）+ 字节计数 / 上限；`PUT /memory/{agent}/{name}` 带 `expected_version`，版本冲突提示"已在其他设备修改"并提供"重新载入"。
+- [x] **F7-3** `memory_conflicts.js`（同目录文件名 → 本体与副本配对，只按前缀与同目录）+ `_tests/memory_conflicts.test.mjs`。
+- [x] **F7-4** 冲突合并浮层：左右只读并排；"保留本体并删除副本"（`POST /fs/delete`，path 取自 `conflicts[]`，`confirmDelete` + `confirm: true`）、"用副本覆盖本体"（`GET /fs/preview` 读副本 → `PUT` 带 `expected_version` → 删副本）、"手动合并"（编辑浮层预填两段）。
+- [x] **F7-5** "新建记忆"`openForm`：agent、名称（前端 `^[a-z0-9][a-z0-9-]{0,63}$` 校验）、描述、类型；删除记忆 `confirmDelete` 键入名称 → `DELETE /memory/{agent}/{name}` 带 `confirm: true`。
+- [x] **F7-6** 未配置 `memory.root` 或不在 allow 内：标签页显示说明与配置示例。
+- [x] **F7-7** i18n 键 `memory.*`；`ui_memory_test.go`：保存带 `expected_version`、删除带 `confirm: true`、冲突浮层三动作各自路由、正文按文本插入。
 
 **F8 —— `#/triggers` 屏 + 投递详情 + 测试投递（T-41 · 二期，2026-09-15 完成）**
 

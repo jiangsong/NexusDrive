@@ -177,6 +177,20 @@ index:                   # 内容索引（PDF / Office / 文本抽取 + 全文�
   max_text_bytes: 2MiB   # 单个文件最多抽多少文本
   max_total_text: 4GiB   # 整个索引的文本上限，到了就暂停并在 doctor 里提示
   fetch_budget: 2GiB/h   # 规则每小时最多下载多少；Caps.Tier=unofficial 的网盘自动减半
+  max_chunks: 200000     # 最多嵌入多少分块；超出的分块仍可关键词检索
+  embedding:             # 语义检索的嵌入端点；默认 provider: none，没有任何内容离开本机
+    provider: ollama     # none | openai（任何 /embeddings 兼容服务）| ollama（/api/embed）
+    base_url: http://127.0.0.1:11434   # 省略时 openai 为 https://api.openai.com/v1，ollama 为本机 11434
+    model: nomic-embed-text
+    # api_key: keyring:index.embedding   # 只接受 keyring:/secretfile: 引用，由 `cloudfs index auth` 写入；YAML 里写明文会被拒绝
+    # dimensions: 512    # openai 的 dimensions 参数（默认 512）；ollama 没有这个参数，保持 0
+    # allow_remote: true # 端点不在回环 / 内网 / .local 时必须显式确认：每个被索引的分块都会发到那里
+    batch: 64            # 每次请求带多少段文本；concurrency 2、qps 4、timeout 30s、quantize int8 是默认值
+
+memory:                  # Agent 记忆库：<root>/memory/<agent>/{MEMORY.md, facts/<name>.md} 的普通 Markdown
+  root: /work/.agent     # 省略时取 mcp.workspace，再退到第一个 mcp.allow 前缀 + /.agent；必须在 allow 内
+  max_fact_bytes: 64KiB  # 一条记忆的上限（含 frontmatter）
+  max_agent_bytes: 32MiB # 一个 agent 的 facts/ 总量上限
 
 triggers:                # 事件触发器：文件变化 → 本机命令或签名 webhook；只在拥有存储的 mount 进程里运行
   - name: inbox-to-agent # 名字只能是 [a-z0-9-]，是投递记录、控制台与 CLI 里的标识
@@ -317,9 +331,39 @@ cloudfs index status --path /work/docs/plan.pdf   # ok / pending / failed / unco
 （按小时预算下载）覆盖的文件抽成文本，写进独立的 `<cache.dir>/index.db`；MCP 多出
 `semantic_search`、`index_status`、`index`、`unindex`、`read_extracted_text` 五个工具，控制台多出
 「索引」屏，主窗口搜索框多出"文件名 / 内容"切换，PDF 与 Office 文件在检查器里可以"查看抽取文本"。
-本期只有关键词检索（`hybrid` / `vector` 按关键词执行并标 `degraded`），不做 OCR。抽取器对 zip
-条目数、解压量与 PDF 解析都有上限，坏文件只会让自己 `failed`；抽取中断电或 `kill -9`，重启后队列续跑。
-接口与 agent 使用建议见 `docs/mcp.md`"内容索引"。
+不做 OCR。抽取器对 zip 条目数、解压量与 PDF 解析都有上限，坏文件只会让自己 `failed`；抽取中断电或
+`kill -9`，重启后队列续跑。接口与 agent 使用建议见 `docs/mcp.md`"内容索引"。
+
+### 语义检索与记忆库
+
+```sh
+cloudfs index auth --key-file ~/openai.key     # 不带参数时走隐藏提示，也可以 `cat key | cloudfs index auth`；写 keyring: 引用进配置
+cloudfs index embedding --check                # provider / 模型 / 维度 / 主机 / 健康 / 已嵌入 / 待嵌入 / 本月字符；--check 真的调一次
+cloudfs index search 复盘 季度目标 --mode hybrid   # mode_used 说明真正跑的是 hybrid 还是降级后的 keyword
+cloudfs memory agents                          # 谁有记忆、各占多少
+cloudfs memory put style --agent claude-code --description "代码风格" <<'EOF'
+Go 代码统一 gofmt，注释用英文。
+EOF
+cloudfs memory get style --agent claude-code   # 正文原样输出
+cloudfs memory search gofmt --agent claude-code
+```
+
+**语义检索**：配置 `index.embedding` 后，索引 worker 把每个分块发到端点换成向量（int8 存进 `index.db` 的
+`vectors` 表），`semantic_search` / `cloudfs index search` / 界面"语义"模式默认按 `hybrid`（bm25 与向量 cosine 做
+RRF 融合）检索，同义与跨语言表达也能命中。**默认 `provider: none`，什么都不外发**；一旦配了端点，每个被索引的
+分块与每条语义查询都会发到 `base_url` 所指主机——端点不在本机 / 内网时必须 `allow_remote: true`，控制台「索引」屏会
+常驻一条不可关闭的黄色横幅说明"文件内容会发送到 <host>"。本机 ollama 是零外发的选择。端点连续失败会熔断 60 s，
+期间以及尚未嵌入完成、换了模型还没重嵌时，检索自动按关键词执行并在 `degraded` 里说明，不报错；换 `model` 会清空
+向量并把全部分块重新排队（`chunks_fts` 不动）。`cloudfs doctor` 检查端点可达与维度一致。
+
+**记忆库**：Claude Code / Codex 这类 agent 的记忆本来是本机文件，换台机器就没了。CloudFS 把它约定成网盘上的普通
+Markdown：`<memory.root>/memory/<agent>/MEMORY.md` 是索引（每条记忆一行），`facts/<name>.md` 是正文（带
+`name / description / type / updated_at` frontmatter），`memory/shared/` 是所有 agent 共读的区域。MCP 多出
+`memory_list / get / put / delete / search` 五个工具（`put` 带 `expected_version` 做乐观并发，`get` 列出网盘留下的冲突副本
+`conflicts[]`，`search` 是限定在该 agent 目录下的 `semantic_search`，记忆树由内置索引规则自动覆盖）；控制台「Agent」屏
+的"记忆"标签能看、编辑、删除、合并冲突；`cloudfs memory` 在终端做同样的事；你也可以直接 `cat` / 编辑挂载点上的那个
+文件。跨设备同步就是网盘同步，两边同时写时输掉的一方以冲突副本形式保留在同目录。`memory.root` 必须在 `mcp.allow` 内，
+`--read-only` 的服务只读不写。
 
 ### 事件触发器与发送给 Agent
 
@@ -473,6 +517,17 @@ index auth [--key-file F] 把嵌入 API key 存进密钥库并在 index.embeddin
 triggers list | deliveries [--rule R] [--state S] [--limit N] [--cursor C] | show <id> [--json]
                           事件触发器的规则（只读）与投递记录；没有守护进程时只读 agent.db
 triggers test <rule> <path> --confirm | retry <id>   立刻投递一次 / 重排一条 dead 投递；需要运行中的守护进程
+memory agents             列出有记忆的 agent：条数、占用 / 上限、冲突副本数；需要运行中的守护进程
+memory list [--agent A] [--cursor C] [--limit N] [--json]
+                          列一个 agent 的记忆（名称 / 描述 / 类型 / 更新时间 / 冲突副本）；--agent 默认 shared
+memory get <name> [--agent A] [--json]
+                          原样打印一条记忆的正文（可管道）；--json 带 version 与 conflicts
+memory put <name> [--agent A] [--file F] [--description D] [--type T] [--append] [--expected-version V]
+                          写一条记忆，正文来自 --file 或 stdin；--expected-version 与当前版本不同则拒绝
+memory delete <name> [--agent A] --confirm
+                          删除记忆文件与 MEMORY.md 里指向它的行（远端同样删除）
+memory search <query> [--agent A] [--no-shared] [--mode keyword|hybrid|vector] [--limit N] [--json]
+                          在一个 agent 的记忆（默认加 shared）里检索
 cp <source> <dest>        复制单个文件，可跨 remote；恢复与竞争限制见 docs/copy.md
 copies list | show <id>    查询复制准备状态、检查点及关联上传；list 支持 --limit/--cursor
 copies retry|cancel <id>   重试或取消准备任务，保留内容；不能取消已交接的上传

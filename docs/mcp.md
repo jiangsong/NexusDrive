@@ -2,7 +2,7 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
-> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，关键词检索，见"[内容索引](#内容索引)"）。**二期已落地**：会话快照与回滚（`rollback_session`，见"[会话回滚](#会话回滚)"）。**仍在规划中**：嵌入与 hybrid 检索、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-39 ~ T-42）。工具表只列出已实现的工具。
+> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，见"[内容索引](#内容索引)"）。**二期已落地**：会话快照与回滚（`rollback_session`，见"[会话回滚](#会话回滚)"，T-38）、嵌入与 hybrid 检索（`semantic_search.mode`，T-39）、Agent 记忆库（`memory_*` 5 个工具，见"[记忆库](#记忆库)"，T-40）、事件触发器与"发送给 Agent"运行（见"[事件触发器](#事件触发器)"，T-41/T-42）。**仍开放**：stdio MCP 与挂载并存下的 stdio→HTTP 桥（T-43，见"[与挂载并存](#与挂载并存)"）。设计见 [Agent 工作底座路线图](agent-roadmap.md)。工具表只列出已实现的工具。
 
 ## 注册
 
@@ -125,8 +125,8 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `semantic_search` | `query`, `path?`, `top_k?`, `mode?`, `max_snippet_bytes?` | 在**已索引文件的抽取文本**里找分块：每个 hit 带 `path`、`heading`（标题路径）、`snippet`、`start_off`/`end_off`、`offset_kind`（`file` / `text`）、`score`、`stale`。只覆盖索引范围（`index.pinned` / `index.rules` / `index` 工具加的规则），不是全盘 grep；响应带 `docs`（可搜文档数）、`pending`（待抽取数）、`truncated`。**本期只有关键词检索**：`mode` 给 `hybrid` 或 `vector` 时按 `keyword` 执行并在 `degraded` 里说明（`mode_used: keyword`），嵌入是二期 T-39 |
-| `index_status` | `path?` | 不带 `path`：文档数（正常 / dirty / 失败）、分块数、待抽取队列、最近失败列表（按作用域过滤）、文本占用与 `max_total_text`、本小时下载与 `fetch_budget`、worker 进度（`paused` 为 `busy` / `risk_control` / `budget` / `text_budget` 及 `resume_at`）。带 `path`：`covered`（覆盖它的规则路径）、`rule_source`（`config` / `ui` / `tool`）、`state`（`ok` / `dirty` / `failed` / `pending` / `uncovered`）、`chunks`、`error` |
+| `semantic_search` | `query`, `path?`, `top_k?`, `mode?`, `max_snippet_bytes?` | 在**已索引文件的抽取文本**里找分块：每个 hit 带 `path`、`heading`（标题路径）、`snippet`、`start_off`/`end_off`、`offset_kind`（`file` / `text`）、`score`、`stale`。只覆盖索引范围（`index.pinned` / `index.rules` / `index` 工具加的规则），不是全盘 grep；响应带 `docs`（可搜文档数）、`pending`（待抽取数）、`truncated`。`mode` 取 `keyword`（FTS bm25，查询词全部要出现）/ `hybrid`（bm25 top-2k 与向量 cosine top-2k 做 RRF k=60，同义与跨语言表达也能命中）/ `vector`（只按 cosine）；省略时配置了嵌入端点就是 `hybrid`，否则 `keyword`。`mode_used` 只报真正跑的模式：没有配置 `index.embedding`、端点不健康 / 熔断中、尚未嵌入任何 chunk、向量是另一个模型嵌的、查询本身嵌入失败——这些情况一律按 `keyword` 执行并在 `degraded` 里说明原因，不报错 |
+| `index_status` | `path?` | 不带 `path`：文档数（正常 / dirty / 失败）、分块数、待抽取队列、最近失败列表（按作用域过滤）、文本占用与 `max_total_text`、本小时下载与 `fetch_budget`、worker 进度（`paused` 为 `busy` / `risk_control` / `budget` / `text_budget` 及 `resume_at`）、`vectors` / `max_chunks` 与 `embedding{provider, model, dim, remote, host, healthy, last_error, breaker_open_until, embedded, pending, chars_this_month, capped}`。带 `path`：`covered`（覆盖它的规则路径）、`rule_source`（`config` / `ui` / `tool`）、`state`（`ok` / `dirty` / `failed` / `pending` / `uncovered`）、`chunks`、`error` |
 | `index` | `path`, `include?`, `max_file_size?` | 加一条运行时规则（来源 `tool`）：文件或目录，`include` 是相对 `path` 的 glob（默认文本、代码与 Office 集合），匹配文件按小时预算下载并后台抽取。只需读权限；返回 `pending` |
 | `unindex` | `path` | 移除 `index` 工具或界面加的规则并丢弃无其它规则覆盖的文本；配置文件里的规则只能改配置（`ErrConfigRule`） |
 | `read_extracted_text` | `path`, `offset?`, `max_bytes?` | 按字节偏移分页读抽取文本，返回 `text`、`next_offset`、`eof`、`kind`。PDF / docx / xlsx / pptx 就是这样变成可读的；纯文本文件的偏移就是文件偏移。未索引返回 `this file is not indexed; call index_status to see coverage` |
@@ -136,6 +136,29 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 只读 `/work` 的令牌永远看不到 `/private` 下的分块（`TestSearchNeverLeaksOutsideRoots`、
 `TestSemanticSearchRespectsTokenScope`）。目录改名后 hit 路径立即是新路径（查询时按 `(remote, remote_id)`
 回到当前树）；`stale: true` 表示索引的是旧版本，文件已经在挂载里变了、抽取还没跟上。
+
+**隐私**：`index.embedding.provider` 为 `none`（默认）时没有任何内容离开本机。一旦配置了端点，**每个被索引
+的 chunk 文本与每条 `hybrid` / `vector` 查询都会发送到 `base_url` 所指的主机**；端点不在回环 / RFC1918 / link-local /
+`.local` 时配置必须显式 `allow_remote: true` 才能通过校验，控制台「索引」屏常驻黄色横幅"文件内容会发送到 <host>"
+且不可关闭，`index_status.embedding.remote` 与 `host` 也如实报告。`api_key` 只接受 `keyring:` / `secretfile:` 引用
+（`cloudfs index auth` 写入），任何响应与状态都不会带出 key 值。本机 ollama 是零外发的选项。
+
+### 记忆库
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `memory_list` | `agent?`, `cursor?`, `limit?` | 列出 `<memory.root>/memory/<agent>/facts/*.md`：每条带 `name`、`path`、`size`、`meta{name, description, type, updated_at}`（frontmatter）与 `conflicts[]`（同目录里以该名字开头、又不是合法 fact 文件的兄弟——网盘生成的冲突副本）。`agent` 省略 = 调用方自己（HTTP 令牌名或 stdio 的 client name 规范化为 `[a-z0-9-]`，`cloudfs mcp --agent` 覆盖）；`shared` 是所有 agent 共读的区域 |
+| `memory_get` | `name`, `agent?` | 读一条：`content`（frontmatter 之下的正文）、`version`（文件字节的内容哈希，不是网盘版本）、`conflicts[]` |
+| `memory_put` | `name`, `content`, `agent?`, `mode?`, `expected_version?`, `description?`, `type?` | 写一条：`name` 须匹配 `^[a-z0-9][a-z0-9-]{0,63}$`；`mode` 为 `replace`（默认）或 `append`；带 `expected_version` 时与当前 `version` 不同就拒绝且内容不变（`memory changed elsewhere; re-read`，消息里给当前版本）；单条超过 `memory.max_fact_bytes`（64 KiB，含 frontmatter）或该 agent 超过 `memory.max_agent_bytes`（32 MiB）拒绝并给出当前用量；`description` / `type` 省略时保留文件里的。写 `facts/<name>.md` 后把 `MEMORY.md` 里唯一指向它的行替换、否则追加。返回 `version` 与 `state`（`local` / `synced`） |
+| `memory_delete` | `name`, `agent?`, `confirm` | 删除 fact 文件与 `MEMORY.md` 里指向它的行，`confirm` 必须为 true；冲突副本不动，由 agent 自己读过后删 |
+| `memory_search` | `query`, `agent?`, `include_shared?`, `top_k?`, `mode?` | 限定在 `memory/<agent>`（默认加 `memory/shared`）的 `semantic_search`：每个 hit 多带 `agent` 与 `name`，`mode` / `mode_used` / `degraded` 同上。记忆树由内置索引规则（`index_status` 里 `rule_source: builtin`）自动索引 `**/*.md`，`unindex` 不能删它；`index.enabled: false` 时返回 `memory_search needs the content index, but index.enabled: false` |
+
+五个工具只在配置了 `memory.root`（默认 `mcp.workspace`，再退到第一个 `mcp.allow` 前缀 + `/.agent`）时有意义：
+root 为空或不在调用方作用域内，五个工具都返回同一句配置说明；`--read-only` 或非 owner 的 stdio 进程下 `get` /
+`list` / `search` 可用、`put` / `delete` 拒绝。每个涉及的路径（agent 目录、fact 文件、`MEMORY.md`）都过 `checkPath`
+并进审计。记忆就是网盘上的普通 Markdown，终端 `cat` / 编辑同一个文件，控制台「Agent」屏记忆标签与
+`cloudfs memory` 也走同一实现；跨设备同步交给网盘，两边同时写时输掉的一方以网盘的冲突副本形式留在同目录，
+`memory_get.conflicts` 把它列出来。`skills/<name>/SKILL.md` 只约定位置，没有工具。
 
 ### 复制任务管理
 
@@ -458,7 +481,9 @@ list|deliveries|show|test|retry`，控制面 `GET /triggers`、`GET /triggers/de
 
 **先 `pin` 再做内容搜索，但它不是完整 grep。** `content` 只检查完整缓存文件的前 `MaxBytes` 字节，并有最多 `4 × max_results` 个已授权名称候选的预算。预算耗尽时返回 `truncated` 和说明；未缓存文件会跳过并提示先 `pin`。文件后半部分、候选预算外或尚未列举的文件可能不被检查。需要完整内容检索时应逐文件分页读取；当前搜索没有跨请求内容快照。
 
-**`semantic_search` 只搜索引范围内的文本，先看 `index_status`。** 空结果不等于"没有这个内容"：文件可能不在任何规则或 pin 之下（`index_status{path}` 的 `state: uncovered`），或还在队列里（`pending`）。范围之外先用 `index{path}` 加规则，再等 `index_status` 报 `ok`；不要为了一次查询把整棵树加进索引——规则会按小时预算真的下载文件。命中的 `offset_kind=file` 时 `start_off` 可直接传给 `read_text` 的 `offset` 读原文；`offset_kind=text`（PDF / Office）时用 `read_extracted_text` 分页，原文件里没有对应偏移。`degraded` 非空表示本期只有关键词检索，`hybrid` / `vector` 会按关键词执行；查询词全部都要出现，同义表达不会命中。`Caps.Tier=unofficial` 的网盘（如 quark）不建议配 `rules`，用 `index.pinned` 只处理已经完整缓存的文件，零额外下载。不做 OCR：扫描版 PDF 与图片没有文本。中文 PDF 的抽取质量在真实样本上尚未验证（`UNVERIFIED`），命中不到时用 `read_extracted_text` 看抽出来的是不是乱码。
+**`semantic_search` 只搜索引范围内的文本，先看 `index_status`。** 空结果不等于"没有这个内容"：文件可能不在任何规则或 pin 之下（`index_status{path}` 的 `state: uncovered`），或还在队列里（`pending`）。范围之外先用 `index{path}` 加规则，再等 `index_status` 报 `ok`；不要为了一次查询把整棵树加进索引——规则会按小时预算真的下载文件。命中的 `offset_kind=file` 时 `start_off` 可直接传给 `read_text` 的 `offset` 读原文；`offset_kind=text`（PDF / Office）时用 `read_extracted_text` 分页，原文件里没有对应偏移。`degraded` 非空表示这次按关键词执行了（没配嵌入端点、端点不健康或还没嵌入完），此时查询词全部都要出现、同义表达不会命中；`mode_used: hybrid` 才是语义检索。`Caps.Tier=unofficial` 的网盘（如 quark）不建议配 `rules`，用 `index.pinned` 只处理已经完整缓存的文件，零额外下载。不做 OCR：扫描版 PDF 与图片没有文本。中文 PDF 的抽取质量在真实样本上尚未验证（`UNVERIFIED`），命中不到时用 `read_extracted_text` 看抽出来的是不是乱码。
+
+**记忆先 `memory_get` 再 `memory_put`，并带上 `expected_version`。** 记忆文件会被另一台设备上的你、或终端里的人同时改；带版本的 put 被拒时重新 `memory_get` 合并后再写，不要盲目覆盖。`conflicts[]` 非空说明网盘留下了冲突副本：用 `read_text` 读副本、合并进本体，再用 `delete` 删副本。一条记忆是一段笔记，不是文档——超过 64 KiB 的内容放普通文件，记忆里记路径。
 
 **用 `stat_many` 而不是循环 `stat`。** 一次调用检查最多 100 个路径，缺失的路径在结果里单独标注，不会中断整批。
 

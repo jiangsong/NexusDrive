@@ -1075,9 +1075,11 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 ### [ ] T-11 92 处 `UNVERIFIED` 待真实账号核对
 
 按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
-`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **97 处**（2026-09-15 二期线 E 加 1 处：`internal/trigger/exec_windows.go`
-Windows 无 `Setpgid` 的进程组终止；此前 96 处：一期加了 4 处——PDF 中文抽取质量、
-爬取器与索引 worker 的 quark 风控映射、Codex HTTP 配置键；此前为 92 处 / 31 个文件，2026-09-12 重数；
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **100 处**（2026-09-15 二期合并后重数：线 D 加了 3 处——
+`internal/embed/openai.go` 的 openai 线上格式与 `dimensions`、`internal/embed/ollama.go` 的 ollama 批量接口返回顺序、
+`internal/index/embed_worker.go` 的 64 条批是否超真实端点上限；线 E 加了 1 处——`internal/trigger/exec_windows.go` Windows 无 `Setpgid`
+的进程组终止；严格的 `grep -rn 'UNVERIFIED:' --include=*.go | wc -l` 计数见合并后的重数；此前 96 处：一期加了 4 处——PDF 中文抽取质量、
+爬取器与索引 worker 的 quark 风控映射、Codex HTTP 配置键；再此前为 92 处 / 31 个文件，2026-09-12 重数；
 其中 5 处是 T-33 配额哨兵新加的驱动映射，其余差额来自此前未计入的测试与工具文件），
 不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
 从来没有进过这张表，驱动侧的计数也偏低。下表按当前实测重列。不能在实际核验前笼统
@@ -1095,6 +1097,7 @@ Windows 无 `Setpgid` 的进程组终止；此前 96 处：一期加了 4 处—
 | baidu | 4 | `baidu.go` 4 |
 | box | 1 | content 端点的 `version` 查询参数 |
 | cloudfs-desktop | 1 | `link_windows.go` |
+| embed / index | 3 | `embed/openai.go` 1 · `embed/ollama.go` 1 · `index/embed_worker.go` 1 —— 需要真实 openai / ollama 端点，属于 T-39 遗留 |
 
 **建议顺序**：从待确认项最少的 baidu(2) 与 pan123(3) 开始，
 两者都有官方开放平台文档，核对成本最低；tianyi 与 quark 放到最后。
@@ -2108,7 +2111,60 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     `/sessions?path=`。
   - e2e：MCP 写 → 终端 `cat` 新内容 → 浏览器冒烟点回滚 → 终端 `cat` 旧内容。
 
-### [ ] T-39 嵌入与 hybrid 检索（二期）
+### [x] T-39 嵌入与 hybrid 检索（二期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 D 提交 cc1d6bc、7f1fd92、d2b50fb、4339aa3，收口提交 e2e 与文档）：`internal/embed`
+  （`Embedder{Embed, Model, Dim}`；`openai` 走 `/embeddings` 并带 `dimensions`（默认 512），`ollama` 走 `/api/embed`
+  批量；请求经 `httpx` 与代理规则，独立 `ratelimit` 按 `qps` 限速、429 自适应减半并遵守 `Retry-After`，独立
+  breaker 5 次 5xx/连接失败后开 60 s；维度首个成功响应探测一次并钉住，之后不一致即报错；`Fake` 导出给 index /
+  perf / e2e 计数）；`internal/config/embedding.go`（`index.embedding{provider, base_url, model, api_key, dimensions,
+  batch, concurrency, qps, timeout, proxy, allow_remote, quantize}`、`index.max_chunks` 默认 200 000；provider ∈
+  none/openai/ollama，`api_key` 进 `IsSecretField` 且只接受 `keyring:`/`secretfile:` 引用，`allow_remote:false`
+  时非回环 / RFC1918 / link-local / `.local` 端点 `config.Parse` 报错）；index.db v2 只加 `vectors`（int8 + 每向量
+  scale，`quantize: none` 存 float32，随 chunk 级联删除）与 `embed_pending` 两表；`embed_worker.go`（按 `batch`
+  取队列、失败按 chunk 指数退避 8 次；换模型或存储形式 → 清空 vectors、全部 chunk 重新入队、`chunks_fts` 不动；
+  维度与 `index_meta` 不一致 → 记错误并停 worker 而不是静默重嵌整库；breaker 打开时休眠到关闭；`max_chunks`
+  硬上限，超出的 chunk 不入队仍可关键词检索）；`hybrid.go`（`vector` = 内存暴力 cosine top-k，按 generation
+  跟随 store；`hybrid` = bm25 top-2k 与 cosine top-2k 做 RRF k=60；无 Embedder / 端点不健康 / 尚无向量 / 向量
+  属于另一模型 / 查询嵌入失败 → 一律跑 keyword 并在 `degraded` 说明，`mode_used` 只报真正跑的模式；短查询在有
+  向量时走向量）；`Status.Embedding{provider, model, dim, remote, host, healthy, last_error, breaker_open_until,
+  embedded, pending, chars_this_month, capped}` 与 `Status.Vectors/MaxChunks`；控制面 `GET /index/embedding`
+  （多 `api_key_configured`、裸 host、标明"估算"的费用 `estimate{chars, formula}`，永不带 key 值）与
+  `POST /index/embedding/check`（只嵌入一次 `"cloudfs"`，返回 dim / latency / error）；doctor `index_embedding`
+  （端点健康、`index_meta` 维度一致）与 `index_embedding_remote` warn；CLI `index auth`（`--key-file` / 隐藏提示 /
+  stdin，拒绝命令行参数，写密钥库并把 `keyring:` 引用写进配置）与 `index embedding [--check]`；MCP `index_status.
+  embedding` 与 `semantic_search.mode` 透传；界面 `embedding_panel.js` + 零 import 的 `embedding_view.js`（provider /
+  模型 / 维度 / 地址、健康点 + 最后错误 + 熔断恢复时间、已嵌入 / 待嵌入、本月字符与估算费用；`remote=true` 黄色
+  横幅无关闭按钮；"测试端点"先说明再点击才请求；无 key 时只显示 `cloudfs index auth` + 复制按钮，无输入框；底部
+  "在配置文件中修改"），概况卡"向量 N / max_chunks"，主窗口搜索切换"文件名 / 关键词 / 语义"（`mode=hybrid`，
+  `degraded` 非空时渲染"已降级为关键词"说明行）。
+- **验收证明**：provider=none 时 `mode: hybrid` → `mode_used: keyword`、`degraded` 非空、不报错：
+  `TestVectorModeNeedsAnEmbedder`（`internal/index`）、`TestSemanticSearchReportsModeUsed`（`internal/mcpsrv`）；
+  连续 5 次 5xx 后 60 s 内无新请求且 `healthy=false`：`TestBreakerOpensAfterFiveServerErrors`（另
+  `TestConnectionFailuresFeedTheBreakerAndConcurrencyKeepsOrder`、`TestThrottledHonoursRetryAfter`）；
+  `allow_remote: false` + `https://api.openai.com/v1` 解析报错：`TestRemoteEndpointNeedsAllowRemote`（另
+  `TestAPIKeyMustBeAReference`、`TestEmbeddingDefaults`）；BM25 与 cosine 结论相反时 RRF 顺序：
+  `TestHybridRRFOrdersByFusedRank`（另 `TestShortQueryUsesVectorsWhenPresent`、`TestInt8QuantisationKeepsCosineOrder`）；
+  换模型后 `vectors` 清空、`embed_pending` = chunks 数、`chunks_fts` 行数不变：`TestChangingTheModelReembedsEverything`
+  （另 `TestSchemaV2AddsVectorTables`、`TestEmbedPendingFollowsTheChunks`、`TestEmbedWorkerSleepsWhileTheBreakerIsOpen`、
+  `TestMaxChunksIsAHardCap`、`TestDimensionMismatchStopsTheEmbedWorker`）；perf 嵌入调用次数 = `ceil(chunks/batch)`、
+  无变化重跑 0 次：`test/perf` `TestEmbedCallsEqualCeilChunksOverBatch`；端点协议：`TestOpenAIBatchesAndSendsDimensions`、
+  `TestOllamaUsesTheBatchEndpoint`、`TestDimIsProbedOnceAndPinned`；控制面 / doctor / CLI：`TestEmbeddingStatusNeverLeaksTheKey`、
+  `TestEmbeddingCheckCallsTheEndpointOnce`、`TestStatusCarriesTheEmbeddingLine`、`TestDoctorFlagsDimensionMismatch`、
+  `TestDoctorNotesARemoteEndpoint`、`TestIndexAuthWritesAReference`、`TestIndexAuthRefusesAKeyOnTheCommandLine`、
+  `TestIndexEmbeddingPrintsTheStatusTable`、`TestIndexStatusCarriesEmbedding`；界面 `ui_embedding_test.go`：
+  `TestRemoteBannerHasNoCloseButton`、`TestEmbeddingPanelHasNoKeyInput`、`TestEndpointCheckOnlyOnClick`、
+  `TestSemanticModeShowsDegradedNote`、`TestIndexOverviewShowsVectors`、`TestEmbeddingCatalogCoversThePanel`，
+  `_tests/embedding_view.test.mjs` 7 例；e2e 真实挂载 `test/e2e/memory_e2e_test.go` `TestHybridSearchWithAFakeEmbedder`
+  （`embed.Fake` 接进 `index.Options.Embedder`，挂载点写 md → 抽取 → `EmbedNow` 恰 1 次调用 → `semantic_search{mode:
+  hybrid}` 返回 `mode_used: hybrid` 且无 `degraded`，`mode: vector` 同样命中，`index_status.embedding` 报 `model: fake`、
+  `dim: 8`、`embedded: 1`）。
+- **遗留**：openai / ollama 的线上格式只对照公开文档写成（`internal/embed/openai.go`、`ollama.go` 各一处
+  `UNVERIFIED`：真实 openai 端点的 `dimensions` 行为、ollama 批量接口的返回顺序）；64 条 × 1200 rune 的批是否超过真实
+  端点的请求 / token 上限（`embed_worker.go` `UNVERIFIED`）；向量检索只有内存暴力 cosine（HNSW 留三期）；
+  `api_key_configured` 提示对任何 provider 都显示（ollama 通常不需要 key）；换 `embedding.model` 会重嵌整库，没有增量
+  迁移；e2e 用 `embed.Fake`，守护进程不能从配置注入假端点，所以 e2e 的索引是测试自建的 `Indexer`（同一 `index.New`
+  与 MCP 接线，`index.enabled: false` 避免两份索引）。
 
 - **证据**：T-37 只有 keyword；中文同义表达、跨语言检索 FTS 无能为力。
 - **做法（后端）**：
@@ -2139,7 +2195,67 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   - 界面：`ui_embedding_test.go` 断言 remote 横幅在 `remote=true` 时渲染且无关闭按钮；嵌入模块无
     `input` 用于 key、无秘密字段名；"测试端点"仅点击时请求；语义模式降级说明行渲染。
 
-### [ ] T-40 Agent 记忆库（二期）
+### [x] T-40 Agent 记忆库（二期，2026-09-15 完成）
+
+- **2026-09-15 完成**（线 D 提交 f41c4b3、9ddba86、3893dc0，收口提交 e2e 与文档）：`internal/config/memory.go`
+  （`memory.root` 默认 `mcp.workspace`，再退到第一个 allow 前缀 + `/.agent`，与 `begin_session` 同一推导；
+  `max_fact_bytes` 64 KiB、`max_agent_bytes` 32 MiB；root 必须规范路径）；`internal/memory`（`Store{fs, index, cfg}`
+  是 MCP 工具、控制面与 CLI 共用的唯一实现：`Agents/List/Get/Put/Delete/Search`；`Put` 校验名字
+  `^[a-z0-9][a-z0-9-]{0,63}$`、`expected_version`、单条与 agent 预算（拒绝时给当前用量），写 `facts/<name>.md`
+  （frontmatter `name/description/type/updated_at` + 正文）后把 `MEMORY.md` 唯一匹配行替换、否则追加；版本取自文件
+  字节的 sha256 前 12 字节而不是网盘版本，上传落地不变、内容一变就变；冲突副本 = 同目录、以 `<name>` 开头且不是合法
+  fact 文件的兄弟，不猜任何 provider 的命名；`NormalizeAgent` 把 client name 规范成 `[a-z0-9-]`）；MCP
+  `memory_list/get/put/delete/search`（agent 默认 = HTTP 令牌名或 stdio client name 规范化，`cloudfs mcp --agent`
+  覆盖；每个路径过 `checkPath`，root 不在 scope 内五个工具同一说明；`--read-only` 与非 owner stdio 拒绝 put/delete；
+  `delete` 需 `confirm`；`search` = index 限定 `memory/<agent>`（+ `shared`）的检索，靠 `Source: builtin` 的内置规则
+  跟随 `memory.root` 自动索引 `**/*.md`，`unindex` 与界面不能删它）；控制面 `GET /memory/agents`（无 store / 无 root
+  时 `{enabled:false, reason, example}`）、`GET /memory/{agent}?cursor`、`GET|PUT|DELETE /memory/{agent}/{name}`
+  （PUT 带 `expected_version`，过期 409 且 body 带 `current_version`；超限 413 带用量；`..`、`/`、大写 400；DELETE 走
+  `confirmed` 键 `confirm.memory.delete`）、`GET /memory/search`（无索引 409）；CLI `cloudfs memory
+  agents|list|get|put|delete|search [--agent]`（`get` 原样打印正文可管道，`put` 读 `--file` 或 stdin，`delete`
+  需 `--confirm`）；界面 `screens/agents_memory.js`（左 agent 列表：条数、占用 / 上限、有副本时红点；右表 名称 / 描述 /
+  类型 / 更新时间 / 冲突标记 `data-conflicts`；顶部搜索框走 `/memory/search`；"新建记忆"`openForm` 前端同规则校验；
+  未配置 root 显示原因与配置示例；深链 `#/agents?tab=memory&agent=<a>&memory=<name>` 直接开编辑器）、
+  `memory_panel.js`（编辑浮层：名称只读、描述、类型、正文 `textarea` 经 `.value` 填充、字节计数 / 上限，保存 PUT 带读到
+  的 `expected_version`，409 → "已在其他设备修改" + "重新载入"；冲突合并浮层：本体与副本只读并排（副本经 `/fs/preview`），
+  "保留本体并删除副本"（键入确认 → `POST /fs/delete`）、"用副本覆盖本体"（PUT 带读到的版本 → 删副本）、"手动合并"
+  （两段预填进下方编辑器，不写任何东西）；删除 `confirmDelete` 键入名称 → `DELETE` 带 `confirm:true`）、零 import 的
+  `memory_conflicts.js`（副本配对只按前缀与同目录、名字正则与 Go 侧逐字符一致、UTF-8 字节计数、frontmatter 拆分）。
+  **顺带修的 VFS 缺口**：上传以冲突副本落地后，输掉的本地节点保留 `cloudfs-local:` 身份、缓存项已被钩子释放，而本应
+  把远端版本带回来的列举却一直把它当待传写入保护，文件在进程生命周期内不可读——`remote_protection.go` 新增
+  `conflictLoser`（本地身份、无缓存项、无写句柄）并在 `fetchDir` 的 `protect` 里放行，下一次列举恢复远端版本
+  （`internal/vfs/conflict_restore_test.go` `TestConflictLoserIsRestoredByTheNextListing`）。
+- **验收证明**：`memory_put("style")` 后 `facts/style.md` 存在、`MEMORY.md` 恰一行、重复 put 不增行：
+  `TestPutCreatesTheFactAndOneIndexLine`（`internal/memory` 与 `internal/mcpsrv` 各一）、`TestIndexLineEditing`、
+  e2e `TestMemoryPutIsVisibleInTheMountAndSearchable`（真实挂载：`memory_put` → 终端 `cat` 得 frontmatter + 正文、
+  `MEMORY.md` 恰一行 → `memory_search` 3 s 内命中 → 带 `expected_version` 二次 put 仍一行 → 终端 `>>` 追加 → `memory_get`
+  返回新正文与新版本）；过期 `expected_version` 被拒、内容不变：`TestStaleExpectedVersionIsRefused`（memory 与 mcpsrv）、
+  `TestMemoryPutRequiresExpectedVersionWhenGiven`（控制面 409 带 `current_version`）；fakeprovider 注入版本冲突后
+  `memory_get.conflicts` 列出副本：`TestGetListsConflictCopies`、`TestConflictSiblingsArePrefixMatchesThatAreNotFacts`；
+  超过 `max_fact_bytes` / `max_agent_bytes` 被拒并给用量：`TestBudgetsAreEnforcedWithUsage`；root 不在 allow 内五个工具
+  同一说明：`TestRootOutsideScopeFailsEveryToolTheSameWay`、`TestMemoryToolsRefuseWithoutARoot`、
+  `TestMemoryAgentsExplainsAMissingRoot`；`--read-only` 下 get/list/search 可用、put/delete 拒绝：
+  `TestReadOnlyAllowsReadsOnly`、`TestMemoryPutAndDeleteNeedTheOwner`；写入 3 s 内 `memory_search` 命中：
+  `TestMemorySearchFindsAFreshFact`、`TestMemorySearchScopesTheIndexToTheAgent`、`TestIndexRuleCoversTheMemoryTree`、
+  `TestMemoryStoreIsWiredWithTheBuiltinIndexRule`、`TestBuiltinRulesFollowTheConfigurationAndCannotBeRemoved` 与上述 e2e；
+  agent 身份：`TestAgentNameIsNormalised`（memory 与 mcpsrv）、`TestMemoryAgentFollowsTheTokenPrincipal`；删除确认：
+  `TestMemoryDeleteNeedsConfirm`（mcpsrv 与控制面）、`TestMemoryCLIDeleteNeedsConfirm`；路由名字校验：
+  `TestMemoryRoutesRefuseBadNames`、`TestMemoryRoutesWhenNoStore`、`TestMemorySearchWithoutIndexIs409`、
+  `TestEveryRouteIsEitherGuardedOrArguedOpen` 与 `TestEveryRouteToleratesTheLanguageParameter` 自动覆盖；CLI：`TestMemoryCLIPutsAndGets`；frontmatter：`TestFrontmatterRoundTrip`、
+  `TestFrontmatterOnlyReadsTheHead`；界面 `ui_memory_test.go`：`TestMemorySaveCarriesExpectedVersion`、
+  `TestMemoryDeleteConfirms`、`TestConflictActionsHitTheirRoutes`（三动作各自路由）、`TestMemoryBodyIsInsertedAsText`、
+  `TestMemoryTabExplainsMissingRoot`、`TestMemoryNameValidatedInTheForm`、`TestMemoryCatalogCoversTheTab`、
+  `TestMemoryModulesStayShort`，`_tests/memory_conflicts.test.mjs` 7 例（配对与不配对样例）；浏览器冒烟
+  `TestMemoryTabInTheBrowser`（`CLOUDFS_BROWSER=1`：记忆标签列出 MCP 创建的 agent 与 fact，深链打开编辑器、路径在浮层里、
+  `textarea.value` 等于正文）；VFS 修复：`TestConflictLoserIsRestoredByTheNextListing`。
+- **遗留**：fact 的 `version` 是内容哈希而不是网盘版本——两台设备写出相同字节视为同一版本（对记忆语义无害，但不能
+  用它判断"谁先落地"）；`expected_version` 的比对与写入不是原子的（`Store.mu` 只串行化本进程，跨进程 / 跨设备有毫秒级
+  窗口，输掉的一方仍会以冲突副本形式保留）；`Put` 的 `description` / `type` 为空表示"保留文件里的"，所以不能通过 put
+  清空描述（要清空只能改文件）；CLI `--agent` 默认 `shared` 而 MCP 默认调用方自己，两边默认不同是有意的但要知道；
+  名为 `agents` / `search` 的 agent 与 `/memory/agents`、`/memory/search` 路由同名，只能经 MCP 工具访问；冲突副本配对
+  只按"同目录 + 前缀"，provider 若把副本放到别处或改名前缀就配不上；带外（MCP）写入后内核属性失效是异步 `InodeNotify`，
+  微秒级窗口内终端的 `O_APPEND` 仍按旧 size 定位（e2e 里先等 `stat` 看到新 size；属于 T-43 并存语义，不是记忆库缺陷）；
+  `skills/<name>/SKILL.md` 只约定位置，没有工具。
 
 - **证据**：Claude Code / Codex / OpenClaw 的记忆都是本机文件，换设备即丢；CloudFS 已能跨设备同步文件，
   但没有约定、没有工具、冲突副本对 agent 不可见。
