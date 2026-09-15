@@ -293,6 +293,9 @@ func (x *Indexer) readFile(ctx context.Context, n meta.Node, p string, pinnedOnl
 		data = append(data, piece...)
 		off += int64(len(piece))
 	}
+	if !vfs.IsLocalOnly(n.RemoteID) {
+		x.fetched.Add(int64(len(data)))
+	}
 	return data, nil
 }
 

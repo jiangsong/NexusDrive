@@ -700,6 +700,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
+		Index: indexOf(d),
 	})
 	if err != nil {
 		return err
@@ -721,11 +722,21 @@ func exportJobsOf(d *daemon.Daemon) mcpsrv.ExportJobs {
 	return d.Export
 }
 
+// indexOf keeps a nil indexer a nil interface: mcpsrv registers the index
+// tools on that alone.
+func indexOf(d *daemon.Daemon) mcpsrv.IndexService {
+	if d.Index == nil {
+		return nil
+	}
+	return d.Index
+}
+
 func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, readOnly bool, addr string, exportRoots []string) error {
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
+		Index: indexOf(d),
 	})
 	if err != nil {
 		return err

@@ -137,6 +137,9 @@ type Indexer struct {
 	prog     Progress
 	watchers map[chan Progress]struct{}
 	yields   atomic.Int64
+	// fetched counts the bytes readFile took from remotes in this process,
+	// what cloudfs_index_fetch_bytes_total reports.
+	fetched atomic.Int64
 
 	lifeMu    sync.Mutex
 	cancel    context.CancelFunc

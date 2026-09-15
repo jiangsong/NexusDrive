@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/config"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -125,7 +126,8 @@ func TestOptionsWithoutSessionsKeepTheProcessWideScope(t *testing.T) {
 // is listed as path-less with a reason.
 func TestEveryToolChecksItsPaths(t *testing.T) {
 	root := t.TempDir()
-	e, _ := newAgentEnv(t, Options{Export: newFakeExportJobs(), ExportRoots: []string{root}}, agent.Scope{Read: []string{"/work"}})
+	// The env carries an index so that the index tools are listed too.
+	e, _, _ := newIndexAgentEnv(t, Options{Export: newFakeExportJobs(), ExportRoots: []string{root}}, agent.Scope{Read: []string{"/work"}}, config.Index{Enabled: true})
 	e.fake.Seed("gd/x.txt", []byte("secret"))
 	e.fake.Seed("work/nope.txt", []byte("here"))
 	outside := map[string]map[string]any{
@@ -146,6 +148,12 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"pin":              {"path": "/gd/x.txt"},
 		"unpin":            {"path": "/gd/x.txt"},
 		"export":           {"paths": []string{"/gd/x.txt"}, "dest": root},
+		// The index tools: a rule or a search below /gd, or the extracted
+		// text of a file there.
+		"semantic_search":     {"query": "x", "path": "/gd"},
+		"index":               {"path": "/gd"},
+		"unindex":             {"path": "/gd"},
+		"read_extracted_text": {"path": "/gd/x.txt"},
 	}
 	// Path-less tools: they take ids or nothing, and filter their results by
 	// scope internally (list_roots, upload/copy/export job listings).
@@ -159,6 +167,9 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		// The session tools derive their paths from the configuration and
 		// check them internally; list_sessions filters by principal.
 		"begin_session": "workspace checked internally", "finish_session": "session ids only", "list_sessions": "filters by principal",
+		// index_status checks the path it is given (TestIndexStatusChecksItsOptionalPath)
+		// and filters the failure list by scope when given none.
+		"index_status": "optional path checked; failures filtered by scope",
 	}
 	// perEntry tools report a denied path inside their structured result
 	// instead of failing the whole call.

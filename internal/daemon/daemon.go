@@ -21,6 +21,7 @@ import (
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
 	"cloudfs/internal/export"
+	"cloudfs/internal/index"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
@@ -52,6 +53,10 @@ type Daemon struct {
 	Agent *agent.Store
 	// Sessions maps MCP connections to sessions in Agent.
 	Sessions *agent.Sessions
+	// Index is the content indexer over index.db, nil unless index.enabled.
+	// Every process opens it so a stdio MCP server beside the daemon can
+	// search; only the owner of index.db runs the extraction worker.
+	Index    *index.Indexer
 	Proxy    *proxy.Manager
 	Limiters *ratelimit.Registry
 	// Providers maps remote name to backend.
@@ -285,6 +290,38 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// is waiting on a read, the same way hydration and rebalancing do.
 	exports.SetBusy(fsys.Busy)
 	d.closers = append(d.closers, exports.Close)
+
+	// The content index keeps its own database next to the cache for the
+	// same reason exports do: meta has one writer and FLUSH waits on its
+	// lock, so extraction must not queue behind it. With index.enabled
+	// false nothing is opened and no index.db appears.
+	if cfg.Index.Enabled {
+		indexStore, err := index.OpenStore(cacheDir)
+		if err != nil {
+			d.Close()
+			return nil, fmt.Errorf("daemon: index store: %w", err)
+		}
+		x, err := index.New(index.Options{
+			FS: fsys, Store: indexStore, Config: cfg.Index,
+			Unofficial: func(remote string) bool {
+				p, ok := d.Providers[remote]
+				return ok && p.Capabilities().Tier == provider.TierUnofficial
+			},
+		})
+		if err != nil {
+			indexStore.Close()
+			d.Close()
+			return nil, err
+		}
+		d.Index = x
+		// The indexer subscribes to the VFS change feed, so it closes
+		// before the VFS does: closers run in reverse and fsys.Close was
+		// appended above.
+		d.closers = append(d.closers, indexStore.Close, x.Close)
+		if indexStore.Owner() && !opt.NoBackground {
+			x.Start(ctx)
+		}
+	}
 
 	// Remotes with a change feed follow the provider within a poll interval;
 	// the rest rely on the directory TTL. Polling a full listing on a

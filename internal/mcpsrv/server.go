@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/index"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
@@ -92,6 +93,19 @@ type Options struct {
 	// whole mount then gets a configuration error, since the mount root is
 	// not writable.
 	Workspace string
+	// Index, when set, exposes the content index tools (semantic_search,
+	// index_status, index, unindex, read_extracted_text). nil leaves them
+	// unregistered: with index.enabled false there is no index to search.
+	Index IndexService
+}
+
+// IndexService is what the index tools need from the daemon's indexer.
+type IndexService interface {
+	Search(ctx context.Context, q index.SearchQuery) (index.SearchResult, error)
+	Status(ctx context.Context, p string) (index.Status, error)
+	AddRule(ctx context.Context, r index.Rule) error
+	RemoveRule(ctx context.Context, p string) error
+	Text(ctx context.Context, p string, off int64, max int) (index.TextPage, error)
 }
 
 // errRequiresOwner is the refusal a session or rollback tool gives on a
@@ -192,6 +206,7 @@ func New(opt Options) (*Server, error) {
 	s.registerUploadTools()
 	s.registerExportTools()
 	s.registerSessionTools()
+	s.registerIndexTools()
 	s.registerResources()
 	if opt.Sessions != nil {
 		s.revokeStop = make(chan struct{})

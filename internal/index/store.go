@@ -796,6 +796,24 @@ func (s *Store) Pending(ctx context.Context, limit int) ([]PendingItem, error) {
 	return out, nil
 }
 
+// ChunkCount reports how many chunks document id has.
+func (s *Store) ChunkCount(ctx context.Context, id int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM chunks WHERE doc_id = ?`, id).Scan(&n); err != nil {
+		return 0, fmt.Errorf("index: %w", err)
+	}
+	return n, nil
+}
+
+// Queued reports whether the file with inode ino waits in the queue.
+func (s *Store) Queued(ctx context.Context, ino uint64) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM index_pending WHERE ino = ?`, int64(ino)).Scan(&n); err != nil {
+		return false, fmt.Errorf("index: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Dequeue removes an inode from the queue. Removing an absent inode is not
 // an error.
 func (s *Store) Dequeue(ctx context.Context, ino uint64) error {
