@@ -283,9 +283,9 @@ E1–E8 已全部完成，每条的落地说明见本节末尾。
 
 ### 阶段 F —— Agent 底座界面（2026-09-14 登记）
 
-对应 [TODO.md](../TODO.md) 的 P4 节（T-34 ~ T-43），设计与安全边界见 [Agent 工作底座路线图](agent-roadmap.md)
+对应 [TODO.md](../TODO.md) 的 P4 节（T-34 ~ T-44），设计与安全边界见 [Agent 工作底座路线图](agent-roadmap.md)
 §6。本段只列界面侧逐项清单；证据、后端做法与验收断言以 TODO.md 为准。**纪律**：F 条目与对应 T 条目
-同期交付、同一验收，界面不落地不关 T 条目。F1–F4 属一期（F9 的"复制提示词"可提前到一期末），
+同期交付、同一验收，界面不落地不关 T 条目。F1–F4 与 F11 属一期（F11 前置于 F4-b，F9 的"复制提示词"可提前到一期末），
 F5–F10 属二期。
 
 共用约定（每条都适用，不再逐条重复）：新屏与浮层只用 `openForm`/`openPanel`/`showPanel`/`confirmDelete`，
@@ -389,6 +389,15 @@ F5–F10 属二期。
 - [ ] **F10-2** 接入面板在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染黄色横幅"请改用 HTTP 传输"，链到 `#/diagnostics`。
 - [ ] **F10-3** `ui_agents_test.go` 补断言：横幅条件渲染并链到 `#/diagnostics`。
 - [ ] **F10-4** `test/e2e` 的 `CLOUDFS_BROWSER=1` 冒烟加 `#/agents`、`#/index`、`#/triggers` 可达；`browser_modules_test.go` 自动覆盖新增 `_tests/*.test.mjs`；`ui_icons_test.go` 覆盖 `bot/layers/bolt/undo`。
+
+**F11 —— Everything 式文件名搜索：主窗口全盘搜索、过滤条、覆盖率（T-44 · 一期，前置于 F4-b）**
+
+- [ ] **F11-1** `screens/main.js` 搜索框默认**全盘**（请求不带 `path=`），旁边分段切换"全盘 / 当前目录"，选择存 localStorage；`Ctrl/⌘+K` 聚焦，`Esc` 清空并回到目录视图。搜索逻辑抽到 `content_search.js` 之外的独立模块 `name_search.js`，`main.js` 只接线（F4-b 之后同一个模块再加"内容"分段）。
+- [ ] **F11-2** 结果行填满：名称（命中高亮，片段经文本节点插入，绝不进 `html:`）/ 大小 / 修改时间 / 状态（已缓存点+文字）；表头可点排序 → 改 `sort=` 重新请求；双击结果定位到父目录并选中该行。
+- [ ] **F11-3** 结果上方常驻一行"N 条 · 覆盖 已列举 X / 已知 Y 目录"（来自 `/search` 响应的 `coverage`）；未全覆盖时附"索引整棵树"按钮：`confirmDelete` 键入 `warm` → `POST /cache/warm {path:"/", depth:-1, confirm:true}`；`complete=false` 的常驻说明行不变。
+- [ ] **F11-4** 过滤条：搜索框右侧"筛选"展开为 类型 / 扩展名 / 大小范围 / 修改时间；`search_query.js`（零 import）做过滤条 ↔ 查询串双向转换，用户能看到并手改最终查询串；最近 10 次搜索下拉（localStorage）。
+- [ ] **F11-5** 缓存屏概况卡加"目录覆盖率"卡（已列举 / 已知、最后爬取时间、爬取中进度），SSE `status` 驱动；检查器目录项加"列举整棵子树"（`warm` depth=-1，同一确认门）。
+- [ ] **F11-6** i18n 键 `search.*` 扩充（scope、coverage、filters、sort）；`ui_search_test.go`：默认请求不带 `path=`、分段切换写 localStorage、"索引整棵树"带 `confirm: true`、表头点击改 `sort=`、高亮经文本节点插入、覆盖率文案来自 i18n；`_tests/search_query.test.mjs`：双向转换与非法输入。
 
 **关键复用**：模态与确认用 `internal/control/web/ui.js` 的 `openForm`、`openPanel`、`showPanel`、
 `confirmDelete`；表格续页用 `ui.js` 的 `moreRow` 与 `paged.js` 的 `pageCursor`/`pageFailureMode`（续页失败保留

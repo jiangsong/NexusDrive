@@ -337,7 +337,7 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
 | 负缓存 | `.git`、`.DS_Store`、`node_modules` 等探测命中 `absent` 表；该目录任何创建操作清空 |
 | 写直达 | 本地变更先更新 SQLite 并标 `dirty`，同时 `notify_inval`；内核 `entry_timeout / attr_timeout` 设 30 s |
 | 持久化 | 重启后目录树可直接用；避免冷启动刷新风暴 |
-| 搜索 | 文件名 trigram FTS，支持子串与 glob 转换；`cloudfs find` 与 MCP `search` 共用 |
+| 搜索 | 文件名 trigram FTS 子串匹配（1／2 字符走短倒排），父链在查询期拼路径，工作预算 + `Complete`；`cloudfs find`、控制面 `/search` 与 MCP `search` 共用。只覆盖已列举的目录；glob／`ext:`／`size:`／`dm:` 过滤、排序、后台全树爬取与覆盖率提示是规划中的 T-44（[agent-roadmap.md](agent-roadmap.md) §7.1） |
 
 ### 4.4 数据缓存层 BlockCache
 

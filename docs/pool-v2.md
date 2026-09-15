@@ -1,6 +1,6 @@
 # 存储池 v2：带宽融合、导出、CRUSH-lite 放置
 
-> 状态：**设计稿，未实现**。对应 `TODO.md` 的 T-29 ~ T-33。v1（容量融合、N 副本、修复、多机）见 [pool.md](pool.md)，架构摘要见 [DESIGN.md](DESIGN.md) §4.11。
+> 状态：**已实现**（T-29 ~ T-33 于 2026-09-15 收口，见 `TODO.md`）。v1（容量融合、N 副本、修复、多机）见 [pool.md](pool.md)，架构摘要见 [DESIGN.md](DESIGN.md) §4.11。
 
 ## 0. 一页摘要
 

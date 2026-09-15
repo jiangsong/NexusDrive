@@ -2,41 +2,41 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 两条互不阻塞的线并行交付一期：线 A（T-34 审计与会话作用域 → T-35 访问令牌与 HTTP 接入 → T-36 交付箱），线 B（T-37 内容抽取 + FTS + `semantic_search`）；每条后端能力都带同期控制台界面与同一验收。
+**Goal:** 两条互不阻塞的线并行交付一期：线 A（T-34 审计与会话作用域 → T-35 访问令牌与 HTTP 接入 → T-36 交付箱），线 B（T-44 Everything 式文件名搜索 → T-37 内容抽取 + FTS + `semantic_search`；T-44 于 2026-09-15 追加为 B0.5，前置于 B12 的搜索切换）；每条后端能力都带同期控制台界面与同一验收。
 
 **Architecture:** 新增 `internal/agent`（独立 `<cache.dir>/agent/agent.db`）与 `internal/textract` + `internal/index`（独立 `<cache.dir>/index.db`），二者都是 `vfs` 的**消费者**，不改 meta v11 / journal v13，不改 `vfs` 语义。`mcpsrv` 只加 receiving middleware（会话解析 + 审计）与 `checkPath(ctx, p, write)`；控制面加路由进 `metrics.go` 路由表；控制台加 `#/agents`、`#/index` 两屏与主窗口搜索/检查器扩展，纯逻辑抽成零 import 模块配 `node --test`。
 
-**Tech Stack:** Go 1.27（模块 `cloudfs`）、`modernc.org/sqlite v1.57.0`（FTS5 trigram）、`github.com/modelcontextprotocol/go-sdk v1.7.0`（`mcp` + `auth`）、新依赖 `github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80`（仅 B3）、原生 ES module 控制台（`internal/control/web`）+ Node v24 `node --test`、headless Chrome `--dump-dom` 冒烟（新建门控 `CLOUDFS_BROWSER=1`）。
+**Tech Stack:** Go 1.27（模块 `cloudfs`）、`modernc.org/sqlite v1.57.0`（FTS5 trigram）、`github.com/modelcontextprotocol/go-sdk v1.7.0`（`mcp` + `auth`）、新依赖 `github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80`（仅 B3）、原生 ES module 控制台（`internal/control/web`）+ Node v22 `node --test`、headless Chromium `--dump-dom` 冒烟（新建门控 `CLOUDFS_BROWSER=1`；本机用 Playwright 缓存里的 Chromium，见"代码锚点核对"）。
 
 **Spec:**
-- 验收真相源：`TODO.md` P4 节 T-34 / T-35 / T-36 / T-37（若执行时 P4 尚未写入 `TODO.md`，以 `/Users/nava/.claude/plans/fs-workbuddy-encapsulated-frog.md` 的"TODO.md 插入稿"为准，两者文字一致）；T-42 仅"复制提示词"前半。
-- 界面清单：`docs/ui-plan.md` 阶段 F（F1–F4、F9 前半）与 `docs/agent-roadmap.md` §UI（屏幕地图、路由表、安全边界五条）。
-- 详细设计：`/private/tmp/claude-502/-Users-nava-work-lefs/61c92a79-0409-45f8-972a-30de6e0bae4a/scratchpad/plan-workbase.md`（§0、§1、§A、§B1、§B3）与 `.../scratchpad/plan-rag.md`（§A.1–A.3、A.5–A.11，phase 1 部分）。设计若与 TODO 验收冲突，以 TODO 为准。
+- 验收真相源：`TODO.md` P4 节 T-34 / T-35 / T-36 / T-37 / T-44（已写入，随 `94cb3c4` 及后续 docs 提交）；T-42 仅"复制提示词"前半。
+- 界面清单：`docs/ui-plan.md` 阶段 F（F1–F4、F11、F9 前半）与 `docs/agent-roadmap.md` §UI（屏幕地图、路由表、安全边界五条）。
+- 详细设计：`docs/agent-roadmap.md`（§2、§3.1–3.4、§3.6–3.10、§4、§6；它吸收了规划阶段的两份 scratch 设计稿，那两份文件已不存在）。设计若与 TODO 验收冲突，以 TODO 为准。
 
 ## Global Constraints
 
 - 工具链只用 `./gow`：`./gow build ./...`、`./gow vet ./...`（基线干净，不引入新告警）。
-- 本机（macOS 无 macFUSE）全量测试：`./gow test $(./gow list ./... | grep -v -e internal/fusefs -e test/conformance -e test/e2e)`；`test/e2e` 只用 `-run` 精确选择**不挂载**的用例运行，需要挂载的用例在 Linux `/dev/fuse` 上跑，skip 不等于通过。
+- 全量测试：本机是 Linux 且有 `/dev/fuse`，直接 `./gow test ./...`，`internal/fusefs`、`test/conformance`、`test/e2e` 都真跑；只有在无 macFUSE 的 macOS 上才排除这三个包（`./gow test $(./gow list ./... | grep -v -e internal/fusefs -e test/conformance -e test/e2e)`）。任何 skip 都要确认是环境原因，skip 不等于通过。
 - 每个任务 GREEN 之后对改动包跑 `-race`：`./gow test -race ./internal/agent/ ./internal/mcpsrv/ ./internal/control/`（按任务替换包名）。
 - 浏览器纯模块测试：`node --test internal/control/web/_tests/*.test.mjs`；Go 侧 `./gow test ./internal/control/ -run 'TestBrowserModuleBehaviour|TestBrowserModulesParse'`。`TestBrowserModuleBehaviour` 自动 glob `web/_tests/*.test.mjs`，`TestBrowserModulesParse` 自动解析 `web/*.js` 与 `web/screens/*.js`——**无需登记**；纯模块放 `web/` 顶层（同 `paged.js`），测试里 `import { x } from '../x.js'`。`Makefile` 没有 node 目标，不要去加。
-- 分层：`internal/agent`、`internal/index`、`internal/textract` 不被 `vfs` 引用；`mcpsrv`/`control` 保持薄适配。一期**不改** `internal/vfs` 任何文件（`Change.Kind/Origin` 是 T-41 二期）。
+- 分层：`internal/agent`、`internal/index`、`internal/textract` 不被 `vfs` 引用；`mcpsrv`/`control` 保持薄适配。一期**不改** `internal/vfs` 语义（`Change.Kind/Origin` 是 T-41 二期）。唯一的文件级例外是 B0.5（T-44，2026-09-15 追加）：新增 `internal/vfs/crawl.go`、`search.go`，并把 `read.go` 的 `prefetcher.waitIdle` 循环体抽成共享的 `FS.yieldToForeground`；其余任务仍不碰 `vfs`。
 - 永不按网盘名字分支；行为差异走 `provider.Caps`（例如 `Caps.Tier == "unofficial"` 预算减半）。无法在本机验证的点加 `// UNVERIFIED: <要验证什么>`。
 - 新 SQLite 库一律照 `internal/export/store.go:39-48` 的 DSN：`?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_txlock=immediate`，`SetMaxOpenConns(4)`，`meta(k,v)` 表 + `PRAGMA user_version`，比本构建新的 schema 拒绝打开；flock 照 `internal/export/lock.go` / `lock_unix.go` / `lock_windows.go` 复制一份到本包（未导出 helper 不跨包共享）。
 - 控制面：新路由**全部**登记在 `internal/control/metrics.go` 的 `routes()`（`security_all_routes_test.go` 自动覆盖守卫）；handler 首行 `privateRequest(w, r)` + `allowMethod`；破坏性动作走 `confirmed(w, r, q.Confirm, "confirm.<key>", args...)`（`shared.go:29`），确认文案键加进 `internal/i18n/catalog_zh.go` 与 `catalog_en.go`；远端凭据永不经过控制面（`rejectSecretFields`）。
 - 控制台：所有文案经 `t()`，`web/i18n.js` 的 `zh` 与 `en` 两表键集合一致（`ui_i18n_test.go` `TestWebCatalogsHaveTheSameKeys`），除 `i18n.js` 外任何 `.js` 不得出现汉字与全角标点（`TestWebScreensHoldNoUntranslatedText`），`t('literal')` 必须存在于表中（`TestEveryTranslationKeyUsedByTheAppExists`）；占位符是 `%s`。
 - 控制台 DOM：用 `fill()` 不用 `replaceChildren`；来自文件/远端/审计的文本一律作为 `el()` 的**子节点字符串**插入（`append` 走 `createTextNode`），**永不**放进 `html:` 属性；图标名必须在 `icons.js` 定义（`ui_icons_test.go` 用正则 `iconEl\('([a-z]+)'\)` 扫描）；`confirmDelete` 只用对象签名；全部嵌入字节不得出现 `type="password"`、`refresh_token`、`client_secret`、`access_token`、`name="password"`、`id="secret"`、`prompt(`（`ui_test.go` `TestWebAppNeverAsksForACredential`）。
-- 文件体量：单文件 < 800 行；`screens/main.js` 当前 376 行，新增逻辑放独立模块（`content_search.js`、`index_inspector.js`、`workspace_view.js` 等），`main.js` 只接线。
+- 文件体量：单文件 < 800 行；`screens/main.js` 当前 376 行，新增逻辑放独立模块（`name_search.js`、`search_query.js`、`content_search.js`、`index_inspector.js`、`workspace_view.js` 等），`main.js` 只接线；B0.5-c 把 336-356 的搜索监听整段搬进 `name_search.js`，`main.js` 净减行数。
 - 代码与注释英文；`docs/`、`TODO.md`、`README.md` 中文。
 - 每个任务一个提交，conventional commit（`feat:`/`fix:`/`test:`/`docs:`），正文写为什么，结尾 `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`。
 - 条目纪律：UI 任务与其后端任务同属一个 TODO 条目，UI 不落地不关条目（线 A 的 A11、线 B 的 B13 才更新 `TODO.md` 状态）。
 
 ---
 
-## 决策点：MCP 访问令牌在界面"只显示一次"
+## 决策点：MCP 访问令牌在界面"只显示一次"（已于 2026-09-15 决定：接受）
 
-**默认（本计划按此编写）**：接受。`POST /mcp/tokens` 返回明文一次（`Cache-Control: no-store`、不落日志），前端只在揭示浮层局部变量里持有，关闭即丢，不进 `store.js`、不进 localStorage；`GET /mcp/tokens` 只返回 4 位指纹。
+**已采纳（本计划按此编写）**：`POST /mcp/tokens` 返回明文一次（`Cache-Control: no-store`、不落日志），前端只在揭示浮层局部变量里持有，关闭即丢，不进 `store.js`、不进 localStorage；`GET /mcp/tokens` 只返回 4 位指纹。
 
-**回退（用户选"更严"时）**：界面只显示 `cloudfs mcp token create ...` 命令。受影响位置已在任务内以 **【决策点】** 标注：
+**未采纳的备选（仅留档，任务内 【决策点】 标注不再需要执行）**：界面只显示 `cloudfs mcp token create ...` 命令。它会影响：
 - **A7**：不登记 `POST /mcp/tokens`（`/mcp/tokens` 只允许 GET，POST 返回 405）；`MCPView` 去掉 `CreateToken`；删除 `TestCreateTokenResponseIsNoStore`，改为 `TestTokensRouteRefusesCreate`。
 - **A8**：删除 `web/token_reveal.js` 与"新建令牌"`openForm`；令牌标签顶部改为命令构造器（名称/可读/可写/有效期 → 拼出 CLI 命令 + `copyBtn`，零网络请求）；`ui_tokens_test.go` 改为断言源码**不含** `api.post('/mcp/tokens'`。
 - **A11**：e2e 链路第一步改用 `agent.Store.CreateToken`（与 CLI 同一实现），浏览器冒烟不覆盖揭示浮层。
@@ -46,22 +46,22 @@
 
 ## 分支与合并卫生
 
-- **起点**：必须等 `feat/pool-v2`（HEAD `41f976d` + 当前大量未提交改动）合入 `main` 之后再开工，否则下列重叠文件必然冲突。开工：`git switch main && git pull && git switch -c feat/agent-phase1`；两条线各自用 worktree（superpowers:using-git-worktrees）：`feat/agent-line-a`、`feat/agent-line-b`，都从 `feat/agent-phase1` 拉出，完成后分别 rebase 回 `feat/agent-phase1`。
-- **与当前工作区已修改文件重叠（合并风险，开工前确认 pool-v2 已落地）**：
+- **起点（2026-09-15 决定）**：`feat/agent-phase1` 直接从 `feat/pool-v2`（`94cb3c4`，T-29～T-33 已完成并提交）开出，不等 pool-v2 合入 `main`；pool-v2 合入 `main` 后 `feat/agent-phase1` rebase 一次，只 rebase 不 merge。两条线各自用 worktree（superpowers:using-git-worktrees）：`../fs-line-a` = `feat/agent-line-a`、`../fs-line-b` = `feat/agent-line-b`，都从 `feat/agent-phase1` 拉出，完成后分别 rebase 回 `feat/agent-phase1`（线 A 先合）。
+- **pool-v2 改过、本计划也要改的文件（从 pool-v2 开出后已包含其改动；pool-v2 若再有新提交，rebase 时留意）**：
   `cmd/cloudfs/main.go`、`internal/config/config.go`、`internal/control/events.go`、`internal/control/events_test.go`、`internal/control/metrics.go`、`internal/control/ui_test.go`（仅阅读其断言，本计划不改）、`internal/control/web/api.js`、`internal/control/web/app.js`、`internal/control/web/i18n.js`、`internal/daemon/daemon.go`、`internal/mcpsrv/export_jobs.go`（A2 改 `checkPath/checkWrite` 调用点）、`internal/mcpsrv/export_jobs_test.go`（只跑不改）。
   本计划引用但**不修改**的已修改文件：`internal/vfs/changes.go`、`internal/vfs/read.go`、`internal/vfs/vfs.go`——行号以合入后为准，执行前 `grep -n` 复核。
 - **两线交叉热点与协议**（两线都会改，谁后合谁 rebase 解决）：
   | 文件 | 线 A | 线 B | 协议 |
   |---|---|---|---|
-  | `internal/mcpsrv/server.go` | A2 `checkPath(ctx,p,write)` 全量替换、`Options.Sessions/Scope` | B9 `Options.Index`、`registerIndexTools` | B9 若先于 A2 合入，调用旧签名 `s.checkPath(p)`；A2 合入后 rebase 一次性改成 `s.checkPath(ctx, p, false)`。A2 的 `TestEveryToolChecksItsPaths` 遍历 `tools/list`，会**强制**把 5 个索引工具登记进表，漏改即红 |
+  | `internal/mcpsrv/server.go` | A2 `checkPath(ctx,p,write)` 全量替换、`Options.Sessions/Scope` | B0.5-b `searchInput` 加字段、`search` 改走 `FS.Search`；B9 `Options.Index`、`registerIndexTools` | B9 若先于 A2 合入，调用旧签名 `s.checkPath(p)`；A2 合入后 rebase 一次性改成 `s.checkPath(ctx, p, false)`。A2 的 `TestEveryToolChecksItsPaths` 遍历 `tools/list`，会**强制**把 5 个索引工具登记进表，漏改即红 |
   | `internal/control/metrics.go` `routes()` | A4/A7 | B10/B14 | 各自追加在表尾，冲突只在相邻行，保留两边 |
-  | `internal/control/status.go` `Collector`/`Status` | `Agent`、`MCP` 字段 | `Index` 字段 | 同上 |
+  | `internal/control/status.go` `Collector`/`Status` | `Agent`、`MCP` 字段 | B0.5 `Crawl`、`MetaStatus.LastCrawl`；B10 `Index` 字段 | 同上 |
   | `internal/control/events.go` | `audit`/`session` 事件 | `index` 事件 | 各加一个 `case`，冲突保留两边 |
   | `internal/daemon/daemon.go` | 打开 agent.db（在 `if !opt.SkipWrite` 之前） | 打开 index.db（在 export store 之后） | 位置不同，通常无冲突 |
-  | `cmd/cloudfs/main.go` | `mcp token`、`audit`、`sessions` 分发，`mcpsrv.Options.Sessions` | `index` 分发，`mcpsrv.Options.Index` | 两处 `mcpsrv.New(mcpsrv.Options{...})`（stdio 与 `serveMCPHTTPWith`）都要带上两边字段 |
-  | `internal/config/config.go` | `MCP.Audit/Session/Workspace` | `Config.Index` | 不同结构体 |
+  | `cmd/cloudfs/main.go` | `mcp token`、`audit`、`sessions` 分发，`mcpsrv.Options.Sessions` | B0.5 `cmdFind` → `runFind`、`warm --all`；B10 `index` 分发，`mcpsrv.Options.Index` | 两处 `mcpsrv.New(mcpsrv.Options{...})`（stdio 与 `serveMCPHTTPWith`）都要带上两边字段；`find`/`warm` 与线 A 无交集 |
+  | `internal/config/config.go` | `MCP.Audit/Session/Workspace` | B0.5 `Config.Search`、B0 `Config.Index` | 不同结构体；`Validate` 里两行相邻，保留两边 |
   | `web/router.js`、`web/app.js`、`web/api.js`、`web/i18n.js`、`web/icons.js` | `#/agents`、`bot`、`onAudit/onSession` | `#/index`、`layers`、`onIndex` | 追加式；`i18n.js` 两表各自追加在表尾 |
-  | `web/screens/main.js` | A10 工作区标记 + "来自会话" | B12 搜索切换 + 索引检查器，B14 发送给 Agent | 只在 `renderInspector` 按钮行与搜索监听处接线；逻辑都在独立模块 |
+  | `web/screens/main.js` | A10 工作区标记 + "来自会话" | B0.5-c 删掉搜索监听、改 `mountNameSearch` 接线 + `load()` 行加 `data-path`，B0.5-d 检查器"列举整棵子树"；B12 通过 `extraModes` 加"内容"分段 + 索引检查器，B14 发送给 Agent | 只在 `renderInspector` 按钮行与 `mountNameSearch(...)` 参数处接线；逻辑都在独立模块。A10 若晚于 B0.5-c 合入，rebase 时搜索监听那段已不在 `main.js`，按钮行照常追加 |
   | `test/e2e/browser_helper_test.go` | A11 新建 | B13 新建 | **两线内容逐字相同**（本计划给出全文），git 对内容相同的 add/add 自动合并 |
   | `web/icons.js` `bot` | A0 | B14（仅当 A 未合入） | B14 写与 A0 **完全相同的一行**；合并时保留一份 |
 
@@ -95,9 +95,19 @@
 | `config.Config` 293、`MCP` 179、`Validate` 364、`IsSecretField` secrets.go:39 | 一致 | 一期不改 `IsSecretField`（`api_key` 属 T-39） |
 | fakeprovider 计数"Get"/"Link" | 实际操作名 `ReadRange`（598）、`DownloadURL`（628）、`List`、`Stat`；`NewPathIDs` 可造 `Caps.PathIDs=true` | 验收里的 `Get` → `Calls("ReadRange")`，`Link` → `Calls("DownloadURL")` |
 | doublestar glob | `go.mod` 无 doublestar | B6 自写 `internal/index/glob.go`（`**` 段 + `path.Match`），不加依赖 |
-| `ledongthuc/pdf` | module download cache 只有 `.info/.mod`，无源码 zip | B3 需联网 `./gow get`；离线回退见 B3 |
+| `ledongthuc/pdf` | 2026-09-15 `./gow mod download` 经代理已拉到本机模块缓存 | B3 直接 `./gow get`；离线回退仍保留 |
 | chaos "kill -9" | `test/chaos/chaos_test.go:167 TestKillDuringWriteLosesNothing` 以"不优雅关闭 + 同目录重开"模拟 | B13 照此写法 |
-| Chrome / Node | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`；`node v24.16.0` | 无 |
+| Chrome / Node | 本机（Linux）无系统 Chrome；Playwright 缓存有 `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`（`--headless=new --no-sandbox --dump-dom` 已验证可用）；`node v22.22.0` | `requireBrowser` 候选路径加 `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` glob，并总是带 `--no-sandbox`；或跑测试时设 `CLOUDFS_CHROME` |
+| T-44 `refresh.go:228-231` 未列举目录的 delta 只标 stale | 实为 227-252：`if !haveLocal {` 注释 228-230，`nodeByRemoteID` 232，`store.Invalidate(ctx, p.Ino)` 246（`Invalidate` 把 `dir_state.complete` 置 0，`meta/store.go:1170`）| 爬取器不订阅 delta：`IncompleteDirs` 扫 `complete=0` 自然把这些 stale 目录带上，`Rescan` 周期决定滞后 |
+| T-44 `meta.SearchResult` 只有 `Ino/Name/Path`（`store.go:1391`） | 一致；`Stats` 在 1398，`nodes` 列名 `kind/size/mtime_ns/remote/remote_id/version`（`schema.go:12-28`），无 kv 表 | `SearchResult` 加 `Kind/Size/MTime/Remote/RemoteID/Version/Cached`；`Stats.LastCrawl` 取 `MAX(listed_at)`，不加表、不升 schema |
+| T-44 `searchSQL`/`bounded` CTE | `search.go:150-234`；`bounded` 在 208，`ORDER BY depth,path,ino` 在 227；`cloudfs_search_fold`/`shortNameToken` 在 `search_functions.go:18,32` | 过滤条件进 `bounded` 的 `WHERE`，`ORDER BY` 换成可选排序 |
+| T-44 `FS.Warm` vfs.go:1135 / `warmNode` 1143 / `prefetcher.waitIdle` read.go:723 / `fgIO` vfs.go:180 | 一致；`readDirRefresh` 697、`dirListing` 703（挂载点之上的目录零 provider 调用） | 爬取器复用 `readDirRefresh(ctx, ino, false)`；`waitIdle` 抽成 `FS.yieldToForeground` |
+| T-44 `mcpsrv.searchInput` server.go:328 / `search` 922 | 一致；allow 交集在 942-952，`checkPath` 单参签名（A2 前） | 交集代码不动；hit 加字段；A2 合入后 rebase 改签名 |
+| T-44 `control/search.go` 只有 `q/path/limit` | 一致（`searchMax=500`，`err.q_required`、`err.limit_range`）；`/cache/warm` 无确认门，`decodeMutationLimit` 用 `DisallowUnknownFields`（fs.go:183），所以 `confirm`/`all` 必须是 `CacheRequest` 的字段 | 加字段；`Depth<0` 走 `confirmed(..., "confirm.warm_all")` |
+| T-44 `screens/main.js` 搜索监听 336-356、检查器按钮行 238-244 | 一致；`load()` 行 187-196 无 `data-path`；`ui.js` `confirmDelete` 有 `danger` 参数（89） | 监听整段搬进 `name_search.js`；行加 `data-path` |
+| T-44 `cmd/cloudfs/main.go:958 cmdFind` | 一致；它直接 `daemon.Open` 一个会启动上传的完整 daemon，且不经控制面 | 改为 `runFind`：先 `control.CallSearch`，离线才 `SkipWrite+RequireOwner+NoBackground` |
+| T-44 `test/perf` 计数与 fakeprovider 分页 | `ListPageSize = 2`（fake.go:547）：目录超过 2 项要多次 `List` | "每目录恰一次"用每目录 ≤ 2 项的二叉树（1023 目录）断言 |
+| T-44 B0 引用的 `minimalConfigYAML` | `config_test.go` 无此常量，只有 `example`（12 行起） | B0.5 与 B0 的 config 测试都用 `example` |
 
 ---
 
@@ -118,12 +128,14 @@
 - `internal/textract/`：`textract.go`（Kind/Doc/Options/Extract/KindOf）、`text.go`、`office.go`、`zipguard.go`、`pdf.go`、`chunk.go`，各配 `_test.go`，`pdf_fixture_test.go`（手写最小 PDF）。
 - `internal/index/`：`store.go`、`schema.go`、`lock.go` `lock_unix.go` `lock_windows.go`、`glob.go`、`rules.go`、`budget.go`、`indexer.go`、`search.go`、`service.go`（`mcpsrv.IndexService`/`control.IndexControl` 实现），各配 `_test.go`。
 - `internal/mcpsrv/index_tools.go` + `index_tools_test.go`。
+- B0.5：`internal/vfs/crawl.go`、`crawl_test.go`、`search.go`、`search_test.go`；`internal/meta/coverage.go`、`coverage_test.go`、`query.go`、`query_test.go`、`find_test.go`；`internal/control/ui_search_test.go`；`internal/control/web/name_search.js`、`search_query.js`、`_tests/search_query.test.mjs`；`cmd/cloudfs/find_test.go`；`test/perf/search_scale_test.go`、`test/e2e/search_e2e_test.go`。
 - `internal/control/index.go`、`index_client.go`、`index_test.go`、`ui_index_test.go`、`ui_content_search_test.go`；可选 `agent_prompt.go` + `agent_prompt_test.go`、`ui_send_to_agent_test.go`。
 - `cmd/cloudfs/index.go` + `index_test.go`。
 - `internal/control/web/`：`snippet.js`、`index_presets.js`、`content_search.js`、`extracted_text.js`、`index_inspector.js`、`screens/index.js`；可选 `send_to_agent.js`；`_tests/snippet.test.mjs`、`_tests/index_presets.test.mjs`。
 - `test/perf/index_test.go`、`test/chaos/index_test.go`、`test/e2e/index_e2e_test.go`、`test/e2e/browser_helper_test.go`（与线 A 逐字相同）。
 
 **线 B（修改）**：`go.mod`/`go.sum`、`internal/config/config.go`(+test)、`internal/meta/children_page.go`（加 `WalkSubtree`）+ `walk_subtree_test.go`、`internal/mcpsrv/server.go`、`internal/control/{metrics.go,status.go,events.go,doctor.go}`、`internal/i18n/{catalog_zh.go,catalog_en.go}`、`internal/daemon/daemon.go`、`cmd/cloudfs/main.go`、`internal/control/web/{icons.js,router.js,app.js,api.js,i18n.js,screens/main.js}`、`docs/mcp.md`、`docs/DESIGN.md`、`README.md`、`TODO.md`。
+B0.5 另改：`internal/meta/{store.go,search.go}`、`internal/vfs/read.go`（`waitIdle` 委托）、`internal/mcpsrv/server_test.go`、`internal/control/{search.go,cache.go,fs_test.go,cache_test.go,ui_paging_test.go}`、`cmd/cloudfs/cache.go`、`internal/control/web/screens/storage.js`、`docs/ui-plan.md`。
 
 ---
 
@@ -2922,11 +2934,18 @@ func requireBrowser(t *testing.T) string {
 	if os.Getenv("CLOUDFS_BROWSER") != "1" {
 		t.Skip("set CLOUDFS_BROWSER=1 to run the headless browser smoke")
 	}
-	for _, c := range []string{
+	candidates := []string{
 		os.Getenv("CLOUDFS_CHROME"),
 		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 		"google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-	} {
+	}
+	// Playwright keeps a Chromium under the user cache; a dev box without a
+	// system browser usually has one.
+	if home, err := os.UserHomeDir(); err == nil {
+		matches, _ := filepath.Glob(filepath.Join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux64", "chrome"))
+		candidates = append(candidates, matches...)
+	}
+	for _, c := range candidates {
 		if c == "" {
 			continue
 		}
@@ -2956,7 +2975,7 @@ func renderedDOM(t *testing.T, chrome, url string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, chrome,
-		"--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+		"--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
 		"--user-data-dir="+t.TempDir(), "--virtual-time-budget=10000", "--timeout=20000",
 		"--dump-dom", url).Output()
 	if err != nil {
@@ -3220,6 +3239,1107 @@ Expected: PASS
 ```bash
 git add internal/config internal/meta/walk_subtree.go internal/meta/walk_subtree_test.go internal/control/web/icons.js
 git commit -m "feat(config,meta): index configuration and a paged subtree walk"
+```
+
+---
+
+## Task B0.5：T-44 Everything 式文件名搜索（覆盖率、过滤与排序、全盘搜索界面）
+
+T-44 于 2026-09-15 追加，前置于 B12：B12 的"文件名 / 内容"切换要建在这里改造过的搜索框上。引擎（trigram + 短倒排 + 父链拼路径 + 预算，`internal/meta/search.go`）不动，补的是 Everything 的三件事：索引等于整个卷（后台爬取器 + 覆盖率）、输入即结果（结果行填满、过滤与排序）、全盘默认（界面）。四个子步骤各一个提交，顺序 a → b → c → d；a 与 b 互不依赖，可并行。
+
+**本任务对本计划约束的两处例外（已写进 Global Constraints）**：
+- `internal/vfs` 新增 `crawl.go`、`search.go`（各配 `_test.go`），并把 `read.go:723 prefetcher.waitIdle` 的循环体抽成 `FS.yieldToForeground(stop <-chan struct{}, max time.Duration)` 供爬取器复用；`vfs` 语义不变，`Change.Kind/Origin` 仍是 T-41。
+- **不加新路由**：`/search`（`metrics.go:98`）与 `/cache/warm`（`metrics.go:80` 的 `/cache/` 前缀）已存在，只加查询参数与请求字段；`security_all_routes_test.go` 无需改。
+
+**Files:**
+- Create: `internal/vfs/crawl.go`、`internal/vfs/crawl_test.go`、`internal/vfs/search.go`、`internal/vfs/search_test.go`
+- Create: `internal/meta/coverage.go`、`internal/meta/coverage_test.go`、`internal/meta/query.go`、`internal/meta/query_test.go`、`internal/meta/find_test.go`
+- Create: `internal/control/ui_search_test.go`、`internal/control/web/name_search.js`、`internal/control/web/search_query.js`、`internal/control/web/_tests/search_query.test.mjs`
+- Create: `test/perf/search_scale_test.go`、`test/e2e/search_e2e_test.go`、`test/e2e/browser_helper_test.go`（**仅当 A11/B13 尚未合入**：逐字复制 A11 Step 1 全文；后合入的一方保留已有文件不改）
+- Modify: `internal/config/config.go`（`Config` 293 行加 `Search Search \`yaml:"search"\``；`Validate` 364 行附近调 `c.Search.Validate(c.Remotes)`）+ `config_test.go`
+- Modify: `internal/meta/store.go`（`SearchResult` 1391、`Stats` 1398）、`internal/meta/search.go`（`searchSQL` 改为由 `Filter` 驱动，旧签名 `SearchReport` 保留为薄包装）、`internal/vfs/read.go`（`waitIdle` 委托）
+- Modify: `internal/mcpsrv/server.go`（`searchInput` 328、`search` 922）+ `server_test.go`；`internal/control/search.go` + `fs_test.go`、`internal/control/cache.go` + `cache_test.go`、`internal/control/status.go`；`internal/i18n/catalog_zh.go`、`catalog_en.go`（`confirm.warm_all`）
+- Modify: `internal/daemon/daemon.go`（`if !opt.NoBackground` 块内 `fsys.StartCrawl(ctx, vfs.CrawlOptionsFrom(cfg.Search.Crawl))`）
+- Modify: `cmd/cloudfs/main.go`（`cmdFind` 958 改为 `runFind(ctx, args, out)`；`warm` 分支 127 经 `runCache` 接 `--all`）、`cmd/cloudfs/cache.go`；新建 `cmd/cloudfs/find_test.go`
+- Modify: `internal/control/web/screens/main.js`（删掉 336-356 的搜索监听，改为 `mountNameSearch` 接线；`renderInspector` 238-244 按钮行加"列举整棵子树"；`load()` 行加 `'data-path'`）、`screens/storage.js`（覆盖率卡）、`i18n.js`
+- Modify: `docs/DESIGN.md`（§4.3 表"搜索"一行）、`docs/mcp.md`（`search` 参数）、`README.md`（`search:` 配置、`find`/`warm --all`）、`TODO.md`（T-44 状态：本条与 B12 无关，B0.5-d 落地即关）
+
+**Interfaces:**
+- Consumes: 现有 `meta.Store.{DirState, Children, Stats, BeginDirListing, FlushIndex}`、`vfs.FS.{readDirRefresh, dirListing, Busy, Mounts, Meta, Cache, Warm}`、`cache.Cache.Complete`、`provider.Caps.Tier`、`provider.ErrRiskControl`、`control.{CacheRequest, ManageCache, CallCache, callControl, confirmed}`、`fakeprovider.{Calls, TotalCalls, Seed, SetFaults, ListPageSize}`。
+- Produces:
+```go
+// internal/config/config.go
+type Search struct{ Crawl SearchCrawl `yaml:"crawl"` }
+type SearchCrawl struct {
+	Enabled   bool          `yaml:"enabled"`    // default false: zero provider calls unless asked
+	Remotes   []string      `yaml:"remotes"`    // empty = every mounted remote; names must exist in Remotes
+	Exclude   []string      `yaml:"exclude"`    // path.Match patterns tried against the virtual path and against the directory's own name
+	IdleAfter time.Duration `yaml:"idle_after"` // default 30s: foreground quiet before a pass starts
+	Rescan    time.Duration `yaml:"rescan"`     // default 5m: how often a finished pass looks for directories a delta marked stale
+}
+func (s *Search) Validate(remotes map[string]Remote) error
+```
+```go
+// internal/meta/coverage.go — progress lives in dir_state; no new table.
+type Coverage struct {
+	Listed int64 `json:"listed"` // dir_state rows with complete = 1
+	Known  int64 `json:"known"`  // directory nodes, the root included, so Listed <= Known
+}
+func (s *Store) Coverage(ctx context.Context) (Coverage, error)
+// IncompleteDirs pages directory nodes whose listing is missing or stale, by
+// ascending ino, so a sweep that only moves `after` forward terminates even
+// while it creates new directories (AUTOINCREMENT puts them after the cursor).
+func (s *Store) IncompleteDirs(ctx context.Context, after uint64, limit int) ([]Node, error)
+// Stats gains LastCrawl: MAX(listed_at) over dir_state — the crawler and readdir share the table.
+```
+```go
+// internal/meta/query.go
+type Term struct{ Text string; Glob, Negate bool }
+type Filter struct {
+	Terms          []Term    // bare words: substring of the folded name, or GLOB when Glob
+	Paths          []string  // path: terms and bare words containing "/" (folded path substring; expands subtrees)
+	Ext, NotExt    []string  // lower-case, no dot
+	MinSize        int64     // -1 = unset; inclusive
+	MaxSize        int64     // -1 = unset; inclusive
+	ModifiedAfter  time.Time // zero = unset; inclusive
+	ModifiedBefore time.Time // zero = unset; exclusive
+	Kind           string    // "" | "dir" | "file"
+}
+func ParseQuery(raw string) (Filter, error)
+func (f Filter) Empty() bool
+type SearchQuery struct {
+	Filter Filter
+	Roots  []string // nil = unrestricted (same contract as SearchWithin)
+	Limit  int
+	Sort   string   // "" (depth,path,ino) | name | size | mtime | path; a leading "-" reverses
+}
+func (s *Store) Find(ctx context.Context, q SearchQuery) (SearchReport, error)
+func (s *Store) ExplainFind(ctx context.Context, q SearchQuery) ([]string, error) // EXPLAIN QUERY PLAN detail lines
+// SearchReport/SearchWithin/Search keep their signatures and call Find with ParseQuery(query).
+```
+```go
+// internal/meta/store.go
+type SearchResult struct {
+	Ino   uint64
+	Name  string
+	Path  string
+	Kind  provider.Kind
+	Size  int64
+	MTime time.Time
+	// Remote, RemoteID, Version identify the content so a caller can ask the
+	// block cache; Cached is filled by vfs.FS.Search, never read from meta.
+	Remote, RemoteID, Version string
+	Cached bool
+}
+```
+```go
+// internal/vfs/crawl.go
+type CrawlOptions struct {
+	Enabled   bool
+	Remotes   []string
+	Exclude   []string
+	IdleAfter time.Duration // default 30s
+	Rescan    time.Duration // default 5m
+	YieldMax  time.Duration // default prefetchYield (5s)
+	RiskSleep time.Duration // default 15m
+}
+func CrawlOptionsFrom(c config.SearchCrawl) CrawlOptions
+type CrawlProgress struct {
+	Running  bool      `json:"running"`
+	Listed   int64     `json:"listed"`  // directories listed since this process started (cumulative, so a quiet pass does not zero it)
+	Skipped  int64     `json:"skipped"` // already complete, above a mount, or excluded
+	Failed   int64     `json:"failed"`
+	Yields   int64     `json:"yields"`
+	Paused   string    `json:"paused,omitempty"` // "" | busy | risk_control
+	ResumeAt time.Time `json:"resume_at,omitempty"`
+	Finished time.Time `json:"finished,omitempty"` // end of the last complete pass in this process
+}
+func (f *FS) StartCrawl(ctx context.Context, opt CrawlOptions) // manager goroutine; automatic passes only when opt.Enabled
+func (f *FS) StopCrawl()
+func (f *FS) KickCrawl() bool                                   // one pass now, Enabled or not; false without a manager (NoBackground)
+func (f *FS) CrawlOnce(ctx context.Context, opt CrawlOptions) (CrawlProgress, error) // synchronous pass: warm --all, tests
+func (f *FS) CrawlProgress() CrawlProgress
+// internal/vfs/search.go
+type SearchAnswer struct {
+	meta.SearchReport
+	Coverage meta.Coverage
+	Crawling bool
+}
+func (f *FS) Search(ctx context.Context, q meta.SearchQuery) (SearchAnswer, error) // Find + Cached via cache.Complete + Coverage
+```
+```go
+// internal/control — /search gains ext,glob,kind,min_size,max_size,after,sort (q may be empty when a filter is set)
+type SearchHit struct {
+	Name   string    `json:"name"`
+	Path   string    `json:"path"`
+	Kind   string    `json:"kind"` // "dir" | "file"
+	Size   int64     `json:"size"`
+	MTime  time.Time `json:"mtime"`
+	Cached bool      `json:"cached"`
+}
+type SearchResponse struct {
+	Results  []SearchHit   `json:"results"`
+	Complete bool          `json:"complete"`
+	Coverage SearchCoverage `json:"coverage"`
+}
+type SearchCoverage struct{ Listed, Known int64; Crawling bool } // json: listed, known, crawling
+type SearchQuery struct{ Q, Path, Ext, Glob, Kind, After, Sort string; MinSize, MaxSize int64; Limit int } // CLI client side
+func CallSearch(ctx context.Context, socket, tcp string, q SearchQuery) (SearchResponse, bool, error)
+// CacheRequest gains All bool `json:"all,omitempty"` (warm: run the crawler instead of Warm) and
+// Confirm bool `json:"confirm,omitempty"`; Validate: warm with Depth < 0 requires Confirm ("confirm.warm_all", path).
+// CacheResponse gains Crawl *vfs.CrawlProgress `json:"crawl,omitempty"`; Status gains Crawl vfs.CrawlProgress `json:"crawl"` and
+// Coverage meta.Coverage `json:"coverage"` (the same listed/known pair /search returns; MetaStatus.Dirs excludes the root and
+// CompleteDirs does not, so the pair is what the card must show); MetaStatus gains LastCrawl time.Time `json:"last_crawl"`.
+```
+```go
+// internal/mcpsrv — searchInput gains (all optional):
+//   Glob string `json:"glob"` Ext string `json:"ext"` (comma list) MinSize, MaxSize int64 ModifiedAfter string (RFC3339 or YYYY-MM-DD)
+//   Kind string ("dir"|"file") Sort string; query may be empty when any of them is set.
+// searchHit gains Kind string, Size int64, MTime time.Time, Cached bool; searchOutput gains Coverage struct{Listed, Known int64}.
+```
+
+### B0.5-a 覆盖：爬取器、`search.crawl`、`LastCrawl`、`coverage`、`warm --all`
+
+- [ ] **Step 1: 写失败测试**
+
+```go
+// internal/config/config_test.go
+func TestSearchCrawlIsOffByDefault(t *testing.T) {
+	cfg, err := Parse([]byte(example))
+	if err != nil { t.Fatal(err) }
+	c := cfg.Search.Crawl
+	if c.Enabled || len(c.Remotes) != 0 || len(c.Exclude) != 0 || c.IdleAfter != 30*time.Second || c.Rescan != 5*time.Minute { t.Fatalf("%+v", c) }
+}
+func TestSearchCrawlIsValidated(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"unknown remote": "search:\n  crawl:\n    enabled: true\n    remotes: [nope]\n",
+		"bad glob":       "search:\n  crawl:\n    exclude: [\"[\"]\n",
+		"negative idle":  "search:\n  crawl:\n    idle_after: -1s\n",
+	} {
+		if _, err := Parse([]byte(example + "\n" + yaml)); err == nil { t.Errorf("%s accepted", name) }
+	}
+	cfg, err := Parse([]byte(example + "\nsearch:\n  crawl:\n    enabled: true\n    remotes: [ali]\n    exclude: [\"*/node_modules\", \".git\"]\n    idle_after: 5s\n"))
+	if err != nil || !cfg.Search.Crawl.Enabled || cfg.Search.Crawl.IdleAfter != 5*time.Second { t.Fatalf("%+v %v", cfg.Search, err) }
+}
+```
+```go
+// internal/meta/coverage_test.go
+func TestIncompleteDirsPagesByInoAndCoverageCountsTheRoot(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	var dirs []Node
+	for i := 0; i < 5; i++ {
+		d, err := s.Upsert(ctx, dir(RootIno, fmt.Sprintf("d%d", i)))
+		if err != nil { t.Fatal(err) }
+		dirs = append(dirs, d)
+	}
+	for _, i := range []int{1, 3} { // an empty published listing makes a directory complete
+		l, err := s.BeginDirListing(ctx, dirs[i])
+		if err != nil { t.Fatal(err) }
+		if err := l.Commit(ctx, time.Minute, nil); err != nil { t.Fatal(err) }
+		l.Close()
+	}
+	var got []uint64
+	for after := uint64(0); ; {
+		page, err := s.IncompleteDirs(ctx, after, 2)
+		if err != nil { t.Fatal(err) }
+		if len(page) == 0 { break }
+		for _, n := range page { got = append(got, n.Ino) }
+		after = page[len(page)-1].Ino
+	}
+	if want := []uint64{RootIno, dirs[0].Ino, dirs[2].Ino, dirs[4].Ino}; fmt.Sprint(got) != fmt.Sprint(want) { t.Fatalf("incomplete = %v, want %v", got, want) }
+	cov, err := s.Coverage(ctx)
+	if err != nil || cov.Known != 6 || cov.Listed != 2 { t.Fatalf("%+v %v", cov, err) }
+	st, err := s.Stats(ctx)
+	if err != nil || st.LastCrawl.IsZero() { t.Fatalf("LastCrawl not derived from dir_state: %+v %v", st, err) }
+}
+```
+```go
+// internal/vfs/crawl_test.go
+// seedBinaryTree seeds `depth` levels of two subdirectories each with one file
+// per leaf directory: every directory holds at most fakeprovider.ListPageSize
+// (2) children, so one List call lists one directory and Calls("List") counts
+// directories. It returns that count, the provider root included.
+func seedBinaryTree(f *fakeprovider.Fake, depth int) int {
+	var walk func(prefix string, level int)
+	walk = func(prefix string, level int) {
+		if level == depth { f.Seed(prefix+"/leaf.txt", []byte("x")); return }
+		walk(prefix+"/0", level+1)
+		walk(prefix+"/1", level+1)
+	}
+	walk("", 0)
+	return 1<<(depth+1) - 1
+}
+
+func TestCrawlYieldsToForegroundIO(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	seedBinaryTree(e.fake, 4)
+	e.fs.fgIO.Add(1) // the kernel is "waiting on us" for the whole test
+	defer e.fs.fgIO.Add(-1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prog, err := e.fs.CrawlOnce(ctx, CrawlOptions{YieldMax: 50 * time.Millisecond})
+	if err != nil { t.Fatal(err) }
+	if prog.Yields == 0 { t.Fatal("the crawler never stood aside for foreground IO") }
+	if prog.Listed != 31 { t.Fatalf("yielding must end at YieldMax, not stop the crawl: listed %d", prog.Listed) }
+}
+
+func TestCrawlSleepsAfterRiskControl(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	seedBinaryTree(e.fake, 5) // 63 directories
+	e.fake.SetFaults(func(ft *fakeprovider.Faults) { ft.RiskControlAfter = 10 })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.fs.StartCrawl(ctx, CrawlOptions{Enabled: true, IdleAfter: time.Millisecond, RiskSleep: time.Hour})
+	defer e.fs.StopCrawl()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.fs.CrawlProgress().Paused != "risk_control" {
+		if time.Now().After(deadline) { t.Fatalf("no risk-control pause: %+v", e.fs.CrawlProgress()) }
+		time.Sleep(10 * time.Millisecond)
+	}
+	lists := e.fake.Calls("List")
+	time.Sleep(300 * time.Millisecond)
+	if got := e.fake.Calls("List"); got != lists { t.Fatalf("List calls kept coming during the pause: %d -> %d", lists, got) }
+	if p := e.fs.CrawlProgress(); p.ResumeAt.Before(time.Now().Add(50 * time.Minute)) { t.Fatalf("resume_at = %v, want ≈ now + RiskSleep", p.ResumeAt) }
+}
+
+// A pass interrupted part-way is resumed by the next process from dir_state:
+// directories already complete are never listed again. The store is closed
+// without any crawler shutdown, the way test/chaos models kill -9.
+func TestCrawlResumesAfterAnUncleanStop(t *testing.T) {
+	dir := t.TempDir()
+	fake := fakeprovider.New("ali")
+	seedBinaryTree(fake, 5) // 63 directories
+	open := func() (*FS, *meta.Store) {
+		store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
+		if err != nil { t.Fatal(err) }
+		ca, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: 64, FreeSpace: func(string) (int64, error) { return 1 << 40, nil }})
+		if err != nil { t.Fatal(err) }
+		f, err := New(Options{Meta: store, Cache: ca, DefaultDirTTL: time.Hour, AttrTTL: time.Hour, NegativeTTL: time.Second,
+			Mounts: []Mount{{Prefix: "/", Remote: "ali", RootID: fake.RootID(), Provider: fake, Mode: config.ModeWriteback, DirTTL: time.Hour}}})
+		if err != nil { t.Fatal(err) }
+		t.Cleanup(func() { ca.Close() })
+		return f, store
+	}
+	f1, store1 := open()
+	fake.SetFaults(func(ft *fakeprovider.Faults) { ft.Latency = 5 * time.Millisecond })
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	f1.CrawlOnce(ctx, CrawlOptions{})
+	cancel()
+	listed := fake.Calls("List")
+	if listed == 0 || listed >= 63 { t.Fatalf("the first pass should stop part-way, listed %d", listed) }
+	store1.Close() // no f1.Close(): nothing is flushed on purpose
+	fake.SetFaults(func(ft *fakeprovider.Faults) { ft.Latency = 0 })
+	f2, store2 := open()
+	defer func() { f2.Close(); store2.Close() }()
+	if _, err := f2.CrawlOnce(context.Background(), CrawlOptions{}); err != nil { t.Fatal(err) }
+	if got := fake.Calls("List"); got != 63 { t.Fatalf("List calls across both passes = %d, want 63: a complete directory was listed twice", got) }
+}
+```
+```go
+// test/perf/search_scale_test.go (part 1 of 2; the 1M-node baseline is B0.5-b Step 1)
+// The crawler lists each directory exactly once, and a disabled crawler is
+// free: the existing call-count baselines in this package depend on that.
+func TestCrawlListsEveryDirectoryExactlyOnce(t *testing.T) {
+	h := newHarness(t, 4096, 0, 0)
+	dirs := seedBinaryTree(h.fake, 9) // 1023 directories, at most two entries each
+	ctx := context.Background()
+	prog, err := h.fs.CrawlOnce(ctx, vfs.CrawlOptions{})
+	if err != nil { t.Fatal(err) }
+	if got := h.fake.Calls("List"); got != dirs || int(prog.Listed) != dirs { t.Fatalf("List calls = %d, listed = %d, want %d", got, prog.Listed, dirs) }
+	if h.fake.Calls("Stat") != 0 { t.Fatalf("crawl issued %d Stat calls; listings carry attributes", h.fake.Calls("Stat")) }
+	if _, err := h.fs.CrawlOnce(ctx, vfs.CrawlOptions{}); err != nil { t.Fatal(err) }
+	if got := h.fake.Calls("List"); got != dirs { t.Fatalf("a second pass listed complete directories again: %d", got) }
+	cov, _ := h.fs.Meta().Coverage(ctx)
+	if cov.Listed != int64(dirs) || cov.Known != int64(dirs) { t.Fatalf("coverage %+v after a full crawl", cov) }
+}
+func TestCrawlerOffCostsNoCalls(t *testing.T) {
+	h := newHarness(t, 4096, 0, 0)
+	seedTree(h.fake, 5, 20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.fs.StartCrawl(ctx, vfs.CrawlOptions{Enabled: false, IdleAfter: time.Millisecond, Rescan: time.Millisecond})
+	defer h.fs.StopCrawl()
+	time.Sleep(200 * time.Millisecond)
+	if n := h.fake.TotalCalls(); n != 0 { t.Fatalf("a disabled crawler made %d provider calls", n) }
+	if h.fs.CrawlProgress().Running { t.Fatal("a disabled crawler reports running") }
+}
+```
+（`seedBinaryTree` 在 `test/perf` 里再写一份同名 helper——两个包不共享测试代码。）
+```go
+// internal/control/cache_test.go
+func TestUnboundedWarmRequiresConfirmAndAllUsesTheCrawler(t *testing.T) {
+	f, p := cacheControl(t)
+	p.Seed("/docs/deep/x", []byte("x"))
+	s := NewServer(f.coll)
+	if w := call(t, s, "POST", "/cache/warm", `{"path":"/","depth":-1}`); w.Code != 400 || !strings.Contains(w.Body.String(), "confirm=true") { t.Fatalf("unconfirmed whole-tree warm: %d %s", w.Code, w.Body) }
+	if w := call(t, s, "POST", "/cache/warm", `{"path":"/docs","depth":1}`); w.Code != 200 { t.Fatalf("a bounded warm needs no confirmation: %d %s", w.Code, w.Body) }
+	out := decode[CacheResponse](t, call(t, s, "POST", "/cache/warm", `{"path":"/","depth":-1,"all":true,"confirm":true}`))
+	if out.Crawl == nil || out.Crawl.Listed == 0 { t.Fatalf("all=true did not run the crawler: %+v", out) }
+	cov, _ := f.coll.FS.Meta().Coverage(context.Background())
+	if cov.Listed != cov.Known { t.Fatalf("crawler left directories unlisted: %+v", cov) }
+}
+```
+（`cacheControl` 建的 `Collector` 没有后台 manager，所以 `all:true` 在 handler 里同步跑 `CrawlOnce`；daemon 装配后 `KickCrawl()` 返回 true 时改为异步并只回 `Crawl` 进度——两条分支都在 `ManageCache` 里，见 Step 3。）
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `./gow test ./internal/config/ -run TestSearchCrawl -v; ./gow test ./internal/meta/ -run TestIncompleteDirs -v; ./gow test ./internal/vfs/ -run TestCrawl -v; ./gow test ./test/perf/ -run 'TestCrawl' -v; ./gow test ./internal/control/ -run TestUnboundedWarm -v`
+Expected: FAIL（编译错误即可）
+
+- [ ] **Step 3: 实现**
+
+- `config.Search.Validate`：填默认 `IdleAfter=30s`、`Rescan=5m`；`IdleAfter/Rescan < 0` 拒绝；`Remotes` 每项必须是 `Remotes` 的键；`Exclude` 每项 `path.Match(p, "")` 不得返回 `path.ErrBadPattern`。
+- `meta.IncompleteDirs`：`SELECT nodeCols FROM nodes n LEFT JOIN dir_state d ON d.ino=n.ino WHERE n.kind=? AND n.ino>? AND (d.ino IS NULL OR d.complete=0) ORDER BY n.ino LIMIT ?`（按主键顺序扫，百万节点一趟 < 200 ms，每 `Rescan` 一次可接受）；`Coverage`：两条 COUNT；`Stats.LastCrawl`：`SELECT COALESCE(MAX(listed_at),0) FROM dir_state`。
+- `vfs/crawl.go`：
+  - `CrawlOnce` = 一次单调扫描：`after := 0`，循环 `IncompleteDirs(ctx, after, 256)`；对每个目录 `p := pathOf(ino)`，`mountFor(p)` 不在 `Remotes` 里或 `excluded(p)` → `Skipped++`；否则 `yieldToForeground(stop, YieldMax)`（进入过等待就 `Yields++`、`Paused="busy"`）→ `readDirRefresh(ctx, ino, false)`（`dirListing` 自己决定要不要碰 provider：挂载点之上的目录零调用）→ 成功 `Listed++`；`errors.Is(err, provider.ErrRiskControl)` → `Paused="risk_control"`、`ResumeAt=now+RiskSleep`，睡到 `ResumeAt` 或 ctx 结束后**重试同一目录**；其他错误 `Failed++` 继续；`after = 本页最后 ino`。空页结束，`Finished=now`。每个 remote 一个串行 worker：本期对所有 tier 都是并发 1（`unofficial` 固定 1，`official` 的 fanout 留到与 `prefetchFanout` 对齐时再放开），所以按 remote 分组只是把队列按 `mountFor(p).Remote` 拆开、各自一个 goroutine，用 `errgroup` 汇总。
+  - `excluded(p)`：对每个模式 `path.Match(pat, p) || path.Match(pat, path.Base(p))`。
+  - `StartCrawl` 起 manager goroutine：`Enabled` 时先等前台安静 `IdleAfter`（`fgIO==0` 持续该时长，用 50 ms 轮询）跑第一轮，之后每轮结束 `select { case <-kick: case <-time.After(Rescan): }` 再等安静、再跑；`Enabled=false` 时只在 `KickCrawl` 上醒来，`TestCrawlerOffCostsNoCalls` 断言的就是这条分支。`CrawlProgress` 用 `atomic.Pointer` 发布，`Listed/Skipped/Failed/Yields` 累计。`StopCrawl` 关 stop、等 goroutine。`CrawlProgress()` 读 `atomic.Pointer[CrawlProgress]`。
+  - `read.go`：`prefetcher.waitIdle()` 改为 `p.fs.yieldToForeground(p.stopC, prefetchYield)`，循环体原样搬到 `crawl.go`，返回 `bool`（是否等待过）。
+  - `dirListing` 若把 provider 错误包了一层，`errors.Is` 仍能识别；若发现被映射成 `ErrTransient`（`UNVERIFIED: 真机 quark 风控是否穿透 dirListing`），在 `mapListingErr` 保留 `ErrRiskControl`。
+- `control/cache.go`：`CacheRequest` 加 `All`、`Confirm`；`Validate`：`Action=="warm" && Depth < 0 && !Confirm` → `errors.New("control: confirm=true is required to list a whole subtree")`；handler 在 `Validate` 之前用 `confirmed(w, r, q.Confirm, "confirm.warm_all", q.Path)` 给出本地化文案（`Depth < 0` 时）。`ManageCache` `warm` 分支：`q.All` → `c.FS.KickCrawl()` 为 true 时 `out.Crawl = ptr(c.FS.CrawlProgress())` 立即返回；否则 `prog, err := c.FS.CrawlOnce(ctx, vfs.CrawlOptionsFrom(c.ConfigView().Search.Crawl))`（`Config` 为 nil 用零值）→ `out.Crawl=&prog`、`out.Directories=int(prog.Listed)`；`!q.All` 走原 `Warm`。`i18n` 两表加 `confirm.warm_all`（zh "对 %s 整棵子树发出目录列举请求，可能是很多次" / en "lists every folder under %s, which can be many requests"）。
+- `control/status.go`：`Status.Crawl = c.FS.CrawlProgress()`、`Status.Coverage, _ = c.FS.Meta().Coverage(ctx)`；`MetaStatus.LastCrawl = st.LastCrawl`。
+- `daemon.go`：`if !opt.NoBackground` 块内 `fsys.StartCrawl(ctx, vfs.CrawlOptionsFrom(cfg.Search.Crawl))`，`closers` 加 `StopCrawl`。
+- `cmd/cloudfs/cache.go`：`runCache` 的 `parseFlags(args, "json", "all")`；`warm --all` → `q.Path="/"`、`q.Depth=-1`、`q.All=true`；任何 `warm` 且 `Depth<0` 自动 `q.Confirm=true`（敲命令即确认）；`All` 且在线时打印 `crawl` 进度并提示 `cloudfs status` 跟进。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `./gow test -race ./internal/config/ ./internal/meta/ ./internal/vfs/ ./internal/control/ ./internal/daemon/ ./cmd/cloudfs/ -count=1 && ./gow test ./test/perf/ -count=1`
+Expected: PASS；`test/perf` 既有 `TestWarmTraversalIsFree`、`TestSearchIsLocal` 等调用次数不变。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add internal/config internal/meta internal/vfs internal/control internal/i18n internal/daemon cmd/cloudfs test/perf/search_scale_test.go
+git commit -m "feat(vfs,meta): background directory crawler with coverage, and warm --all
+
+The name index only knows directories somebody has opened; a delta event for
+an unlisted directory marks its parent stale and nothing ever follows up.
+A crawler that sweeps dir_state.complete=0 in ino order finishes every pass,
+survives restarts without a table of its own, yields to the kernel and sleeps
+after risk control. Off by default: zero provider calls unless configured.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+### B0.5-b 结果与过滤：`SearchResult` 填满、查询语法、排序、MCP / 控制面 / CLI 参数、百万节点基线
+
+查询语法（`internal/meta/query.go`，控制台 `search_query.js` 实现同一张表）：
+
+| 语法 | 含义 | 进 SQL 的形式（`n` = `nodes`，`fold` = `cloudfs_search_fold`） |
+|---|---|---|
+| `report` | 名字子串（大小写折叠）；多个裸词 **AND** | `instr(fold(n.name),?)>0` |
+| `"my report"` | 含空格的字面量 | 同上 |
+| `*.md`、`rep?rt*` | 通配：`*` 任意串、`?` 单字符；字面量里的 `[` 转义为 `[[]` | `fold(n.name) GLOB ?` |
+| `src/handler`、`path:src` | 路径子串（等价现有含 `/` 的行为）；触发子树展开 | `instr(fold(matches.path),?)>0` |
+| `ext:go`、`ext:go,md` | 扩展名（无点、折叠），逗号 = OR | `(fold(n.name) GLOB '*.go' OR …)` |
+| `size:>1m`、`size:<100k`、`size:1m..10m`、`size:4096` | 大小；`k/m/g` 二进制单位；`>`/`<` 严格；`..` 闭区间；裸数字精确 | `n.size>=? AND n.size<=?` |
+| `dm:>2026-09-01`、`dm:<2026-09`、`dm:2026-09`、`dm:2026-09-01..2026-09-30` | 修改时间；`YYYY`、`YYYY-MM`、`YYYY-MM-DD`，本地时区；单值 = 落在该区间内；`>` 从下一天/月/年起 | `n.mtime_ns>=? AND n.mtime_ns<?` |
+| `type:dir`、`type:file` | 种类 | `n.kind=?` |
+| `-term`、`-ext:bak`、`-path:vendor` | 取反；取反项永不作锚点 | `NOT (...)` / `instr(...)=0` |
+
+锚点：在**正向**的裸词、路径分量、通配的最长字面量段、单一 `ext:` 的 `"."+ext` 里取 rune 数最长者（并列取先出现的）；≥ 3 走 `name_index` trigram（+ `name_index_pending`），1–2 走 `short_name_index`，没有锚点（如只有 `size:`）则从根展开整棵树、只靠预算兜底（`Complete=false` 如实报）。有任何路径项即按现有"路径查询"走 `expanded` 展开，否则不展开。过滤条件全部放在 `bounded` CTE 的 `WHERE`（`JOIN nodes n ON n.ino=matches.ino` 后），所以预算仍只计匹配行。排序 `ORDER BY` 作用在 `bounded` 之上：`name` → `fold(name),path`；`size` → `size DESC,path`；`mtime` → `mtime_ns DESC,path`；`path` → `path`；默认 `depth,path,ino` 不变。**诚实的后果**：排序只在预算收集到的集合上做，`Complete=false` 时"按大小前 N"未必是全局前 N——界面沿用现有 `search.truncated` 常驻行说明，MCP 沿用 `truncated`。
+
+- [ ] **Step 1: 写失败测试**
+
+```go
+// internal/meta/query_test.go
+func unset(f Filter) Filter { if f.MinSize == 0 { f.MinSize = -1 }; if f.MaxSize == 0 { f.MaxSize = -1 }; return f }
+
+func TestParseQueryGrammar(t *testing.T) {
+	loc := time.Local
+	for raw, want := range map[string]Filter{
+		"report":                  {Terms: []Term{{Text: "report"}}},
+		"my report":               {Terms: []Term{{Text: "my"}, {Text: "report"}}},
+		`"my report"`:             {Terms: []Term{{Text: "my report"}}},
+		"*.md":                    {Terms: []Term{{Text: "*.md", Glob: true}}},
+		"src/handler":             {Paths: []string{"src/handler"}},
+		"path:src":                {Paths: []string{"src"}},
+		"ext:Go,md":               {Ext: []string{"go", "md"}},
+		"size:>1m":                {MinSize: 1<<20 + 1},
+		"size:<100k":              {MaxSize: 100<<10 - 1},
+		"size:1m..10m":            {MinSize: 1 << 20, MaxSize: 10 << 20},
+		"size:4096":               {MinSize: 4096, MaxSize: 4096},
+		"dm:>2026-09-01":          {ModifiedAfter: time.Date(2026, 9, 2, 0, 0, 0, 0, loc)},
+		"dm:>2026-09":             {ModifiedAfter: time.Date(2026, 10, 1, 0, 0, 0, 0, loc)},
+		"dm:2026-09":              {ModifiedAfter: time.Date(2026, 9, 1, 0, 0, 0, 0, loc), ModifiedBefore: time.Date(2026, 10, 1, 0, 0, 0, 0, loc)},
+		"type:dir":                {Kind: "dir"},
+		"-tmp -ext:bak type:file": {Terms: []Term{{Text: "tmp", Negate: true}}, NotExt: []string{"bak"}, Kind: "file"},
+	} {
+		got, err := ParseQuery(raw)
+		if err != nil { t.Fatalf("%q: %v", raw, err) }
+		if !reflect.DeepEqual(got, unset(want)) { t.Errorf("%q:\n got %+v\nwant %+v", raw, got, unset(want)) }
+	}
+}
+func TestParseQueryRejectsBadValues(t *testing.T) {
+	for _, raw := range []string{"size:lots", "size:>", "size:10m..1m", "dm:yesterday", "dm:2026-13", "type:link", "ext:", "size:>1m size:<2m size:3m"} {
+		if _, err := ParseQuery(raw); err == nil { t.Errorf("%q accepted", raw) }
+	}
+	if f, err := ParseQuery(`"unterminated`); err != nil || len(f.Terms) != 1 || f.Terms[0].Text != `"unterminated` { t.Fatalf("an unterminated quote is a literal word: %+v %v", f, err) }
+}
+func TestGlobAnchorUsesTheLongestLiteralRun(t *testing.T) {
+	for raw, want := range map[string]struct{ anchor string; short bool }{
+		"*.md": {".md", false}, "rep?rt*2026": {"2026", false}, "a*b": {"a", true}, "*": {"", false},
+		"-tmp *.go": {".go", false}, "ext:go": {".go", false}, "ext:go,md": {"", false}, "size:>1k": {"", false}, "ab report": {"report", false},
+	} {
+		f, err := ParseQuery(raw)
+		if err != nil { t.Fatal(err) }
+		anchor, short := f.anchor()
+		if anchor != want.anchor || short != want.short { t.Errorf("%q: anchor %q short %v, want %+v", raw, anchor, short, want) }
+	}
+}
+```
+```go
+// internal/meta/find_test.go
+// seedTyped builds /src with files whose size, mtime and extension differ.
+func seedTyped(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	src, err := s.Upsert(ctx, dir(RootIno, "src"))
+	if err != nil { t.Fatal(err) }
+	for i, spec := range []struct{ name string; size int64; age time.Duration }{
+		{"main.go", 4096, 0}, {"tiny.go", 10, 48 * time.Hour}, {"notes.md", 2048, 24 * time.Hour}, {"README.md", 300, 72 * time.Hour}, {"big.bin", 5 << 20, 96 * time.Hour},
+	} {
+		n := file(src.Ino, spec.name, spec.size)
+		n.MTime = base.Add(-spec.age)
+		n.Remote, n.RemoteID, n.Version = "ali", fmt.Sprintf("id%d", i), "v1"
+		if _, err := s.Upsert(ctx, n); err != nil { t.Fatal(err) }
+	}
+	if err := s.FlushIndex(ctx); err != nil { t.Fatal(err) }
+}
+func paths(rs []SearchResult) string { out := make([]string, 0, len(rs)); for _, r := range rs { out = append(out, r.Path) }; return fmt.Sprint(out) }
+func find(t *testing.T, s *Store, raw, sort string) SearchReport {
+	t.Helper()
+	f, err := ParseQuery(raw)
+	if err != nil { t.Fatal(err) }
+	rep, err := s.Find(context.Background(), SearchQuery{Filter: f, Limit: 10, Sort: sort})
+	if err != nil { t.Fatal(err) }
+	return rep
+}
+
+func TestFindFiltersByExtensionAndSize(t *testing.T) {
+	s, _ := openTest(t)
+	seedTyped(t, s)
+	rep := find(t, s, "ext:go size:>1k", "")
+	if !rep.Complete || paths(rep.Results) != "[/src/main.go]" { t.Fatalf("%+v", rep) }
+	if r := rep.Results[0]; r.Size != 4096 || r.Kind != provider.KindFile || r.MTime.IsZero() || r.RemoteID != "id0" || r.Cached { t.Fatalf("thin result: %+v", r) }
+}
+func TestFindSortsByModifiedTime(t *testing.T) {
+	s, _ := openTest(t)
+	seedTyped(t, s)
+	if got := paths(find(t, s, "type:file", "mtime").Results); got != "[/src/main.go /src/notes.md /src/tiny.go /src/README.md /src/big.bin]" { t.Fatalf("mtime order: %s", got) }
+	if got := paths(find(t, s, "type:file", "size").Results); got != "[/src/big.bin /src/main.go /src/notes.md /src/README.md /src/tiny.go]" { t.Fatalf("size order: %s", got) }
+	if got := paths(find(t, s, "type:file", "-size").Results); got != "[/src/tiny.go /src/README.md /src/notes.md /src/main.go /src/big.bin]" { t.Fatalf("reversed size order: %s", got) }
+	if _, err := s.Find(context.Background(), SearchQuery{Filter: Filter{Kind: "file", MinSize: -1, MaxSize: -1}, Limit: 10, Sort: "bogus"}); err == nil { t.Fatal("an unknown sort key must be refused") }
+}
+func TestFindKindDirReturnsOnlyDirectories(t *testing.T) {
+	s, _ := openTest(t)
+	seedTyped(t, s)
+	if got := paths(find(t, s, "type:dir", "").Results); got != "[/src]" { t.Fatalf("%s", got) }
+}
+func TestGlobAndExtensionAgree(t *testing.T) {
+	s, _ := openTest(t)
+	seedTyped(t, s)
+	a, b := find(t, s, "*.md", ""), find(t, s, "ext:md", "")
+	if paths(a.Results) != paths(b.Results) || len(a.Results) != 2 { t.Fatalf("glob %s vs ext %s", paths(a.Results), paths(b.Results)) }
+	if got := paths(find(t, s, "-ext:md type:file -big", "").Results); got != "[/src/main.go /src/tiny.go]" { t.Fatalf("negation: %s", got) }
+	if got := paths(find(t, s, "REA*.md", "").Results); got != "[/src/README.md]" { t.Fatalf("folded glob: %s", got) }
+}
+func TestFilteredQueryStillReportsItsBudget(t *testing.T) {
+	if testing.Short() { t.Skip("wide-tree budget") }
+	s, _ := openTest(t)
+	root, _ := s.Upsert(context.Background(), dir(RootIno, "wide"))
+	seedWide(t, s, root.Ino, 200, 300) // 60 000 .txt leaves
+	rep := find(t, s, "ext:txt", "size")
+	if rep.Complete || len(rep.Results) != 10 { t.Fatalf("complete=%v n=%d", rep.Complete, len(rep.Results)) }
+}
+func TestLegacySearchSignaturesStillWork(t *testing.T) {
+	s, _ := openTest(t)
+	seedTyped(t, s)
+	if got, err := s.Search(context.Background(), "notes", 10); err != nil || len(got) != 1 || got[0].Size != 2048 { t.Fatalf("%+v %v", got, err) }
+	if rep, err := s.SearchReport(context.Background(), "src/", []string{"/src"}, 10); err != nil || len(rep.Results) != 5 { t.Fatalf("%+v %v", rep, err) }
+}
+```
+```go
+// internal/vfs/search_test.go
+func TestSearchFillsCachedFromTheBlockCache(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	e.fake.Seed("docs/hot.txt", []byte("0123456789"))
+	e.fake.Seed("docs/cold.txt", []byte("0123456789"))
+	if _, err := e.fs.ReadDirPath(ctx, "/ali/docs"); err != nil { t.Fatal(err) }
+	if _, err := e.fs.ReadFileRange(ctx, "/ali/docs/hot.txt", 0, 10); err != nil { t.Fatal(err) }
+	e.fs.meta.FlushIndex(ctx)
+	f, _ := meta.ParseQuery("ext:txt")
+	ans, err := e.fs.Search(ctx, meta.SearchQuery{Filter: f, Limit: 10, Sort: "name"})
+	if err != nil || len(ans.Results) != 2 { t.Fatalf("%+v %v", ans, err) }
+	if ans.Results[0].Cached || !ans.Results[1].Cached { t.Fatalf("cached flags: %+v", ans.Results) }
+	if ans.Coverage.Known == 0 || ans.Coverage.Listed == 0 { t.Fatalf("coverage: %+v", ans.Coverage) }
+}
+```
+```go
+// test/perf/search_scale_test.go (part 2 of 2)
+// One million nodes: 200 directories × 5000 files, ingested through the real
+// listing path. Asserts latency percentiles and that no query plan scans nodes.
+func TestSearchScaleOneMillionNodes(t *testing.T) {
+	if testing.Short() { t.Skip("1M-node ingest and query baseline (minutes)") }
+	h := newHarness(t, 4096, 0, 0)
+	ctx := context.Background()
+	store := h.fs.Meta()
+	exts := []string{"go", "md", "txt", "pdf"}
+	start := time.Now()
+	for d := 0; d < 200; d++ {
+		parent, err := store.Upsert(ctx, meta.Node{ParentIno: meta.RootIno, Name: fmt.Sprintf("dir%03d", d), Kind: provider.KindDir, Remote: "ali", RemoteID: fmt.Sprintf("d%03d", d), TTL: time.Hour})
+		if err != nil { t.Fatal(err) }
+		l, err := store.BeginDirListing(ctx, parent)
+		if err != nil { t.Fatal(err) }
+		batch := make([]meta.Node, 0, meta.DirListingBatch)
+		for i := 0; i < 5000; i++ {
+			batch = append(batch, meta.Node{Name: fmt.Sprintf("file-%03d-%05d.%s", d, i, exts[i%4]), Kind: provider.KindFile, Size: int64(i * 37 % 100000),
+				MTime: time.Unix(int64(1_700_000_000+d*5000+i), 0), Remote: "ali", RemoteID: fmt.Sprintf("f%03d-%05d", d, i), Version: "1", TTL: time.Hour})
+			if len(batch) == meta.DirListingBatch {
+				if err := l.Append(ctx, batch); err != nil { t.Fatal(err) }
+				batch = batch[:0]
+			}
+		}
+		if err := l.Commit(ctx, time.Hour, nil); err != nil { t.Fatal(err) }
+		l.Close()
+	}
+	if err := store.FlushIndex(ctx); err != nil { t.Fatal(err) }
+	t.Logf("ingest 1M nodes through DirListing: %s", time.Since(start))
+	p95 := func(f meta.Filter, sort string) time.Duration {
+		var samples []time.Duration
+		for i := 0; i < 20; i++ {
+			s := time.Now()
+			if _, err := store.Find(ctx, meta.SearchQuery{Filter: f, Limit: 20, Sort: sort}); err != nil { t.Fatal(err) }
+			samples = append(samples, time.Since(s))
+		}
+		slices.Sort(samples)
+		return samples[18]
+	}
+	for _, tc := range []struct{ q, sort string; max time.Duration }{
+		{"file-199-04999", "", 100 * time.Millisecond}, {"99", "", 50 * time.Millisecond},
+		{"ext:go size:>1k", "mtime", 100 * time.Millisecond}, {"*.pdf", "size", 100 * time.Millisecond},
+	} {
+		f, err := meta.ParseQuery(tc.q)
+		if err != nil { t.Fatal(err) }
+		if got := p95(f, tc.sort); got > tc.max { t.Errorf("%q p95 = %s, want < %s", tc.q, got, tc.max) }
+		plan, err := store.ExplainFind(ctx, meta.SearchQuery{Filter: f, Limit: 20, Sort: tc.sort})
+		if err != nil { t.Fatal(err) }
+		for _, line := range plan {
+			if strings.HasPrefix(line, "SCAN n") { t.Errorf("%q: full table scan: %s", tc.q, line) }
+		}
+		t.Logf("%q: %s", tc.q, strings.Join(plan, " | "))
+	}
+}
+```
+（ingest 预计 2–4 分钟；若本机超过 5 分钟，把目录数降到 100 并在 TODO 验收里写明实际规模。`file-199-04999` 是 14 rune 的 trigram 查询，`99` 走短倒排，后两条各带一个过滤锚点。）
+```go
+// internal/mcpsrv/server_test.go
+func TestSearchGlobRespectsAllowlist(t *testing.T) {
+	e := newEnv(t, Options{Allow: []string{"/work"}})
+	e.fake.Seed("work/notes/plan.md", []byte("x"))
+	e.fake.Seed("work/main.go", []byte("xx"))
+	e.fake.Seed("private/secret.md", []byte("x"))
+	if _, err := e.fs.Warm(context.Background(), "/", -1); err != nil { t.Fatal(err) }
+	var out searchOutput
+	e.call(t, "search", searchInput{Glob: "*.md"}, &out)
+	if len(out.Hits) != 1 || out.Hits[0].Path != "/work/notes/plan.md" || out.Hits[0].Size != 1 || out.Hits[0].Kind != "file" { t.Fatalf("%+v", out.Hits) }
+	if res := e.call(t, "search", searchInput{Path: "/private", Glob: "*.md"}, nil); !res.IsError { t.Fatal("a scope outside the allow-list must fail, not answer empty") }
+	e.call(t, "search", searchInput{Query: "plan", Ext: "go"}, &out)
+	if len(out.Hits) != 0 { t.Fatalf("ext must AND with the query: %+v", out.Hits) }
+	e.call(t, "search", searchInput{Kind: "file", Sort: "size", MinSize: 1}, &out)
+	if len(out.Hits) != 2 || out.Hits[0].Path != "/work/main.go" || out.Coverage.Known == 0 { t.Fatalf("%+v", out) }
+	if res := e.call(t, "search", searchInput{}, nil); !res.IsError { t.Fatal("no query and no filter should fail") }
+}
+```
+```go
+// internal/control/fs_test.go
+func TestSearchCarriesCoverageAndRowFacts(t *testing.T) {
+	f, _ := fsControl(t)
+	s := NewServer(f.coll)
+	ctx := context.Background()
+	if _, err := f.coll.FS.ReadDirPath(ctx, "/docs"); err != nil { t.Fatal(err) }
+	if _, err := f.coll.FS.ReadFileRange(ctx, "/docs/b", 0, 6); err != nil { t.Fatal(err) } // one block: fully cached
+	if err := f.coll.FS.Meta().FlushIndex(ctx); err != nil { t.Fatal(err) }
+	out := decode[SearchResponse](t, call(t, s, "GET", "/search?q=b&sort=size", ""))
+	if out.Coverage.Known == 0 || out.Coverage.Listed == 0 || out.Coverage.Listed > out.Coverage.Known { t.Fatalf("coverage: %+v", out.Coverage) }
+	var hit *SearchHit
+	for i := range out.Results { if out.Results[i].Path == "/docs/b" { hit = &out.Results[i] } }
+	if hit == nil || hit.Size != 6 || hit.Kind != "file" || hit.MTime.IsZero() || !hit.Cached { t.Fatalf("thin hit: %+v", out.Results) }
+	dirs := decode[SearchResponse](t, call(t, s, "GET", "/search?kind=dir", ""))
+	if len(dirs.Results) < 2 { t.Fatalf("filter-only search: %+v", dirs) }
+	for _, r := range dirs.Results { if r.Kind != "dir" { t.Fatalf("kind=dir returned %+v", r) } }
+	for _, bad := range []string{"/search", "/search?q=a&sort=bogus", "/search?q=a&min_size=x", "/search?ext=go&kind=link"} {
+		if w := call(t, s, "GET", bad, ""); w.Code != 400 { t.Fatalf("%s: %d", bad, w.Code) }
+	}
+}
+```
+```go
+// cmd/cloudfs/find_test.go
+func TestFindCLIFiltersAndSorts(t *testing.T) {
+	cfg, configPath := uploadCLIConfig(t)
+	dir := t.TempDir()
+	s, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
+	if err != nil { t.Fatal(err) }
+	defer s.Close()
+	c, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: 64})
+	if err != nil { t.Fatal(err) }
+	defer c.Close()
+	p := fakeprovider.New("ali")
+	f, err := vfs.New(vfs.Options{Meta: s, Cache: c, Mounts: []vfs.Mount{{Prefix: "/", Remote: "ali", RootID: fakeprovider.RootID, Provider: p}}})
+	if err != nil { t.Fatal(err) }
+	defer f.Close()
+	ctx := context.Background()
+	base := time.Now().Truncate(time.Second)
+	for i, name := range []string{"old.go", "new.go", "notes.md"} {
+		n := meta.Node{ParentIno: meta.RootIno, Name: name, Kind: provider.KindFile, Size: int64(100 * (i + 1)), MTime: base.Add(time.Duration(i) * time.Hour), Remote: "ali", RemoteID: name, Version: "1", TTL: time.Hour}
+		if _, err := s.Upsert(ctx, n); err != nil { t.Fatal(err) }
+	}
+	srv, err := control.NewServer(&control.Collector{FS: f, Cache: c}).Start(ctx, cfg.Control.Socket, "")
+	if err != nil { t.Fatal(err) }
+	defer srv.Close()
+	var out bytes.Buffer
+	if err := runFind(ctx, []string{"--ext", "go", "--sort", "mtime", "--config", configPath}, &out); err != nil { t.Fatal(err) }
+	if got := fmt.Sprint(strings.Fields(out.String())); got != "[/new.go /old.go]" { t.Fatalf("find --ext go --sort mtime: %q", out.String()) }
+	out.Reset()
+	if err := runFind(ctx, []string{"--size", ">150", "--after", base.Add(30 * time.Minute).Format(time.RFC3339), "--config", configPath}, &out); err != nil { t.Fatal(err) }
+	if got := fmt.Sprint(strings.Fields(out.String())); got != "[/new.go /notes.md]" { t.Fatalf("find --size --after: %q", out.String()) }
+	// --all lists the tree first: a file in a directory nobody opened appears.
+	for _, name := range []string{"old.go", "new.go", "notes.md"} { p.Seed(name, []byte("x")) }
+	p.Seed("deep/never/x.go", []byte("x"))
+	out.Reset()
+	if err := runFind(ctx, []string{"--all", "--ext", "go", "--config", configPath}, &out); err != nil { t.Fatal(err) }
+	if !strings.Contains(out.String(), "/deep/never/x.go") { t.Fatalf("find --all did not crawl first: %q", out.String()) }
+}
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `./gow test ./internal/meta/ -run 'TestParseQuery|TestGlobAnchor|TestFind|TestGlobAnd|TestFiltered|TestLegacySearch' -v; ./gow test ./internal/vfs/ -run TestSearchFills -v; ./gow test ./internal/mcpsrv/ -run TestSearchGlob -v; ./gow test ./internal/control/ -run TestSearchCarries -v; ./gow test ./cmd/cloudfs/ -run TestFindCLI -v`
+Expected: FAIL
+
+- [ ] **Step 3: 实现**
+
+- `meta/query.go`：分词（空白分隔，双引号成组，未闭合的引号按字面量）；`key:value` 里 `key ∈ {ext, size, dm, type, path}`，其他冒号词当裸词；前导 `-` 取反（`-size:`/`-dm:`/`-type:` 拒绝，只支持裸词/`ext`/`path` 取反）；`size` 用 `config.ParseSize` 之外的小解析（`k/m/g` 后缀，允许 `kb/mb/gb`）；`dm` 用 `time.ParseInLocation` 三种布局；同一 key 重复出现的 `size`/`dm`/`type` 拒绝（`ext`/`path` 可重复）。`(f Filter) anchor() (string, bool)`：候选 = 正向 `Terms`（Glob 取最长字面量段：按 `*`/`?` 切开，`[[]` 还原为 `[`）+ `Paths` 的最长分量 + 恰好一个正向 `Ext` 时的 `"."+ext`；返回 rune 数最长者与 `< 3`。`Empty()`：无任何项。
+- `meta/search.go`：`searchSQL(q SearchQuery, budget int)`：候选段沿用现有三种形态（trigram / 短倒排 / 无锚点从根展开——无锚点时**总是**展开，即 `pathQuery=true` 语义）；`bounded` 改为
+  ```sql
+  , bounded AS (SELECT matches.ino,matches.name,matches.path,matches.depth,n.kind,n.size,n.mtime_ns,n.remote,n.remote_id,n.version
+   FROM <from> matches JOIN nodes n ON n.ino=matches.ino WHERE matches.ino!=1
+   [AND instr(cloudfs_search_fold(n.name),?)>0 ...]      -- every positive literal term, the anchor included
+   [AND cloudfs_search_fold(n.name) GLOB ? ...]           -- glob terms, pattern folded too ('REA*.md' -> 'rea*.md'; '[' -> '[[]'; a literal '*' / '?' cannot be searched, documented)
+   [AND instr(cloudfs_search_fold(matches.path),?)>0 ...] -- path terms
+   [AND (cloudfs_search_fold(n.name) GLOB ? OR ...)]      -- ext
+   [AND NOT (...)]                                        -- negations
+   [AND n.size>=? ] [AND n.size<=?] [AND n.mtime_ns>=?] [AND n.mtime_ns<?] [AND n.kind=?]
+   [AND EXISTS (json_each roots ...)]                     -- unchanged
+   LIMIT ?)
+   SELECT ino,name,path,kind,size,mtime_ns,remote,remote_id,version,count(*) OVER () FROM bounded ORDER BY <sort>
+  ```
+  `Find` 把旧 `SearchReport` 的校验、`pendingIndexExceeds`/`FlushIndex`、去重、`Complete` 逻辑原样保留；`SearchReport(ctx, query, roots, limit)` = `Find(ctx, SearchQuery{Filter: ParseQuery(query), Roots, Limit})`。`ExplainFind` 对同一 SQL 前缀 `EXPLAIN QUERY PLAN` 收集 `detail` 列。旧 `searchAnchor` 删除，`TestShortSearchUsesPostingsAt100KNodes` 改调 `searchSQL(SearchQuery{Filter: mustParse("99"), Limit: 20}, matchBudget(20))`。
+- `vfs/search.go`：`Find` → 每个文件结果 `r.Cached = f.cache.Complete(cache.FileKey{Remote: r.Remote, RemoteID: r.RemoteID, Version: r.Version})`（本地未上传的 `cloudfs-local:` id 同样用这个键，`write.go` 发布时就是这么登记的）；`Coverage` 来自 `meta.Coverage`，`Crawling` 来自 `CrawlProgress().Running`。
+- `mcpsrv/server.go`：`searchInput` 加字段；`ParseQuery(in.Query)` 后叠加：`Glob` → `Terms = append(…, Term{Text: in.Glob, Glob: true})`，`Ext` 逗号拆分并小写，`MinSize/MaxSize` > 0 时覆盖，`ModifiedAfter` 先试 RFC3339 再试 `2006-01-02`，`Kind`、`Sort` 原样（`Find` 校验）；`Filter.Empty()` 且无 `Content` → 现有 "query must not be empty" 错误；roots 交集代码（942 行起）**不动**；`content` 路径仍取 `candidateLimit=limit*4`；hit 填 `Kind/Size/MTime/Cached`，`out.Coverage` 来自 `SearchAnswer`；`checkPath` 仍按当前签名 `s.checkPath(p)`（A2 合入后 rebase 改 `(ctx, p, false)`）。
+- `control/search.go`：读 `ext/glob/kind/min_size/max_size/after/sort`（`strconv.ParseInt` 失败或 `kind` 不是 `dir|file` → 400，新键 `err.search_param`（zh "搜索参数 %s 无效" / en "search parameter %s is invalid"）加进两份 catalog）；`q` 与所有过滤都空 → 400 `err.q_required`；调 `s.collector.FS.Search`；`Sort` 非法由 `Find` 报错 → 400。`CallSearch` 用 `callControl(ctx, socket, tcp, http.MethodGet, "/search?"+q.Encode(), nil, &out)`。
+- `cmd/cloudfs/main.go`：`runFind(ctx, args, out io.Writer)`：`parseFlags(args, "all", "json")`；`--ext`、`--size`（`>150`、`<1m`、`1m..2m`）、`--after`（RFC3339 或日期）、`--sort`、`--limit`、`--type`；先 `control.CallSearch` 走在线 daemon，`!online` 时 `daemon.Open(... SkipWrite: true, RequireOwner: true, NoBackground: true)` 并直接 `d.FS.Search`（与 `runCache` 同一套离线规则，不再起一个会上传的完整 daemon）；`--all`：在线 `CallCache(warm, All, Confirm)` 后轮询 `/status` 的 `crawl.running` 直到 false（`--timeout` 默认 30m），离线 `CrawlOnce`，然后再搜索；输出每行路径，`--json` 输出 `SearchResponse`；空结果与 `!complete` 的 stderr 提示保留，空结果时改为提示 `--all`。
+- `docs/mcp.md` 的 `search` 行加参数与 `coverage` 说明（B0.5-d 一并提交文档亦可，这里先改 mcp.md 以免 B9 的 `docs/mcp.md` 改动冲突）。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `./gow test -race ./internal/meta/ ./internal/vfs/ ./internal/mcpsrv/ ./internal/control/ ./cmd/cloudfs/ -count=1 && ./gow test ./test/perf/ -run 'TestSearchScale|TestSearchIsLocal|TestCrawl' -v -count=1`
+Expected: PASS；`TestShortSearchUsesPostingsAt100KNodes`、`TestWidePathQueryStopsAtItsBudget` 等既有搜索测试不改断言仍过。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add internal/meta internal/vfs internal/mcpsrv internal/control cmd/cloudfs test/perf/search_scale_test.go docs/mcp.md
+git commit -m "feat(meta,mcpsrv,control,cli): filters, wildcards and sorting for name search
+
+Results now carry size, mtime, kind and whether the file is cached. A small
+query grammar (ext: size: dm: type: path: and * ? wildcards) is parsed once
+in meta and reaches SQL before the budgeted CTE, so the budget still counts
+matches only. Sorting is honest about the collected set. MCP search, the
+control /search route and cloudfs find expose the same parameters.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+### B0.5-c UI F11 前半：`name_search.js`、`search_query.js`、全盘默认、快捷键、结果列、排序、覆盖率行
+
+- [ ] **Step 1: 写失败测试（mjs）**
+
+```js
+// internal/control/web/_tests/search_query.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { parseQueryString, buildQueryString, searchURL, highlightParts, sizeRange, splitSizeRange, pushRecent } from '../search_query.js';
+
+test('the default scope asks for the whole drive', () => {
+  const url = searchURL({ query: 'plan', scope: 'all', cwd: '/work' });
+  assert.ok(url.startsWith('/search?q=plan'));
+  assert.ok(!url.includes('path='));
+  assert.ok(searchURL({ query: 'plan', scope: 'cwd', cwd: '/work' }).includes('&path=%2Fwork'));
+  assert.ok(searchURL({ query: 'plan', scope: 'all', cwd: '/', sort: 'size' }).endsWith('&sort=size'));
+  assert.ok(!searchURL({ query: 'plan', scope: 'all', cwd: '/' }).includes('sort='));
+});
+test('filters and terms round-trip through the query string', () => {
+  const q = 'report ext:go,md size:>1m dm:>2026-09 type:file -tmp';
+  const p = parseQueryString(q);
+  assert.deepEqual(p.filters, { kind: 'file', ext: 'go,md', size: '>1m', dm: '>2026-09' });
+  assert.deepEqual(p.terms, ['report', '-tmp']);
+  assert.deepEqual(p.errors, []);
+  assert.equal(buildQueryString(p.terms, p.filters), q);
+});
+test('a size range composes and decomposes', () => {
+  assert.equal(sizeRange('1m', '10m'), '1m..10m');
+  assert.equal(sizeRange('1m', ''), '>1m');
+  assert.equal(sizeRange('', '10m'), '<10m');
+  assert.equal(sizeRange('', ''), '');
+  assert.deepEqual(splitSizeRange('1m..10m'), { min: '1m', max: '10m' });
+  assert.deepEqual(splitSizeRange('>1m'), { min: '1m', max: '' });
+});
+test('invalid filter values stay words and are reported', () => {
+  const p = parseQueryString('size:lots dm:yesterday type:link "unterminated');
+  assert.deepEqual(p.errors, ['size', 'dm', 'type']);
+  assert.ok(p.terms.includes('size:lots'));
+  assert.equal(buildQueryString(p.terms, p.filters), 'size:lots dm:yesterday type:link "unterminated');
+});
+test('highlighting matches bare words only, keeps casing and never emits markup', () => {
+  const parsed = parseQueryString('Plan ext:md');
+  assert.deepEqual(highlightParts('MyPlan.md', parsed), [{ text: 'My', hit: false }, { text: 'Plan', hit: true }, { text: '.md', hit: false }]);
+  assert.deepEqual(highlightParts('x', parseQueryString('ext:md')), [{ text: 'x', hit: false }]);
+  assert.deepEqual(highlightParts('draft.md', parseQueryString('*.md')), [{ text: 'draft', hit: false }, { text: '.md', hit: true }]);
+  assert.ok(highlightParts('<b>plan</b>', parsed).every((p) => typeof p.text === 'string' && !('html' in p)));
+});
+test('recent searches are most-recent-first, unique and capped at ten', () => {
+  let list = [];
+  for (let i = 0; i < 12; i++) list = pushRecent(list, 'q' + i);
+  assert.equal(list.length, 10);
+  assert.equal(list[0], 'q11');
+  assert.deepEqual(pushRecent(['a', 'b'], 'b'), ['b', 'a']);
+  assert.deepEqual(pushRecent(['a'], '  '), ['a']);
+});
+```
+
+- [ ] **Step 2: 写失败测试（Go）**
+
+```go
+// internal/control/ui_search_test.go
+package control
+
+func TestNameSearchDefaultsToTheWholeDrive(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"searchURL(", "=== 'cwd' ? 'cwd' : 'all'", "localStorage.getItem(SEARCH_SCOPE_KEY)", "localStorage.setItem(SEARCH_SCOPE_KEY, scope)"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+	if strings.Count(src, "try {") < 2 { t.Error("scope storage is not guarded") }
+	main := webSource(t, "web/screens/main.js")
+	if strings.Contains(main, "api.get('/search?") || !strings.Contains(main, "mountNameSearch(") { t.Error("main.js must wire name_search.js instead of calling /search itself") }
+}
+func TestIndexWholeTreeAsksForConfirmation(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"confirmToken: 'warm'", "api.post('/cache/warm', { path: '/', depth: -1, all: true, confirm: true })", "r.coverage.listed", "r.coverage.known"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+}
+func TestSortHeadersChangeTheRequest(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"'data-sort': key", "onclick: () => setSort(key)", "'aria-sort'"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+	if !strings.Contains(webSource(t, "web/search_query.js"), "'&sort=' + ") { t.Error("searchURL never sends sort=") }
+}
+func TestHighlightIsInsertedAsText(t *testing.T) {
+	for _, f := range []string{"web/name_search.js", "web/search_query.js"} {
+		if strings.Contains(webSource(t, f), "html:") { t.Errorf("%s uses the html attribute on a file name", f) }
+	}
+	if !strings.Contains(webSource(t, "web/name_search.js"), "highlightParts(hit.name, parsed)") { t.Error("result names do not go through highlightParts") }
+}
+func TestCoverageLineComesFromI18n(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"t('search.count'", "t('search.coverage'", "t('search.coverage.index')", "t('search.scope.all')", "t('search.scope.cwd')", "t('search.truncated')"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+	zh := tableKeys(t, webI18nSource(t), "zh")
+	for _, k := range []string{"search.count", "search.coverage", "search.coverage.crawling", "search.coverage.index", "search.scope", "search.scope.all", "search.scope.cwd", "search.sort", "confirm.warm.title", "confirm.warm.body", "toast.warm.started"} {
+		if !zh[k] { t.Errorf("missing %s", k) }
+	}
+}
+func TestSearchShortcutsAreWired(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"ev.metaKey", "ev.ctrlKey", "=== 'k'", "'Escape'", "searchBox.focus()"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+	if !strings.Contains(webSource(t, "web/screens/main.js"), "'data-path': e.path") { t.Error("directory rows carry no data-path, so a result cannot be selected after opening its folder") }
+}
+```
+
+- [ ] **Step 3: 运行确认失败**
+
+Run: `node --test internal/control/web/_tests/search_query.test.mjs; ./gow test ./internal/control/ -run 'TestNameSearch|TestIndexWholeTree|TestSortHeaders|TestHighlightIsInserted|TestCoverageLine|TestSearchShortcuts' -v`
+Expected: FAIL
+
+- [ ] **Step 4: 实现**
+
+`search_query.js`（零 import，语法表与 Go 一致）：
+```js
+const KEYS = ['ext', 'size', 'dm', 'type', 'path'];
+const SIZE = /^(>|<)?(\d+(?:\.\d+)?[kmg]?b?)$|^(\d+(?:\.\d+)?[kmg]?b?)\.\.(\d+(?:\.\d+)?[kmg]?b?)$/i;
+const DATE = /^(>|<)?(\d{4}(?:-\d{2}){0,2})$|^(\d{4}(?:-\d{2}){0,2})\.\.(\d{4}(?:-\d{2}){0,2})$/;
+export function tokenize(text)                 // whitespace split, double quotes group, an unterminated quote is a literal
+export function parseQueryString(text)         // -> { terms: [...], filters: { kind?, ext?, size?, dm? }, errors: ['size', ...] }
+export function buildQueryString(terms, filters) // terms first, then ext size dm type in that order; a filter is omitted when empty
+export function sizeRange(min, max)            // '1m..10m' | '>1m' | '<10m' | ''
+export function splitSizeRange(text)           // inverse of sizeRange
+export function searchURL({ query, scope, cwd, sort, limit = 100 })
+  // '/search?q=' + encodeURIComponent(query) + (scope === 'cwd' ? '&path=' + encodeURIComponent(cwd) : '') + '&limit=' + limit + (sort ? '&sort=' + sort : '')
+export function highlightParts(name, parsed)   // bare positive terms (globs by their longest literal run), case-insensitive, [{text, hit}]
+export function pushRecent(list, query, max = 10)
+```
+（`parseQueryString` 只校验形态，不算字节数——服务端才是真相；`errors` 让过滤条把无法理解的键标红而不吞掉用户的输入。）
+
+`name_search.js`：
+```js
+import { api } from '/ui/api.js';
+import { el, fill, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
+import { t, locale } from '/ui/i18n.js';
+import { parseQueryString, searchURL, highlightParts } from '/ui/search_query.js';
+
+export const SEARCH_SCOPE_KEY = 'cloudfs.search.scope';
+export function readSearchScope() {
+  try { return localStorage.getItem(SEARCH_SCOPE_KEY) === 'cwd' ? 'cwd' : 'all'; } catch (_) { return 'all'; }
+}
+export function writeSearchScope(scope) {
+  try { localStorage.setItem(SEARCH_SCOPE_KEY, scope); } catch (_) { /* not remembered; the default is the whole drive anyway */ }
+}
+const SORTS = ['name', 'size', 'mtime', 'path'];
+
+// mountNameSearch owns everything between the search box and the result rows:
+// the scope control, the shortcut keys, the request, the result table and the
+// coverage line. main.js only hands it the elements and callbacks.
+// extraModes (B12) adds segments after "whole drive / this folder":
+//   { id, when(), label, active(), select(on), run(query) }.
+export function mountNameSearch({ searchBox, rows, getCwd, onClear, onOpen, onSelect, extraModes = [] }) {
+  let scope = readSearchScope();
+  let sort = '';
+  let parsed = parseQueryString('');
+  let timer;
+  const scopeControl = el('div', { class: 'row', role: 'group', 'aria-label': t('search.scope') });
+  const statusLine = el('div', { class: 'dim', style: 'display:none;padding:8px 18px;font-size:12px;border-bottom:1px solid var(--border)' });
+  const header = el('tr', { 'aria-label': t('search.sort') });
+  function renderScope() { /* buttons for all / cwd with aria-pressed; onclick: scope = s; writeSearchScope(scope); renderScope(); run(); then one button per extraModes entry whose when() is true */ }
+  function renderHeader() {
+    fill(header, ...[['name', t('col.name')], ['size', t('col.size')], ['mtime', t('col.modified')], ['path', t('col.path')]].map(([key, label]) =>
+      el('th', { 'data-sort': key, 'aria-sort': sort === key ? 'descending' : 'none', style: 'cursor:pointer', onclick: () => setSort(key) }, label)));
+  }
+  function setSort(key) { sort = sort === key ? '' : key; renderHeader(); run(); }
+  async function run() {
+    const query = searchBox.value.trim();
+    if (!query) { statusLine.style.display = 'none'; onClear(); return; }
+    parsed = parseQueryString(query);
+    const mode = extraModes.find((m) => m.when() && m.active());
+    if (mode) { await mode.run(query); return; }
+    let r;
+    try { r = await api.get(searchURL({ query, scope, cwd: getCwd(), sort })); } catch (err) { toast(err.message, 'bad'); return; }
+    fill(rows, ...(r.results || []).map((hit) => {
+      const tr = el('tr', { 'data-hit': hit.path, onclick: () => onSelect(hit, tr) },
+        el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' }, iconEl(hit.kind === 'dir' ? 'folder' : 'file'),
+          ...highlightParts(hit.name, parsed).map((p) => (p.hit ? el('mark', {}, p.text) : p.text)))),
+        el('td', { class: 'num dim', 'data-size': String(hit.size) }, hit.kind === 'dir' ? '—' : bytes(hit.size)),
+        el('td', { class: 'detail', style: 'padding-left:20px' }, new Date(hit.mtime).toLocaleDateString(locale())),
+        el('td', { style: 'padding-left:20px;font-size:13px' }, hit.kind === 'dir' ? t('state.dir') : hit.cached ? el('span', { class: 'dim' }, el('span', { class: 'dot ok' }), ' ' + t('state.cached')) : el('span', { class: 'dim' }, el('span', { class: 'dot' }), ' ' + t('state.remote'))));
+      tr.addEventListener('dblclick', () => onOpen(hit));
+      return tr;
+    }));
+    if (!(r.results || []).length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
+    if (!r.complete) rows.append(el('tr', {}, el('td', { colspan: '4', class: 'dim', style: 'text-align:center;padding:12px' }, t('search.truncated'))));
+    renderCoverage(r);
+  }
+  function renderCoverage(r) {
+    const full = r.coverage.listed >= r.coverage.known;
+    statusLine.style.display = '';
+    fill(statusLine, t('search.count', (r.results || []).length), ' · ', t('search.coverage', r.coverage.listed, r.coverage.known),
+      r.coverage.crawling ? ' · ' + t('search.coverage.crawling') : null,
+      full || r.coverage.crawling ? null : el('button', { style: 'margin-left:12px;padding:4px 10px', onclick: indexWholeTree }, t('search.coverage.index')));
+  }
+  async function indexWholeTree() {
+    const ok = await confirmDelete({ title: t('confirm.warm.title'), body: t('confirm.warm.body'), confirmToken: 'warm', confirmLabel: t('search.coverage.index'), danger: false });
+    if (!ok) return;
+    try { await api.post('/cache/warm', { path: '/', depth: -1, all: true, confirm: true }); toast(t('toast.warm.started')); }
+    catch (err) { toast(err.message, 'bad'); }
+  }
+  function onKey(ev) {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'k') { ev.preventDefault(); searchBox.focus(); searchBox.select(); }
+    else if (ev.key === 'Escape' && document.activeElement === searchBox && searchBox.value) { searchBox.value = ''; run(); }
+  }
+  searchBox.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+  document.addEventListener('keydown', onKey);
+  renderScope(); renderHeader();
+  return { scopeControl, statusLine, header, run, refresh: renderScope, dispose() { clearTimeout(timer); document.removeEventListener('keydown', onKey); } };
+}
+```
+`screens/main.js` 接线（删除 336-356 的搜索监听；`import { mountNameSearch } from '/ui/name_search.js';`）：
+```js
+const search = mountNameSearch({
+  searchBox, rows, getCwd: () => cwd, onClear: () => load(),
+  onOpen: (hit) => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load().then(() => selectPath(hit.path)); },
+  onSelect: (hit, tr) => select({ name: hit.name, path: hit.path, size: hit.size, mtime: hit.mtime, is_dir: hit.kind === 'dir', cached: hit.cached ? 1 : 0 }, tr),
+});
+function selectPath(p) { const tr = rows.querySelector('tr[data-path="' + CSS.escape(p) + '"]'); if (tr) tr.click(); }
+// load(): directory rows get 'data-path': e.path; the table's <thead> holds search.header while a query is active
+//   (swap on run/clear: fill(thead, active ? search.header : browseHeader)), and search.statusLine sits between the
+//   header bar and the table; the header bar becomes: crumb, grow, search.scopeControl, searchBox, plus, refresh.
+// deep link on mount: const hp = new URLSearchParams(location.hash.split('?')[1] || ''); if (hp.get('q')) { searchBox.value = hp.get('q'); search.run(); }
+// dispose: search.dispose() alongside off() and unsubscribeHealth()
+```
+（`main.js` 净减约 15 行；B14/A10/B12 仍只在 `renderInspector` 按钮行与 `mountNameSearch` 的参数处接线。）
+
+i18n 键（zh / en；`search.placeholder` 改为提示快捷键）：
+| key | zh | en |
+|---|---|---|
+| `search.placeholder` | 搜索整个网盘（Ctrl/⌘+K） | Search the whole drive (Ctrl/⌘+K) |
+| `search.scope` | 搜索范围 | Search in |
+| `search.scope.all` | 全盘 | Whole drive |
+| `search.scope.cwd` | 当前目录 | This folder |
+| `search.sort` | 排序 | Sort |
+| `search.count` | %s 条 | %s results |
+| `search.coverage` | 覆盖 已列举 %s / 已知 %s 目录 | covers %s of %s known folders |
+| `search.coverage.crawling` | 正在列举更多目录… | listing more folders… |
+| `search.coverage.index` | 索引整棵树 | Index the whole tree |
+| `confirm.warm.title` | 列举整棵树 | List the whole tree |
+| `confirm.warm.body` | 输入 warm 确认。会对网盘发出大量目录列举请求；非官方接口的网盘可能触发风控。 | Type warm to confirm. This sends many listing requests to the drive; drives on unofficial APIs may throttle or flag the account. |
+| `toast.warm.started` | 已开始后台列举，进度见「缓存」屏 | Listing started in the background; progress is on the Cache screen |
+
+- [ ] **Step 5: 运行确认通过**
+
+Run: `node --test internal/control/web/_tests/*.test.mjs && ./gow test ./internal/control/ -run 'TestNameSearch|TestIndexWholeTree|TestSortHeaders|TestHighlightIsInserted|TestCoverageLine|TestSearchShortcuts|TestTruncatedSearchSaysSoInTheResults|TestWebCatalog|TestWebScreens|TestEveryTranslationKey|TestIconsAreSizedAndDefined|TestBrowserModule|TestScreensDoNotStringifyASkippedChild|TestWebAppNeverAsksForACredential' -v`
+Expected: PASS（`TestTruncatedSearchSaysSoInTheResults` 查 `main.js` 里的 `t('search.truncated'`——该串随监听搬进 `name_search.js` 后，把这条既有断言改为查 `web/name_search.js`，属本步骤的合法改动。）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add internal/control/web internal/control/ui_search_test.go internal/control/ui_paging_test.go
+git commit -m "feat(ui): whole-drive name search with scope, shortcuts, sortable full rows and coverage
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+### B0.5-d UI F11 后半：过滤条、最近搜索、缓存屏覆盖率卡、检查器"列举整棵子树"、e2e 与浏览器冒烟、文档
+
+- [ ] **Step 1: 写失败测试（Go，`ui_search_test.go` 追加）**
+
+```go
+func TestFilterBarRoundTripsThroughTheQueryString(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"parseQueryString(searchBox.value)", "buildQueryString(", "sizeRange(", "splitSizeRange(", "t('search.filters')", "t('search.filter.invalid'", "type: 'date'"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+}
+func TestRecentSearchesAreBoundedAndGuarded(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{"pushRecent(", "RECENT_KEY", "el('datalist'", "localStorage.getItem(RECENT_KEY)"} {
+		if !strings.Contains(src, want) { t.Errorf("name_search.js lacks %s", want) }
+	}
+	if strings.Count(src, "try {") < 4 { t.Error("recent-search storage is not guarded") }
+}
+func TestCacheScreenShowsDirectoryCoverage(t *testing.T) {
+	src := webSource(t, "web/screens/storage.js")
+	for _, want := range []string{"t('storage.coverage')", "cov.listed", "cov.known", "crawl.running", "m.last_crawl"} {
+		if !strings.Contains(src, want) { t.Errorf("storage.js lacks %s", want) }
+	}
+}
+func TestInspectorOffersWholeSubtreeListing(t *testing.T) {
+	src := webSource(t, "web/screens/main.js")
+	for _, want := range []string{"api.post('/cache/warm', { path: e.path, depth: -1, confirm: true })", "confirmToken: 'warm'", "t('action.warm.all')"} {
+		if !strings.Contains(src, want) { t.Errorf("main.js lacks %s", want) }
+	}
+}
+```
+
+- [ ] **Step 2: 写 e2e 用例**
+
+```go
+// test/e2e/search_e2e_test.go
+package e2e
+
+const crawlYAML = "search:\n  crawl:\n    enabled: true\n    idle_after: 200ms\n    rescan: 1s\n"
+
+// Needs a kernel mount: run on Linux with /dev/fuse. A file seeded into a
+// directory nobody ever opened becomes searchable once the crawler is on.
+func TestNeverOpenedDirectoryBecomesSearchable(t *testing.T) {
+	s := newStackWith(t, "writeback", stackOptions{extraYAML: crawlYAML})
+	s.fake.Seed("archive/2019/never-opened-51c9.txt", []byte("x"))
+	h := control.NewServer(s.d.Collector()).Handler()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		w := uiCall(t, h, "GET", "/search?q=51c9", "")
+		if strings.Contains(w.Body.String(), `"/archive/2019/never-opened-51c9.txt"`) { break }
+		if time.Now().After(deadline) { t.Fatalf("not searchable within 10s: %s", w.Body.String()) }
+		time.Sleep(200 * time.Millisecond)
+	}
+	if b, err := os.ReadFile(filepath.Join(s.dir, "archive/2019/never-opened-51c9.txt")); err != nil || string(b) != "x" {
+		t.Fatalf("the crawled file is not readable through the mount: %v", err)
+	}
+	var st struct{ Crawl struct{ Listed int64 `json:"listed"` } `json:"crawl"` }
+	json.Unmarshal(uiCall(t, h, "GET", "/status", "").Body.Bytes(), &st)
+	if st.Crawl.Listed < 3 { t.Fatalf("status.crawl does not reflect the pass: %+v", st) }
+}
+
+func TestNameSearchInTheBrowser(t *testing.T) {
+	s := newUnmountedStack(t, stackOptions{})
+	ctx := context.Background()
+	s.fake.Seed("notes/plan.md", []byte("browser smoke marker 7f3a")) // 25 bytes, never read: cached=false
+	if _, err := s.d.FS.ReadDirPath(ctx, "/notes"); err != nil { t.Fatal(err) }
+	if err := s.d.FS.Meta().FlushIndex(ctx); err != nil { t.Fatal(err) }
+	h := control.NewServer(s.d.Collector()).Handler()
+	if w := uiCall(t, h, "GET", "/search?q=plan", ""); !strings.Contains(w.Body.String(), `"/notes/plan.md"`) || !strings.Contains(w.Body.String(), `"size":25`) {
+		t.Fatalf("/search: %s", w.Body.String())
+	}
+	chrome := requireBrowser(t)
+	base := startControlUI(t, s.d.Collector())
+	dom := renderedDOM(t, chrome, base+"/?lang=en#/connections?q=plan")
+	for _, want := range []string{`data-hit="/notes/plan.md"`, `data-size="25"`, "25 B", "<mark>plan</mark>", "known folders"} {
+		if !strings.Contains(dom, want) { t.Fatalf("the file browser's name search lacks %s:\n%s", want, dom) }
+	}
+	if dom := renderedDOM(t, chrome, base+"/?lang=en#/storage"); !strings.Contains(dom, "Folder coverage") {
+		t.Fatalf("the cache screen has no coverage card:\n%s", dom)
+	}
+}
+```
+（`browser_helper_test.go` 若尚不存在，按 A11 Step 1 全文逐字创建；A11/B13 后合入时 git 对内容相同的 add/add 自动合并。）
+
+- [ ] **Step 3: 运行确认失败**
+
+Run: `./gow test ./internal/control/ -run 'TestFilterBar|TestRecentSearches|TestCacheScreenShows|TestInspectorOffers' -v; ./gow vet ./test/e2e/`
+Expected: FAIL / vet 报未定义符号（helper 未建时）
+
+- [ ] **Step 4: 实现**
+
+- `name_search.js` 过滤条：`scopeControl` 右侧加 `el('button', { 'aria-expanded': 'false', onclick: toggleFilters }, iconEl('filter'), t('search.filters'))`（`icons.js` 若无 `filter` 则加一行 `filter: svg('<path d="M3 5h18l-7 8v6l-4-2v-4z"/>')`）；展开行：类型 `select`（`any/file/dir` → `filters.kind`）、扩展名 `input`（`filters.ext`）、大小 `input` 最小 / 最大（`sizeRange(min, max)` → `filters.size`，回填用 `splitSizeRange`）、修改晚于 `el('input', { type: 'date' })`（`filters.dm = '>' + value`）。任一控件 `change` → `searchBox.value = buildQueryString(parsed.terms, filters); run()`；`run()` 里 `parsed = parseQueryString(searchBox.value)` 后把 `parsed.filters` 回填到控件，`parsed.errors` 非空时在过滤条下方显示 `t('search.filter.invalid', parsed.errors.join(', '))`（不拦截请求：服务端 400 会经 toast 显示）。
+- 最近搜索：`export const RECENT_KEY = 'cloudfs.search.recent';` `readRecent()`/`writeRecent(list)` 各自 `try {}`；`run()` 成功后 `writeRecent(pushRecent(readRecent(), query))`；`searchBox.setAttribute('list', 'search-recent')` + `el('datalist', { id: 'search-recent' }, ...list.map((q) => el('option', { value: q })))` 挂在 `scopeControl` 里，每次 `run` 后重建。
+- `screens/storage.js`：`import { t, locale } from '/ui/i18n.js';`；网格改 `repeat(5,minmax(0,1fr))`；`refreshCards` 里 `const st = get().status || {}; const m = st.meta || {}; const cov = st.coverage || {}; const crawl = st.crawl || {};` 加第五张卡 `card(t('storage.coverage'), (cov.listed || 0) + ' / ' + (cov.known || 0), crawl.running ? t('storage.coverage.crawling', crawl.listed || 0) : t('storage.coverage.detail', m.last_crawl && !m.last_crawl.startsWith('0001') ? new Date(m.last_crawl).toLocaleString(locale()) : t('storage.coverage.never')))`（SSE `status` 已驱动 `subscribe`，无需新事件）。
+- `screens/main.js` `renderInspector` 按钮行：目录项在"预热"旁加 `el('button', { onclick: () => warmAll(e) }, iconEl('up'), t('action.warm.all'))`；`warmAll(e)`：`confirmDelete({ title: t('confirm.warm.title'), body: t('confirm.warm.body'), confirmToken: 'warm', confirmLabel: t('action.warm.all'), danger: false })` → `api.post('/cache/warm', { path: e.path, depth: -1, confirm: true })` → `toast(t('toast.warmed', r.directories || 0))`。
+- i18n 键（zh / en）：`search.filters` 筛选 / Filters；`search.filter.kind` 类型 / Type；`search.filter.kind.any` 任意 / Any；`search.filter.kind.file` 文件 / Files；`search.filter.kind.dir` 目录 / Folders；`search.filter.ext` 扩展名 / Extension；`search.filter.size.min` 最小 / Min size；`search.filter.size.max` 最大 / Max size；`search.filter.after` 修改晚于 / Modified after；`search.filter.invalid` 无法理解的筛选：%s / Filter not understood: %s；`search.recent` 最近搜索 / Recent searches；`storage.coverage` 目录覆盖率 / Folder coverage；`storage.coverage.detail` 已列举 / 已知 · 最后列举 %s / listed / known · last listed %s；`storage.coverage.crawling` 正在列举 · 本进程已列举 %s 个目录 / listing · %s folders so far；`storage.coverage.never` 从未 / never；`action.warm.all` 列举整棵子树 / List the whole subtree。
+- 文档：`docs/DESIGN.md` §4.3 表"搜索"一行改为实现现状（语法、排序、爬取器与覆盖率、`Complete` 与排序的关系）；`README.md` 加 `search:` 配置片段（`crawl: {enabled, remotes, exclude, idle_after, rescan}`）、`cloudfs find --ext --size --after --sort --type --all`、`cloudfs warm --all`；`docs/ui-plan.md` F11-1…F11-6 打勾；`TODO.md` T-44 改 `[x]`（macOS 无 FUSE 时 e2e SKIP 则 `[~]`），每条验收后附测试名。
+
+- [ ] **Step 5: 运行**
+
+Run: `node --test internal/control/web/_tests/*.test.mjs && ./gow test -race ./internal/control/ -count=1`
+Expected: PASS
+Run: `./gow test ./test/e2e/ -run TestNameSearchInTheBrowser -v -count=1`
+Expected: PASS（浏览器部分 SKIP）
+Run: `CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run TestNameSearchInTheBrowser -v -count=1`
+Expected: PASS
+Run（Linux + `/dev/fuse`）: `./gow test ./test/e2e/ -run TestNeverOpenedDirectoryBecomesSearchable -v -count=1`
+Expected: PASS；macOS 无 macFUSE 为 SKIP，TODO 标 `[~]`。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add internal/control/web internal/control/ui_search_test.go test/e2e docs README.md TODO.md
+git commit -m "feat(ui,e2e): search filter bar, recent searches, coverage card and whole-subtree listing; T-44 docs
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
@@ -5064,11 +6184,13 @@ git commit -m "feat(ui): index screen with coverage cards, rules and failed docu
 
 ## Task B12：UI F4-b — 主窗口内容搜索、`snippet.js`、检查器索引行与抽取文本浮层（T-37 界面）
 
+**（2026-09-15 因 B0.5 调整）**：搜索框的分段控件已由 B0.5-c 在 `name_search.js` 里建好（"全盘 / 当前目录"），本任务**不再**从零做"文件名 / 内容"切换，而是把"内容"作为一个 `extraModes` 分段插进 `mountNameSearch(...)`；`content_search.js` 保留原有导出（`readSearchMode`/`writeSearchMode`/`runContentSearch`），只是被 `main.js` 传给 `name_search.js` 的分段控件调用。测试不变；`TestContentSearchToggleOnlyWhenIndexEnabled` 对 `main.js` 的断言由下面的 `extraModes` 字面量满足（`when: () => indexEnabled()` 写在 `label: t('search.mode.content')` 之前）。B0.5 若尚未合入而 B12 先动手，先按 B0.5-c 落 `name_search.js`。
+
 **Files:**
 - Create: `internal/control/web/snippet.js`、`internal/control/web/_tests/snippet.test.mjs`
 - Create: `internal/control/web/content_search.js`、`internal/control/web/extracted_text.js`、`internal/control/web/index_inspector.js`
 - Create: `internal/control/ui_content_search_test.go`
-- Modify: `internal/control/web/screens/main.js`（搜索框旁分段切换、搜索监听分支、检查器接线、`?q=&mode=content` 深链）、`internal/control/web/i18n.js`
+- Modify: `internal/control/web/screens/main.js`（`mountNameSearch` 的 `extraModes` 加"内容"分段、检查器接线、B0.5-c 已有的 `?q=` 深链上加 `mode=content`）、`internal/control/web/i18n.js`
 
 **Interfaces:**
 - Consumes: B10 `/index/search`、`/index/status?path=`、`/index/add`、`/index/remove`、`/index/text`；`/status` 的 `index.enabled`。
@@ -5299,36 +6421,37 @@ export async function renderIndexInfo(entry, host) {
       !entry.is_dir && st.state === 'ok' ? el('button', { onclick: () => openExtractedText(entry.path, 0) }, t('action.index.text')) : null));
 }
 ```
-`screens/main.js` 接线：
+`screens/main.js` 接线（2026-09-15 因 B0.5 调整：不再自建 `renderModeToggle`，分段控件由 `name_search.js` 渲染）：
 ```js
 import { readSearchMode, writeSearchMode, runContentSearch } from '/ui/content_search.js';
 import { openExtractedText } from '/ui/extracted_text.js';
 import { renderIndexInfo } from '/ui/index_inspector.js';
 function indexEnabled() { const status = get().status; return !!(status && status.index && status.index.enabled); }
-let searchMode = readSearchMode();
-const modeHost = el('div', { class: 'row', role: 'group', 'aria-label': t('search.mode') });
-function renderModeToggle() {
-  if (!indexEnabled()) { fill(modeHost); searchMode = 'name'; return; }
-  fill(modeHost, ...['name', 'content'].map((m) => el('button', {
-    'aria-pressed': String(searchMode === m), class: searchMode === m ? 'primary' : '',
-    onclick: () => { searchMode = m; writeSearchMode(m); renderModeToggle(); searchBox.dispatchEvent(new Event('input')); },
-  }, m === 'content' ? t('search.mode.content') : t('search.mode.name'))));
-}
-// subscribe(() => renderModeToggle()) with its unsubscribe added to the screen's dispose; header: crumb, grow, modeHost, searchBox, ...
-// search listener, before the /search call:
-//   if (searchMode === 'content' && indexEnabled()) { await runContentSearch({ rows, query: q, cwd, onOpen: (hit) => openExtractedText(hit.path, hit.start_off) }); return; }
+// The "content" segment is an extra mode of the name-search control from B0.5-c:
+// it is only offered while the daemon reports index.enabled, and the choice is
+// remembered by content_search.js so a reload keeps it.
+const search = mountNameSearch({
+  searchBox, rows, getCwd: () => cwd, onClear: () => load(), onOpen, onSelect,   // unchanged from B0.5-c
+  extraModes: [{
+    id: 'content', when: () => indexEnabled(), label: t('search.mode.content'),
+    active: () => readSearchMode() === 'content',
+    select: (on) => writeSearchMode(on ? 'content' : 'name'),
+    run: (q) => runContentSearch({ rows, query: q, cwd, onOpen: (hit) => openExtractedText(hit.path, hit.start_off) }),
+  }],
+});
+// subscribe(() => search.refresh()) so the segment appears/disappears with status.index.enabled (unsubscribe in dispose)
 // renderInspector: after the replicas row, append `const indexHost = el('div', {})` and, when indexEnabled(), renderIndexInfo(e, indexHost)
-// deep link on mount: const hp = new URLSearchParams(location.hash.split('?')[1] || '');
-//   if (hp.get('mode') === 'content') { searchMode = 'content'; } if (hp.get('q')) { searchBox.value = hp.get('q'); once status says index.enabled, dispatch 'input' }
+// deep link on mount (extends B0.5-c's ?q= handling): if (hp.get('mode') === 'content') writeSearchMode('content'); then search.run()
 ```
-（`renderModeToggle` 里 `t('search.mode.content')` 前 400 字节内有 `indexEnabled()`，满足 `TestContentSearchToggleOnlyWhenIndexEnabled`。）
+（`extraModes` 字面量里 `indexEnabled()` 在 `t('search.mode.content')` 之前且相距不足 400 字节，满足 `TestContentSearchToggleOnlyWhenIndexEnabled`；`name_search.js` 里分段按钮的 `aria-pressed`/`class: 'primary'` 与 B0.5-c 的"全盘 / 当前目录"一致，内容模式选中时 `run()` 直接调 `mode.run(query)`，不再请求 `/search`。）
 
 i18n 键（zh / en）：
 | key | zh | en |
 |---|---|---|
-| `search.mode` | 搜索范围 | Search in |
+| `search.mode` | 搜索方式 | Search by |
 | `search.mode.name` | 文件名 | Names |
 | `search.mode.content` | 内容 | Content |
+（`search.scope*` 已由 B0.5-c 定义；`search.mode` 只作分段控件的 `title`，避免与"搜索范围"重复。）
 | `search.content.degraded` | 未配置语义检索，结果按关键词匹配 | Semantic search is not configured; results use keyword matching |
 | `search.content.truncated` | 结果不完整：只检查了部分文本 | Incomplete: only part of the text was checked |
 | `search.content.stale` | 可能已过期 | May be outdated |
@@ -5474,9 +6597,9 @@ Expected: PASS；macOS 无 macFUSE 为 SKIP，TODO 标 `[~]`。
 node --test internal/control/web/_tests/*.test.mjs
 ./gow test ./test/perf/ -count=1
 ./gow test ./test/chaos/ -run TestIndex -race -count=1
-CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run TestContentSearchInTheBrowser -v -count=1
+CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestContentSearchInTheBrowser|TestNameSearchInTheBrowser' -v -count=1
 ```
-Expected: 全部 PASS；`test/perf` 既有基线不变，新增 `TestIndex*` 通过。
+Expected: 全部 PASS；`test/perf` 既有基线不变，新增 `TestIndex*`、`TestCrawl*` 通过（`TestSearchScaleOneMillionNodes` 在 `-short` 下跳过，合入前单独跑一次）。
 
 - [ ] **Step 6: 提交**
 
@@ -5600,8 +6723,9 @@ git commit -m "feat(ui): copy an MCP-ready prompt for a file from the inspector 
 ./gow test -race ./internal/agent/ ./internal/textract/ ./internal/index/ ./internal/mcpsrv/ ./internal/control/ ./internal/daemon/ ./internal/config/ ./internal/meta/ ./cmd/cloudfs/
 node --test internal/control/web/_tests/*.test.mjs
 ./gow test ./test/perf/ -count=1
+./gow test ./test/perf/ -run 'TestSearchScale|TestCrawl' -count=1 -v   # 1M-node baseline: minutes, skipped under -short
 ./gow test ./test/chaos/ -race -count=1
-CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestAgent|TestContentSearchInTheBrowser' -v -count=1
+CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestAgent|TestContentSearchInTheBrowser|TestNameSearchInTheBrowser|TestNeverOpenedDirectoryBecomesSearchable' -v -count=1
 ./gow vet ./internal/fusefs/ ./test/conformance/ ./test/e2e/   # must compile even where they cannot run
 ```
 合入后必做的交叉检查：
@@ -5646,6 +6770,25 @@ CLOUDFS_BROWSER=1 ./gow test ./test/e2e/ -run 'TestAgent|TestContentSearchInTheB
 | T-37 | `FS.Busy()` 持续为真时 worker 5 s 内至少让路一次 | B7 | `TestBusyForegroundMakesTheWorkerYield` |
 | T-37 | 界面：`#/index` 路由导航、未启用不请求 rules、移除/重建 `confirm: true`、配置规则无移除；搜索切换只在 enabled、内容模式调 `/index/search` 并渲染 degraded/truncated；检查器三动作；`snippet.test.mjs` 高亮/CJK/转义 | B11、B12 | `ui_index_test.go`、`ui_content_search_test.go`、`index_presets.test.mjs`、`snippet.test.mjs` |
 | T-37 | e2e：写 md 3 s 内命中；浏览器主窗口内容搜索命中 | B13 | `TestContentSearchFindsAFreshMarkdownFile`（Linux FUSE）、`TestContentSearchInTheBrowser` |
+| T-44 | 爬取器：1000 目录 `Calls("List")` 恰等于目录数；第二轮 0 | B0.5-a | `TestCrawlListsEveryDirectoryExactlyOnce`（1023 目录二叉树，`ListPageSize=2` 下每目录一次 `List`） |
+| T-44 | 前台读持续时 5 s 内至少让路一次 | B0.5-a | `TestCrawlYieldsToForegroundIO`（`Yields > 0` 且仍列完） |
+| T-44 | `ErrRiskControl` 后 15 min 内新增 `List` 为 0 | B0.5-a | `TestCrawlSleepsAfterRiskControl`（`Paused == "risk_control"`，`ResumeAt ≈ now + RiskSleep`） |
+| T-44 | 不优雅关闭后重开，`complete=1` 的目录不再列举 | B0.5-a | `TestCrawlResumesAfterAnUncleanStop`（两轮 `List` 之和 == 63） |
+| T-44 | `search.crawl` 配置默认关闭、校验 remotes/glob | B0.5-a | `TestSearchCrawlIsOffByDefault`、`TestSearchCrawlIsValidated`、`TestIncompleteDirsPagesByInoAndCoverageCountsTheRoot` |
+| T-44 | `search("ext:go size:>1k")` 只返回同时满足两条件的文件 | B0.5-b | `TestFindFiltersByExtensionAndSize`、`TestParseQueryGrammar`、`TestParseQueryRejectsBadValues` |
+| T-44 | `sort=mtime` 顺序正确 | B0.5-b | `TestFindSortsByModifiedTime`（含 `size`、`-size`、非法键） |
+| T-44 | `type:dir` 只返回目录 | B0.5-b | `TestFindKindDirReturnsOnlyDirectories` |
+| T-44 | 通配 `*.md` 与 `ext:md` 结果一致 | B0.5-b | `TestGlobAndExtensionAgree`、`TestGlobAnchorUsesTheLongestLiteralRun` |
+| T-44 | 预算被击中时 `Complete=false` | B0.5-b | `TestFilteredQueryStillReportsItsBudget`（`sort=size` 下如实报） |
+| T-44 | 100 万节点：p95 达标、`EXPLAIN QUERY PLAN` 无全表扫 | B0.5-b | `TestSearchScaleOneMillionNodes`（4 类查询 p95 与计划行，`-short` 跳过） |
+| T-44 | `test/perf` 既有调用次数基线不变；爬取器默认关闭不产生调用 | B0.5-a | `TestCrawlerOffCostsNoCalls` + 既有 `TestWarmTraversalIsFree`/`TestSearchIsLocal` 不改断言 |
+| T-44 | MCP `search` 带 `glob:"*.md"` 与 `--allow` 交集正确 | B0.5-b | `TestSearchGlobRespectsAllowlist`（A2 合入后同用例走令牌作用域） |
+| T-44 | 控制面 `/search` 响应含 `coverage` 与每行 `size/mtime/kind/cached` | B0.5-b | `TestSearchCarriesCoverageAndRowFacts`、`TestSearchFillsCachedFromTheBlockCache` |
+| T-44 | `cloudfs find --ext go --sort mtime` 输出顺序正确 | B0.5-b | `TestFindCLIFiltersAndSorts`（含 `--size`、`--after`、`--all`） |
+| T-44 | 整树列举需确认；`warm --all` 走爬取器 | B0.5-a | `TestUnboundedWarmRequiresConfirmAndAllUsesTheCrawler` |
+| T-44 | 界面：默认请求不带 `path=`、分段切换写 localStorage、"索引整棵树"带 `confirm: true`、表头点击改 `sort=`、高亮经文本节点、覆盖率文案来自 i18n | B0.5-c | `TestNameSearchDefaultsToTheWholeDrive`、`TestIndexWholeTreeAsksForConfirmation`、`TestSortHeadersChangeTheRequest`、`TestHighlightIsInsertedAsText`、`TestCoverageLineComesFromI18n`、`TestSearchShortcutsAreWired`；`search_query.test.mjs`（`the default scope asks for the whole drive`） |
+| T-44 | `_tests/search_query.test.mjs` 双向转换与非法输入；i18n 两表一致、screens 无汉字 | B0.5-c、B0.5-d | `search_query.test.mjs` 全部 6 条；`TestWebCatalogsHaveTheSameKeys`、`TestWebScreensHoldNoUntranslatedText`、`TestFilterBarRoundTripsThroughTheQueryString`、`TestRecentSearchesAreBoundedAndGuarded`、`TestCacheScreenShowsDirectoryCoverage`、`TestInspectorOffersWholeSubtreeListing` |
+| T-44 | e2e：从未打开过的目录里的文件开启爬取后 ≤ 10 s 可搜到；浏览器冒烟结果行大小列非空；`docs/DESIGN.md` 搜索一行与实现一致 | B0.5-d | `TestNeverOpenedDirectoryBecomesSearchable`（Linux FUSE）、`TestNameSearchInTheBrowser`（`data-size="25"`）；Step 4 文档 |
 | T-42（前半） | 复制提示词无写操作；两个入口；不存在路径 404 不泄露内部路径 | B14 | `TestSendToAgentOnlyReadsAndCopies`、`TestSendToAgentHasBothEntrances`、`TestAgentPromptMissingPathIs404WithoutInternals` |
 
 ---

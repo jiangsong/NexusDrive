@@ -1146,6 +1146,21 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 
 ---
 
+### [ ] T-45 全量 `-race` 在负载下超时：三项计时测试不适合竞态模式
+
+- **2026-09-15 实测**（Linux 8 核，同时有 3 个 agent 在编译测试，load ≈ 5）：`./gow test ./...` 全绿（两处
+  测试自身问题已在 1d721eb 修掉）；`./gow test -race ./...` **无任何 `DATA RACE`**，但三个包因计时超限而红：
+  `internal/meta` 在 `TestShortSearchUsesPostingsAt100KNodes`（插入 10 万节点）上耗尽 10 分钟默认超时；
+  `test/e2e` 同样 10 分钟超时（`TestSTRMGenerationOverAThousandFilmsHasABoundedBackendCost` 运行中）；
+  `test/perf` 的 `TestPoolReadFanoutAddsBandwidth` 断言"3 副本 < 0.60× 单副本时间"在 race 下得 0.88。
+  非 race 的 `test/perf` 全绿。
+- **做法（2026-09-15 已做前半）**：新增 `internal/testx.RaceEnabled`（`//go:build race` 常量，照标准库
+  `internal/race`），`TestShortSearchUsesPostingsAt100KNodes` 与 `TestPoolReadFanoutAddsBandwidth` 在 race 下
+  `t.Skip`；e2e 不跳过——它 96 s 的非 race 用时在 race 下本来就要 8～10 分钟，`CLAUDE.md` 的 race 命令改为
+  `-timeout 30m`。
+- **仍缺**：在空闲机器上跑一次 `./gow test -race -timeout 30m ./... -count=1`，确认除这三处外没有别的超时。
+- **验收**：空闲机器上述命令全绿；`grep -c 'DATA RACE'` = 0。
+
 ## P3 — 采用缺口（能力已具备，但用户接触不到）
 
 前面 P0–P2 与"验证缺口"都是**对着设计文档**核对出来的。这一节是**对着竞品**核对出来的：
@@ -1723,8 +1738,8 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
 目标场景：个人桌面 Agent（Claude Code / Codex / OpenClaw），单用户单 daemon。
 权限模型按会话级 scope 设计，团队场景只需给 principal 加 owner 字段。
 
-分期：一期 = T-34 T-35 T-36 T-37（两条线并行）；二期 = T-38 T-39 T-40 T-41 T-42；
-T-43 是先于二期回滚的验证缺口。
+分期：一期 = T-34 T-35 T-36（线 A）∥ T-44 T-37（线 B，T-44 前置）；二期 = T-38 T-39 T-40 T-41 T-42；
+T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ---
 
@@ -2077,6 +2092,73 @@ T-43 是先于二期回滚的验证缺口。
 
 ---
 
+### [ ] T-44 Everything 式文件名搜索：覆盖率、过滤与排序、全盘即时搜索（一期）
+
+对照 Everything（voidtools）核对：它的两条原则是"索引等于整个卷"与"输入即结果"，附带按扩展名/大小/
+日期过滤与排序。CloudFS 的引擎已经是这个形态——`internal/meta/search.go` 用父链在查询期拼路径
+（不物化、目录改名不重写子树，与 Everything 的 string forest 同构）、FTS5 trigram 子串索引、1／2 字符
+短倒排、工作预算 + `Complete` 诚实报告，T-09 实测名字查询 5～20 ms。缺的是 Everything 的**体验**，
+不是引擎。本条前置于 T-37（T-37 的"文件名 / 内容"切换要建立在这里改造过的搜索框上）。
+
+- **证据**：
+  - 覆盖率：只索引列举过的目录。`internal/vfs/refresh.go:228-231` 对落在未列举目录的 delta 事件只把父目录
+    标 stale、不补节点，所以 delta feed 不能引导整棵树；`FS.Warm`（`internal/vfs/vfs.go:1135`）手动、阻塞、
+    限深度；`cloudfs find` 空结果时只在 stderr 提示"run cloudfs warm"；界面没有任何"覆盖了多少"的提示，
+    `i18n.js` 也没有对应文案（`control/search.go:24-26` 的注释说 UI 必须说明，但没做）。
+  - 结果太瘦：`meta.SearchResult`（`internal/meta/store.go:1391`）只有 `Ino/Name/Path`；
+    `screens/main.js:339-341` 搜索结果行的大小、修改时间两列渲染为空。
+  - 无过滤与排序：`mcpsrv.searchInput`（`internal/mcpsrv/server.go:328`）只有 `path/query/content/max_results`；
+    `docs/DESIGN.md:340` 写"支持子串与 glob 转换"，实现里没有 glob。控制面 `/search` 同样只有 `q/path/limit`。
+  - 默认范围是当前目录：`screens/main.js:336-356` 固定带 `path=cwd`；无命中高亮、结果计数、快捷键、最近搜索。
+  - 规模：`TestShortSearchUsesPostingsAt100KNodes` 只到 10 万节点，百万节点无基线；T-09 自己标了
+    "真实规模长期吞吐待补"。
+- **做法（后端）**：
+  - **覆盖**：`internal/vfs/crawl.go` 后台爬取器——每个 remote 一个串行 worker，从根 BFS 列举
+    `dir_state.complete=0` 的目录，复用 `readDirRefresh`；照 `prefetcher.waitIdle`（`internal/vfs/read.go:720`）
+    在前台有请求时让路；走既有三维限流与熔断，`provider.ErrRiskControl` 后休眠 15 min，`Caps.Tier=unofficial`
+    并发固定 1；进度就是 `dir_state`（不加新表），重启续跑。配置新增顶层
+    `search.crawl: {enabled: false, remotes: [...], exclude: [glob], idle_after: 30s, rescan: 5m}`，默认关闭
+    （`rescan` 是重新扫 `complete=0` 目录的周期，delta 把目录标 stale 后靠它补列）；`cloudfs warm --all` 与界面
+    "索引整棵树"（`POST /cache/warm {path:"/", depth:-1, all:true, confirm:true}`）都触发同一实现，`depth<0` 必须带 confirm。`meta.Stats` 暴露 `Dirs`/`CompleteDs`（已有）+ `LastCrawl`，
+    控制面 `/search` 响应加 `coverage{listed, known, crawling}`，`status` 加同一组数。
+  - **结果与过滤**：`SearchResult` 加 `Size/MTime/Kind/Cached`（`nodes` 已有列，在 `bounded` CTE 直接带出，
+    `Cached` 由调用方按 `cache.Complete` 补）。新增 `internal/meta/query.go` 解析查询语法：
+    `ext:go size:>1m dm:>2026-09 type:dir path:src` 与 `*`/`?` 通配（通配转 `GLOB`，锚点仍走 trigram）；裸词按空白切分
+    后 AND（引号包住才是含空格的字面量）——这是 Everything 的语义，带空格的旧查询行为因此改变，写进 `docs/mcp.md`；
+    过滤条件在 `bounded` 之前进 SQL，预算仍作用于匹配行；`sort=name|size|mtime|path`（默认 depth,path 不变）。
+    MCP `search` 加 `glob/ext/min_size/max_size/modified_after/kind/sort`；控制面 `/search` 同参数；
+    CLI `find` 加 `--ext --size --after --sort --all`。
+  - **规模**：`test/perf/search_scale_test.go` 合成 100 万节点（200 目录 × 5000 文件），断言名字查询
+    p95 < 100 ms、2 字符查询 < 50 ms、`EXPLAIN QUERY PLAN` 无 `SCAN nodes`；爬取器对 fakeprovider 的
+    `Calls("List")` = 目录数（每目录恰一次）。
+- **界面**：
+  - 主窗口搜索框：默认**全盘**，旁边分段切换"全盘 / 当前目录"（选择存 localStorage）；`Ctrl/⌘+K` 聚焦、
+    `Esc` 清空回到目录视图；结果行填满 名称（命中高亮，高亮片段经文本节点插入）/ 大小 / 修改时间 / 状态
+    （已缓存点+文字）；表头可点排序（改 `sort=` 重新请求）；结果上方常驻一行"N 条 · 覆盖 已列举 X / 已知 Y
+    目录"，未全覆盖时附"索引整棵树"按钮（`POST /cache/warm {path:"/", depth:-1}` 或开启 `search.crawl`，
+    `confirmDelete` 键入 `warm`——会产生大量远端调用）；`complete=false` 的常驻说明行不变；双击结果定位到父目录
+    并选中该行；最近 10 次搜索下拉（localStorage）。
+  - 过滤条：搜索框右侧"筛选"展开为 类型 / 扩展名 / 大小范围 / 修改时间；选择即拼进查询串，用户能看到并手改
+    最终查询（`search_query.js` 零 import 模块做双向转换）。
+  - 缓存屏概况卡加"目录覆盖率"卡（已列举 / 已知、最后爬取时间、爬取中进度），SSE `status` 驱动。
+  - 检查器目录项加"列举整棵子树"（`warm` depth=-1，同一确认门）。
+- **验收**：
+  - 爬取器：fakeprovider 1000 目录，`search.crawl.enabled` 后 `Calls("List")` 恰 1000；前台读持续时 5 s 内至少
+    让路一次；`ErrRiskControl` 后 15 min 内新增 `List` 为 0；不优雅关闭后重开，已 `complete=1` 的目录不再列举。
+  - `search("ext:go size:>1k")` 只返回同时满足两条件的文件；`sort=mtime` 顺序正确；`type:dir` 只返回目录；
+    通配 `*.md` 与 `ext:md` 结果一致；预算被击中时 `Complete=false`。
+  - 100 万节点基线：p95 达标，`EXPLAIN QUERY PLAN` 无全表扫；`test/perf` 既有调用次数基线不变
+    （爬取器默认关闭，不产生调用）。
+  - MCP `search` 带 `glob:"*.md"` 与 `--allow` 交集正确；控制面 `/search` 响应含 `coverage` 与每行
+    `size/mtime/kind/cached`；`cloudfs find --ext go --sort mtime` 输出顺序正确。
+  - 界面：`ui_search_test.go` 断言默认请求不带 `path=`（全盘）、分段切换写 localStorage、"索引整棵树"带
+    `confirm: true`、表头点击改 `sort=`、高亮经文本节点插入不进 `html:`、覆盖率行文案来自 i18n；
+    `_tests/search_query.test.mjs` 覆盖过滤条 ↔ 查询串双向转换与非法输入；i18n 两表一致、screens 无汉字。
+  - e2e：真实挂载下，从未打开过的目录里的文件在开启爬取后 ≤ 10 s 可被主窗口搜到；浏览器冒烟结果行大小列非空；
+    `docs/DESIGN.md` 搜索一行改为与实现一致。
+
+---
+
 ## 明确不在当前范围内
 
 以下是设计文档中标注为二期或预留的部分，列在这里是为了避免被误当作遗漏：
@@ -2240,10 +2322,10 @@ T-03（慢客户端隔离）、T-06（交互式向导）、T-17（Web 加账号�
     CloudDrive2 正面拼价格的差异点）
 14. **T-21**（Windows / WinFsp：排期决策，取决于目标用户是 NAS 还是桌面）
 
-**阶段 4 — Agent 工作底座**（2026-09-14 登记，见 P4 节与 `docs/agent-roadmap.md`）
+**阶段 4 — Agent 工作底座**（2026-09-14 登记，T-44 于 2026-09-15 追加，见 P4 节与 `docs/agent-roadmap.md`）
 
-15. **一期（并行两线）**：线 A T-34 → T-35 → T-36；线 B T-37。每条后端任务后紧跟界面任务，
-    界面不落地不关条目。
+15. **一期（并行两线）**：线 A T-34 → T-35 → T-36；线 B T-44 → T-37（T-44 改造主窗口搜索框，T-37 在它
+    之上加"内容"分段）。每条后端任务后紧跟界面任务，界面不落地不关条目。
 16. **二期**：T-43（先核实拓扑）→ T-38；T-39 → T-40（记忆检索依赖嵌入可选，keyword 即可先上）；
     T-41 → T-42（运行按钮依赖 exec 执行器，复制提示词可提前到一期末）。
 17. **三期**：stdio→HTTP 桥；递归删除逐文件前像；control/WebDAV 操作进审计；`pull_events`；
