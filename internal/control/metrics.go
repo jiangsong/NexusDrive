@@ -156,6 +156,8 @@ func (s *Server) routes() []route {
 		{pattern: "/triggers/deliveries/", handler: s.triggerDeliveryByPath, probe: "/triggers/deliveries/1"},
 		{pattern: "/triggers/test", handler: s.triggerTest},
 		{pattern: "/triggers/retry", handler: s.triggerRetry},
+		{pattern: "/memory/agents", handler: s.memoryAgents},
+		{pattern: "/memory/", handler: s.memoryByPath, probe: "/memory/x/y"},
 	}
 }
 

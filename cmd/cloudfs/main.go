@@ -149,6 +149,8 @@ func main() {
 		err = runIndex(ctx, os.Args[2:], os.Stdout)
 	case "triggers":
 		err = runTriggers(ctx, os.Args[2:], os.Stdout)
+	case "memory":
+		err = runMemory(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
 	case "ui", "open":
@@ -222,6 +224,16 @@ Agents
   triggers show <id>        one delivery with its output
   triggers test <rule> <path> --confirm | retry <id>
                             queue a real run of a rule, or reopen a dead delivery; both need the running daemon
+  memory agents | list [--agent A] [--json]
+                            agent memory directories with their usage; the facts of one agent (default shared)
+  memory get <name> [--agent A] [--json]
+                            print a fact's body; --json adds its version and conflict copies
+  memory put <name> [--agent A] [--file F] [--description D] [--type T] [--expected-version V] [--append]
+                            write a fact from --file or stdin; --expected-version refuses a fact changed since
+  memory delete <name> [--agent A] --confirm
+                            remove a fact and its MEMORY.md line, on the remote too
+  memory search <query> [--agent A] [--no-shared] [--mode keyword|hybrid|vector] [--limit N] [--json]
+                            search an agent's facts and the shared area through the content index
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)

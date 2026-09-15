@@ -282,6 +282,17 @@ var zh = map[string]string{
 	"doctor.embedding.remote":           "索引的文件内容会离开本机：分块被发送到 %s 做嵌入",
 	"doctor.embedding.remote.fix":       "若非有意，把 index.embedding.provider 设为 none，或把 base_url 指向本机端点",
 
+	// Agent 记忆库路由（T-40）。具体信息由存储自己的句子给出，这里只做包装。
+	"err.memory_disabled":   "本进程没有 Agent 记忆库",
+	"err.memory_no_root":    "未配置 memory.root；把 memory.root（或 mcp.workspace）设为 mcp.allow 内的一个目录",
+	"err.memory_bad_name":   "%v",
+	"err.memory_not_found":  "%v",
+	"err.memory_too_large":  "%v",
+	"err.memory_bad_mode":   "mode 只能是 replace 或 append",
+	"err.memory_no_index":   "记忆检索需要内容索引，但 index.enabled: false；请在配置里启用",
+	"err.memory_failed":     "记忆库无法应答：%v",
+	"confirm.memory.delete": "删除记忆 %s/%s 及其 MEMORY.md 行，远端也一并删除",
+
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。
 	// 每一句对应守护进程真的提供的一个工具；没有的功能不提。
 	"err.prompt_path":        "找不到这个路径",

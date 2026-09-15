@@ -284,6 +284,18 @@ var en = map[string]string{
 	"doctor.embedding.remote":           "indexed file content leaves this machine: chunks are sent to %s for embedding",
 	"doctor.embedding.remote.fix":       "set index.embedding.provider to none or point base_url at a local endpoint if that is not intended",
 
+	// Agent memory routes (T-40). The store's own sentences carry the
+	// specifics; these wrap them.
+	"err.memory_disabled":   "the agent memory store is not available in this process",
+	"err.memory_no_root":    "memory.root is not configured; set memory.root (or mcp.workspace) to a directory inside mcp.allow",
+	"err.memory_bad_name":   "%v",
+	"err.memory_not_found":  "%v",
+	"err.memory_too_large":  "%v",
+	"err.memory_bad_mode":   "mode must be replace or append",
+	"err.memory_no_index":   "memory search needs the content index, but index.enabled: false; enable it in the configuration",
+	"err.memory_failed":     "the memory store could not answer: %v",
+	"confirm.memory.delete": "deletes memory %s/%s and its MEMORY.md line, on the remote too",
+
 	// Send to agent: the console hands this prompt to the person to paste
 	// into their own MCP client. Each sentence names a tool the daemon
 	// really offers; a feature that is off is not mentioned.

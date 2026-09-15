@@ -220,8 +220,8 @@ func (v *storeAgentView) Watch() (<-chan agent.Event, func()) { return v.st.Watc
 func (v *storeAgentView) AppendAudit(ctx context.Context, row agent.AuditRow) (int64, error) {
 	return v.st.AppendAudit(ctx, row)
 }
-func (v *storeAgentView) AuditWriteFailures() int64           { return v.st.AuditWriteFailures() }
-func (v *storeAgentView) Workspace() string                   { return v.workspace }
+func (v *storeAgentView) AuditWriteFailures() int64 { return v.st.AuditWriteFailures() }
+func (v *storeAgentView) Workspace() string         { return v.workspace }
 
 // agentView answers the request itself when no store is wired.
 func (s *Server) agentView(w http.ResponseWriter, r *http.Request) (AgentView, bool) {

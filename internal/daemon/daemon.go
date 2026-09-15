@@ -581,6 +581,11 @@ func (d *Daemon) Collector() *control.Collector {
 	col.MCP = d.mcpView()
 	col.Index = d.indexView()
 	col.Trigger = d.triggerView()
+	// The memory routes serve the same store the MCP tools use; a nil
+	// *Store has to stay a nil interface for /memory/agents to say so.
+	if d.Memory != nil {
+		col.Memory = d.Memory
+	}
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that

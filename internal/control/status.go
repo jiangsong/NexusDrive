@@ -250,7 +250,11 @@ type Collector struct {
 	// the owner of agent.db); /triggers then answers {"enabled":false} and
 	// the other trigger routes 404.
 	Trigger TriggerControl
-	Now     func() time.Time
+	// Memory, when set, serves /memory/*: the same store the memory_* MCP
+	// tools use. nil in a process without one; /memory/agents then
+	// answers {"enabled":false} and the other memory routes 404.
+	Memory MemoryControl
+	Now    func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value

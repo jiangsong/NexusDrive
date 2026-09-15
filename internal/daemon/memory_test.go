@@ -25,6 +25,10 @@ func TestMemoryStoreIsWiredWithTheBuiltinIndexRule(t *testing.T) {
 	if d.Memory == nil || d.Memory.Root() != "/demo/.agent" || !d.Memory.HasIndex() {
 		t.Fatalf("memory store: %+v", d.Memory)
 	}
+	// The control plane serves the same store, not a second one.
+	if col := d.Collector(); col.Memory == nil || col.Memory.Root() != d.Memory.Root() {
+		t.Fatalf("collector memory: %+v", col.Memory)
+	}
 	rules, err := d.Index.Rules(ctx)
 	if err != nil {
 		t.Fatal(err)

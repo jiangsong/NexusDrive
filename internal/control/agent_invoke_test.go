@@ -36,8 +36,8 @@ type fakeInvoke struct {
 	prompt string
 }
 
-func (f *fakeTrigger) Rules() []config.Trigger  { return nil }
-func (f *fakeTrigger) Agents() []config.Agent   { return f.agents }
+func (f *fakeTrigger) Rules() []config.Trigger { return nil }
+func (f *fakeTrigger) Agents() []config.Agent  { return f.agents }
 func (f *fakeTrigger) Deliveries(context.Context, agent.DeliveryQuery) ([]agent.Delivery, string, error) {
 	return nil, "", nil
 }
