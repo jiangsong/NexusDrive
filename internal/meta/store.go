@@ -1401,6 +1401,10 @@ type Stats struct {
 	CompleteDs int64
 	Absent     int64
 	Pins       int64
+	// LastCrawl is the newest listed_at over dir_state, zero when nothing
+	// has been listed. The crawler and readdir share the table, so this
+	// is the last time anything extended the index.
+	LastCrawl time.Time
 }
 
 // Stats reads counters.
@@ -1421,6 +1425,13 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	st.Absent = s.absentCount()
 	if err := q(&st.Pins, `SELECT COUNT(*) FROM pins`); err != nil {
 		return st, fmt.Errorf("meta: stats: %w", err)
+	}
+	var lastListed int64
+	if err := q(&lastListed, `SELECT COALESCE(MAX(listed_at), 0) FROM dir_state`); err != nil {
+		return st, fmt.Errorf("meta: stats: %w", err)
+	}
+	if lastListed > 0 {
+		st.LastCrawl = time.Unix(lastListed, 0)
 	}
 	return st, nil
 }

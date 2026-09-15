@@ -223,6 +223,7 @@ var en = map[string]string{
 	"confirm.export_forget":  "drops the export record and the partial files it left behind; finished copies are kept",
 	"confirm.remove_mount":   "removes the mount layout from the configuration",
 	"confirm.stop_service":   "stops the service and detaches its mount",
+	"confirm.warm_all":       "lists every folder under %s, which can be many requests",
 	"confirm.required":       "this %s; send confirm=true after checking the target",
 	"confirm.token_revoke":   "revokes access token %s and closes every session using it",
 

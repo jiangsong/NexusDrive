@@ -175,6 +175,8 @@ type FS struct {
 	writers         map[uint64]int // protected by mu; retained through close commit
 
 	prefetch *prefetcher
+	// crawl is the background directory crawler (crawl.go).
+	crawl crawlState
 	// fgIO counts the reads and writes the kernel is waiting on, so
 	// background work can stand aside.
 	fgIO     atomic.Int64
@@ -359,6 +361,7 @@ func (f *FS) Close() error {
 	}
 	f.pinMu.Unlock()
 	f.pinWG.Wait()
+	f.StopCrawl()
 	f.prefetch.stop()
 	return nil
 }

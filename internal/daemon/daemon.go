@@ -408,6 +408,10 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		fsys.StartCopies(ctx, time.Minute)
 		d.closers = append(d.closers, func() error { fsys.StopCopies(); return nil })
 		exports.Start(ctx, time.Minute)
+		// The manager is always installed so `warm --all` can hand a pass
+		// to it; it only lists on its own when search.crawl.enabled.
+		fsys.StartCrawl(ctx, vfs.CrawlOptionsFrom(cfg.Search.Crawl))
+		d.closers = append(d.closers, func() error { fsys.StopCrawl(); return nil })
 	}
 	return d, nil
 }

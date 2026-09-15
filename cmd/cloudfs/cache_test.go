@@ -148,3 +148,65 @@ func TestOfflineCacheCLIPersistsPinsWithoutStartingUploads(t *testing.T) {
 		t.Fatalf("offline cache command changed upload: %+v %v", row, err)
 	}
 }
+
+func TestWarmAllHandsThePassToTheDaemonAndConfirmsByItself(t *testing.T) {
+	cfg, configPath := uploadCLIConfig(t)
+	dir := t.TempDir()
+	s, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c, err := cache.New(cache.Options{Dir: filepath.Join(dir, "cache"), BlockSize: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	p := fakeprovider.New("ali")
+	p.Seed("/docs/deep/a", []byte("x"))
+	f, err := vfs.New(vfs.Options{Meta: s, Cache: c, Mounts: []vfs.Mount{{Prefix: "/", Remote: "ali", RootID: fakeprovider.RootID, Provider: p}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	ctx := context.Background()
+	srv, err := control.NewServer(&control.Collector{FS: f, Cache: c}).Start(ctx, cfg.Control.Socket, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	for _, args := range [][]string{{"--all", "/docs"}, {"--all", "--config", configPath, "--json", "/", "1"}} {
+		if err := runCache(ctx, "warm", args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--all") {
+			t.Fatalf("warm %v accepted: %v", args, err)
+		}
+	}
+	// Without a manager (no daemon background), the pass runs inside the
+	// request; the default depth of -1 does not need a confirm flag.
+	var out bytes.Buffer
+	if err := runCache(ctx, "warm", []string{"--all", "--config", configPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "listed 3 directories under /") {
+		t.Fatalf("output: %q", got)
+	}
+	if p.Calls("List") != 3 {
+		t.Fatalf("List calls = %d, want one per directory", p.Calls("List"))
+	}
+	f.StartCrawl(ctx, vfs.CrawlOptions{})
+	defer f.StopCrawl()
+	out.Reset()
+	if err := runCache(ctx, "warm", []string{"--all", "--config", configPath}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "handed to the daemon") || !strings.Contains(got, "cloudfs status") {
+		t.Fatalf("output: %q", got)
+	}
+	out.Reset()
+	if err := runCache(ctx, "warm", []string{"/docs", "--config", configPath, "--json"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"directories":`) {
+		t.Fatalf("an unbounded warm typed at the shell must confirm itself: %s", out.String())
+	}
+}

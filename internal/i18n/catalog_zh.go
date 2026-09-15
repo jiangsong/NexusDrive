@@ -222,6 +222,7 @@ var zh = map[string]string{
 	"confirm.export_forget":  "丢掉这条导出记录和它留下的半成品文件；已完成的副本保留",
 	"confirm.remove_mount":   "把挂载布局从配置里移除",
 	"confirm.stop_service":   "停止服务并卸下它的挂载点",
+	"confirm.warm_all":       "对 %s 整棵子树发出目录列举请求，可能是很多次",
 	"confirm.required":       "这会%s；核对目标后再传 confirm=true",
 	"confirm.token_revoke":   "吊销访问令牌 %s 并关闭所有使用它的会话",
 

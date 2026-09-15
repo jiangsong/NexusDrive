@@ -222,6 +222,7 @@ Cache control
   pin <path>                download a path in full and keep it cached
   unpin <path>              remove a pin rule without deleting cached bytes
   warm <path> [depth]       pre-list a subtree so lookups are local
+  warm --all                crawl every directory the name index does not hold yet
 
 Other
   config check [path]       parse and validate the config file

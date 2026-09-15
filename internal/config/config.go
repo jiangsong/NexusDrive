@@ -507,6 +507,7 @@ type Config struct {
 	WebDAV     WebDAV            `yaml:"webdav"`
 	Export     Export            `yaml:"export"`
 	Index      Index             `yaml:"index"`
+	Search     Search            `yaml:"search"`
 }
 
 // Default returns the built-in defaults applied before the file is decoded.
@@ -607,6 +608,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Index.Validate(); err != nil {
+		return err
+	}
+	if err := c.Search.Validate(c.Remotes); err != nil {
 		return err
 	}
 	// Validate the global cache policy on its own, so an unknown preset or a

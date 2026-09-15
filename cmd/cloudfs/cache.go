@@ -15,16 +15,17 @@ import (
 )
 
 func runCache(ctx context.Context, action string, args []string, out io.Writer) error {
-	f := parseFlags(args, "json")
+	f := parseFlags(args, "json", "all")
 	for k := range f.values {
 		if k != "config" && k != "timeout" {
 			return fmt.Errorf("cache: unknown flag --%s", k)
 		}
 	}
 	for k := range f.bools {
-		if k != "json" {
-			return fmt.Errorf("cache: invalid flag --%s", k)
+		if k == "json" || k == "all" && action == "warm" {
+			continue
 		}
+		return fmt.Errorf("cache: invalid flag --%s", k)
 	}
 	q := control.CacheRequest{Action: action}
 	if action == "cache" {
@@ -54,6 +55,15 @@ func runCache(ctx context.Context, action string, args []string, out io.Writer) 
 				}
 				q.Depth = n
 			}
+			if f.bools["all"] {
+				if len(f.args) > 0 {
+					return errors.New("warm: --all crawls every mount and takes no path or depth")
+				}
+				q.Path, q.Depth, q.All = "/", -1, true
+			}
+			// Typing the command is the confirmation the control plane
+			// asks for before it lists a whole subtree.
+			q.Confirm = q.Depth < 0
 		}
 		if len(f.args) > limit {
 			return errors.New("cache: unexpected positional argument")
@@ -96,6 +106,17 @@ func runCache(ctx context.Context, action string, args []string, out io.Writer) 
 	case "unpin":
 		fmt.Fprintf(out, "removed pin rule %s; cached bytes are retained and overlapping rules still apply\n", q.Path)
 	case "warm":
+		if q.All && result.Queued && result.Crawl != nil {
+			// The daemon's crawler took the pass; it keeps running after
+			// this command returns.
+			c := result.Crawl
+			fmt.Fprintf(out, "crawl handed to the daemon: %d listed, %d skipped, %d failed so far", c.Listed, c.Skipped, c.Failed)
+			if c.Paused != "" {
+				fmt.Fprintf(out, ", paused (%s)", c.Paused)
+			}
+			fmt.Fprintln(out, "; follow it with 'cloudfs status'")
+			break
+		}
 		fmt.Fprintf(out, "listed %d directories under %s\n", result.Directories, q.Path)
 	case "gc":
 		fmt.Fprintf(out, "freed %d bytes\n", result.FreedBytes)

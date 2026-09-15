@@ -721,27 +721,7 @@ const prefetchYield = 5 * time.Second
 // costs a provider round trip and a metadata write transaction, both of which
 // the read path is waiting behind.
 func (p *prefetcher) waitIdle() {
-	deadline := time.Now().Add(prefetchYield)
-	// Backing off keeps a long wait from costing thousands of timer
-	// wake-ups: starting background listing a few tens of milliseconds late
-	// is free, and up to nine of these can be waiting at once.
-	for wait := time.Millisecond; ; {
-		if p.fs.fgIO.Load() == 0 {
-			return
-		}
-		select {
-		case <-p.stopC:
-			return
-		default:
-		}
-		if time.Now().After(deadline) {
-			return
-		}
-		time.Sleep(wait)
-		if wait < 50*time.Millisecond {
-			wait *= 2
-		}
-	}
+	p.fs.yieldToForeground(p.stopC, prefetchYield)
 }
 
 func (p *prefetcher) schedule(path string, ino uint64, depth int) {

@@ -89,3 +89,40 @@ func TestCacheControlRejectsBrowserAndActionOverride(t *testing.T) {
 		t.Fatal("rejected request changed pins")
 	}
 }
+
+func TestUnboundedWarmRequiresConfirmAndAllUsesTheCrawler(t *testing.T) {
+	f, p := cacheControl(t)
+	p.Seed("/docs/deep/x", []byte("x"))
+	s := NewServer(f.coll)
+	if w := call(t, s, "POST", "/cache/warm", `{"path":"/","depth":-1}`); w.Code != 400 || !strings.Contains(w.Body.String(), "confirm=true") {
+		t.Fatalf("unconfirmed whole-tree warm: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, s, "POST", "/cache/warm", `{"path":"/docs","depth":-1,"all":true,"confirm":true}`); w.Code != 400 {
+		t.Fatalf("all=true below the root: %d %s", w.Code, w.Body)
+	}
+	out := decode[CacheResponse](t, call(t, s, "POST", "/cache/warm", `{"path":"/","depth":-1,"all":true,"confirm":true}`))
+	if out.Crawl == nil || out.Queued || out.Crawl.Listed != 3 || out.Directories != 3 || p.Calls("List") != 3 {
+		t.Fatalf("all=true did not run the crawler over /, /docs and /docs/deep: %+v, %d List calls", out, p.Calls("List"))
+	}
+	cov, _ := f.coll.FS.Meta().Coverage(context.Background())
+	if cov.Listed != cov.Known {
+		t.Fatalf("crawler left directories unlisted: %+v", cov)
+	}
+	if w := call(t, s, "POST", "/cache/warm", `{"path":"/docs","depth":1}`); w.Code != 200 {
+		t.Fatalf("a bounded warm needs no confirmation: %d %s", w.Code, w.Body)
+	}
+	st := f.coll.Collect(context.Background(), "en")
+	if st.Coverage != cov || st.Meta.LastCrawl.IsZero() || st.Crawl.Listed != out.Crawl.Listed {
+		t.Fatalf("status does not carry the crawl: coverage %+v, meta %+v, crawl %+v", st.Coverage, st.Meta, st.Crawl)
+	}
+	// With a manager running, the pass is handed over and the request
+	// answers with the running state instead of holding the connection.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.coll.FS.StartCrawl(ctx, vfs.CrawlOptions{})
+	defer f.coll.FS.StopCrawl()
+	out = decode[CacheResponse](t, call(t, s, "POST", "/cache/warm", `{"path":"/","depth":-1,"all":true,"confirm":true}`))
+	if out.Crawl == nil || !out.Queued || out.Directories != 0 {
+		t.Fatalf("a kicked pass must answer with progress only: %+v", out)
+	}
+}

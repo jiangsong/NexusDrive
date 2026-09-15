@@ -14,6 +14,7 @@ import (
 	"cloudfs/internal/config"
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
+	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
 	"cloudfs/internal/pool"
@@ -27,12 +28,18 @@ type Status struct {
 	Uptime    time.Duration `json:"uptime_ns"`
 	UptimeStr string        `json:"uptime"`
 
-	Mounts  []MountStatus  `json:"mounts"`
-	Cache   CacheStatus    `json:"cache"`
-	Uploads UploadStatus   `json:"uploads"`
-	Meta    MetaStatus     `json:"meta"`
-	Proxies []ProxyStatus  `json:"proxies,omitempty"`
-	Remotes []RemoteStatus `json:"remotes,omitempty"`
+	Mounts  []MountStatus `json:"mounts"`
+	Cache   CacheStatus   `json:"cache"`
+	Uploads UploadStatus  `json:"uploads"`
+	Meta    MetaStatus    `json:"meta"`
+	// Crawl is the background directory crawler's progress, and Coverage
+	// the listed/known directory pair the search answer also carries
+	// (Meta.Dirs excludes the root and Meta.CompleteDirs does not, so the
+	// pair is what a coverage card must show).
+	Crawl    vfs.CrawlProgress `json:"crawl"`
+	Coverage meta.Coverage     `json:"coverage"`
+	Proxies  []ProxyStatus     `json:"proxies,omitempty"`
+	Remotes  []RemoteStatus    `json:"remotes,omitempty"`
 	// Fuse is present when a kernel mount is being served.
 	Fuse *FuseStatus `json:"fuse,omitempty"`
 	// Durability is what close(2) promises: "power" or "crash".
@@ -104,6 +111,9 @@ type MetaStatus struct {
 	CompleteDirs  int64 `json:"complete_dirs"`
 	NegativeCache int64 `json:"negative_cache"`
 	Pins          int64 `json:"pins"`
+	// LastCrawl is when a listing last extended the index, by the crawler
+	// or by a readdir; zero when nothing has been listed.
+	LastCrawl time.Time `json:"last_crawl"`
 }
 
 // ProxyStatus is one outbound's health.
@@ -284,8 +294,12 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 		if st, err := c.FS.Meta().Stats(ctx); err == nil {
 			s.Meta = MetaStatus{
 				Nodes: st.Nodes, Dirs: st.Dirs, CompleteDirs: st.CompleteDs,
-				NegativeCache: st.Absent, Pins: st.Pins,
+				NegativeCache: st.Absent, Pins: st.Pins, LastCrawl: st.LastCrawl,
 			}
+		}
+		s.Crawl = c.FS.CrawlProgress()
+		if cov, err := c.FS.Meta().Coverage(ctx); err == nil {
+			s.Coverage = cov
 		}
 	}
 
