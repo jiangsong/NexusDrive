@@ -12,6 +12,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -93,7 +94,24 @@ type Server struct {
 	defaultPrincipal agent.Principal
 	// audit is where auditMiddleware writes; nil means no audit trail.
 	audit AuditWriter
+
+	// principalsMu guards envPrincipalCached and legacyByPrincipal.
+	principalsMu sync.Mutex
+	// envPrincipalCached is the principal of the legacy environment token,
+	// looked up once on its first request.
+	envPrincipalCached *agent.Principal
+	// legacyByPrincipal maps a principal to the stateful SDK sessions that
+	// authenticated as it, so revoking the principal's token can close them.
+	legacyByPrincipal map[string]map[*mcp.ServerSession]struct{}
+	// revokeStop ends the revocation poller; revokeWG waits for it.
+	revokeStop chan struct{}
+	revokeOnce sync.Once
+	revokeWG   sync.WaitGroup
 }
+
+// revokePollInterval bounds how long a revoked token's stateful session
+// survives when the revocation came from another process.
+const revokePollInterval = 2 * time.Second
 
 // ErrDenied is returned for paths outside the caller's scope. It is the
 // scope package's error so that callers may match either name.
@@ -156,6 +174,11 @@ func New(opt Options) (*Server, error) {
 	s.registerUploadTools()
 	s.registerExportTools()
 	s.registerResources()
+	if opt.Sessions != nil {
+		s.revokeStop = make(chan struct{})
+		s.revokeWG.Add(1)
+		go s.watchRevocations(revokePollInterval)
+	}
 	return s, nil
 }
 
@@ -165,6 +188,10 @@ func (s *Server) MCP() *mcp.Server { return s.mcp }
 // Close stops notification delivery, cancels subscription streams, and closes
 // remaining client sessions. It is safe to call more than once.
 func (s *Server) Close() error {
+	if s.revokeStop != nil {
+		s.revokeOnce.Do(func() { close(s.revokeStop) })
+		s.revokeWG.Wait()
+	}
 	s.subscriptions.stop()
 	for session := range s.mcp.Sessions() {
 		_ = session.Close()

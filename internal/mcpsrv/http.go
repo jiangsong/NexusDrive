@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"cloudfs/internal/agent"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -26,6 +29,47 @@ func ServeHTTP(ctx context.Context, s *Server, addr string) error {
 // ServeHTTPWithToken is ServeHTTP with bearer-token authentication. A token is
 // required for any address that is not loopback.
 func ServeHTTPWithToken(ctx context.Context, s *Server, addr, token string) error {
+	return ServeHTTPWithAuth(ctx, s, addr, HTTPAuth{Token: token})
+}
+
+// HTTPAuth is how the HTTP transport decides who a request is. The legacy
+// environment token keeps full access so an existing registration keeps
+// working; issued tokens are looked up through Verify and carry their own
+// scope; Open lets a loopback listener admit local callers until the first
+// token exists.
+type HTTPAuth struct {
+	// Token is the legacy CLOUDFS_MCP_TOKEN: full access, kept for compatibility.
+	Token string
+	// Verify resolves an issued token to its principal. nil = no issued tokens.
+	Verify func(ctx context.Context, plain string) (agent.Principal, error)
+	// Open reports whether a request with no Authorization header may pass as
+	// the local default principal. Only consulted on loopback listeners.
+	Open func(ctx context.Context) bool
+}
+
+// enabled reports whether any bearer token can be accepted at all.
+func (a HTTPAuth) enabled() bool { return a.Token != "" || a.Verify != nil }
+
+// envPrincipalID is the TokenInfo.UserID a request authenticated with the
+// legacy environment token carries. Issued tokens carry their principal's
+// UUID, so the two can never collide.
+const envPrincipalID = "env"
+
+// NewHTTPHandler is the MCP HTTP handler behind the given authentication.
+// With neither a legacy token nor a verifier the handler is open, which is
+// only ever reached on a loopback listener.
+func NewHTTPHandler(s *Server, a HTTPAuth) http.Handler {
+	h := newMCPHTTPHandler(s)
+	if !a.enabled() {
+		return h
+	}
+	return requireAuth(h, a)
+}
+
+// ServeHTTPWithAuth serves the MCP server over Streamable HTTP on addr until
+// ctx ends. A non-loopback address must have some authentication and never
+// admits an anonymous caller, whatever Open says.
+func ServeHTTPWithAuth(ctx context.Context, s *Server, addr string, a HTTPAuth) error {
 	defer s.Close()
 	// Also release the shutdown waiter if binding fails before ctx ends.
 	ctx, cancel := context.WithCancel(ctx)
@@ -34,14 +78,13 @@ func ServeHTTPWithToken(ctx context.Context, s *Server, addr, token string) erro
 	if err != nil {
 		return err
 	}
-	if !loopback && token == "" {
-		return fmt.Errorf("mcpsrv: refusing to serve %s without a token: this server can read and write your cloud storage, so a non-loopback address needs authentication", addr)
+	if !loopback {
+		a.Open = nil
+		if !a.enabled() {
+			return fmt.Errorf("mcpsrv: refusing to serve %s without a token: this server can read and write your cloud storage, so a non-loopback address needs authentication", addr)
+		}
 	}
-	var h http.Handler = newMCPHTTPHandler(s)
-	if token != "" {
-		h = requireBearer(h, token)
-	}
-	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: NewHTTPHandler(s, a), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -161,6 +204,58 @@ func acceptRedundantHTTPCancellation(w http.ResponseWriter, r *http.Request) boo
 	w.WriteHeader(http.StatusAccepted)
 	return true
 }
+
+// requireAuth admits a request that carries the legacy token or a live
+// issued token, and records which as the request's TokenInfo so the session
+// layer can name the principal. Anything else is 401; an unknown, expired
+// and revoked token all look the same to the caller. A request with no
+// Authorization header at all may still pass when Open says the listener is
+// open.
+func requireAuth(next http.Handler, a HTTPAuth) http.Handler {
+	verifier := func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+		far := time.Now().Add(100 * 365 * 24 * time.Hour)
+		if a.Token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) == 1 {
+			return &auth.TokenInfo{UserID: envPrincipalID, Expiration: far}, nil
+		}
+		if a.Verify == nil {
+			return nil, auth.ErrInvalidToken
+		}
+		p, err := a.Verify(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
+		}
+		exp := p.ExpiresAt
+		if exp.IsZero() {
+			exp = far
+		}
+		return &auth.TokenInfo{UserID: p.ID, Expiration: exp}, nil
+	}
+	guarded := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{})(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" && a.Open != nil && a.Open(r.Context()) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		guarded.ServeHTTP(&challengeWriter{ResponseWriter: w}, r)
+	})
+}
+
+// challengeWriter adds the WWW-Authenticate challenge to a 401 written by
+// the SDK middleware, which only sets one when it has OAuth metadata to
+// advertise. Unwrap keeps http.ResponseController, and with it SSE
+// flushing, working through the wrapper.
+type challengeWriter struct {
+	http.ResponseWriter
+}
+
+func (w *challengeWriter) WriteHeader(code int) {
+	if code == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="cloudfs"`)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *challengeWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func requireBearer(next http.Handler, token string) http.Handler {
 	want := []byte("Bearer " + token)

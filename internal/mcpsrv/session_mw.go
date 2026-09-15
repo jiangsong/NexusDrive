@@ -51,7 +51,23 @@ func (s *Server) resolveSession(ctx context.Context, req mcp.Request) (agent.Ses
 	case extra != nil && extra.TokenInfo != nil && extra.TokenInfo.UserID != "":
 		// A bearer token verified upstream names its principal; every request
 		// with that token is one connection, whatever SDK session carried it.
-		c.Key, c.Transport, c.PrincipalID = "token:"+extra.TokenInfo.UserID, "http-token", extra.TokenInfo.UserID
+		pid := extra.TokenInfo.UserID
+		if pid == envPrincipalID {
+			// The legacy environment token has no row of its own until it is
+			// first used; it runs under the process-wide scope like stdio.
+			p, err := s.envPrincipal(ctx)
+			if err != nil {
+				return agent.Session{}, err
+			}
+			pid = p.ID
+		}
+		c.Key, c.Transport, c.PrincipalID = "token:"+pid, "http-token", pid
+		if ss != nil && ss.ID() != "" {
+			// A stateful SDK session outlives the request that authenticated
+			// it, so remember which principal it belongs to: revoking that
+			// principal's token must close it, not just refuse its next call.
+			s.rememberLegacySession(pid, ss)
+		}
 	case ss != nil && ss.ID() != "":
 		// The legacy stateful HTTP transport keeps one SDK session per client
 		// and hands out its id in a header.
@@ -66,6 +82,100 @@ func (s *Server) resolveSession(ctx context.Context, req mcp.Request) (agent.Ses
 		c.Key, c.Transport, c.PrincipalID = fmt.Sprintf("stdio:%p", ss), "stdio", s.defaultPrincipal.ID
 	}
 	return s.opt.Sessions.Resolve(ctx, c)
+}
+
+// envPrincipal returns the principal behind the legacy environment token,
+// created on first use with the process-wide scope and cached for the life
+// of the server.
+func (s *Server) envPrincipal(ctx context.Context) (agent.Principal, error) {
+	s.principalsMu.Lock()
+	defer s.principalsMu.Unlock()
+	if s.envPrincipalCached != nil {
+		return *s.envPrincipalCached, nil
+	}
+	p, err := s.opt.Sessions.EnsurePrincipal(ctx, "env", "env", s.defaultScope)
+	if err != nil {
+		return agent.Principal{}, fmt.Errorf("mcpsrv: env principal: %w", err)
+	}
+	s.envPrincipalCached = &p
+	return p, nil
+}
+
+// rememberLegacySession records that a stateful SDK session was
+// authenticated as principalID.
+func (s *Server) rememberLegacySession(principalID string, ss *mcp.ServerSession) {
+	s.principalsMu.Lock()
+	defer s.principalsMu.Unlock()
+	if s.legacyByPrincipal == nil {
+		s.legacyByPrincipal = map[string]map[*mcp.ServerSession]struct{}{}
+	}
+	if s.legacyByPrincipal[principalID] == nil {
+		s.legacyByPrincipal[principalID] = map[*mcp.ServerSession]struct{}{}
+	}
+	s.legacyByPrincipal[principalID][ss] = struct{}{}
+}
+
+// CloseSessionsOf closes every stateful SDK session that authenticated as
+// the given principal and reports how many it closed. Stateless requests
+// need nothing here: each one re-verifies its token.
+func (s *Server) CloseSessionsOf(principalID string) int {
+	s.principalsMu.Lock()
+	sessions := s.legacyByPrincipal[principalID]
+	delete(s.legacyByPrincipal, principalID)
+	s.principalsMu.Unlock()
+	for ss := range sessions {
+		_ = ss.Close()
+	}
+	return len(sessions)
+}
+
+// pruneLegacySessions forgets SDK sessions that have already ended, so the
+// map only ever holds what the SDK still lists.
+func (s *Server) pruneLegacySessions() {
+	live := map[*mcp.ServerSession]struct{}{}
+	for ss := range s.mcp.Sessions() {
+		live[ss] = struct{}{}
+	}
+	s.principalsMu.Lock()
+	defer s.principalsMu.Unlock()
+	for pid, sessions := range s.legacyByPrincipal {
+		for ss := range sessions {
+			if _, ok := live[ss]; !ok {
+				delete(sessions, ss)
+			}
+		}
+		if len(sessions) == 0 {
+			delete(s.legacyByPrincipal, pid)
+		}
+	}
+}
+
+// watchRevocations polls the store for principals revoked since the last
+// look and closes their sessions, so a token revoked by the CLI or the
+// console in another process stops working within one poll interval even
+// on a stateful connection.
+func (s *Server) watchRevocations(interval time.Duration) {
+	defer s.revokeWG.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	since := time.Now()
+	for {
+		select {
+		case <-s.revokeStop:
+			return
+		case <-ticker.C:
+		}
+		now := time.Now()
+		ids, err := s.opt.Sessions.Store().RevokedSince(context.Background(), since)
+		if err != nil {
+			continue
+		}
+		since = now
+		for _, id := range ids {
+			s.CloseSessionsOf(id)
+		}
+		s.pruneLegacySessions()
+	}
 }
 
 // clientInfoOf finds the client's identity wherever the protocol version put

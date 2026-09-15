@@ -182,6 +182,11 @@ Agents
   mcp --http [addr]         serve MCP over Streamable HTTP on a loopback address
   mcp install --client claude|codex [--write <file>]
                             print or write the client registration snippet
+  mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h]
+                            issue a scoped HTTP access token; the token is printed once
+  mcp token list            list issued tokens by fingerprint, never the token itself
+  mcp token revoke <name|id> --confirm
+                            revoke a token and close the sessions using it
   strm <virtual-path> --out <dir>
                             generate media .strm files through WebDAV; --prune removes verified stale outputs
   audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
@@ -644,6 +649,9 @@ func cmdMCP(ctx context.Context, args []string) error {
 	if f.arg(0) == "install" {
 		return mcpInstall(f, allow, readOnly)
 	}
+	if f.arg(0) == "token" {
+		return runMCPToken(ctx, os.Stdout, mcpTokenArgs(args))
+	}
 	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version})
 	if err != nil {
 		return err
@@ -711,11 +719,22 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 	if err != nil {
 		return err
 	}
-	// Keep the bearer token out of argv and YAML: argv is commonly visible to
-	// other local users, while YAML is deliberately shareable as a deployment
-	// template. A non-loopback listener (for example inside a container) still
-	// fails closed when the environment variable is absent.
-	return mcpsrv.ServeHTTPWithToken(ctx, srv, addr, mcpHTTPToken())
+	// Keep the legacy bearer token out of argv and YAML: argv is commonly
+	// visible to other local users, while YAML is deliberately shareable as a
+	// deployment template. Issued tokens live hashed in agent.db; until the
+	// first one exists a loopback listener stays open to local callers, as it
+	// always was. A non-loopback listener (for example inside a container)
+	// still fails closed when neither kind of token can be accepted.
+	auth := mcpsrv.HTTPAuth{Token: mcpHTTPToken()}
+	if d.Agent != nil {
+		auth.Verify = d.Agent.VerifyToken
+		env := auth.Token
+		auth.Open = func(ctx context.Context) bool {
+			live, err := d.Agent.HasLiveTokens(ctx)
+			return env == "" && err == nil && !live
+		}
+	}
+	return mcpsrv.ServeHTTPWithAuth(ctx, srv, addr, auth)
 }
 
 func mcpHTTPToken() string { return os.Getenv("CLOUDFS_MCP_TOKEN") }
