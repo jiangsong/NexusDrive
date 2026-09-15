@@ -126,3 +126,92 @@ func TestSearchShortcutsAreWired(t *testing.T) {
 		t.Error("directory rows carry no data-path, so a result cannot be selected after opening its folder")
 	}
 }
+
+// TestFilterBarRoundTripsThroughTheQueryString: the filter bar is the query
+// grammar with controls on it. A change is written into the box as
+// key:value words through buildQueryString, and a hand edit in the box is
+// parsed back into the controls, so the two never disagree about what is
+// sent; a value the bar cannot read is named under it rather than dropped.
+func TestFilterBarRoundTripsThroughTheQueryString(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{
+		"parseQueryString(searchBox.value)",
+		"buildQueryString(",
+		"sizeRange(",
+		"splitSizeRange(",
+		"t('search.filters')",
+		"t('search.filter.invalid'",
+		"type: 'date'",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("name_search.js lacks %s", want)
+		}
+	}
+	main := webSource(t, "web/screens/main.js")
+	if !strings.Contains(main, "search.filterBar") {
+		t.Error("main.js never places the filter bar")
+	}
+}
+
+// TestRecentSearchesAreBoundedAndGuarded: the last ten queries come back
+// from a datalist on the box. localStorage can refuse or hold garbage, and
+// neither may cost a search.
+func TestRecentSearchesAreBoundedAndGuarded(t *testing.T) {
+	src := webSource(t, "web/name_search.js")
+	for _, want := range []string{
+		"pushRecent(",
+		"RECENT_KEY",
+		"el('datalist'",
+		"localStorage.getItem(RECENT_KEY)",
+		"setAttribute('list', 'search-recent')",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("name_search.js lacks %s", want)
+		}
+	}
+	if strings.Count(src, "try {") < 4 {
+		t.Error("recent-search storage is not guarded")
+	}
+}
+
+// TestCacheScreenShowsDirectoryCoverage: the cache screen's fifth card is
+// listed over known folders, the last listing time and the crawler's
+// progress, read from the status document the SSE stream already delivers.
+func TestCacheScreenShowsDirectoryCoverage(t *testing.T) {
+	src := webSource(t, "web/screens/storage.js")
+	for _, want := range []string{
+		"t('storage.coverage')",
+		"cov.listed",
+		"cov.known",
+		"crawl.running",
+		"m.last_crawl",
+		"t('storage.coverage.never')",
+		"toLocaleString(locale())",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("storage.js lacks %s", want)
+		}
+	}
+	zh := tableKeys(t, webI18nSource(t), "zh")
+	for _, k := range []string{"storage.coverage", "storage.coverage.detail", "storage.coverage.crawling", "storage.coverage.never"} {
+		if !zh[k] {
+			t.Errorf("missing %s", k)
+		}
+	}
+}
+
+// TestInspectorOffersWholeSubtreeListing: a directory in the inspector can
+// be listed to the bottom. Depth -1 has no stop, so it goes through the
+// same typed confirmation as "index the whole tree" and sends confirm.
+func TestInspectorOffersWholeSubtreeListing(t *testing.T) {
+	src := webSource(t, "web/screens/main.js")
+	for _, want := range []string{
+		"api.post('/cache/warm', { path: e.path, depth: -1, confirm: true })",
+		"confirmToken: 'warm'",
+		"t('action.warm.all')",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("main.js lacks %s", want)
+		}
+	}
+}

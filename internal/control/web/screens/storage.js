@@ -1,10 +1,10 @@
 import { api } from '/ui/api.js';
 import { el, fill, bytes, toast } from '/ui/ui.js';
-import { t } from '/ui/i18n.js';
+import { t, locale } from '/ui/i18n.js';
 import { get, subscribe } from '/ui/store.js';
 
 export function renderStorage(host) {
-  const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:0 20px' });
+  const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;padding:0 20px' });
   const pinRows = el('tbody');
 
   function card(label, value, sub) {
@@ -14,13 +14,30 @@ export function renderStorage(host) {
       el('div', { class: 'detail', style: 'font-size:13px;margin-top:12px' }, sub));
   }
 
+  // The coverage card is the one place outside the search box that says
+  // how much of the tree the name index holds: listed over known folders,
+  // when a listing last extended it, and the crawler's progress while one
+  // runs. It is driven by the same SSE status document as the other cards.
+  function coverageCard(st) {
+    const m = st.meta || {};
+    const cov = st.coverage || {};
+    const crawl = st.crawl || {};
+    const never = !m.last_crawl || m.last_crawl.startsWith('0001');
+    return card(t('storage.coverage'), (cov.listed || 0) + ' / ' + (cov.known || 0),
+      crawl.running
+        ? t('storage.coverage.crawling', crawl.listed || 0)
+        : t('storage.coverage.detail', never ? t('storage.coverage.never') : new Date(m.last_crawl).toLocaleString(locale())));
+  }
+
   function refreshCards() {
-    const c = (get().status || {}).cache || {};
+    const st = get().status || {};
+    const c = st.cache || {};
     fill(cards,
       card(t('storage.used'), c.bytes_human || '0 B', c.max_bytes ? t('storage.limit', bytes(c.max_bytes)) : t('storage.nolimit')),
       card(t('storage.hit'), Math.round((c.hit_ratio || 0) * 100) + '%', t('storage.reads', (c.hits || 0).toLocaleString())),
       card(t('storage.evictions'), String(c.evictions || 0), t('storage.evictions.note')),
-      card(t('storage.free'), bytes(c.free_bytes), t('storage.free.note')));
+      card(t('storage.free'), bytes(c.free_bytes), t('storage.free.note')),
+      coverageCard(st));
   }
 
   async function loadPins() {

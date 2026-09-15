@@ -1,7 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, fill, iconEl, bytes, toast, confirmDelete } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
-import { parseQueryString, searchURL, highlightParts } from '/ui/search_query.js';
+import { parseQueryString, buildQueryString, searchURL, highlightParts, sizeRange, splitSizeRange, pushRecent } from '/ui/search_query.js';
 
 // The name search of the main window: Everything's two rules, on this page.
 // The index is the whole drive, so the default scope is the whole drive and
@@ -24,6 +24,26 @@ export function writeSearchScope(scope) {
   try { localStorage.setItem(SEARCH_SCOPE_KEY, scope); } catch (_) { /* not remembered; the default is the whole drive anyway */ }
 }
 
+// RECENT_KEY holds the last ten queries, most recent first. The list is
+// bounded by pushRecent and guarded the same way as the scope: a browser
+// that refuses storage, or one whose stored value is not a list, gets an
+// empty history and a search box that still searches.
+export const RECENT_KEY = 'cloudfs.search.recent';
+export function readRecent() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((q) => typeof q === 'string').slice(0, 10) : [];
+  } catch (_) { return []; }
+}
+export function writeRecent(list) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 10))); } catch (_) { /* not remembered */ }
+}
+
+// DATE_ONLY is what the date control can show: a modified-after filter on
+// one calendar day. Any other dm: value (a range, a month, a "before")
+// stays in the query string, which the person can edit by hand.
+const DATE_ONLY = /^>=?(\d{4}-\d{2}-\d{2})$/;
+
 // DEBOUNCE_MS is how long the box waits after a keystroke. A name query
 // answers in a few milliseconds; the wait is for the next key, not the
 // daemon.
@@ -43,6 +63,9 @@ const COLUMNS = 4;
 //   extraModes  (B12) segments after "whole drive / this folder", each
 //               { id, when(), label, active(), select(on), run(query) };
 //               a selected extra mode answers the query itself.
+// It returns the scope control (segments, the filter toggle and the recent
+// list), the filter bar, the status line and the sortable header for the
+// screen to place.
 export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, onOpen, onSelect, extraModes = [] }) {
   let scope = readSearchScope();
   let sort = '';
@@ -54,6 +77,73 @@ export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, on
   const scopeControl = el('div', { class: 'row', role: 'group', 'aria-label': t('search.scope'), style: 'gap:4px' });
   const statusLine = el('div', { class: 'dim', role: 'status', style: 'display:none;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 18px;font-size:12px;border-bottom:1px solid var(--border)' });
   const header = el('tr', { 'aria-label': t('search.sort') });
+
+  // The filter bar is the query grammar with controls on it. Every change
+  // is written into the box as key:value words, so what the person sees in
+  // the box is exactly what is sent, and a hand edit there flows back into
+  // the controls on the next run. The recent list is a datalist on the box.
+  const recentList = el('datalist', { id: 'search-recent' });
+  searchBox.setAttribute('list', 'search-recent');
+  const kindSelect = el('select', { 'aria-label': t('search.filter.kind'), onchange: applyFilters },
+    el('option', { value: '' }, t('search.filter.kind.any')),
+    el('option', { value: 'file' }, t('search.filter.kind.file')),
+    el('option', { value: 'dir' }, t('search.filter.kind.dir')));
+  const extInput = el('input', { type: 'text', 'aria-label': t('search.filter.ext'), placeholder: 'go,md', style: 'width:90px', onchange: applyFilters });
+  const minInput = el('input', { type: 'text', 'aria-label': t('search.filter.size.min'), placeholder: '1m', style: 'width:70px', onchange: applyFilters });
+  const maxInput = el('input', { type: 'text', 'aria-label': t('search.filter.size.max'), placeholder: '10m', style: 'width:70px', onchange: applyFilters });
+  const afterInput = el('input', { type: 'date', 'aria-label': t('search.filter.after'), onchange: applyFilters });
+  const filterError = el('div', { class: 'dim', role: 'alert', style: 'display:none;font-size:12px;color:var(--warn-text)' });
+  const filterToggle = el('button', { 'aria-expanded': 'false', 'aria-controls': 'search-filters', onclick: toggleFilters }, iconEl('filter'), t('search.filters'));
+  const filterBar = el('div', { id: 'search-filters', style: 'display:none;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 18px;font-size:12.5px;border-bottom:1px solid var(--border)' },
+    labelled(t('search.filter.kind'), kindSelect),
+    labelled(t('search.filter.ext'), extInput),
+    labelled(t('search.filter.size.min'), minInput),
+    labelled(t('search.filter.size.max'), maxInput),
+    labelled(t('search.filter.after'), afterInput),
+    filterError);
+  function labelled(text, control) {
+    return el('label', { class: 'row', style: 'gap:6px;align-items:center' }, el('span', { class: 'muted' }, text), control);
+  }
+  function toggleFilters() {
+    const open = filterToggle.getAttribute('aria-expanded') !== 'true';
+    filterToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    filterToggle.className = open ? 'primary' : '';
+    filterBar.style.display = open ? 'flex' : 'none';
+    if (open) syncFilters(parseQueryString(searchBox.value));
+  }
+  // applyFilters reads the controls into the filters of whatever is in the
+  // box right now and writes the whole query back, words first. A filter the
+  // controls cannot show (a size range typed as 1m..2m is shown; a dm: range
+  // is not) is left as the person wrote it.
+  function applyFilters() {
+    parsed = parseQueryString(searchBox.value);
+    const filters = { ...parsed.filters };
+    if (kindSelect.value) filters.kind = kindSelect.value; else delete filters.kind;
+    if (extInput.value.trim()) filters.ext = extInput.value.trim(); else delete filters.ext;
+    const size = sizeRange(minInput.value, maxInput.value);
+    if (size) filters.size = size; else delete filters.size;
+    if (afterInput.value) filters.dm = '>' + afterInput.value;
+    else if (DATE_ONLY.test(filters.dm || '')) delete filters.dm;
+    searchBox.value = buildQueryString(parsed.terms, filters);
+    run();
+  }
+  // syncFilters is the other direction: the box was edited, or a recent
+  // query was picked, and the controls follow it.
+  function syncFilters(p) {
+    const f = p.filters;
+    kindSelect.value = f.kind || '';
+    extInput.value = f.ext || '';
+    const size = splitSizeRange(f.size || '');
+    minInput.value = size.min;
+    maxInput.value = size.max;
+    const m = DATE_ONLY.exec(f.dm || '');
+    afterInput.value = m ? m[1] : '';
+    filterError.style.display = p.errors.length ? '' : 'none';
+    fill(filterError, p.errors.length ? t('search.filter.invalid', p.errors.join(', ')) : '');
+  }
+  function renderRecent() {
+    fill(recentList, ...readRecent().map((q) => el('option', { value: q })));
+  }
 
   function segment(label, active, onclick) {
     return el('button', { class: active ? 'primary' : '', 'aria-pressed': active ? 'true' : 'false', style: 'padding:5px 10px', onclick }, label);
@@ -80,7 +170,8 @@ export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, on
           extraModes.forEach((x) => x.select(x === m));
           renderScope();
           run();
-        })));
+        })),
+      filterToggle, recentList);
     searchBox.placeholder = scope === 'cwd' && !mode ? t('search.placeholder.cwd') : t('search.placeholder');
   }
 
@@ -142,13 +233,19 @@ export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, on
   async function run() {
     const query = searchBox.value.trim();
     const mine = ++seq;
-    if (!query) { statusLine.style.display = 'none'; onClear(); return; }
+    if (!query) { statusLine.style.display = 'none'; syncFilters(parseQueryString('')); onClear(); return; }
     parsed = parseQueryString(query);
+    // The controls follow the box, and a value the bar cannot read is named
+    // under it. The request still goes out: the daemon's own refusal is the
+    // authoritative one and arrives as a toast.
+    syncFilters(parsed);
     const mode = currentMode();
     if (mode) { await mode.run(query); return; }
     let r;
     try { r = await api.get(searchURL({ query, scope, cwd: getCwd(), sort, limit: LIMIT })); } catch (err) { toast(err.message, 'bad'); return; }
     if (mine !== seq) return;
+    writeRecent(pushRecent(readRecent(), query));
+    renderRecent();
     if (onSearch) onSearch();
     const hits = r.results || [];
     fill(rows, ...hits.map(resultRow));
@@ -211,8 +308,9 @@ export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, on
   document.addEventListener('keydown', onKey);
   renderScope();
   renderHeader();
+  renderRecent();
   return {
-    scopeControl, statusLine, header, run,
+    scopeControl, filterBar, statusLine, header, run,
     refresh: renderScope,
     dispose() { clearTimeout(timer); document.removeEventListener('keydown', onKey); },
   };

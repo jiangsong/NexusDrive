@@ -275,6 +275,7 @@ export function renderMain(host) {
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),
         e.is_dir ? el('button', { onclick: () => warm(e) }, iconEl('up'), t('action.warm')) : null,
+        e.is_dir ? el('button', { onclick: () => warmAll(e) }, iconEl('layers'), t('action.warm.all')) : null,
         el('button', { onclick: () => rename(e) }, t('action.rename')),
         e.is_dir ? null : el('button', { onclick: () => preview(e) }, t('action.preview')),
         e.is_dir ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
@@ -303,6 +304,17 @@ export function renderMain(host) {
   }
   async function warm(e) {
     try { const r = await api.post('/cache/warm', { path: e.path }); toast(t('toast.warmed', r.directories || 0)); }
+    catch (err) { toast(err.message, 'bad'); }
+  }
+  // Listing a whole subtree is one provider call per directory under it,
+  // with no depth to stop at; on an unofficial API that is the traffic
+  // that gets an account flagged. It goes through the same typed
+  // confirmation as "index the whole tree" and sends the confirm flag the
+  // daemon insists on for depth -1.
+  async function warmAll(e) {
+    const ok = await confirmDelete({ title: t('confirm.warm.title'), body: t('confirm.warm.body'), confirmToken: 'warm', confirmLabel: t('action.warm.all'), danger: false });
+    if (!ok) return;
+    try { const r = await api.post('/cache/warm', { path: e.path, depth: -1, confirm: true }); toast(t('toast.warmed', r.directories || 0)); }
     catch (err) { toast(err.message, 'bad'); }
   }
   async function remove(e) {
@@ -400,6 +412,7 @@ export function renderMain(host) {
       crumb, el('div', { class: 'grow' }), search.scopeControl, searchBox,
       el('button', { onclick: newFolder, 'aria-label': t('action.newfolder'), title: t('action.newfolder') }, iconEl('plus')),
       el('button', { onclick: () => load(), 'aria-label': t('action.refresh'), title: t('action.refresh') }, iconEl('refresh'))),
+    search.filterBar,
     search.statusLine,
     el('div', { style: 'flex-grow:1;overflow:auto' }, el('table', {}, thead, rows)));
 
