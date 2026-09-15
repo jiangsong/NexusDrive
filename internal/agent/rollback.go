@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"cloudfs/internal/vfs"
 
@@ -64,19 +65,35 @@ const rollbackTransport = "console"
 // rolled back. It belongs to the principal of the session in ctx when
 // there is one, else to the console principal. When every row has been
 // looked at, the original session's state becomes rolled_back.
-func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id string, dryRun bool) (Plan, Session, error) {
+//
+// A session that is still active is finished first, before its rows are
+// read, exactly as finish_session would end it: the connection behind it
+// starts a fresh session on its next call, so no write can join the
+// session after the plan was drawn and escape the undo. A dry run leaves
+// an active session active.
+//
+// The rollback's own session is always closed: finished with the summary
+// when every row was looked at, and finished as interrupted when a row's
+// bookkeeping or the context failed part way, so a rerun (which skips
+// what this run settled) does not find it still active in the console.
+func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id string, dryRun bool) (plan Plan, sess Session, err error) {
 	if fs == nil || pre == nil {
 		return Plan{}, Session{}, ErrRollbackUnavailable
 	}
-	sess, err := m.Get(ctx, id)
+	sess, err = m.Get(ctx, id)
 	if err != nil {
 		return Plan{}, Session{}, err
+	}
+	if !dryRun && sess.State == "active" {
+		if sess, err = m.Finish(ctx, id, sess.Summary); err != nil {
+			return Plan{}, Session{}, err
+		}
 	}
 	ops, err := m.store.OpsOf(ctx, id)
 	if err != nil {
 		return Plan{}, Session{}, err
 	}
-	plan := Plan{SessionID: id, DryRun: dryRun, Restored: []PlanItem{}, Skipped: []PlanItem{}, Conflict: []PlanItem{}}
+	plan = Plan{SessionID: id, DryRun: dryRun, Restored: []PlanItem{}, Skipped: []PlanItem{}, Conflict: []PlanItem{}}
 	r := &rollback{m: m, fs: fs, pre: pre, dryRun: dryRun}
 	if !dryRun {
 		r.session, err = m.beginRollbackSession(ctx, sess)
@@ -84,9 +101,14 @@ func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id st
 			return Plan{}, Session{}, err
 		}
 		plan.RollbackSessionID = r.session.ID
+		defer func() {
+			if err != nil {
+				r.abort(err)
+			}
+		}()
 	}
 	for i := len(ops) - 1; i >= 0; i-- {
-		if err := ctx.Err(); err != nil {
+		if err = ctx.Err(); err != nil {
 			return plan, sess, err
 		}
 		op := ops[i]
@@ -114,7 +136,7 @@ func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id st
 		if reason != "" {
 			result += ": " + reason
 		}
-		if err := m.store.setRollbackResult(ctx, op.Seq, outcome == restored, result); err != nil {
+		if err = m.store.setRollbackResult(ctx, op.Seq, outcome == restored, result); err != nil {
 			return plan, sess, err
 		}
 	}
@@ -122,14 +144,25 @@ func (m *Sessions) Rollback(ctx context.Context, fs FSOps, pre *Preimages, id st
 		return plan, sess, nil
 	}
 	summary := fmt.Sprintf("rollback of %s: %d restored, %d skipped, %d conflicts", id, len(plan.Restored), len(plan.Skipped), len(plan.Conflict))
-	if _, err := m.Finish(ctx, r.session.ID, summary); err != nil {
+	if _, err = m.Finish(ctx, r.session.ID, summary); err != nil {
 		return plan, sess, err
 	}
-	if err := m.markRolledBack(ctx, id); err != nil {
+	if err = m.markRolledBack(ctx, id); err != nil {
 		return plan, sess, err
 	}
 	sess, err = m.Get(ctx, id)
 	return plan, sess, err
+}
+
+// abort closes the rollback session of a run that did not get through
+// its rows, so it is not left active. The context that failed the run may
+// be the reason, so the close runs on a context of its own.
+func (r *rollback) abort(cause error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
+	defer cancel()
+	if _, err := r.m.Finish(ctx, r.session.ID, "rollback interrupted: "+cause.Error()); err != nil {
+		slog.Warn("agent: interrupted rollback session not finished", "session", r.session.ID, "err", err)
+	}
 }
 
 type outcome int

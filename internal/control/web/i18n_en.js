@@ -356,6 +356,7 @@ export const en = {
   'rollback.promise.1': 'A rollback is a new set of writes through the mount, not a remote version restore: visible locally at once, on the remote eventually.',
   'rollback.promise.2': 'A file changed after the session is reported as a conflict and left alone, never silently overwritten.',
   'rollback.promise.3': 'Only writes made through MCP tools are covered; kernel writes, the console and WebDAV are outside the session.',
+  'rollback.promise.active': 'This session is still open: the rollback finishes it first, as finishing would, and later writes on that connection start a new session.',
   'rollback.confirm.title': 'Execute the rollback', 'rollback.confirm.body': 'Type the session\'s short id to restore %s paths. This cannot be undone here; the rollback itself becomes a session you can roll back.',
   'rollback.nothing': 'Nothing would be restored; the session\'s writes are skipped or in conflict.',
   'rollback.done': 'Rolled back: %s restored',

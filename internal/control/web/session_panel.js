@@ -161,11 +161,12 @@ function planView(plan) {
 
 // promise is the three sentences of docs/agent-roadmap.md §4.8, under
 // every preview: what a rollback is, what it leaves alone, what it covers.
-function promise() {
+function promise(active) {
   return el('div', { class: 'muted', style: 'font-size:12px;margin-top:14px;line-height:1.5' },
     el('div', {}, t('rollback.promise.1')),
     el('div', {}, t('rollback.promise.2')),
-    el('div', {}, t('rollback.promise.3')));
+    el('div', {}, t('rollback.promise.3')),
+    active ? el('div', { 'data-rollback': 'ends-active' }, t('rollback.promise.active')) : null);
 }
 
 // openRollback is the whole rollback flow for session id, and the only
@@ -173,9 +174,12 @@ function promise() {
 // order: a dry run first, whose plan is the preview; then, on Execute, the
 // typed confirmation of the short id; and only behind that answer the
 // confirming post. The result is shown in the same three groups, with the
-// rollback's own session offered for rolling back in turn. onDone runs
+// rollback's own session offered for rolling back in turn. active says
+// the session is still open: the preview then also says that the rollback
+// ends it first, as finishing would, and the connection behind it goes
+// on in a new session. onDone runs
 // after an executed rollback so whatever opened the flow can reload.
-export async function openRollback(id, onDone) {
+export async function openRollback(id, onDone, active = false) {
   const route = '/sessions/' + encodeURIComponent(id) + '/rollback';
   let plan;
   try {
@@ -195,7 +199,7 @@ export async function openRollback(id, onDone) {
       content: el('div', { 'data-rollback': 'preview' },
         planView(plan),
         counts.restore === 0 ? el('p', { class: 'dim', style: 'font-size:13px' }, t('rollback.nothing')) : null,
-        promise()),
+        promise(active)),
       footer: el('div', { class: 'row', style: 'margin-top:16px' }, go, cancel),
       onEscape: () => resolve(close(false)),
     });
@@ -264,7 +268,7 @@ export async function openSessionPanel(id, onFinished) {
   // Rolling back closes the panel: the session's state and every op's
   // result have changed underneath it, and the list behind reloads.
   const rollbackBtn = s.state !== 'rolled_back' && ops.length
-    ? el('button', { 'data-action': 'rollback', onclick: () => openRollback(id, () => { if (close) close(); if (onFinished) onFinished(); }) }, iconEl('undo'), t('rollback.button'))
+    ? el('button', { 'data-action': 'rollback', onclick: () => openRollback(id, () => { if (close) close(); if (onFinished) onFinished(); }, s.state === 'active') }, iconEl('undo'), t('rollback.button'))
     : null;
   const done = el('button', { class: 'primary' }, t('conn.close'));
   done.addEventListener('click', () => { if (close) close(); });

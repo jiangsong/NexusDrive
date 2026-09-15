@@ -33,6 +33,9 @@ type fakeFS struct {
 	reads  int
 	// readErr, when set, makes ReadFileRange fail for that path.
 	readErr map[string]error
+	// beforeWrite, when set, runs at the start of every WriteFile and can
+	// fail it; a test cancels a context from it to interrupt a rollback.
+	beforeWrite func(p string) error
 }
 
 func newFakeFS() *fakeFS {
@@ -88,6 +91,11 @@ func (f *fakeFS) ReadFileRange(_ context.Context, p string, off, length int64) (
 }
 
 func (f *fakeFS) WriteFile(_ context.Context, p string, data []byte, appendMode bool) (FileInfo, error) {
+	if f.beforeWrite != nil {
+		if err := f.beforeWrite(p); err != nil {
+			return FileInfo{}, err
+		}
+	}
 	f.writes++
 	if !f.dirs[path.Dir(p)] {
 		return FileInfo{}, vfs.ErrNotFound
@@ -773,5 +781,154 @@ func TestSessionsTouchingFindsOpsByPath(t *testing.T) {
 	}
 	if got, _ := e.m.SessionsTouching(ctx, "/work/a.txt", e.now.Add(time.Hour)); len(got) != 0 {
 		t.Fatalf("since in the future: %+v", got)
+	}
+}
+
+func TestRollbackFinishesAnActiveSessionBeforeReadingItsRows(t *testing.T) {
+	e := newRollbackEnv(t)
+	ctx := context.Background()
+	conn := ConnInfo{Key: "stdio:1", Transport: "stdio", PrincipalID: e.sess.PrincipalID, ClientName: "codex"}
+	e.fs.put("/work/a.txt", []byte("a0"))
+	e.write(t, "overwrite", "/work/a.txt", []byte("a1"))
+
+	// A dry run is only a look: the session stays the connection's.
+	if _, s, err := e.m.Rollback(ctx, e.fs, e.pre, e.sess.ID, true); err != nil || s.State != "active" {
+		t.Fatalf("after a dry run: %+v %v", s, err)
+	}
+	if cur, err := e.m.Resolve(ctx, conn); err != nil || cur.ID != e.sess.ID {
+		t.Fatalf("the connection lost its session to a dry run: %+v %v", cur, err)
+	}
+
+	// A real rollback ends the session first, so a write the connection
+	// makes while the rollback runs cannot join the rows the plan was
+	// drawn from; the connection carries on in a new session, as after
+	// finish_session. The write here arrives in the middle of the undo.
+	e.now = e.now.Add(time.Minute)
+	var during Session
+	e.fs.beforeWrite = func(string) error {
+		var err error
+		if during, err = e.m.Resolve(ctx, conn); err != nil {
+			return err
+		}
+		_, err = e.st.RecordOp(ctx, during.ID, Op{Op: "create", Path: "/work/late.txt", PreState: "absent"})
+		return err
+	}
+	plan, s, err := e.m.Rollback(ctx, e.fs, e.pre, e.sess.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Restored) != 1 || s.State != "rolled_back" || s.FinishedAt.IsZero() || s.OpsCount != 1 {
+		t.Fatalf("after the rollback: %+v %+v", plan, s)
+	}
+	if during.ID == "" || during.ID == e.sess.ID {
+		t.Fatalf("a write during the rollback joined the session being rolled back: %+v", during)
+	}
+	cur, err := e.m.Resolve(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.ID != during.ID || cur.State != "active" || cur.OpsCount != 1 {
+		t.Fatalf("the connection after the rollback: %+v", cur)
+	}
+	active, _, err := e.m.List(ctx, ListQuery{State: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != cur.ID {
+		t.Fatalf("active sessions after the rollback: %+v", active)
+	}
+}
+
+func TestAnInterruptedRollbackClosesItsOwnSession(t *testing.T) {
+	e := newRollbackEnv(t)
+	e.fs.put("/work/a.txt", []byte("a0"))
+	e.fs.put("/work/b.txt", []byte("b0"))
+	e.write(t, "overwrite", "/work/a.txt", []byte("a1"))
+	e.write(t, "overwrite", "/work/b.txt", []byte("b1"))
+
+	// The undo of b (the last op) goes through; the undo of a is where the
+	// context is cancelled, and the write refuses like the VFS would.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.fs.beforeWrite = func(p string) error {
+		if p == "/work/a.txt" {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	}
+	plan, _, err := e.m.Rollback(ctx, e.fs, e.pre, e.sess.ID, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted rollback: %v %+v", err, plan)
+	}
+	if plan.RollbackSessionID == "" {
+		t.Fatal("no rollback session id")
+	}
+	if string(e.fs.files["/work/a.txt"]) != "a1" || string(e.fs.files["/work/b.txt"]) != "b0" {
+		t.Fatalf("files after the interrupted run: a=%q b=%q", e.fs.files["/work/a.txt"], e.fs.files["/work/b.txt"])
+	}
+	// The rollback's own session is finished, not left active for the
+	// console to wonder about, and says why.
+	rb, err := e.m.Get(context.Background(), plan.RollbackSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rb.State != "finished" || rb.FinishedAt.IsZero() || !strings.HasPrefix(rb.Summary, "rollback interrupted: ") {
+		t.Fatalf("rollback session after the interruption: %+v", rb)
+	}
+	active, _, err := e.m.List(context.Background(), ListQuery{State: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("sessions left active: %+v", active)
+	}
+	// The rerun finishes the job under a session of its own.
+	e.fs.beforeWrite = nil
+	again, s, err := e.m.Rollback(context.Background(), e.fs, e.pre, e.sess.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Restored) != 1 || again.Restored[0].Path != "/work/a.txt" || len(again.Skipped) != 1 || again.Skipped[0].Reason != "already" || s.State != "rolled_back" {
+		t.Fatalf("rerun: %+v %+v", again, s)
+	}
+	if string(e.fs.files["/work/a.txt"]) != "a0" || string(e.fs.files["/work/b.txt"]) != "b0" {
+		t.Fatalf("files after the rerun: a=%q b=%q", e.fs.files["/work/a.txt"], e.fs.files["/work/b.txt"])
+	}
+}
+
+// TestSweepLeavesAnInFlightCopyAlone: the copy of a preimage runs outside
+// the lock, so a sweep can meet its temporary file; the in-flight mark
+// taken before the lock was dropped is what protects that file and the
+// blob until the row is recorded.
+func TestSweepLeavesAnInFlightCopyAlone(t *testing.T) {
+	e := newRollbackEnv(t)
+	ctx := context.Background()
+	e.fs.put("/work/a.txt", []byte("live"))
+	pre, err := e.pre.Capture(ctx, e.fs, "/work/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pre.Blob == "" {
+		t.Fatalf("no blob: %+v", pre)
+	}
+	// What a concurrent copy of the same content would leave mid-way.
+	tmp := filepath.Join(e.pre.Dir(), pre.Blob+".tmp-abcd")
+	if err := os.WriteFile(tmp, []byte("li"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := e.pre.Recover(ctx); err != nil || removed != 0 {
+		t.Fatalf("sweep during a capture removed %d (%v)", removed, err)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("the in-flight temporary file is gone: %v", err)
+	}
+	if _, err := e.pre.Open(pre.Blob); err != nil {
+		t.Fatalf("the in-flight blob is gone: %v", err)
+	}
+	// Once the capture is let go without a row, both are orphans.
+	e.pre.Discard(pre)
+	if removed, err := e.pre.Recover(ctx); err != nil || removed != 2 {
+		t.Fatalf("sweep after discard removed %d (%v), want the blob and its temporary file", removed, err)
 	}
 }

@@ -143,6 +143,7 @@ func (s *Server) registerRollbackTool() {
 		Description: "Undo the writes a session made through this server, newest first, from the content kept before each write. " +
 			"A file someone changed after the session is reported as a conflict and left alone; files too large to keep, " +
 			"unreadable ones and recursive directory deletes are skipped. dry_run=true previews the plan. " +
+			"A session still active (your current one included) is finished first, as finish_session would; your next call starts a new session. " +
 			"The rollback is a new session of its own and can be rolled back in turn. It is not a remote version restore: " +
 			"the restored files upload like any other change.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true)},

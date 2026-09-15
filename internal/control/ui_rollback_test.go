@@ -71,13 +71,15 @@ func TestRollbackButtonPreviewsBeforeConfirming(t *testing.T) {
 }
 
 // The preview and the result overlay share the three groups of the plan,
-// and the preview carries the three promises of docs/agent-roadmap.md §4.8.
+// and the preview carries the three promises of docs/agent-roadmap.md §4.8,
+// plus the note that an active session is finished first.
 func TestRollbackPlanGroupsAndPromise(t *testing.T) {
 	panel := webSource(t, "web/session_panel.js")
 	for _, want := range []string{
 		"import { groupPlan, shortID", "from '/ui/rollback_plan.js'",
 		"t('rollback.group.restore', ", "t('rollback.group.skip', ", "t('rollback.group.conflict', ",
-		"t('rollback.promise.1')", "t('rollback.promise.2')", "t('rollback.promise.3')",
+		"t('rollback.promise.1')", "t('rollback.promise.2')", "t('rollback.promise.3')", "t('rollback.promise.active')",
+		"s.state === 'active')",
 		"t('rollback.conflict.modified')", "t('rollback.again')", "rollback_session_id",
 		"iconEl('undo')", "t('rollback.button')",
 	} {
@@ -104,7 +106,7 @@ func TestRollbackPlanGroupsAndPromise(t *testing.T) {
 	for _, k := range []string{
 		"rollback.button", "rollback.preview.title", "rollback.result.title", "rollback.execute", "rollback.again",
 		"rollback.group.restore", "rollback.group.skip", "rollback.group.conflict", "rollback.conflict.modified",
-		"rollback.promise.1", "rollback.promise.2", "rollback.promise.3", "rollback.confirm.title", "rollback.confirm.body",
+		"rollback.promise.1", "rollback.promise.2", "rollback.promise.3", "rollback.promise.active", "rollback.confirm.title", "rollback.confirm.body",
 		"rollback.nothing", "rollback.done",
 		"rollback.pre.ok", "rollback.pre.too_large", "rollback.pre.not_cached", "rollback.pre.dir", "rollback.pre.absent",
 		"session.op.create", "session.op.overwrite", "session.op.append", "session.op.edit",

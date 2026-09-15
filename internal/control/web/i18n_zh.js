@@ -357,6 +357,7 @@ export const zh = {
   'rollback.promise.1': '回滚是经挂载发起的一组新写入，不是远端历史版本恢复：本地立即可见，远端最终一致。',
   'rollback.promise.2': '会话之后又被修改过的文件报为冲突并保持原样，不会被静默覆盖。',
   'rollback.promise.3': '只覆盖经 MCP 工具发起的修改；内核写入、控制台与 WebDAV 不在会话内。',
+  'rollback.promise.active': '这个会话还在进行中：回滚会先像“结束会话”那样结束它，之后连接上的写入进入新会话。',
   'rollback.confirm.title': '执行回滚', 'rollback.confirm.body': '输入会话短 ID 以恢复 %s 个路径。此处无法撤销；回滚本身会成为一个可再回滚的会话。',
   'rollback.nothing': '没有可恢复的项：该会话的写操作均被跳过或存在冲突。',
   'rollback.done': '已回滚：恢复 %s 项',
