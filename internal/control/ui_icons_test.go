@@ -63,6 +63,25 @@ func TestIconsAreSizedAndDefined(t *testing.T) {
 	}
 }
 
+// TestPhaseTwoSharedHooksExist: the rollback and trigger screens land on
+// separate branches, and both need an icon and an SSE hook that live in
+// files every branch touches. Adding them once here is what keeps those
+// branches from colliding on the same lines of icons.js and api.js.
+func TestPhaseTwoSharedHooksExist(t *testing.T) {
+	icons := string(mustAsset(t, "web/icons.js"))
+	for _, name := range []string{"undo", "bolt"} {
+		if !regexp.MustCompile(`(?m)^\s*` + name + `:\s*svg\(`).MatchString(icons) {
+			t.Errorf("icons.js does not define %q", name)
+		}
+	}
+	api := string(mustAsset(t, "web/api.js"))
+	for _, want := range []string{"onTrigger", "es.addEventListener('trigger'"} {
+		if !strings.Contains(api, want) {
+			t.Errorf("api.js does not wire %q", want)
+		}
+	}
+}
+
 // TestScreensDoNotStringifyASkippedChild: the screens build rows with
 // conditional children (`cond ? row : null`). node.replaceChildren stringifies
 // a null child into the text "null" instead of skipping it, so a row that was

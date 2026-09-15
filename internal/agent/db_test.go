@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"time"
 )
 
-func TestOpenCreatesSchemaV1(t *testing.T) {
+func TestOpenCreatesTheSchema(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
 	if err != nil {
@@ -33,8 +34,113 @@ func TestOpenCreatesSchemaV1(t *testing.T) {
 		t.Fatalf("user_version = %d", v)
 	}
 	var stored string
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&stored); err != nil || stored != "1" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&stored); err != nil || stored != fmt.Sprint(schemaVersion) {
 		t.Fatalf("meta schema_version = %q, %v", stored, err)
+	}
+}
+
+// TestSchemaV2HasSessionOpsAndDeliveries: a fresh store lands on v2 with the
+// two tables phase two builds on, and each takes a row with only the
+// columns its writer knows about.
+func TestSchemaV2HasSessionOpsAndDeliveries(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 2 {
+		t.Fatalf("user_version = %d, want 2", v)
+	}
+	for _, table := range []string{"session_ops", "trigger_deliveries"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+	for _, index := range []string{"session_ops_path", "session_ops_session", "trigger_pending"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("index %s missing: %v", index, err)
+		}
+	}
+	if _, err := s.db.Exec(`INSERT INTO session_ops(session_id, audit_id, op, path, pre_state)
+		VALUES ('s1', 1, 'create', '/a.txt', 'absent')`); err != nil {
+		t.Fatalf("session_ops refused a row: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO trigger_deliveries(rule, path, kind, origin, first_seen, due_at)
+		VALUES ('r1', '/a.txt', 'create', 'kernel', 1, 1)`); err != nil {
+		t.Fatalf("trigger_deliveries refused a row: %v", err)
+	}
+	// One pending delivery per (rule, path): a second event for the same file
+	// coalesces into the queued one instead of running the action twice.
+	if _, err := s.db.Exec(`INSERT INTO trigger_deliveries(rule, path, kind, origin, first_seen, due_at)
+		VALUES ('r1', '/a.txt', 'write', 'kernel', 2, 2)`); err == nil {
+		t.Fatal("two pending deliveries for the same rule and path were accepted")
+	}
+	if _, err := s.db.Exec(`UPDATE trigger_deliveries SET state = 'done' WHERE rule = 'r1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO trigger_deliveries(rule, path, kind, origin, first_seen, due_at)
+		VALUES ('r1', '/a.txt', 'write', 'kernel', 3, 3)`); err != nil {
+		t.Fatalf("a finished delivery must not block the next pending one: %v", err)
+	}
+}
+
+// TestOlderDatabaseMigratesToV2: a v1 agent.db left by the previous build
+// gains the new tables in place and keeps its audit trail.
+func TestOlderDatabaseMigratesToV2(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDB(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range schemaV1 {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO meta(k, v) VALUES('schema_version', '1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO audit(ts, tool, paths, args, result) VALUES (1, 'stat', '[]', '{}', 'ok')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("a v1 database must open and migrate: %v", err)
+	}
+	defer s.Close()
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d after migration, want %d", v, schemaVersion)
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&stored); err != nil || stored != "2" {
+		t.Fatalf("meta schema_version = %q, %v", stored, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM audit`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("the audit row did not survive the migration: n=%d err=%v", n, err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO session_ops(session_id, audit_id, op, path, pre_state)
+		VALUES ('s1', 1, 'create', '/a.txt', 'absent')`); err != nil {
+		t.Fatalf("session_ops missing after migration: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO trigger_deliveries(rule, path, kind, origin, first_seen, due_at)
+		VALUES ('r1', '/a.txt', 'create', 'kernel', 1, 1)`); err != nil {
+		t.Fatalf("trigger_deliveries missing after migration: %v", err)
 	}
 }
 

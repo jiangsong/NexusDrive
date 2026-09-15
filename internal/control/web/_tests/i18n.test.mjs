@@ -14,14 +14,16 @@ globalThis.document = {};
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 
 const { t, tables, locale } = await import('../i18n.js');
-const source = readFileSync(new URL('../i18n.js', import.meta.url), 'utf8');
 
-// tableSource cuts one `const <name> = { ... };` table out of the file. The
-// parsed object cannot answer a question about duplicates — the second entry
-// has already won by then — so this reads the text.
+// tableSource cuts the `export const <name> = { ... };` table out of its own
+// file, i18n_<name>.js. The parsed object cannot answer a question about
+// duplicates — the second entry has already won by then — so this reads the
+// text.
 function tableSource(name) {
+  const file = 'i18n_' + name + '.js';
+  const source = readFileSync(new URL('../' + file, import.meta.url), 'utf8');
   const start = source.indexOf('const ' + name + ' = {');
-  assert.ok(start >= 0, 'no ' + name + ' table in i18n.js');
+  assert.ok(start >= 0, 'no ' + name + ' table in ' + file);
   const end = source.indexOf('\n};', start);
   assert.ok(end > start, name + ' table is not terminated');
   return source.slice(start, end);

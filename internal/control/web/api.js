@@ -43,11 +43,12 @@ export const api = {
 
 // events subscribes to the /events SSE stream, with exponential backoff
 // reconnect and a polling fallback for a viewer whose WebView drops SSE. The
-// caller gets change, status, export, audit, session and index events; it
-// does not have to know which transport delivered them. Audit, session and
-// index events have no polling fallback: the tabs that show them reload on
-// demand, and the index screen reads its progress from the status document.
-export function events({ onStatus, onChange, onExport, onAudit, onSession, onIndex }) {
+// caller gets change, status, export, audit, session, index and trigger
+// events; it does not have to know which transport delivered them. Audit,
+// session, index and trigger events have no polling fallback: the tabs that
+// show them reload on demand, and the index screen reads its progress from
+// the status document.
+export function events({ onStatus, onChange, onExport, onAudit, onSession, onIndex, onTrigger }) {
   let es, timer, backoff = 1000, stopped = false, pollTimer;
   const startPoll = () => {
     if (pollTimer) return;
@@ -72,6 +73,7 @@ export function events({ onStatus, onChange, onExport, onAudit, onSession, onInd
     es.addEventListener('audit', (e) => { try { onAudit && onAudit(JSON.parse(e.data)); } catch (_) {} });
     es.addEventListener('session', (e) => { try { onSession && onSession(JSON.parse(e.data)); } catch (_) {} });
     es.addEventListener('index', (e) => { try { onIndex && onIndex(JSON.parse(e.data)); } catch (_) {} });
+    es.addEventListener('trigger', (e) => { try { onTrigger && onTrigger(JSON.parse(e.data)); } catch (_) {} });
     es.addEventListener('error', () => {
       es.close();
       startPoll();

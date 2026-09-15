@@ -10,21 +10,22 @@ import (
 	"cloudfs/internal/provider"
 )
 
-// The page's own catalog is a pair of hand-edited tables in one file. A key
-// added to one and forgotten in the other renders as the key itself on the
-// other language's screen, which is exactly the kind of gap nobody notices
-// until a user in that language reports a screen full of dotted identifiers.
-// These tests read the shipped asset, so they fail on the edit that caused it.
+// The page's own catalog is a pair of hand-edited tables, one per file
+// (i18n_zh.js, i18n_en.js) behind one loader (i18n.js). A key added to one
+// and forgotten in the other renders as the key itself on the other
+// language's screen, which is exactly the kind of gap nobody notices until a
+// user in that language reports a screen full of dotted identifiers. These
+// tests read the shipped assets, so they fail on the edit that caused it.
 
 var jsKeyRe = regexp.MustCompile(`'([a-z][a-zA-Z0-9._]*)':`)
 
-// tableKeys returns the keys of one `const <name> = { ... };` table in the
-// embedded i18n.js.
+// tableKeys returns the keys of one `export const <name> = { ... };` table
+// in the source webI18nSource returns.
 func tableKeys(t *testing.T, source, name string) map[string]bool {
 	t.Helper()
 	start := strings.Index(source, "const "+name+" = {")
 	if start < 0 {
-		t.Fatalf("no %s table in i18n.js", name)
+		t.Fatalf("no %s table in i18n_%s.js", name, name)
 	}
 	end := strings.Index(source[start:], "\n};")
 	if end < 0 {
@@ -51,7 +52,31 @@ func webSource(t *testing.T, name string) string {
 	return string(b)
 }
 
-func webI18nSource(t *testing.T) string { return webSource(t, "web/i18n.js") }
+// webI18nFiles are the loader and the two catalogs. The loader is what the
+// language-switch tests read; the catalogs are what tableKeys cuts up; and
+// they are the only files allowed to hold Chinese text.
+var webI18nFiles = []string{"web/i18n.js", "web/i18n_zh.js", "web/i18n_en.js"}
+
+// webI18nSource returns the loader and both catalogs as one text, so a test
+// that scans for a table or a loader detail reads the split files the way it
+// read the one file they used to be.
+func webI18nSource(t *testing.T) string {
+	t.Helper()
+	var parts []string
+	for _, name := range webI18nFiles {
+		parts = append(parts, webSource(t, name))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func isWebI18nFile(name string) bool {
+	for _, f := range webI18nFiles {
+		if name == f {
+			return true
+		}
+	}
+	return false
+}
 
 // webScripts lists every embedded .js asset, which is what the tests that
 // hold a rule for the whole app walk.
@@ -102,6 +127,30 @@ func TestWebCatalogsHaveTheSameKeys(t *testing.T) {
 	}
 }
 
+// TestWebCatalogIsSplitAndShort: the catalogs grow with every screen, and a
+// single file holding both was the one module allowed past the 800-line
+// limit. Each language now has its own file, the loader imports both, and
+// every one of the three stays readable in one sitting.
+func TestWebCatalogIsSplitAndShort(t *testing.T) {
+	for _, name := range webI18nFiles {
+		if n := strings.Count(webSource(t, name), "\n"); n >= 800 {
+			t.Errorf("%s is %d lines; split it", name, n)
+		}
+	}
+	loader := webSource(t, "web/i18n.js")
+	for _, want := range []string{"import { zh } from './i18n_zh.js';", "import { en } from './i18n_en.js';", "export const tables = { zh, en };"} {
+		if !strings.Contains(loader, want) {
+			t.Errorf("i18n.js does not contain %q", want)
+		}
+	}
+	if strings.Contains(loader, "const zh = {") || strings.Contains(loader, "const en = {") {
+		t.Error("i18n.js still holds a catalog table; the tables live in i18n_zh.js and i18n_en.js")
+	}
+	if !strings.Contains(webSource(t, "web/i18n_zh.js"), "export const zh = {") || !strings.Contains(webSource(t, "web/i18n_en.js"), "export const en = {") {
+		t.Error("each catalog file must export its table under the language code")
+	}
+}
+
 // A browser can deny localStorage (privacy settings, embedded contexts). The
 // selected language must therefore cross the reload in the URL as well, and
 // detection must honor that explicit value before consulting storage.
@@ -118,8 +167,8 @@ func TestWebLanguageSwitchSurvivesUnavailableStorage(t *testing.T) {
 }
 
 // TestWebScreensHoldNoUntranslatedText: a screen with a Chinese literal in it
-// is a string that never reaches the English table. i18n.js is the one file
-// allowed to contain them.
+// is a string that never reaches the English table. i18n_zh.js is the file
+// for them; i18n.js is exempt too only for the language switch's own label.
 func TestWebScreensHoldNoUntranslatedText(t *testing.T) {
 	entries, err := webFS.ReadDir("web")
 	if err != nil {
@@ -140,7 +189,7 @@ func TestWebScreensHoldNoUntranslatedText(t *testing.T) {
 		files = append(files, "web/"+e.Name())
 	}
 	for _, name := range files {
-		if name == "web/i18n.js" || !strings.HasSuffix(name, ".js") {
+		if isWebI18nFile(name) || !strings.HasSuffix(name, ".js") {
 			continue
 		}
 		b, err := webFS.ReadFile(name)
@@ -154,7 +203,7 @@ func TestWebScreensHoldNoUntranslatedText(t *testing.T) {
 			}
 		}
 		if strings.ContainsAny(string(b), "，。：；（）【】") {
-			t.Errorf("%s contains locale-specific punctuation outside i18n.js", name)
+			t.Errorf("%s contains locale-specific punctuation outside i18n_zh.js", name)
 		}
 		if strings.Contains(string(b), "'zh-CN'") || strings.Contains(string(b), `"zh-CN"`) {
 			t.Errorf("%s hard-codes zh-CN formatting instead of using the selected locale", name)
@@ -170,7 +219,7 @@ func TestWebCatalogCoversUploadStates(t *testing.T) {
 	for _, state := range []string{"pending", "uploading", "done", "dead", "cancelling", "cancelled", "purging"} {
 		key := "upload.state." + state
 		if !known[key] {
-			t.Errorf("i18n.js has no translation for upload state %q", state)
+			t.Errorf("the catalog has no translation for upload state %q", state)
 		}
 	}
 }
@@ -187,17 +236,17 @@ func TestWebCatalogCoversCopyStatesAndMountModes(t *testing.T) {
 		journal.CopyFailed, journal.CopyCancelled, journal.CopyPurging,
 	} {
 		if key := "copy.state." + string(state); !known[key] {
-			t.Errorf("i18n.js has no translation for copy state %q", state)
+			t.Errorf("the catalog has no translation for copy state %q", state)
 		}
 	}
 	for _, mode := range []config.Mode{config.ModeWriteback, config.ModeStrict, config.ModeReadonly} {
 		if key := "mode." + string(mode); !known[key] {
-			t.Errorf("i18n.js has no translation for mount mode %q", mode)
+			t.Errorf("the catalog has no translation for mount mode %q", mode)
 		}
 	}
 	for _, tier := range []provider.Tier{provider.TierOfficial, provider.TierUnofficial} {
 		if key := "tier." + string(tier); !known[key] {
-			t.Errorf("i18n.js has no translation for API tier %q", tier)
+			t.Errorf("the catalog has no translation for API tier %q", tier)
 		}
 	}
 }
@@ -227,7 +276,7 @@ func TestEveryTranslationKeyUsedByTheAppExists(t *testing.T) {
 		files = append(files, "web/"+e.Name())
 	}
 	for _, name := range files {
-		if name == "web/i18n.js" || !strings.HasSuffix(name, ".js") {
+		if isWebI18nFile(name) || !strings.HasSuffix(name, ".js") {
 			continue
 		}
 		b, err := webFS.ReadFile(name)

@@ -19,7 +19,7 @@ import (
 )
 
 // schemaVersion is the agent.db layout this build understands.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // dbName is the database file inside the store directory.
 const dbName = "agent.db"
@@ -29,8 +29,8 @@ const dbName = "agent.db"
 // call.
 const watchBuffer = 64
 
-// schemaV1 is applied in one transaction by the first opener. Every time
-// column is Unix nanoseconds; zero means "not yet".
+// schemaV1 is the layout the first build shipped. Every time column is Unix
+// nanoseconds; zero means "not yet".
 var schemaV1 = []string{
 	`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS principals (
@@ -63,6 +63,39 @@ var schemaV1 = []string{
 	`CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts)`,
 	`CREATE INDEX IF NOT EXISTS audit_session ON audit(session_id, id)`,
 }
+
+// schemaV2 adds the two tables session rollback and triggers share, per
+// docs/agent-roadmap.md §4.3. session_ops holds one row per write a tool made
+// inside a session, with the state the path had before it (the preimage);
+// trigger_deliveries is the durable queue of rule matches waiting to run.
+// Both are additive, so a v1 file migrates in place and keeps its rows.
+var schemaV2 = []string{
+	`CREATE TABLE IF NOT EXISTS session_ops (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+  audit_id INTEGER NOT NULL DEFAULT 0,
+  op TEXT NOT NULL, path TEXT NOT NULL, to_path TEXT NOT NULL DEFAULT '',
+  pre_state TEXT NOT NULL, pre_remote TEXT NOT NULL DEFAULT '',
+  pre_remote_id TEXT NOT NULL DEFAULT '', pre_version TEXT NOT NULL DEFAULT '',
+  pre_size INTEGER NOT NULL DEFAULT 0, pre_hash TEXT NOT NULL DEFAULT '',
+  pre_blob TEXT NOT NULL DEFAULT '', pre_reason TEXT NOT NULL DEFAULT '',
+  post_version TEXT NOT NULL DEFAULT '',
+  rolled_back INTEGER NOT NULL DEFAULT 0, rollback_result TEXT NOT NULL DEFAULT '')`,
+	`CREATE INDEX IF NOT EXISTS session_ops_path ON session_ops(path)`,
+	`CREATE INDEX IF NOT EXISTS session_ops_session ON session_ops(session_id, seq)`,
+	`CREATE TABLE IF NOT EXISTS trigger_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, rule TEXT NOT NULL, path TEXT NOT NULL,
+  kind TEXT NOT NULL, origin TEXT NOT NULL DEFAULT '',
+  first_seen INTEGER NOT NULL, due_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending',
+  last_error TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '',
+  done_at INTEGER NOT NULL DEFAULT 0)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS trigger_pending ON trigger_deliveries(rule, path) WHERE state='pending'`,
+}
+
+// migrations lists every layout in order; migrate applies the ones above the
+// file's current version. Each step is idempotent (IF NOT EXISTS), so a
+// crash between a step and the version write is repaired by the next open.
+var migrations = [][]string{schemaV1, schemaV2}
 
 // Store is the open agent.db.
 type Store struct {
@@ -189,10 +222,11 @@ func (s *Store) Close() error {
 	return err
 }
 
-// migrate brings the database to schemaVersion. The version check happens
-// inside the immediate transaction so that two processes opening an empty
-// file at once cannot both decide to create it: the second one waits on the
-// write lock and then sees the first one's version.
+// migrate brings the database to schemaVersion, applying the steps the file
+// has not seen yet. The version check happens inside the immediate
+// transaction so that two processes opening an empty file at once cannot
+// both decide to create it: the second one waits on the write lock and then
+// sees the first one's version.
 func (s *Store) migrate() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -209,9 +243,11 @@ func (s *Store) migrate() error {
 	if version > schemaVersion {
 		return newerSchemaError(version)
 	}
-	for _, q := range schemaV1 {
-		if _, err := tx.Exec(q); err != nil {
-			return fmt.Errorf("agent: %w", err)
+	for _, step := range migrations[version:] {
+		for _, q := range step {
+			if _, err := tx.Exec(q); err != nil {
+				return fmt.Errorf("agent: %w", err)
+			}
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO meta(k, v) VALUES('schema_version', ?)

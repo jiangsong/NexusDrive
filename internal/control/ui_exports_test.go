@@ -63,7 +63,7 @@ func TestWebCatalogCoversExportStatesAndPauseReasons(t *testing.T) {
 		export.StateDone, export.StateFailed, export.StateCancelled, export.StatePurging,
 	} {
 		if key := "export.state." + string(state); !known[key] {
-			t.Errorf("i18n.js has no translation for export state %q", state)
+			t.Errorf("the catalog has no translation for export state %q", state)
 		}
 	}
 	for _, reason := range []export.PauseReason{
@@ -74,7 +74,7 @@ func TestWebCatalogCoversExportStatesAndPauseReasons(t *testing.T) {
 			continue
 		}
 		if key := "export.pause." + string(reason); !known[key] {
-			t.Errorf("i18n.js has no translation for pause reason %q", reason)
+			t.Errorf("the catalog has no translation for pause reason %q", reason)
 		}
 	}
 }

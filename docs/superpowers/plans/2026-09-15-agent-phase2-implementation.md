@@ -119,11 +119,11 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `docs/superpowers/plans/2026-09-15-agent-phase2-implementation.md`（本文件已就位）
 
 **Steps:**
-- [ ] RED：`TestSchemaV2HasSessionOpsAndDeliveries`（打开新库 `user_version == 2`，两表可插入）、`TestOlderDatabaseMigratesToV2`（v1 库打开后升级，旧 `audit` 行仍在）、`TestNewerSchemaIsRefused` 仍通过
-- [ ] GREEN：`./gow test ./internal/agent/ -count=1`
-- [ ] 图标与 `onTrigger`：`./gow test ./internal/control/ -run 'TestWebIcons|TestBrowserModule' -count=1`
-- [ ] i18n 拆分：`./gow test ./internal/control/ -run 'TestWeb|TestEveryTranslation|TestBrowserModule' -count=1 && node --test internal/control/web/_tests/*.test.mjs`；`wc -l internal/control/web/i18n*.js` 每个 < 800
-- [ ] 提交：`feat(agent,ui): agent.db v2 tables and the shared console hooks phase two builds on`
+- [x] RED：`TestSchemaV2HasSessionOpsAndDeliveries`（打开新库 `user_version == 2`，两表可插入）、`TestOlderDatabaseMigratesToV2`（v1 库打开后升级，旧 `audit` 行仍在）、`TestNewerSchemaIsRefused` 仍通过
+- [x] GREEN：`./gow test ./internal/agent/ -count=1`
+- [x] 图标与 `onTrigger`：`./gow test ./internal/control/ -run 'TestWebIcons|TestBrowserModule' -count=1`
+- [x] i18n 拆分：`./gow test ./internal/control/ -run 'TestWeb|TestEveryTranslation|TestBrowserModule' -count=1 && node --test internal/control/web/_tests/*.test.mjs`；`wc -l internal/control/web/i18n*.js` 每个 < 800
+- [x] 提交：`feat(agent,ui): agent.db v2 tables and the shared console hooks phase two builds on`
 
 ---
 
