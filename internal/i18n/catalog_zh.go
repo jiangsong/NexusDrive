@@ -227,6 +227,26 @@ var zh = map[string]string{
 	"confirm.required":       "这会%s；核对目标后再传 confirm=true",
 	"confirm.token_revoke":   "吊销访问令牌 %s 并关闭所有使用它的会话",
 
+	// 内容索引路由与诊断。
+	"err.index_disabled":             "内容索引未启用（index.enabled: false）",
+	"err.index_config_rule":          "该规则来自配置文件，请在配置文件里移除",
+	"err.index_no_rule":              "没有这条索引规则",
+	"err.index_not_indexed":          "该文件未被索引",
+	"err.index_read_only":            "本进程以只读方式打开了索引；索引由挂载守护进程持有",
+	"err.index_failed":               "索引无法应答：%v",
+	"confirm.index_remove":           "移除规则并删除 %s 下的抽取文本与分块",
+	"confirm.index_rebuild":          "清空索引并按限流重新下载规则覆盖的全部文件",
+	"doctor.index.ok":                "索引正常：%d 个文档，%d 个分块",
+	"doctor.index.db.fix":            "停止 cloudfs 并删除 cache.dir 下的 index.db；它会按规则重建",
+	"doctor.index.identity.ok":       "与当前元数据库匹配",
+	"doctor.index.identity.mismatch": "索引建立在另一个元数据库之上，inode 编号已不匹配",
+	"doctor.index.identity.fix":      "重启守护进程；它会重新绑定并重建索引",
+	"doctor.index.failed":            "%d 个文档抽取失败",
+	"doctor.index.failed.fix":        "cloudfs doctor --fix 会把失败文档重新排队",
+	"doctor.index.budget":            "索引文本已用 %s / %s",
+	"doctor.index.budget.fix":        "调高 index.max_total_text 或收窄规则；达到上限后新文档不再索引",
+	"fix.index_requeued":             "已把 %d 个失败文档重新排队抽取",
+
 	// 存储池在添加网盘的表单里和其它后端一样。
 	"field.pool.pool": "存储池名称（成员与副本数写在 pools.<name> 下）",
 	"creds.pool.note": "无：存储池通过它的成员网盘完成认证",

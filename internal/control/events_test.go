@@ -11,6 +11,7 @@ import (
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/export"
+	"cloudfs/internal/index"
 )
 
 // TestEventsStreamChangesAndStatus: a page holding /events open hears about a
@@ -198,5 +199,68 @@ func TestEventsStreamCarriesAuditAndSession(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("events missing: start=%v audit=%v finish=%v", sawStart, sawAudit, sawFinish)
 		}
+	}
+}
+
+// TestEventsStreamThrottlesIndexProgress: the indexer publishes a snapshot
+// after every file, which is far more often than a progress bar can show.
+// A burst collapses into at most one "index" frame per second, and the
+// frame that does go out is the newest one.
+func TestEventsStreamThrottlesIndexProgress(t *testing.T) {
+	f := newFixture(t)
+	fi := newFakeIndex()
+	f.coll.Index = fi
+	srv := httptest.NewServer(NewServer(f.coll).Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "127.0.0.1"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	events := make(chan string, 256)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		var event string
+		for sc.Scan() {
+			line := sc.Text()
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				events <- event + " " + strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+	if first := <-events; !strings.HasPrefix(first, "status ") {
+		t.Fatalf("first event should be the status document: %s", first)
+	}
+	for i := 1; i <= 50; i++ {
+		fi.progress <- index.Progress{Running: true, Pending: 50 - i, Extracted: int64(i)}
+	}
+	var frames []string
+	deadline := time.After(1500 * time.Millisecond)
+collect:
+	for {
+		select {
+		case ev := <-events:
+			if strings.HasPrefix(ev, "index ") {
+				frames = append(frames, ev)
+			}
+		case <-deadline:
+			break collect
+		}
+	}
+	if len(frames) == 0 || len(frames) > 3 {
+		t.Fatalf("%d index frames in 1.5s, want 1..3: %v", len(frames), frames)
+	}
+	if last := frames[len(frames)-1]; !strings.Contains(last, `"pending":0`) || !strings.Contains(last, `"extracted":50`) {
+		t.Fatalf("the last frame is not the newest snapshot: %s", last)
 	}
 }

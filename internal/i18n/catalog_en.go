@@ -228,6 +228,26 @@ var en = map[string]string{
 	"confirm.required":       "this %s; send confirm=true after checking the target",
 	"confirm.token_revoke":   "revokes access token %s and closes every session using it",
 
+	// Content index routes and diagnostics.
+	"err.index_disabled":             "content indexing is off (index.enabled: false)",
+	"err.index_config_rule":          "this rule comes from the configuration file; remove it there",
+	"err.index_no_rule":              "no such index rule",
+	"err.index_not_indexed":          "this file is not indexed",
+	"err.index_read_only":            "this process opened the index read-only; the mounting daemon owns it",
+	"err.index_failed":               "the index could not answer: %v",
+	"confirm.index_remove":           "removes the rule and deletes the extracted text and chunks under %s",
+	"confirm.index_rebuild":          "clears the index and downloads every rule-covered file again, rate-limited",
+	"doctor.index.ok":                "index healthy: %d documents, %d chunks",
+	"doctor.index.db.fix":            "stop cloudfs and delete index.db under cache.dir; it is rebuilt from the rules",
+	"doctor.index.identity.ok":       "built against this metadata store",
+	"doctor.index.identity.mismatch": "built against another metadata store; its inode numbers no longer match",
+	"doctor.index.identity.fix":      "restart the daemon; it rebinds the index and rebuilds it",
+	"doctor.index.failed":            "%d documents failed to extract",
+	"doctor.index.failed.fix":        "cloudfs doctor --fix requeues failed documents",
+	"doctor.index.budget":            "index text uses %s of %s",
+	"doctor.index.budget.fix":        "raise index.max_total_text or narrow the rules; new documents stop being indexed at the limit",
+	"fix.index_requeued":             "requeued %d failed documents for extraction",
+
 	// The storage pool is a backend like any other on the add-drive form.
 	"field.pool.pool": "Pool name (its members and replica count live under pools.<name>)",
 	"creds.pool.note": "none: a pool authenticates through its member remotes",

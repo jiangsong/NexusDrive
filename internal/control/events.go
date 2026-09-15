@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/index"
 	"cloudfs/internal/vfs"
 )
 
@@ -17,6 +18,10 @@ import (
 const (
 	statusTick = 2 * time.Second
 	exportTick = 1 * time.Second
+	// indexTick is the least time between two "index" frames: the indexer
+	// publishes a snapshot after every file, which is far more often than
+	// a progress bar can show.
+	indexTick = 1 * time.Second
 )
 
 // EventChange is one VFS change as the browser receives it: virtual paths,
@@ -31,10 +36,11 @@ type EventChange struct {
 // GET /events is a server-sent event stream: "change" events from the VFS's
 // own change feed, a "status" event every statusTick, an "export" event
 // every exportTick carrying the first page of live job progress, and an
-// "audit" or "session" event for every row the agent store records. One
-// subscription per open page; the VFS never blocks on a slow one — a full
-// queue collapses into a rescan hint instead — and the agent store drops
-// its oldest event rather than wait.
+// "audit" or "session" event for every row the agent store records, and
+// an "index" event carrying the indexer's latest progress at most once per
+// indexTick. One subscription per open page; the VFS never blocks on a slow
+// one — a full queue collapses into a rescan hint instead — and the agent
+// store and the indexer drop events rather than wait.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
 		return
@@ -61,6 +67,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		agentEvents = ch
 		names = newClientNames(s.collector.Agent)
 	}
+	var indexEvents <-chan index.Progress
+	if s.collector.Index != nil {
+		ch, stop := s.collector.Index.Watch()
+		defer stop()
+		indexEvents = ch
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -86,8 +98,14 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	statusTicker := time.NewTicker(statusTick)
 	exportTicker := time.NewTicker(exportTick)
+	indexFlush := time.NewTicker(indexTick)
 	defer statusTicker.Stop()
 	defer exportTicker.Stop()
+	defer indexFlush.Stop()
+	// The newest progress snapshot not yet sent, and when the last one went
+	// out: a burst of snapshots collapses into the latest one per tick.
+	var lastIndex time.Time
+	var pendingIndex *index.Progress
 	for {
 		select {
 		case <-r.Context().Done():
@@ -116,6 +134,25 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				if !send("session", sessionView(*ev.Session)) {
 					return
 				}
+			}
+		case p, ok := <-indexEvents:
+			if !ok {
+				indexEvents = nil
+				continue
+			}
+			pendingIndex = &p
+			if time.Since(lastIndex) >= indexTick {
+				if !send("index", *pendingIndex) {
+					return
+				}
+				lastIndex, pendingIndex = time.Now(), nil
+			}
+		case <-indexFlush.C:
+			if pendingIndex != nil {
+				if !send("index", *pendingIndex) {
+					return
+				}
+				lastIndex, pendingIndex = time.Now(), nil
 			}
 		case <-statusTicker.C:
 			if !send("status", s.collector.Collect(r.Context(), lang)) {

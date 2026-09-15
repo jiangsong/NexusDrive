@@ -141,6 +141,8 @@ func main() {
 		err = runAudit(ctx, os.Args[2:], os.Stdout)
 	case "sessions":
 		err = runSessions(ctx, os.Args[2:], os.Stdout)
+	case "index":
+		err = runIndex(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
 	case "ui", "open":
@@ -194,6 +196,14 @@ Agents
                             list recorded MCP tool calls, newest first; reads agent.db when no daemon runs
   sessions list [--state active|finished|expired] | show <id> | finish <id> [--summary text]
                             inspect agent sessions and their scope; finish needs the running daemon
+  index status [--path P] [--json]
+                            content index health; reads index.db when no daemon runs
+  index rules | add <path> [--include g1,g2] [--max-file-size 20MiB] | rm <path> --confirm
+                            list, add or remove index rules; changes need the running daemon
+  index rebuild --confirm | retry [<path>]
+                            clear and rebuild the index, or requeue failed documents
+  index search <query> [--path P] [--mode keyword|hybrid] [--limit N] [--json]
+                            search extracted file contents
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)

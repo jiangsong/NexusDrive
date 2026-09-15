@@ -127,6 +127,15 @@ func (s *Server) routes() []route {
 		{pattern: "/mcp/connect", handler: s.mcpConnect},
 		{pattern: "/mcp/tokens", handler: s.mcpTokens},
 		{pattern: "/mcp/tokens/", handler: s.mcpTokenByPath, probe: "/mcp/tokens/x/revoke"},
+		{pattern: "/index/status", handler: s.indexStatus},
+		{pattern: "/index/rules", handler: s.indexRules},
+		{pattern: "/index/add", handler: s.indexAdd},
+		{pattern: "/index/remove", handler: s.indexRemove},
+		{pattern: "/index/rebuild", handler: s.indexRebuild},
+		{pattern: "/index/retry", handler: s.indexRetry},
+		{pattern: "/index/failed", handler: s.indexFailed},
+		{pattern: "/index/search", handler: s.indexSearch},
+		{pattern: "/index/text", handler: s.indexText},
 	}
 }
 
@@ -340,6 +349,19 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 		ms = append(ms,
 			metric{name: "cloudfs_agent_sessions_active", help: "MCP sessions currently active", typ: "gauge", value: float64(st.Agent.ActiveSessions)},
 			metric{name: "cloudfs_audit_write_failures_total", help: "Audit rows that could not be written to agent.db since start", typ: "counter", value: float64(st.Agent.AuditWriteFailures)},
+		)
+	}
+	if st.Index != nil {
+		ms = append(ms,
+			metric{name: "cloudfs_index_documents", help: "Documents in the content index, by state", typ: "gauge",
+				labels: map[string]string{"state": "ok"}, value: float64(st.Index.Docs.OK)},
+			metric{name: "cloudfs_index_documents", labels: map[string]string{"state": "dirty"}, value: float64(st.Index.Docs.Dirty)},
+			metric{name: "cloudfs_index_documents", labels: map[string]string{"state": "failed"}, value: float64(st.Index.Docs.Failed)},
+			metric{name: "cloudfs_index_pending", help: "Files waiting for text extraction", typ: "gauge", value: float64(st.Index.Pending)},
+			metric{name: "cloudfs_index_chunks", help: "Chunks in the content index", typ: "gauge", value: float64(st.Index.Chunks)},
+			metric{name: "cloudfs_index_text_bytes", help: "Extracted text held by the content index", typ: "gauge", value: float64(st.Index.TextBytes)},
+			metric{name: "cloudfs_index_fetch_bytes_total", help: "Bytes the indexer downloaded from remotes since start", typ: "counter", value: float64(st.Index.FetchBytesTotal)},
+			metric{name: "cloudfs_index_failures_total", help: "Extraction failures since start", typ: "counter", value: float64(st.Index.Failures)},
 		)
 	}
 	for _, p := range st.Proxies {

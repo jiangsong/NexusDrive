@@ -75,6 +75,9 @@ type Doctor struct {
 	Pools           map[string]*pool.Pool
 	MemberProviders map[string]provider.Provider
 	HoldMaxBytes    int64
+	// Index, when set, is the content index to check; nil on a daemon
+	// started with index.enabled false, which then has nothing to report.
+	Index IndexControl
 }
 
 // config reads the published configuration, tolerating both a Doctor built
@@ -95,6 +98,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkJournal(ctx)...)
 	out = append(out, d.checkProxy(ctx)...)
 	out = append(out, d.checkPools(ctx)...)
+	out = append(out, d.checkIndex(ctx)...)
 	if cfg := d.config(); cfg != nil {
 		for name, r := range cfg.Remotes {
 			level, detailKey := LevelOK, "doctor.creds.keyring"
@@ -390,6 +394,55 @@ func (d *Doctor) checkProxy(ctx context.Context) []Check {
 	return out
 }
 
+// checkIndex reports on the content index: whether index.db opens and
+// answers, whether it was built against the meta store this daemon runs
+// on, how many documents failed to extract and how close the text is to
+// its budget.
+func (d *Doctor) checkIndex(ctx context.Context) []Check {
+	if d.Index == nil {
+		return nil
+	}
+	st, err := d.Index.Status(ctx, "")
+	if err != nil {
+		c := Check{Name: "index_db", Level: LevelFail, Detail: err.Error()}
+		c.setFix("doctor.index.db.fix")
+		return []Check{c}
+	}
+	var out []Check
+	c := Check{Name: "index_db", Level: LevelOK}
+	c.setDetail("doctor.index.ok", st.Docs.OK, st.ChunksTotal)
+	out = append(out, c)
+
+	if d.Meta != nil {
+		if got, err := d.Index.Identity(ctx); err == nil && got != "" {
+			ic := Check{Name: "index_identity"}
+			if want, err := d.Meta.Identity(ctx); err == nil && want != got {
+				ic.Level = LevelWarn
+				ic.setDetail("doctor.index.identity.mismatch")
+				ic.setFix("doctor.index.identity.fix")
+			} else {
+				ic.Level = LevelOK
+				ic.setDetail("doctor.index.identity.ok")
+			}
+			out = append(out, ic)
+		}
+	}
+
+	if st.Docs.Failed > 0 {
+		fc := Check{Name: "index_failed", Level: LevelWarn, Fixable: true}
+		fc.setDetail("doctor.index.failed", st.Docs.Failed)
+		fc.setFix("doctor.index.failed.fix")
+		out = append(out, fc)
+	}
+	if st.MaxTotalText > 0 && st.TextBytes*10 >= st.MaxTotalText*9 {
+		bc := Check{Name: "index_text_budget", Level: LevelWarn}
+		bc.setDetail("doctor.index.budget", humanBytes(st.TextBytes), humanBytes(st.MaxTotalText))
+		bc.setFix("doctor.index.budget.fix")
+		out = append(out, bc)
+	}
+	return out
+}
+
 // Fix repairs what it safely can and reports what it did, in lang: the
 // report goes straight to a person, in the UI toast or the terminal, so it is
 // the one place in the doctor where the language is an argument rather than a
@@ -426,6 +479,11 @@ func (d *Doctor) Fix(ctx context.Context, lang i18n.Lang) []string {
 	if d.Meta != nil {
 		if err := d.Meta.Vacuum(ctx); err == nil {
 			done = append(done, i18n.T(lang, "fix.checkpointed"))
+		}
+	}
+	if d.Index != nil {
+		if n, err := d.Index.Retry(ctx, ""); err == nil && n > 0 {
+			done = append(done, i18n.T(lang, "fix.index_requeued", n))
 		}
 	}
 	if len(done) == 0 {

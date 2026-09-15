@@ -507,6 +507,7 @@ func (d *Daemon) Collector() *control.Collector {
 	}
 	col.Agent = d.agentView()
 	col.MCP = d.mcpView()
+	col.Index = d.indexView()
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that
@@ -632,6 +633,7 @@ func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, 
 		Pools:           d.Pools,
 		MemberProviders: d.Providers,
 		HoldMaxBytes:    d.holdBudget(),
+		Index:           d.indexView(),
 	}
 }
 

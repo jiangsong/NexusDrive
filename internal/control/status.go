@@ -47,6 +47,9 @@ type Status struct {
 	// Agent is present when this daemon keeps an agent store: how many MCP
 	// sessions are active and whether the audit trail is keeping up.
 	Agent *AgentStatus `json:"agent,omitempty"`
+	// Index is present when this daemon has a content index: the counts
+	// the overview cards show and the cloudfs_index_* metrics are read from.
+	Index *IndexStatus `json:"index,omitempty"`
 	// Warnings names conditions an operator should act on, most urgent first.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -235,7 +238,11 @@ type Collector struct {
 	// MCP, when set, serves /mcp/connect and /mcp/tokens. nil on a daemon
 	// without agent.db, and those routes answer 503.
 	MCP MCPView
-	Now func() time.Time
+	// Index, when set, serves /index/* and feeds the index progress event.
+	// nil on a daemon started with index.enabled false; /index/status then
+	// answers {"enabled":false} and the other index routes 404.
+	Index IndexControl
+	Now   func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value
@@ -284,6 +291,12 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 		s.Agent = &AgentStatus{Workspace: c.Agent.Workspace(), AuditWriteFailures: c.Agent.AuditWriteFailures()}
 		if sum, err := c.Agent.Summary(ctx); err == nil {
 			s.Agent.ActiveSessions = sum.Active
+		}
+	}
+	if c.Index != nil {
+		s.Index = &IndexStatus{Enabled: true}
+		if st, err := c.Index.Status(ctx, ""); err == nil {
+			s.Index = indexStatusOf(st)
 		}
 	}
 
