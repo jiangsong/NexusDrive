@@ -604,7 +604,8 @@ Claude Code 的 HTTP 注册只支持静态 header，所以**令牌是身份，�
 ### 4.5 stdio 拓扑处置（T-35、T-43）
 
 - **一期**：新增 `cloudfs mcp install --client claude|codex --transport http`，只是 `ClientConfig` 多一种输出。文档改为"mount 在跑就用 HTTP"。`cmdMCP` 发现自己不是 owner 时打警告，会话与回滚类工具返回 `requires the storage owner; use the HTTP transport`，审计照写（§1.3）。
-- **T-43 验证缺口**：先写 e2e 复现。mount 与 stdio MCP 同时写同一目录，然后读回、排空、重启，确认有没有丢失、复活或延迟可见。journal 行由 owner uploader 领走，但 `needs_publish` 在另一个进程，这一点尚未核实。结论写回 T-43，并据此决定 stdio→HTTP 桥是否提前。该桥用 SDK `StreamableClientTransport` + 原始 schema `AddTool`，约 300 行。
+- **T-43 结论（2026-09-15）**：e2e 复现失败——非 owner stdio 的 `write_file` 报 `journal: publication requires storage ownership`，但节点已进共享 meta，挂载侧 `cat` 得 EIO，journal 行停在 `needs_publish=1`，owner 重启后复活。桥提前；细节见 TODO.md T-43 与 `docs/mcp.md`"与挂载并存"。
+- **T-43 验证缺口（原文）**：先写 e2e 复现。mount 与 stdio MCP 同时写同一目录，然后读回、排空、重启，确认有没有丢失、复活或延迟可见。journal 行由 owner uploader 领走，但 `needs_publish` 在另一个进程，这一点尚未核实。结论写回 T-43，并据此决定 stdio→HTTP 桥是否提前。该桥用 SDK `StreamableClientTransport` + 原始 schema `AddTool`，约 300 行。
 - **修正文档**：`docs/mcp.md`"与挂载并存"一节的"共用同一个 VFS 实例"只对 owner 进程内的 HTTP 传输成立，已补注。
 
 ### 4.6 访问令牌（T-35）

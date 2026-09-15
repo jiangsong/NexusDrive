@@ -1,6 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, fill, copyBtn } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
+import { stdioWarning } from '/ui/connect_view.js';
 
 // The connect panel sits at the top of the agents screen and answers the
 // first question a person has there: how does an agent reach this mount? It
@@ -31,10 +32,11 @@ function body(c) {
     el('span', { style: 'display:inline-flex;align-items:center;gap:8px' },
       el('span', { class: 'dot ' + (c.owner ? 'ok' : 'warn') }),
       t(c.owner ? 'connect.owner.yes' : 'connect.owner.no'))));
-  if (c.stdio_non_owner) {
-    parts.push(el('div', { class: 'banner warn', role: 'alert', style: 'margin-top:12px' },
-      t('connect.stdio.banner'), ' ',
-      el('a', { href: '#/diagnostics' }, t('connect.stdio.link'))));
+  const warning = stdioWarning(c);
+  if (warning) {
+    parts.push(el('div', { class: 'banner warn', role: 'alert', 'data-stdio-warning': '', style: 'margin-top:12px' },
+      t(warning.key), ' ',
+      el('a', { href: warning.href }, t(warning.linkKey))));
   }
   if (!c.http_listening) {
     parts.push(el('p', { class: 'detail', style: 'margin:12px 0 6px' }, t('connect.http.hint')));

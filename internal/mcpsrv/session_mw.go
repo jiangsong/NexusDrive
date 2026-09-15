@@ -80,8 +80,42 @@ func (s *Server) resolveSession(ctx context.Context, req mcp.Request) (agent.Ses
 	default:
 		// stdio (and in-memory transports): one SDK session per process.
 		c.Key, c.Transport, c.PrincipalID = fmt.Sprintf("stdio:%p", ss), "stdio", s.defaultPrincipal.ID
+		s.rememberStdioKey(c.Key)
 	}
 	return s.opt.Sessions.Resolve(ctx, c)
+}
+
+func (s *Server) rememberStdioKey(key string) {
+	s.principalsMu.Lock()
+	defer s.principalsMu.Unlock()
+	if s.stdioKeys == nil {
+		s.stdioKeys = map[string]struct{}{}
+	}
+	s.stdioKeys[key] = struct{}{}
+}
+
+// FinishStdioSessions finishes the CloudFS session of every stdio
+// connection this server resolved one for, and reports how many it closed.
+// A stdio process is its session: `cloudfs mcp` calls this when its
+// transport ends, so the console does not show the run as active until an
+// idle sweep that stdio sessions, which never rotate, would not get.
+func (s *Server) FinishStdioSessions(ctx context.Context) int {
+	if s.opt.Sessions == nil {
+		return 0
+	}
+	s.principalsMu.Lock()
+	keys := make([]string, 0, len(s.stdioKeys))
+	for k := range s.stdioKeys {
+		keys = append(keys, k)
+	}
+	s.principalsMu.Unlock()
+	n := 0
+	for _, k := range keys {
+		if _, ok, err := s.opt.Sessions.FinishConn(ctx, k, ""); err == nil && ok {
+			n++
+		}
+	}
+	return n
 }
 
 // envPrincipal returns the principal behind the legacy environment token,

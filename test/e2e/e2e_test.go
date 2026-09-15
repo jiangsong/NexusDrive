@@ -438,13 +438,19 @@ func TestDoctorOnALiveSystem(t *testing.T) {
 	for _, c := range checks {
 		byName[c.Name] = c
 	}
-	for _, name := range []string{"platform", "cache_dir", "metadata_db", "upload_queue"} {
+	for _, name := range []string{"platform", "cache_dir", "metadata_db", "upload_queue", "agent_db", "agent_stdio"} {
 		if _, ok := byName[name]; !ok {
 			t.Errorf("doctor is missing the %s check", name)
 		}
 	}
 	if c := byName["upload_queue"]; c.Level != control.LevelOK {
 		t.Errorf("a healthy queue should pass: %+v", c)
+	}
+	// One owner and no stdio server beside it: both agent checks pass.
+	for _, name := range []string{"agent_db", "agent_stdio"} {
+		if c := byName[name]; c.Level != control.LevelOK {
+			t.Errorf("%s should pass on a lone owner: %+v", name, c)
+		}
 	}
 	if c := byName["cache_dir"]; c.Level != control.LevelOK {
 		t.Errorf("the cache dir should be usable: %+v", c)

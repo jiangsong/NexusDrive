@@ -446,6 +446,24 @@ func (m *Sessions) Finish(ctx context.Context, id, summary string) (Session, err
 	return m.finished(ctx, id, res)
 }
 
+// FinishConn finishes the active session of a connection, if it has one,
+// and reports whether it did. A stdio server calls it for its own
+// connection when its transport closes: the process is the session, and a
+// session that outlives its process would sit in the console as active
+// until the idle sweep — which a stdio session, having no idle rotation,
+// never reaches.
+func (m *Sessions) FinishConn(ctx context.Context, key, summary string) (Session, bool, error) {
+	s, err := scanSession(m.store.db.QueryRowContext(ctx, sessionColumns+` WHERE conn_key = ? AND state = 'active'`, key))
+	if errors.Is(err, ErrSessionNotFound) {
+		return Session{}, false, nil
+	}
+	if err != nil {
+		return Session{}, false, err
+	}
+	s, err = m.Finish(ctx, s.ID, summary)
+	return s, err == nil && s.State == "finished", err
+}
+
 // FinishWith is Finish for an explicit session: it also records the
 // artifacts the session delivered, and an empty summary keeps the label
 // the session was begun with rather than blanking it.

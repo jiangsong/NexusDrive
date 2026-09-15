@@ -1,6 +1,8 @@
 package control
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -152,6 +154,41 @@ func TestAgentsModulesStayShort(t *testing.T) {
 	} {
 		if n := strings.Count(webSource(t, name), "\n"); n >= 800 {
 			t.Errorf("%s is %d lines; split it", name, n)
+		}
+	}
+}
+
+// TestConnectPanelWarnsAboutStdioNonOwner: the banner that tells a person
+// to switch to the HTTP transport is driven by /mcp/connect's
+// stdio_non_owner alone and links to the diagnostics screen, where the
+// doctor item explains it. The decision lives in connect_view.js, a module
+// with no DOM, and the node suite exercises both answers; this checks the
+// panel renders that decision and nothing else decides it.
+func TestConnectPanelWarnsAboutStdioNonOwner(t *testing.T) {
+	view := webSource(t, "web/connect_view.js")
+	for _, want := range []string{"c.stdio_non_owner !== true) return null", "href: '#/diagnostics'", "key: 'connect.stdio.banner'", "linkKey: 'connect.stdio.link'"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("connect_view.js lacks %s", want)
+		}
+	}
+	panel := webSource(t, "web/connect_panel.js")
+	for _, want := range []string{"import { stdioWarning } from '/ui/connect_view.js'", "const warning = stdioWarning(c)", "if (warning) {", "role: 'alert'", "'data-stdio-warning'", "el('a', { href: warning.href }, t(warning.linkKey))", "t(warning.key)"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("connect_panel.js lacks %s", want)
+		}
+	}
+	if strings.Contains(panel, "c.stdio_non_owner") {
+		t.Error("the panel decides the banner itself instead of through connect_view.js")
+	}
+	if _, err := os.Stat(filepath.Join("web", "_tests", "connect_view.test.mjs")); err != nil {
+		t.Fatalf("the node suite for connect_view.js is missing: %v", err)
+	}
+	for _, lang := range []string{"zh", "en"} {
+		keys := tableKeys(t, webI18nSource(t), lang)
+		for _, k := range []string{"connect.stdio.banner", "connect.stdio.link"} {
+			if !keys[k] {
+				t.Errorf("%s lacks %s", lang, k)
+			}
 		}
 	}
 }

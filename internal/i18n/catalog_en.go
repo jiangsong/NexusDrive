@@ -246,6 +246,12 @@ var en = map[string]string{
 	"doctor.index.failed.fix":        "cloudfs doctor --fix requeues failed documents",
 	"doctor.index.budget":            "index text uses %s of %s",
 	"doctor.index.budget.fix":        "raise index.max_total_text or narrow the rules; new documents stop being indexed at the limit",
+	"doctor.agent.ok":                "agent.db healthy: schema v%d",
+	"doctor.agent.schema":            "agent.db is at schema v%d, this build expects v%d",
+	"doctor.agent.db.fix":            "stop cloudfs and move agent.db under cache.dir/agent aside; sessions and audit start empty",
+	"doctor.agent.stdio.ok":          "no stdio MCP server runs beside the cache owner",
+	"doctor.agent.stdio.warn":        "%d stdio MCP server(s) run beside the cache owner (pid %s): each has its own view of the files and no uploader",
+	"doctor.agent.stdio.fix":         "register the client over HTTP instead: cloudfs mcp install --transport http",
 	"fix.index_requeued":             "requeued %d failed documents for extraction",
 
 	// Send to agent: the console hands this prompt to the person to paste

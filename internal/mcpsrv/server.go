@@ -127,7 +127,8 @@ type Server struct {
 	// audit is where auditMiddleware writes; nil means no audit trail.
 	audit AuditWriter
 
-	// principalsMu guards envPrincipalCached and legacyByPrincipal.
+	// principalsMu guards envPrincipalCached, legacyByPrincipal and
+	// stdioKeys.
 	principalsMu sync.Mutex
 	// envPrincipalCached is the principal of the legacy environment token,
 	// looked up once on its first request.
@@ -135,6 +136,11 @@ type Server struct {
 	// legacyByPrincipal maps a principal to the stateful SDK sessions that
 	// authenticated as it, so revoking the principal's token can close them.
 	legacyByPrincipal map[string]map[*mcp.ServerSession]struct{}
+	// stdioKeys are the connection keys of the stdio (and in-memory)
+	// transports this server has resolved a session for, so that
+	// FinishStdioSessions can close them after the SDK has already
+	// forgotten the connection.
+	stdioKeys map[string]struct{}
 	// revokeStop ends the revocation poller; revokeWG waits for it.
 	revokeStop chan struct{}
 	revokeOnce sync.Once

@@ -63,9 +63,16 @@ func TestTokensTabReachesTheTokenRoutes(t *testing.T) {
 
 func TestConnectPanelCallsConnectAndLinksDiagnostics(t *testing.T) {
 	src := webSource(t, "web/connect_panel.js")
-	for _, want := range []string{"api.get('/mcp/connect'", "stdio_non_owner", "href: '#/diagnostics'", "http_listening", "'details'"} {
+	for _, want := range []string{"api.get('/mcp/connect'", "stdioWarning(", "http_listening", "'details'"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("connect panel lacks %s", want)
+		}
+	}
+	// The stdio decision moved to connect_view.js so it can run under node.
+	view := webSource(t, "web/connect_view.js")
+	for _, want := range []string{"stdio_non_owner", "href: '#/diagnostics'"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("connect view lacks %s", want)
 		}
 	}
 	agents := webSource(t, "web/screens/agents.js")

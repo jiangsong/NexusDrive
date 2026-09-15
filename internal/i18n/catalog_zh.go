@@ -245,6 +245,12 @@ var zh = map[string]string{
 	"doctor.index.failed.fix":        "cloudfs doctor --fix 会把失败文档重新排队",
 	"doctor.index.budget":            "索引文本已用 %s / %s",
 	"doctor.index.budget.fix":        "调高 index.max_total_text 或收窄规则；达到上限后新文档不再索引",
+	"doctor.agent.ok":                "agent.db 正常：schema v%d",
+	"doctor.agent.schema":            "agent.db 是 schema v%d，本构建需要 v%d",
+	"doctor.agent.db.fix":            "停止 cloudfs 并把 cache.dir/agent 下的 agent.db 移走；会话与审计从空开始",
+	"doctor.agent.stdio.ok":          "没有 stdio MCP 进程与存储 owner 并存",
+	"doctor.agent.stdio.warn":        "%d 个 stdio MCP 进程与存储 owner 并存（pid %s）：它们各有一份文件视图且没有上传器",
+	"doctor.agent.stdio.fix":         "改用 HTTP 传输注册客户端：cloudfs mcp install --transport http",
 	"fix.index_requeued":             "已把 %d 个失败文档重新排队抽取",
 
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。

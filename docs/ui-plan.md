@@ -386,8 +386,8 @@ F5–F10 属二期。
 **F10 —— 诊断项与横幅联动（T-43 · 二期回滚之前）**
 
 - [ ] **F10-1** 诊断屏不改 JS：doctor 新检查"MCP stdio 进程与挂载并存"、agent.db、index.db、嵌入端点自动出现；确认 `diagnostics.js` 对新检查项的 detail 与命令文本正常换行。
-- [ ] **F10-2** 接入面板在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染黄色横幅"请改用 HTTP 传输"，链到 `#/diagnostics`。
-- [ ] **F10-3** `ui_agents_test.go` 补断言：横幅条件渲染并链到 `#/diagnostics`。
+- [x] **F10-2** 接入面板在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染黄色横幅"请改用 HTTP 传输"，链到 `#/diagnostics`（C0：决策在 `connect_view.js`，`/mcp/connect` 按心跳文件填 `stdio_non_owner`）。
+- [x] **F10-3** `ui_agents_test.go` 补断言：横幅条件渲染并链到 `#/diagnostics`（`TestConnectPanelWarnsAboutStdioNonOwner` + `_tests/connect_view.test.mjs`）。
 - [ ] **F10-4** `test/e2e` 的 `CLOUDFS_BROWSER=1` 冒烟加 `#/agents`、`#/index`、`#/triggers` 可达；`browser_modules_test.go` 自动覆盖新增 `_tests/*.test.mjs`；`ui_icons_test.go` 覆盖 `bot/layers/bolt/undo`。
 
 **F11 —— Everything 式文件名搜索：主窗口全盘搜索、过滤条、覆盖率（T-44 · 一期，前置于 F4-b）**

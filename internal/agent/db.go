@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -101,6 +102,9 @@ var migrations = [][]string{schemaV1, schemaV2}
 type Store struct {
 	db   *sql.DB
 	lock *os.File
+	// dir is the store directory, <cache.dir>/agent, where the heartbeats
+	// of stdio processes beside the owner live too.
+	dir string
 	// owner reports whether this process holds the flock and therefore runs
 	// housekeeping. Non-owners still write: a stdio MCP process appends its
 	// own audit rows while the daemon holds the lock.
@@ -139,6 +143,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := newStore(db, lock, owner, false)
+	s.dir = dir
 	if err := s.migrate(); err != nil {
 		releaseOwnership(lock)
 		db.Close()
@@ -163,6 +168,7 @@ func OpenReadOnly(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := newStore(db, nil, false, true)
+	s.dir = dir
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		db.Close()
@@ -206,6 +212,20 @@ func newerSchemaError(version int) error {
 
 // Owner reports whether this process holds the lock and runs housekeeping.
 func (s *Store) Owner() bool { return s.owner }
+
+// Dir is the directory the store was opened in.
+func (s *Store) Dir() string { return s.dir }
+
+// SchemaVersions reports the layout the file is at and the one this build
+// understands. Open refuses a newer file, so the two agree on a store that
+// opened; doctor reads them so the number is on the diagnostics page rather
+// than only in an error nobody sees until the refusal.
+func (s *Store) SchemaVersions(ctx context.Context) (file, build int, err error) {
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&file); err != nil {
+		return 0, schemaVersion, fmt.Errorf("agent: %w", err)
+	}
+	return file, schemaVersion, nil
+}
 
 // Close releases the database and the ownership lock. Watchers are closed
 // so a console loop ranging over them terminates.

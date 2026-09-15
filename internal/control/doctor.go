@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/cache"
 	"cloudfs/internal/config"
 	"cloudfs/internal/i18n"
@@ -78,6 +79,12 @@ type Doctor struct {
 	// Index, when set, is the content index to check; nil on a daemon
 	// started with index.enabled false, which then has nothing to report.
 	Index IndexControl
+	// Agent is the open agent.db, nil on a Doctor built without a daemon.
+	// AgentDir is its directory, <cache.dir>/agent, where the heartbeats
+	// of stdio MCP processes beside the owner live; it is read even when
+	// Agent is nil, so a config-only doctor still spots them.
+	Agent    *agent.Store
+	AgentDir string
 }
 
 // config reads the published configuration, tolerating both a Doctor built
@@ -99,6 +106,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkProxy(ctx)...)
 	out = append(out, d.checkPools(ctx)...)
 	out = append(out, d.checkIndex(ctx)...)
+	out = append(out, d.checkAgent(ctx)...)
 	if cfg := d.config(); cfg != nil {
 		for name, r := range cfg.Remotes {
 			level, detailKey := LevelOK, "doctor.creds.keyring"
@@ -398,6 +406,62 @@ func (d *Doctor) checkProxy(ctx context.Context) []Check {
 // answers, whether it was built against the meta store this daemon runs
 // on, how many documents failed to extract and how close the text is to
 // its budget.
+// checkAgent reports agent.db and the topology docs/mcp.md advises
+// against: a stdio MCP server started beside the cache owner. That server
+// has its own VFS and no uploader (T-43), so it announces itself with a
+// heartbeat under AgentDir, and the warning names the HTTP transport as the
+// way out.
+func (d *Doctor) checkAgent(ctx context.Context) []Check {
+	var out []Check
+	if d.Agent != nil {
+		c := Check{Name: "agent_db"}
+		file, build, err := d.Agent.SchemaVersions(ctx)
+		switch {
+		case err != nil:
+			c.Level = LevelFail
+			c.passDetail(err.Error())
+			c.setFix("doctor.agent.db.fix")
+		case file != build:
+			c.Level = LevelFail
+			c.setDetail("doctor.agent.schema", file, build)
+			c.setFix("doctor.agent.db.fix")
+		default:
+			c.Level = LevelOK
+			c.setDetail("doctor.agent.ok", file)
+		}
+		out = append(out, c)
+	}
+	dir := d.AgentDir
+	if dir == "" && d.Agent != nil {
+		dir = d.Agent.Dir()
+	}
+	if dir == "" {
+		return out
+	}
+	now := time.Now()
+	if d.Now != nil {
+		now = d.Now()
+	}
+	c := Check{Name: "agent_stdio"}
+	if pids := agent.LiveStdioProcesses(dir, now); len(pids) > 0 {
+		c.Level = LevelWarn
+		c.setDetail("doctor.agent.stdio.warn", len(pids), pidList(pids))
+		c.setFix("doctor.agent.stdio.fix")
+	} else {
+		c.Level = LevelOK
+		c.setDetail("doctor.agent.stdio.ok")
+	}
+	return append(out, c)
+}
+
+func pidList(pids []int) string {
+	parts := make([]string, len(pids))
+	for i, pid := range pids {
+		parts[i] = strconv.Itoa(pid)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (d *Doctor) checkIndex(ctx context.Context) []Check {
 	if d.Index == nil {
 		return nil

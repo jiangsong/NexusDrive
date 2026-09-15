@@ -963,9 +963,34 @@ var _ provider.Provider = (*Fake)(nil)
 var _ provider.ChangeLister = (*Fake)(nil)
 
 func init() {
-	provider.Register("fake", func(name string, _ map[string]any) (provider.Provider, error) {
+	provider.Register("fake", func(name string, cfg map[string]any) (provider.Provider, error) {
+		if key, _ := cfg["shared"].(string); key != "" {
+			return Shared(key, name), nil
+		}
 		return New(name), nil
 	})
+}
+
+var (
+	sharedMu sync.Mutex
+	shared   = map[string]*Fake{}
+)
+
+// Shared returns the one Fake registered under key, creating it with name on
+// first use. A remote configured as `{type: fake, shared: <key>}` resolves to
+// it from every daemon opened in the process, which is what a test of two
+// daemons on one cache directory needs: in production both would talk to the
+// same account, and a second empty in-memory backend would make the second
+// daemon see an empty drive instead.
+func Shared(key, name string) *Fake {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	f, ok := shared[key]
+	if !ok {
+		f = New(name)
+		shared[key] = f
+	}
+	return f
 }
 
 // Content returns what the backend holds at path. Tests use it to check that

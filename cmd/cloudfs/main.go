@@ -19,9 +19,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/bench"
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
@@ -705,6 +708,12 @@ func cmdMCP(ctx context.Context, args []string) error {
 	nonOwner := d.Journal != nil && !d.Journal.Owner()
 	if nonOwner {
 		fmt.Fprintln(os.Stderr, nonOwnerWarning)
+		// Announce the topology to the owner: doctor and the console's
+		// connect panel read the heartbeat, since the lock alone cannot say
+		// who else is here. Stopped and removed when this server ends.
+		if d.Agent != nil {
+			defer stdioHeartbeat(ctx, d.Agent.Dir())()
+		}
 	}
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
@@ -716,7 +725,50 @@ func cmdMCP(ctx context.Context, args []string) error {
 		return err
 	}
 	defer srv.Close()
-	return srv.Run(ctx, &mcp.StdioTransport{})
+	err = srv.Run(ctx, &mcp.StdioTransport{})
+	// The process was the session: when the client closes the transport
+	// the run is over, and the console should say finished rather than
+	// active. ctx may already be cancelled, so the update gets its own.
+	finishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.FinishStdioSessions(finishCtx)
+	return err
+}
+
+// stdioHeartbeat writes this process's heartbeat under dir and refreshes it
+// every agent.HeartbeatInterval until the returned stop is called or ctx
+// ends; stop removes the file. A heartbeat that cannot be written is only
+// logged: the server still works, doctor just cannot see it.
+func stdioHeartbeat(ctx context.Context, dir string) (stop func()) {
+	pid := os.Getpid()
+	if err := agent.WriteHeartbeat(dir, pid); err != nil {
+		fmt.Fprintf(os.Stderr, "cloudfs: %v\n", err)
+	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(agent.HeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = agent.WriteHeartbeat(dir, pid)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+			_ = agent.RemoveHeartbeat(dir, pid)
+		})
+	}
 }
 
 func serveMCPHTTP(ctx context.Context, d *daemon.Daemon, cfg *config.Config, addr string) error {

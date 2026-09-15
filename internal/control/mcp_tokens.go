@@ -31,8 +31,10 @@ type MCPConnect struct {
 	HTTPAddr      string `json:"http_addr,omitempty"`
 	URL           string `json:"url,omitempty"`
 	Owner         bool   `json:"owner"`
-	// StdioNonOwner is always false in phase 1; the diagnostics item that
-	// spots a stdio server beside a mount (T-43) fills it.
+	// StdioNonOwner says a stdio MCP server is running beside the cache
+	// owner, known from its heartbeat under the agent directory (T-43).
+	// That server has its own view of the files and no uploader; the
+	// console banner and the doctor item both point at the HTTP transport.
 	StdioNonOwner bool              `json:"stdio_non_owner"`
 	AuthRequired  bool              `json:"auth_required"`
 	Snippets      map[string]string `json:"snippets"`
@@ -128,6 +130,7 @@ func (v *storeMCPView) Connect(ctx context.Context) MCPConnect {
 		live, err := v.st.HasLiveTokens(ctx)
 		out.AuthRequired = err == nil && live
 	}
+	out.StdioNonOwner = len(agent.LiveStdioProcesses(v.st.Dir(), time.Now())) > 0
 	if out.HTTPListening {
 		out.URL = "http://" + st.Addr + "/"
 		if v.render != nil {

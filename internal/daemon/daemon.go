@@ -634,6 +634,8 @@ func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, 
 		MemberProviders: d.Providers,
 		HoldMaxBytes:    d.holdBudget(),
 		Index:           d.indexView(),
+		Agent:           d.Agent,
+		AgentDir:        filepath.Join(cacheDir, "agent"),
 	}
 }
 

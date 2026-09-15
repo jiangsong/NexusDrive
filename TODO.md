@@ -1772,7 +1772,8 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   自动覆盖新路由，`TestFinishSessionWithoutControlHeaderIs403`；界面 `ui_agents_test.go` 全部、
   `_tests/scope_view.test.mjs`、i18n 两表一致；e2e `TestAgentTokenSandboxChainAndAuditInTheBrowser`
   （越界写 → `/audit` denied → 浏览器 `#/agents?tab=audit` 有 `data-result="denied"` 行，真实 Chromium）。
-- **遗留**：stdio 会话在进程退出后仍 `active`，只靠 `mcp.session.idle` 过期；非 owner stdio 进程写进 `agent.db`
+- **遗留**：~~stdio 会话在进程退出后仍 `active`，只靠 `mcp.session.idle` 过期~~（2026-09-15 C0 修：`cmdMCP`
+  在传输结束时调 `Server.FinishStdioSessions`，`Sessions.FinishConn` 按连接键结束）；非 owner stdio 进程写进 `agent.db`
   的审计行不进 owner 的 `Store.Watch`（SSE 看不到，刷新可见，见 T-43）；旧协议客户端 `initialize` 无 `Extra`
   会多出一条 `http-legacy` 幽灵会话（`session_mw.go` 的 `onInitialized` 应先查 `legacyByPrincipal`）；
   `Scope/Principal/Session.ExpiresAt` 的 `omitempty` 对结构体无效（前端已按零值当缺失处理，后端可改 `omitzero`）。
@@ -2180,6 +2181,38 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成）
 
+- **2026-09-15 结论（线 C C0，e2e 复现失败，用例保持红色）**：`test/e2e/coexist_e2e_test.go`
+  `TestStdioBesideMountSharesWrites`——同进程第二次 `daemon.Open` 同一 cache 目录拿不到 journal/agent flock
+  （flock 按打开文件描述计，`d2.Journal.Owner() == false` 已断言），再按 `cmdMCP` 非 owner 分支起
+  `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})`，两个 daemon 共用同一个
+  `fakeprovider.Shared` 实例（`remotes.demo: {type: fake, shared: <key>}`，模拟同一账号）。观察到（逐字）：
+  - stdio 侧 `write_file /demo/side.txt` 返回工具错误 **`journal: publication requires storage ownership`**
+    （`internal/journal/publication.go` `MarkPublished` 非 owner 拒绝；此时 `commitWrite` 已经把节点写进共享
+    meta、把本地链接装进 d2 自己的块缓存）。stdio 侧随后 `stat` 得 `/demo/side.txt: file, 6 bytes, local`、
+    `read_text` 得 `6 of 6 bytes`——它自己认为写成功了。
+  - 挂载侧（owner）：`stat mnt/demo/side.txt` 立刻可见（0.8 ms，6 字节），**`cat` 得 `input/output error`**
+    （owner 的 `cache.Cache` 内存索引没有那份本地链接，`blockfetch` 对 `cloudfs-local:` id 返回
+    `errLocalOnlyGone`）。journal 行停在 `state=pending needs_publish=true`，owner 上传器按
+    `needs_publish = 0` 取行，永远不领它；等了 4.5 s 网盘上仍没有该文件。
+  - `create_directory /demo/sub` 正常（直接调 provider，挂载侧与网盘都立刻有）；终端写的 `shell.txt`
+    上传落地后 stdio 侧 `read_text` 能读到——**读路径与目录操作没问题，坏的只有文件写入**。
+  - stdio 侧退出、owner 重启后：`RecoverPublications` 把那条 `needs_publish=1` 的行发布并上传，
+    `/demo/side.txt` 读回 `hello\n`，网盘上出现该文件——**agent 被告知失败的写入在下一次 `cloudfs mount`
+    启动时"复活"**。
+  - 断言 (a)"5 s 内挂载侧读到"失败（错误信息含上面两条）；(b)(c) 因 (a) `Fatalf` 未执行。
+  - **决定**：stdio→HTTP 桥提前（见计划"结论记录"）。在桥落地前，非 owner stdio 的写入应在碰 meta 之前
+    就拒绝（`vfs` 在 `journal.Owner()==false` 时让 `commitWrite` 早退，或 mcpsrv `NonOwner` 直接拒绝写工具），
+    否则会留下"本地有、网盘无、重启复活"的半发布行；这不属于 C0，登记为 C3/三期前置。
+- **本条已交付（C0）**：`internal/agent/heartbeat.go`（`WriteHeartbeat/RemoveHeartbeat/LiveStdioProcesses`，
+  `<cache.dir>/agent/stdio-<pid>.hb`，30 s 一次，超 2 min 陈旧并清理）；`cmdMCP` 非 owner 写心跳、退出删除、
+  传输结束时 `Server.FinishStdioSessions` 结束自己的会话（修掉 T-34 遗留"stdio 会话退出后仍 active"）；
+  doctor `checkAgent`（`agent_db` schema 版本、`agent_stdio` 心跳 warn，`Fix` 为 `cloudfs mcp install
+  --transport http`，`doctor.agent.*` 中英文键）；`GET /mcp/connect` 的 `stdio_non_owner` 按心跳填；
+  控制台 `connect_view.js` + 接入面板横幅链 `#/diagnostics`；`docs/mcp.md`"与挂载并存"改写。
+  测试：`TestLiveStdioProcessesDropsStaleHeartbeats`、`TestFinishStdioSessionsClosesTheProcessSession`、
+  `TestStdioHeartbeatLivesWithTheServer`、`TestDoctorWarnsWhenStdioRunsBesideTheMount`、`TestDoctorReportsAgentDB`、
+  `TestMCPConnectReportsAStdioServerBesideTheOwner`、`TestConnectPanelWarnsAboutStdioNonOwner`、
+  `_tests/connect_view.test.mjs`、`TestDoctorOnALiveSystem` 加 `agent_db`/`agent_stdio`。
 - **证据**：`cmd/cloudfs/main.go` 的 `cmdMCP`（当前约 613 行，`daemon.Open` 在 639 行）走 `daemon.Open`；mount 在跑时 stdio 进程非 owner，
   `internal/daemon/daemon.go:314-321` 给它独立 VFS（写入落共享 journal，无 uploader）。
   `docs/mcp.md` "MCP 与 FUSE 挂载共用同一个 VFS 实例"只对 owner 内 HTTP 成立；journal 行由 owner

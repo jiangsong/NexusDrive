@@ -68,6 +68,39 @@ func TestMCPConnectCarriesNoToken(t *testing.T) {
 	}
 }
 
+// TestMCPConnectReportsAStdioServerBesideTheOwner: the connect panel's
+// banner is driven by the heartbeat a non-owner stdio server keeps under
+// the agent directory, read on every request so the banner follows the
+// process up and down.
+func TestMCPConnectReportsAStdioServerBesideTheOwner(t *testing.T) {
+	f, st := tokensFixture(t)
+	h := NewServer(f.coll).Handler()
+	connect := func() MCPConnect {
+		t.Helper()
+		w := uiCallControl(t, h, "GET", "/mcp/connect", "")
+		var c MCPConnect
+		if err := json.Unmarshal(w.Body.Bytes(), &c); w.Code != 200 || err != nil {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+		return c
+	}
+	if connect().StdioNonOwner {
+		t.Fatal("no heartbeat, yet a stdio server was reported")
+	}
+	if err := agent.WriteHeartbeat(st.Dir(), 777); err != nil {
+		t.Fatal(err)
+	}
+	if !connect().StdioNonOwner {
+		t.Fatal("a live heartbeat was not reported")
+	}
+	if err := agent.RemoveHeartbeat(st.Dir(), 777); err != nil {
+		t.Fatal(err)
+	}
+	if connect().StdioNonOwner {
+		t.Fatal("the stdio server's exit was not noticed")
+	}
+}
+
 func TestMCPConnectWithoutAListener(t *testing.T) {
 	f, st, _ := agentFixture(t)
 	f.coll.MCP = NewMCPView(st, func() MCPHTTPState { return MCPHTTPState{} }, testSnippets)

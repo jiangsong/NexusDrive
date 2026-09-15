@@ -410,10 +410,18 @@ cloudfs sessions list | show <id> | finish <id> --summary "…"
 
 MCP 与 FUSE 挂载共用同一个 VFS 实例，所以两边看到的是同一份文件系统：agent 写的文件，终端里 `cat` 立刻能读到；终端里改的文件，agent 下次 `read_text` 就看到新内容。端到端测试 `test/e2e` 专门验证这一点。
 
-这个"同一实例"只对 storage owner 进程内的 MCP（例如 `cloudfs mount` 同进程启用的 HTTP 传输）成立。挂载已在运行时再单独启动的 `cloudfs mcp --stdio` 不是 journal owner，拿到的是另一份 VFS 实例：写入进共享 journal 但不运行上传器，看不到内核写的变更事件。这种进程现在会：
+这个"同一实例"只对 storage owner 进程内的 MCP（例如 `cloudfs mount` 同进程启用的 HTTP 传输）成立。挂载已在运行时再单独启动的 `cloudfs mcp --stdio` 不是 journal owner，拿到的是另一份 VFS 实例：共享 meta、块缓存目录和 journal，但不运行上传器，也看不到内核写的变更事件。**这种拓扑不能写文件**——e2e `test/e2e/coexist_e2e_test.go` `TestStdioBesideMountSharesWrites`（TODO.md T-43，2026-09-15）实测：
+
+- 读工具正常：`read_text`/`stat`/`list` 看到的是共享 meta，终端写的文件上传落地后 stdio 进程能读到；`create_directory` 直接调 provider，挂载侧与网盘都立刻可见；
+- **`write_file` 返回错误 `journal: publication requires storage ownership`（`edit_file` 走同一条提交路径），但写入已经进了共享 meta 与 journal**：stdio 进程自己 `stat` 得到 `file, 6 bytes, local` 且能读回；挂载侧 `stat` 有该文件、`cat` 却是 `input/output error`（owner 的块缓存没有那份本地链接）；journal 行停在 `pending, needs_publish=1`，owner 的上传器永远不领它，网盘上没有这个文件；
+- **owner 重启后这条写入"复活"**：`RecoverPublications` 把它发布并上传，agent 被告知失败的那份内容在下一次 `cloudfs mount` 启动后出现在网盘上。
+
+所以与挂载并存时**必须改用 HTTP 传输**（`cloudfs mcp install --transport http`）。非 owner 的 stdio 进程现在会：
 
 - 启动时在 stderr 打印 `cloudfs: another process owns this cache (is "cloudfs mount" running?) … use the HTTP transport: cloudfs mcp install --transport http`（stdout 是传输，不能写）；
-- 读写工具照常工作，调用照常写进共享的 `agent.db` 审计（agent 库在 owner 判断之前打开）；但 owner 进程的 SSE 只推送自己写的行，控制台要刷新一次才看到这些审计；
+- 在 `<cache.dir>/agent/stdio-<pid>.hb` 写心跳（每 30 s 一次，退出时删除，超过 2 min 未更新视为陈旧并由读到它的进程清理）：`cloudfs doctor` 的 `agent_stdio` 项据此报 warn 并给出上面的命令，控制台「Agent」屏接入面板显示黄色横幅并链到诊断屏，`GET /mcp/connect` 的 `stdio_non_owner` 为 true；
+- 传输结束（客户端关闭 stdin）时 `Finish` 自己的会话，控制台不再把已退出进程的会话显示为活动；
+- 调用照常写进共享的 `agent.db` 审计（agent 库在 owner 判断之前打开）；但 owner 进程的 SSE 只推送自己写的行，控制台要刷新一次才看到这些审计；
 - `begin_session`/`finish_session`/`list_sessions` 拒绝并返回 `requires the storage owner; use the HTTP transport`。
 
-其与挂载并存时的一致性（内核写与 stdio 进程视图）仍登记为 TODO.md T-43；与挂载并存时请改用 HTTP 传输，控制台「Agent」屏的接入面板在这种情况下也会提示。
+上面的复现用例在修好之前保持红色，作为 stdio→HTTP 桥（三期）提前的依据；见 TODO.md T-43。

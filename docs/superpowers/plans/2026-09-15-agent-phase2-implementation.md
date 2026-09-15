@@ -141,11 +141,11 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `docs/mcp.md`"与挂载并存"一节；`TODO.md` T-43 写结论（**通过或失败都写**）
 
 **Steps:**
-- [ ] RED e2e：`TestStdioBesideMountSharesWrites`——`newStack` 之外再 `daemon.Open` 同一 cacheDir（同进程第二个 fd 拿不到 flock → 非 owner），用 `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})` in-memory 连接；三个断言：(a) stdio 侧 `write_file /demo/side.txt` 后 owner 侧 `cat mnt/demo/side.txt` 在 5 s 内可见且内容一致；(b) owner 侧 `settle` 后 fake provider 有该文件且 `Calls("Upload") == 1`（无重复上传）；(c) 关闭 d2、重开 owner 后文件不"复活/丢失"。任何一条失败即把现象逐字写进 TODO T-43，测试用 `t.Skip` **不允许**——失败就保留红，作为三期 stdio→HTTP 桥提前的证据，并在计划末尾"结论"处记录
-- [ ] RED doctor：`TestDoctorWarnsWhenStdioRunsBesideTheMount`（写一个心跳文件 → warn；无心跳 → ok；陈旧心跳 → ok 且文件被清理）、`TestDoctorReportsAgentDB`
-- [ ] RED UI：`TestConnectPanelWarnsAboutStdioNonOwner`（`stdio_non_owner:true` → 横幅渲染且 `href="#/diagnostics"`；false → 无）
-- [ ] GREEN：`./gow test ./internal/agent/ ./internal/control/ ./cmd/cloudfs/ -count=1 && ./gow test ./test/e2e/ -run 'TestStdioBesideMount|TestDoctorOnALiveSystem' -count=1 -v`
-- [ ] 提交：`feat(agent,control): verify stdio MCP beside a mount and warn about it in doctor and the console`
+- [x] RED e2e（**保持红色**，见"结论记录"）：`TestStdioBesideMountSharesWrites`——`newStack` 之外再 `daemon.Open` 同一 cacheDir（同进程第二个 fd 拿不到 flock → 非 owner），用 `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})` in-memory 连接；三个断言：(a) stdio 侧 `write_file /demo/side.txt` 后 owner 侧 `cat mnt/demo/side.txt` 在 5 s 内可见且内容一致；(b) owner 侧 `settle` 后 fake provider 有该文件且 `Calls("Upload") == 1`（无重复上传）；(c) 关闭 d2、重开 owner 后文件不"复活/丢失"。任何一条失败即把现象逐字写进 TODO T-43，测试用 `t.Skip` **不允许**——失败就保留红，作为三期 stdio→HTTP 桥提前的证据，并在计划末尾"结论"处记录
+- [x] RED doctor：`TestDoctorWarnsWhenStdioRunsBesideTheMount`（写一个心跳文件 → warn；无心跳 → ok；陈旧心跳 → ok 且文件被清理）、`TestDoctorReportsAgentDB`
+- [x] RED UI：`TestConnectPanelWarnsAboutStdioNonOwner`（`stdio_non_owner:true` → 横幅渲染且 `href="#/diagnostics"`；false → 无）
+- [x] GREEN（e2e 复现用例除外，它按约定保持红色）：`./gow test ./internal/agent/ ./internal/control/ ./cmd/cloudfs/ -count=1 && ./gow test ./test/e2e/ -run 'TestStdioBesideMount|TestDoctorOnALiveSystem' -count=1 -v`
+- [x] 提交：`feat(agent,control): verify stdio MCP beside a mount and warn about it in doctor and the console`
 
 ## Task C1：T-38 后端 — `session_ops`、前像、回滚、MCP/控制面/CLI
 
@@ -406,5 +406,12 @@ test/perf/embed_perf_test.go（D1）
 
 ## 结论记录（执行时填写）
 
-- T-43 e2e 结论：
-- stdio→HTTP 桥是否提前到三期之前：
+- T-43 e2e 结论（2026-09-15，C0）：**失败，用例 `TestStdioBesideMountSharesWrites` 保持红色**。同进程第二个
+  `daemon.Open` 确实成为非 owner（flock 按文件描述）。非 owner stdio 的 `write_file` 返回
+  `journal: publication requires storage ownership`（`MarkPublished` 拒绝非 owner），但此前 `commitWrite` 已把节点写进
+  共享 meta：stdio 侧自己 `stat`/`read_text` 都"成功"；挂载侧 `stat` 可见（<1 ms）而 `cat` 得 `input/output error`；
+  journal 行停在 `pending, needs_publish=1`，owner 上传器不领，网盘无此文件；owner 重启后 `RecoverPublications`
+  发布并上传，文件"复活"。读工具与 `create_directory` 正常。断言 (a) 失败，(b)(c) 未跑到。逐字记录见 TODO T-43。
+- stdio→HTTP 桥是否提前到三期之前：**提前**。并存拓扑下文件写入根本不可用且会留下半发布行，doctor/横幅只是提示。
+  在桥落地前先补一道栅栏：非 owner 的 `commitWrite` 在碰 meta/journal 之前就拒绝（或 mcpsrv `NonOwner` 拒绝写工具），
+  建议放进 C3 收口或三期第一项；C0 未动 vfs。
