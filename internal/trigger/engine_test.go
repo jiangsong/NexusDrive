@@ -147,6 +147,15 @@ func (h *harness) waitState(id int64, state string) agent.Delivery {
 	return d
 }
 
+// holdsInvocation reports whether the engine still keeps the prompt of
+// delivery id.
+func (h *harness) holdsInvocation(id int64) bool {
+	h.eng.invMu.Lock()
+	defer h.eng.invMu.Unlock()
+	_, ok := h.eng.invocations[id]
+	return ok
+}
+
 func execRule(name string, paths []string, argv ...string) config.Trigger {
 	return config.Trigger{
 		Name: name, Paths: paths,
@@ -456,6 +465,11 @@ func TestInvokeAppendsPathsAsSeparateArgv(t *testing.T) {
 	if d.Rule != "agent:claude" || d.Path != "/work/a b.txt" || d.Kind != "invoke" || d.Origin != "console" {
 		t.Fatalf("row = %+v", d)
 	}
+	// The prompt is not kept once the run is done: a console that sends
+	// a page of text per run must not grow the daemon by that page each
+	// time. A dead run's prompt stays for Retry (TestInvokeFailureIsDeadAtOnce).
+	// The row turns done before the map is trimmed, so wait for it.
+	h.waitFor("prompt released", func() bool { return !h.holdsInvocation(id) })
 }
 
 // TestInvokeFailureIsDeadAtOnce: a person is waiting on an agent run, so a
@@ -470,6 +484,9 @@ func TestInvokeFailureIsDeadAtOnce(t *testing.T) {
 	d := h.waitState(id, agent.DeliveryDead)
 	if d.Attempts != 1 || !strings.Contains(d.LastError, "exit status 2") {
 		t.Fatalf("dead = %+v", d)
+	}
+	if !h.holdsInvocation(id) {
+		t.Fatal("the prompt of a dead run was dropped; Retry needs it")
 	}
 }
 

@@ -2074,7 +2074,13 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   - `delete recursive=true` 删目录只记 `pre_state=dir`，回滚报 `skipped: dir`（逐文件前像在三期）；mkdir 的 `dry_run`
     不能预知目录是否为空，按"将尝试"报 restored，真跑非空报 `skipped: not_empty`。
   - `GET /sessions?path=` 同时匹配"工作区包含该路径"的会话（`SessionsTouching` 只按 `session_ops`，检查器用后者）。
-  - 回滚中途被打断时，那一轮的回滚会话保持 `active`（靠空闲过期），其未落地的一步记 `write_failed`；重跑开新回滚会话。
+  - 回滚中途被打断时，那一轮的回滚会话以 `rollback interrupted: <原因>` 结束（2026-09-15 审查修：之前保持 `active`
+    且 stdio/console 传输不轮转，永不过期也永不被 GC），其未落地的一步记 `write_failed`；重跑开新回滚会话。
+  - 回滚仍 `active` 的会话（含 agent 自己的当前会话）先像 `finish_session` 一样结束它、再读 ops 行（2026-09-15 审查修：
+    之前先读行再回滚，回滚期间连接上的写入会记进正被回滚的会话而逃过撤销）；连接随后的调用进入新会话——这与
+    `finish_session` 的语义一致，沙箱本来就只约束一个 `begin_session` 会话而非 principal。
+  - 硬链接前像与块缓存共享 inode，不计入 `cache.max_size`（只有拷贝走 `ReserveDisk`）：缓存淘汰了 hydrated 文件后，
+    这些字节仍被前像目录占着直到保留期 GC；缓存吃紧时 `du <cache.dir>/agent/preimages` 才看得到。
   - 已执行过的回滚中 conflict 的行重跑不再重试（`skipped: <上次结果>`），要重试需先解决冲突再回滚"回滚会话"。
   - 上传后 `Version` 变化不算冲突是靠内容 hash；追加写在前像留不住时 `post_version` 为空（行本身因无前像报
     `skipped: not_cached`）；记了行但进程在工具返回前退出、没回填 `post_version` 的行报 `conflict: incomplete`。
@@ -2415,7 +2421,8 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     投递详情在浏览器里的渲染由 T-41 的 `TestTriggersScreenInTheBrowser` 覆盖（运行按钮跳的就是同一深链）。
 - **遗留**：
   - agent 调用不跨重启：`{prompt}` 与第 2 个起的路径只保存在引擎内存里（表只存首路径），重启后重试会以
-    "the prompt of an agent run is not kept across restarts" 直接 dead，需从控制台重新运行。
+    "the prompt of an agent run is not kept across restarts" 直接 dead，需从控制台重新运行。内存里的 prompt 在投递
+    `done` 时释放、`dead` 时保留给重试（2026-09-15 审查修：之前只增不删，每次运行的 prompt 常驻到进程退出）。
   - 控制台发起的审计行 `session` 与 client 列为空（没有 MCP 会话在背后），审计屏按 principal `console` 区分。
   - 一次只发送一个文件（多选留三期）；`cwd` 只在配置里指定。
 

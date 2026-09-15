@@ -403,7 +403,9 @@ sha256，所以上传后版本号变了也不算别人改过）。
 时的前像是"不存在"）；`conflict: modified|missing|exists|from_exists|incomplete|<写入返回的错误>`（`incomplete`＝
 行记了但工具没来得及回填 `post_version`）。已恢复的行再跑一次报 `skipped: already` 且**原记录不被改写**，
 conflict 的行重跑会再次检查，所以中途被打断的回滚重跑是幂等的（`test/chaos` `TestRollbackInterruptedIsIdempotent`：
-两轮合计每个 op 恰被撤销一次；被打断那一轮的回滚会话留在 `active` 直到空闲过期，它没落地的那一步记 `write_failed`）。
+两轮合计每个 op 恰被撤销一次；被打断那一轮的回滚会话以 `rollback interrupted: <原因>` 结束，它没落地的那一步记
+`write_failed`）。回滚一个仍 `active` 的会话（agent 自己的当前会话也可以）会先像 `finish_session` 一样结束它、再读它的
+ops 行，所以回滚期间连接上的写入进入新会话而不会记进正被回滚的会话；`dry_run` 不改变会话状态。
 回滚的每一步写入同样记前像，记在一个名为 `rollback of <id>` 的新会话下，因此**回滚可以再回滚**。结束时原会话
 `state=rolled_back` 并带 `rolled_back_at`。`dry_run` 对 `create_directory` 建的目录不能预知是否为空，按"将尝试"
 报 restored，真跑非空才报 `skipped: not_empty`。

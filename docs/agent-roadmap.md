@@ -680,7 +680,10 @@ Claude Code 的 HTTP 注册只支持静态 header，所以**令牌是身份，�
 
 - 每个 op 的结果写入 `rollback_result`，整体返回 `{restored, skipped, conflict}` 计数与逐项清单。
 - `dry_run=true` 只计算这张表，不产生任何 VFS 写，journal 行数不变。
-- 回滚本身记为一个新会话（`name="rollback of <id>"`），同样捕获前像，所以**回滚可以再回滚**。
+- 回滚本身记为一个新会话（`name="rollback of <id>"`），同样捕获前像，所以**回滚可以再回滚**。它总是被结束：
+  跑完是 `rollback of <id>: …` 摘要，中途失败是 `rollback interrupted: <原因>`，不会留下 `active` 的回滚会话。
+- 回滚仍 `active` 的会话先像 `finish_session` 一样结束它、再读 ops 行，这样回滚期间连接上的写入进入新会话，
+  不会记进正被回滚的会话而逃过撤销；`dry_run` 不改变会话状态。
 - 入口：
   - MCP `rollback_session{session_id, confirm, dry_run?}`，带 `DestructiveHint`。
   - 控制面 `POST /sessions/{id}/rollback {dry_run | confirm}`。

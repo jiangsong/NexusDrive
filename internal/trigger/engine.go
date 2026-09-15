@@ -93,7 +93,8 @@ type Engine struct {
 
 	// invocations keeps what Invoke was asked to run, by delivery id. The
 	// table holds only the first path; the prompt and the rest live here
-	// for the process's lifetime, so a retry works until a restart.
+	// until the run succeeds, or for the process's lifetime while it is
+	// dead, so a retry works until a restart.
 	invMu       sync.Mutex
 	invocations map[int64]invocation
 
@@ -340,7 +341,9 @@ func (e *Engine) deliver(d agent.Delivery) {
 	defer cancel()
 	switch {
 	case err == nil:
-		err = e.q.Done(ctx, d.ID, output)
+		if err = e.q.Done(ctx, d.ID, output); err == nil {
+			e.forgetInvocation(d.ID)
+		}
 	case errors.Is(err, errPermanent) || strings.HasPrefix(d.Rule, agentRulePrefix) || d.Attempts >= maxAttempts:
 		// An agent run has a person waiting on it; parking it at once
 		// beats retrying an expensive command for an hour.
@@ -446,6 +449,14 @@ func (e *Engine) Invoke(ctx context.Context, name string, paths []string, prompt
 	}
 	e.invocations[id] = invocation{paths: append([]string(nil), paths...), prompt: prompt}
 	return id, nil
+}
+
+// forgetInvocation drops the prompt of a run that is done: a prompt is
+// kept only as long as a retry could still need it.
+func (e *Engine) forgetInvocation(id int64) {
+	e.invMu.Lock()
+	delete(e.invocations, id)
+	e.invMu.Unlock()
 }
 
 // Retry reopens a dead delivery and wakes its worker.
