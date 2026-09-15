@@ -1,23 +1,23 @@
-package index
+// Package pathglob matches virtual paths against the "**" glob dialect the
+// index rules and the trigger rules share. It deliberately avoids a
+// doublestar dependency.
+package pathglob
 
 import (
 	"path"
 	"strings"
 )
 
-// MatchGlob reports whether the virtual path p matches pattern. Both are
+// Match reports whether the virtual path p matches pattern. Both are
 // split on "/" (a leading "/" is ignored on either side) and compared one
 // segment at a time: a "**" segment matches zero or more whole segments,
 // every other segment is a path.Match pattern applied to exactly one
 // segment, so "*" never crosses a "/". A pattern that does not start with
 // "**" is anchored at the first segment: "docs/*.txt" matches "/docs/a.txt"
 // and not "/x/docs/a.txt". Matching is case-sensitive, like the virtual
-// tree itself. A malformed segment matches nothing; config.Index.Validate
+// tree itself. A malformed segment matches nothing; the config validation
 // rejects those before they get here.
-//
-// This is the whole glob dialect the index uses; it deliberately avoids a
-// doublestar dependency.
-func MatchGlob(pattern, p string) bool {
+func Match(pattern, p string) bool {
 	return matchSegments(splitGlob(pattern), splitGlob(p))
 }
 
@@ -62,10 +62,10 @@ func matchSegments(pat, parts []string) bool {
 	return len(parts) == 0
 }
 
-// matchAny reports whether p matches at least one of patterns.
-func matchAny(patterns []string, p string) bool {
+// MatchAny reports whether p matches at least one of patterns.
+func MatchAny(patterns []string, p string) bool {
 	for _, pat := range patterns {
-		if MatchGlob(pat, p) {
+		if Match(pat, p) {
 			return true
 		}
 	}

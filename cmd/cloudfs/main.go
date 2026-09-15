@@ -325,6 +325,16 @@ func loadConfig(f *flags) (*config.Config, string, error) {
 	return cfg, path, nil
 }
 
+// printConfigWarnings writes what config.Validate accepted with
+// reservations, one line each, so a rule that will fire on the agent's own
+// writes is visible the moment the daemon starts rather than after the
+// first surprise. cloudfs doctor reports the same list as a check.
+func printConfigWarnings(w io.Writer, cfg *config.Config) {
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", warning)
+	}
+}
+
 func cmdConfig(ctx context.Context, args []string) error {
 	if parseFlags(args).arg(0) != "check" {
 		return runConfig(ctx, args, configIO{In: os.Stdin, Out: os.Stdout, Err: os.Stderr})
@@ -341,6 +351,7 @@ func cmdConfig(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	printConfigWarnings(os.Stderr, cfg)
 	fmt.Printf("ok: %s\n", path)
 	fmt.Printf("  cache %s (max %s, min free %s, block %s)\n",
 		cfg.Cache.Dir, cfg.Cache.MaxSize, cfg.Cache.MinFree, cfg.Cache.BlockSize)
@@ -483,6 +494,7 @@ func cmdMount(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	printConfigWarnings(os.Stderr, cfg)
 	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version})
 	if err != nil {
 		return err

@@ -1,8 +1,8 @@
-package index
+package pathglob
 
 import "testing"
 
-func TestMatchGlob(t *testing.T) {
+func TestMatch(t *testing.T) {
 	for _, tc := range []struct {
 		pat, p string
 		want   bool
@@ -61,13 +61,13 @@ func TestMatchGlob(t *testing.T) {
 		{"", "/x", false},
 		{"", "/", true},
 	} {
-		if got := MatchGlob(tc.pat, tc.p); got != tc.want {
-			t.Errorf("MatchGlob(%q, %q) = %v, want %v", tc.pat, tc.p, got, tc.want)
+		if got := Match(tc.pat, tc.p); got != tc.want {
+			t.Errorf("Match(%q, %q) = %v, want %v", tc.pat, tc.p, got, tc.want)
 		}
 	}
 }
 
-func TestMatchGlobHandlesRepeatedDoubleStars(t *testing.T) {
+func TestMatchHandlesRepeatedDoubleStars(t *testing.T) {
 	// Several "**" against a long path of identical segments must finish
 	// promptly and still answer by the last segment.
 	p := "/"
@@ -76,7 +76,7 @@ func TestMatchGlobHandlesRepeatedDoubleStars(t *testing.T) {
 	}
 	p += "b"
 	pat := "**/a/**/a/**/a/**/a/**/c"
-	if MatchGlob(pat, p) {
+	if Match(pat, p) {
 		t.Fatal("matched a path that ends in b against a pattern that ends in c")
 	}
 }

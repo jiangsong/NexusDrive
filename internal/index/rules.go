@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"cloudfs/internal/config"
+	"cloudfs/internal/pathglob"
 )
 
 // DefaultMaxFileSize bounds a rule that names no max_file_size, the same
@@ -89,7 +90,7 @@ func relativeTo(root, p string) string {
 // pattern. The indexer asks it about directories too, so a walk can skip
 // ".git" or "node_modules" instead of visiting every file below.
 func (m *Matcher) Excluded(p string) bool {
-	return matchAny(m.global, strings.TrimPrefix(p, "/"))
+	return pathglob.MatchAny(m.global, strings.TrimPrefix(p, "/"))
 }
 
 // Match reports the rule covering the file at p with the given size, and
@@ -111,7 +112,7 @@ func (m *Matcher) Match(p string, size int64) (Rule, bool) {
 			return r, true
 		}
 		rel := relativeTo(r.Path, p)
-		if !matchAny(r.Include, rel) || matchAny(r.Exclude, rel) {
+		if !pathglob.MatchAny(r.Include, rel) || pathglob.MatchAny(r.Exclude, rel) {
 			return Rule{}, false
 		}
 		return r, true

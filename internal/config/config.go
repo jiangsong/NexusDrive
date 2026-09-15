@@ -531,6 +531,12 @@ type Config struct {
 	Export     Export            `yaml:"export"`
 	Index      Index             `yaml:"index"`
 	Search     Search            `yaml:"search"`
+	Triggers   []Trigger         `yaml:"triggers"`
+	Agents     []Agent           `yaml:"agents"`
+	// Warnings collects what Validate accepted but would rather not have:
+	// settings that work and are probably not what was meant. It is reset on
+	// every Validate; mount and doctor print it.
+	Warnings []string `yaml:"-"`
 }
 
 // Default returns the built-in defaults applied before the file is decoded.
@@ -590,6 +596,7 @@ func Parse(b []byte) (*Config, error) {
 // Validate checks cross references: mounts → remotes, remotes → proxy names,
 // groups → outbounds, modes, block size.
 func (c *Config) Validate() error {
+	c.Warnings = nil
 	if c.WebDAV.Prefix == "" {
 		c.WebDAV.Prefix = "/dav"
 	}
@@ -676,6 +683,9 @@ func (c *Config) Validate() error {
 		if !names[target] {
 			return fmt.Errorf("config: rule %d targets unknown outbound %q", i, target)
 		}
+	}
+	if err := c.validateTriggers(names); err != nil {
+		return err
 	}
 	for name, r := range c.Remotes {
 		if r.Type == "" {

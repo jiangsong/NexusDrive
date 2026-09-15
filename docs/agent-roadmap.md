@@ -750,7 +750,7 @@ triggers:
     debounce: 2s
     on_rescan: ignore                # 默认 deliver
     action:
-      exec: { command: ["/usr/local/bin/claude", "-p", "Summarize {path}"], cwd: ~/work, timeout: 10m }
+      exec: { command: ["/usr/local/bin/summarize", "{path}"], cwd: ~/work, timeout: 10m }  # 占位符只能是独立的 argv 元素
   - name: notify
     paths: ["/work/reports/**"]
     events: [write]
@@ -758,11 +758,13 @@ triggers:
       webhook: { url: https://hooks.example/cloudfs, secret: keyring:cloudfs/hook, timeout: 15s, include_download_url: false, proxy: direct }
 agents:
   - name: claude
-    exec: { command: ["claude", "-p", "{prompt}"], cwd: ~, timeout: 30m }
+    exec: { command: ["claude", "-p", "{prompt}"], cwd: "~", timeout: 30m }
 ```
 
-`Validate()`（`internal/config/config.go`）对未排除 `api` 来源的 exec 规则给出 warning（不是错误），
-文档首例就演示 `origins: [kernel, remote]`。
+`Validate()`（`internal/config/triggers.go`）对未排除 `api` 来源的 exec 规则给出 warning（不是错误），
+`cloudfs mount` 启动时逐条打到 stderr，文档首例就演示 `origins: [kernel, remote]`。`{path}`/`{kind}`/`{uri}`/`{prompt}`
+只能作为独立的 argv 元素出现（`"Summarize {path}"` 会被拒绝，因为替换只按整个元素进行），`{prompt}` 只有 `agents[]` 可用；
+webhook 的 `secret` 必须是 `keyring:`/`secretfile:` 引用；glob 匹配器在 `internal/pathglob`，索引规则与触发器共用。
 
 ### 5.3 引擎（`internal/trigger`，只在 owner 进程运行）
 

@@ -38,7 +38,7 @@ func NewSecretStore(c *Config) *SecretStore {
 
 func IsSecretField(field string) bool {
 	switch field {
-	case "refresh_token", "access_token", "client_secret", "cookie", "password", "pass", "key_passphrase", "secret_access_key", "session_token", "ntlm_hash":
+	case "refresh_token", "access_token", "client_secret", "cookie", "password", "pass", "key_passphrase", "secret_access_key", "session_token", "ntlm_hash", "secret":
 		return true
 	}
 	return false
