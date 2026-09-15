@@ -226,7 +226,11 @@ func exportManagementError(err error) error {
 }
 
 func (s *Server) startExport(ctx context.Context, _ *mcp.CallToolRequest, in exportInput) (*mcp.CallToolResult, exportJobView, error) {
-	if err := s.checkWrite(ctx); err != nil {
+	err := s.checkWrite(ctx)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
+	if err != nil {
 		r, _ := fail(err)
 		return r, exportJobView{}, nil
 	}
@@ -313,7 +317,11 @@ func (s *Server) getExportJob(ctx context.Context, _ *mcp.CallToolRequest, in ex
 }
 
 func (s *Server) cancelExportJob(ctx context.Context, _ *mcp.CallToolRequest, in exportJobInput) (*mcp.CallToolResult, exportMutationOutput, error) {
-	if err := s.checkWrite(ctx); err != nil {
+	err := s.checkWrite(ctx)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
+	if err != nil {
 		r, _ := fail(err)
 		return r, exportMutationOutput{}, nil
 	}

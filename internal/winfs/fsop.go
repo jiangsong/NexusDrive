@@ -99,7 +99,7 @@ func errc(err error) int {
 		return -fuse.ENOTDIR
 	case is(err, vfs.ErrNotEmpty):
 		return -fuse.ENOTEMPTY
-	case is(err, vfs.ErrReadOnly):
+	case is(err, vfs.ErrReadOnly), is(err, vfs.ErrNotOwner):
 		return -fuse.EROFS
 	case is(err, vfs.ErrUploadCancelled), is(err, vfs.ErrUploadPurging):
 		return -fuse.EBUSY

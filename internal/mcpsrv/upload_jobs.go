@@ -215,7 +215,11 @@ func (s *Server) getUpload(ctx context.Context, _ *mcp.CallToolRequest, in uploa
 }
 
 func (s *Server) mutateUpload(ctx context.Context, id, action string, confirm bool) (*mcp.CallToolResult, uploadMutationOutput, error) {
-	if err := s.checkWrite(ctx); err != nil {
+	err := s.checkWrite(ctx)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
+	if err != nil {
 		r, _ := fail(err)
 		return r, uploadMutationOutput{}, nil
 	}
@@ -287,7 +291,11 @@ func (s *Server) discardUpload(ctx context.Context, _ *mcp.CallToolRequest, in c
 
 func (s *Server) flushUploads(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, uploadFlushOutput, error) {
 	out := uploadFlushOutput{}
-	if err := s.checkWrite(ctx); err != nil {
+	err := s.checkWrite(ctx)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
+	if err != nil {
 		r, _ := fail(err)
 		return r, out, nil
 	}

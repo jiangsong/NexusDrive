@@ -39,6 +39,11 @@ var (
 	ErrUploadPurging   = journal.ErrUploadPurging
 )
 
+// ErrNotOwner: the write journal belongs to another process (a stdio MCP
+// server opened the cache while `cloudfs mount` owns it), so this VFS
+// cannot publish or upload what it would write. See FS.requireOwner.
+var ErrNotOwner = errors.New("vfs: writing requires the storage owner")
+
 // Mount binds a subtree of the mount point to one remote.
 type Mount struct {
 	// Prefix is the path inside the mount, e.g. "/work". "/" mounts a remote

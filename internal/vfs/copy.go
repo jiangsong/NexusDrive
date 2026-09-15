@@ -51,7 +51,10 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 	if dm.Mode == config.ModeReadonly {
 		return Attr{}, ErrReadOnly
 	}
-	if f.journal == nil || !f.journal.Owner() {
+	if err := f.requireOwner(); err != nil {
+		return Attr{}, err
+	}
+	if f.journal == nil {
 		return Attr{}, fmt.Errorf("vfs: copy requires the write-journal owner: %w", syscall.EBUSY)
 	}
 	name := path.Base(dst)

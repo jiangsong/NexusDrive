@@ -63,6 +63,21 @@ func (f *FS) SetWriteBackend(j *journal.Journal, u *upload.Uploader) {
 // Journal exposes the write journal (status, doctor).
 func (f *FS) Journal() *journal.Journal { return f.journal }
 
+// requireOwner is the write fence of a VFS that shares its cache with the
+// storage owner: a `cloudfs mcp` stdio server started beside `cloudfs
+// mount` gets a journal it does not own, no uploader, and the same meta.
+// A mutation that went ahead would leave a node in shared meta and a
+// journal row the owner never publishes (TODO.md T-43), so every write
+// entry point refuses with ErrNotOwner before touching either. A VFS with
+// no journal at all is left to the "no write backend" errors of each path,
+// which is how read-only assemblies and tests without a journal run.
+func (f *FS) requireOwner() error {
+	if f.journal != nil && !f.journal.Owner() {
+		return ErrNotOwner
+	}
+	return nil
+}
+
 // newWriteState prepares staging for a write handle. An existing file is
 // materialised into staging first so random writes and appends work.
 func (f *FS) newWriteState(ctx context.Context, h *Handle) (*writeState, error) {
@@ -565,6 +580,9 @@ func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, e
 	if f.journal == nil {
 		return nil, errors.New("vfs: no write backend configured")
 	}
+	if err := f.requireOwner(); err != nil {
+		return nil, err
+	}
 	if _, err := f.lookupNode(ctx, parent, name); err == nil {
 		return nil, ErrExists
 	} else if !errors.Is(err, ErrNotFound) {
@@ -626,6 +644,9 @@ func (f *FS) WriteFile(ctx context.Context, p string, data []byte, appendMode bo
 	if name == "" {
 		return Attr{}, ErrIsDir
 	}
+	if err := f.requireOwner(); err != nil {
+		return Attr{}, err
+	}
 	parent, err := f.resolve(ctx, dir)
 	if err != nil {
 		return Attr{}, err
@@ -680,6 +701,9 @@ func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error
 	if m.Mode == config.ModeReadonly {
 		return Attr{}, ErrReadOnly
 	}
+	if err := f.requireOwner(); err != nil {
+		return Attr{}, err
+	}
 	if _, err := f.lookupNode(ctx, parent, name); err == nil {
 		return Attr{}, ErrExists
 	} else if !errors.Is(err, ErrNotFound) {
@@ -723,6 +747,9 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	}
 	if m.Mode == config.ModeReadonly {
 		return ErrReadOnly
+	}
+	if err := f.requireOwner(); err != nil {
+		return err
 	}
 	n, err := f.lookupNode(ctx, parent, name)
 	if err != nil {
@@ -817,6 +844,9 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 	}
 	if srcMount.Mode == config.ModeReadonly {
 		return ErrReadOnly
+	}
+	if err := f.requireOwner(); err != nil {
+		return err
 	}
 	n, err := f.lookupNode(ctx, oldParent, oldName)
 	if err != nil {

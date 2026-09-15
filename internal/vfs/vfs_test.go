@@ -33,6 +33,8 @@ type env struct {
 	clk   *clock
 	store *meta.Store
 	cache *cache.Cache
+	// dir is the temp directory meta, cache and journal live under.
+	dir string
 }
 
 type envOpt struct {
@@ -110,7 +112,7 @@ func newEnv(t *testing.T, o envOpt) *env {
 	}
 	t.Cleanup(func() { fs.Close() })
 
-	e := &env{fs: fs, fake: fake, j: j, clk: c, store: store, cache: ca}
+	e := &env{fs: fs, fake: fake, j: j, clk: c, store: store, cache: ca, dir: dir}
 	u, err := upload.New(upload.Options{
 		Journal: j,
 		Providers: func(remote string) (provider.Provider, bool) {

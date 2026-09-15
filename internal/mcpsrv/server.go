@@ -108,10 +108,10 @@ type IndexService interface {
 	Text(ctx context.Context, p string, off int64, max int) (index.TextPage, error)
 }
 
-// errRequiresOwner is the refusal a session or rollback tool gives on a
-// NonOwner server: the work has to happen in the process that owns the
-// cache, which the HTTP transport reaches.
-var errRequiresOwner = errors.New("requires the storage owner; use the HTTP transport")
+// errRequiresOwner is the refusal a session, rollback or mutating tool
+// gives on a NonOwner server (see requireOwner): the work has to happen in
+// the process that owns the cache, which the HTTP transport reaches.
+var errRequiresOwner = errors.New("requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http")
 
 // Server wraps an MCP server bound to a VFS.
 type Server struct {
@@ -797,6 +797,9 @@ func (s *Server) readRange(ctx context.Context, _ *mcp.CallToolRequest, in readR
 
 func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in writeInput) (*mcp.CallToolResult, writeOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, true)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, writeOutput{}, nil
@@ -838,6 +841,12 @@ func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editIn
 	if len(in.Edits) == 0 {
 		r, _ := fail(errors.New("no edits given"))
 		return r, editOutput{}, nil
+	}
+	if !in.DryRun {
+		if err := s.requireOwner(ctx); err != nil {
+			r, _ := fail(err)
+			return r, editOutput{}, nil
+		}
 	}
 	data, err := s.opt.FS.ReadFileRange(ctx, p, 0, 0)
 	if err != nil {
@@ -890,6 +899,9 @@ func truncateLine(s string) string {
 
 func (s *Server) mkdir(ctx context.Context, _ *mcp.CallToolRequest, in mkdirInput) (*mcp.CallToolResult, okOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, true)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -936,6 +948,9 @@ func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput)
 		return r, okOutput{}, nil
 	}
 	to, err := s.checkPath(ctx, in.To, true)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -964,6 +979,9 @@ func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveIn
 		return r, okOutput{}, nil
 	}
 	to, err := s.checkPath(ctx, in.To, true)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -987,6 +1005,10 @@ func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in dele
 	}
 	if p == "/" {
 		r, _ := fail(errors.New("refusing to delete the mount root"))
+		return r, okOutput{}, nil
+	}
+	if err := s.requireOwner(ctx); err != nil {
+		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
 	parent, err := s.opt.FS.StatPath(ctx, path.Dir(p))
@@ -1177,6 +1199,9 @@ func firstMatchingLine(content, needle string) string {
 
 func (s *Server) pin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (*mcp.CallToolResult, okOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, false)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, okOutput{}, nil
@@ -1190,6 +1215,9 @@ func (s *Server) pin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (
 
 func (s *Server) unpin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (*mcp.CallToolResult, okOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, false)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err == nil {
 		err = s.opt.FS.Unpin(ctx, p)
 	}
@@ -1272,6 +1300,9 @@ func mapErr(err error, p string) error {
 		return fmt.Errorf("%s is not empty; pass recursive=true to delete it and its contents", p)
 	case errors.Is(err, vfs.ErrReadOnly):
 		return fmt.Errorf("%s is on a read-only mount", p)
+	case errors.Is(err, vfs.ErrNotOwner):
+		// The VFS's own fence; requireOwner normally answers first.
+		return errNonOwnerWrite
 	case errors.Is(err, vfs.ErrUploadCancelled):
 		return errors.New("retained cancelled upload requires reconciliation before this operation; local content has not been discarded")
 	case errors.Is(err, vfs.ErrUploadPurging):

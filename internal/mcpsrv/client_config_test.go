@@ -121,7 +121,7 @@ func TestNonOwnerOptionIsCarried(t *testing.T) {
 	if !e.server.opt.NonOwner {
 		t.Fatal("NonOwner was dropped by New")
 	}
-	if errRequiresOwner.Error() != "requires the storage owner; use the HTTP transport" {
+	if errRequiresOwner.Error() != "requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http" {
 		t.Fatalf("%v", errRequiresOwner)
 	}
 }

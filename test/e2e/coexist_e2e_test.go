@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +16,10 @@ import (
 	"cloudfs/internal/control"
 	"cloudfs/internal/daemon"
 	"cloudfs/internal/fusefs"
+	"cloudfs/internal/journal"
 	"cloudfs/internal/mcpsrv"
 	"cloudfs/internal/provider"
+	"cloudfs/internal/vfs"
 	"cloudfs/test/fakeprovider"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -44,7 +48,7 @@ mcp:
   allow: []
 `
 
-// TestStdioBesideMountSharesWrites is the T-43 reproduction: `cloudfs
+// TestStdioBesideMountRefusesWritesCleanly is the T-43 contract: `cloudfs
 // mount` owns the cache and a `cloudfs mcp` (stdio) started beside it opens
 // the same cache directory as a non-owner — its own VFS over the shared
 // meta, cache and journal, with no uploader of its own. The second
@@ -53,13 +57,18 @@ mcp:
 // second process is, and the test checks that assumption rather than
 // assuming it.
 //
-// Three things are asserted, and none may be weakened: (a) a file the stdio
-// side writes is readable at the mount, with the same bytes, within five
-// seconds; (b) once the owner's queue drains, the backend holds the file and
-// exactly one upload was made for it; (c) after the stdio side exits and
-// the owner restarts, the file is neither lost nor duplicated and the stdio
-// session is finished rather than left active.
-func TestStdioBesideMountSharesWrites(t *testing.T) {
+// The first version of this test (C0, 2026-09-15) asked such a server to
+// write and recorded what happened: write_file failed with "publication
+// requires storage ownership" after the node was already in shared meta,
+// the mount saw the entry at once but read EIO from it, the journal kept a
+// row nobody published, and the file "came back" on the owner's next
+// start. Every one of those symptoms is a negative assertion below. The
+// contract now: a non-owner refuses every mutation with one error that
+// names the HTTP transport, before it touches meta, the journal or the
+// backend; reads keep working; an owner restart resurrects nothing. The
+// stdio→HTTP bridge that makes such a server write through the owner is
+// the proper fix and is scheduled (see the phase-two plan's conclusions).
+func TestStdioBesideMountRefusesWritesCleanly(t *testing.T) {
 	if ok, why := fusefs.Supported(); !ok {
 		t.Skipf("FUSE unavailable: %s", why)
 	}
@@ -119,8 +128,37 @@ func TestStdioBesideMountSharesWrites(t *testing.T) {
 		unmount()
 		closeOwner()
 	}()
+	settleOwner := func(d *daemon.Daemon) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			st, err := d.Journal.Stats(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Pending == 0 && st.Uploading == 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		st, _ := d.Journal.Stats(context.Background())
+		t.Fatalf("upload queue did not drain: %+v", st)
+	}
+
+	// The shell writes a file through the mount; the owner uploads it. It
+	// is what the stdio side must still be able to read, and the target
+	// of the edit, move, copy and delete it must not be able to make.
+	const shellContent = "written by the shell at the mount\n"
 	if err := os.Mkdir(filepath.Join(mountDir, "demo"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	shellPath := filepath.Join(mountDir, "demo", "shell.txt")
+	if err := os.WriteFile(shellPath, []byte(shellContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settleOwner(d1)
+	if got, ok := fake.Content("demo/shell.txt"); !ok || string(got) != shellContent {
+		t.Fatalf("backend after the shell write holds %q (%v)", got, ok)
 	}
 
 	// The stdio server beside it: a second open of the same cache directory
@@ -161,11 +199,17 @@ func TestStdioBesideMountSharesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call := func(name string, args map[string]any) *mcp.CallToolResult {
+	call := func(name string, args map[string]any, out any) *mcp.CallToolResult {
 		t.Helper()
 		res, err := cs.CallTool(ctx2, &mcp.CallToolParams{Name: name, Arguments: args})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
+		}
+		if out != nil && !res.IsError && res.StructuredContent != nil {
+			b, _ := json.Marshal(res.StructuredContent)
+			if err := json.Unmarshal(b, out); err != nil {
+				t.Fatalf("%s: decode: %v", name, err)
+			}
 		}
 		return res
 	}
@@ -175,72 +219,142 @@ func TestStdioBesideMountSharesWrites(t *testing.T) {
 		t.Fatalf("doctor beside a live stdio server: %+v", c)
 	}
 
-	// (a) The stdio side writes; the shell at the mount reads it back. A
-	// tool error is recorded rather than fatal so the poll below can say
-	// what the mount saw of the write anyway — that is the evidence T-43
-	// asks for.
-	const content = "written over stdio beside the mount\n"
-	if res := call("write_file", map[string]any{"path": "/demo/side.txt", "content": content}); res.IsError {
-		t.Errorf("(a) stdio write_file returned an error: %s", toolText(res))
+	// The baseline every mutation is measured against.
+	rowsBefore, err := d1.Journal.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	shellPath := filepath.Join(mountDir, "demo", "side.txt")
-	var (
-		deadline                  = time.Now().Add(5 * time.Second)
-		started                   = time.Now()
-		firstSeen   time.Duration = -1
-		lastReadErr error
-		readAt      time.Duration = -1
-	)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(shellPath); err == nil && firstSeen < 0 {
-			firstSeen = time.Since(started)
+	uploadsBefore := fake.Calls("BeginUpload")
+	callsBefore := fake.TotalCalls()
+
+	// Every mutation over stdio is refused with the one owner error.
+	const content = "written over stdio beside the mount\n"
+	mutations := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"write_file", map[string]any{"path": "/demo/side.txt", "content": content}},
+		{"edit_file", map[string]any{"path": "/demo/shell.txt", "edits": []map[string]any{{"old_text": "shell", "new_text": "agent"}}}},
+		{"create_directory", map[string]any{"path": "/demo/sub"}},
+		{"move", map[string]any{"from": "/demo/shell.txt", "to": "/demo/moved.txt"}},
+		{"copy", map[string]any{"from": "/demo/shell.txt", "to": "/demo/copy.txt"}},
+		{"delete", map[string]any{"path": "/demo/shell.txt", "confirm": true}},
+	}
+	for _, mu := range mutations {
+		res := call(mu.tool, mu.args, nil)
+		body := toolText(res)
+		if !res.IsError {
+			t.Fatalf("stdio %s beside the mount succeeded: %s", mu.tool, body)
 		}
-		got, err := os.ReadFile(shellPath)
-		if err == nil && string(got) == content {
-			readAt = time.Since(started)
-			break
+		if !strings.Contains(body, "requires the storage owner") || !strings.Contains(body, "cloudfs mcp install --transport http") {
+			t.Fatalf("stdio %s refused without naming the owner and the HTTP transport: %s", mu.tool, body)
 		}
-		if err != nil {
-			lastReadErr = err
-		} else {
-			lastReadErr = fmt.Errorf("content %q", got)
+		// C0 saw "journal: publication requires storage ownership" — the
+		// refusal of a write that had already reached meta.
+		if strings.Contains(body, "publication requires storage ownership") {
+			t.Fatalf("stdio %s reached the journal before being refused: %s", mu.tool, body)
+		}
+	}
+	// The VFS behind the server refuses on its own too, so a tool that
+	// forgot the fence could not get further.
+	if _, err := d2.FS.WriteFile(ctx2, "/demo/vfs.txt", []byte("x"), false); !errors.Is(err, vfs.ErrNotOwner) {
+		t.Fatalf("the non-owner VFS accepted a write: %v", err)
+	}
+
+	// Nothing reached the backend: C0 saw create_directory make the
+	// directory on the remote and the write leave a row for the owner.
+	if n := fake.TotalCalls(); n != callsBefore {
+		t.Fatalf("refused stdio mutations made %d provider calls", n-callsBefore)
+	}
+	for _, p := range []string{"demo/side.txt", "demo/sub", "demo/moved.txt", "demo/copy.txt", "demo/vfs.txt"} {
+		if _, ok := fake.Content(p); ok {
+			t.Fatalf("backend holds %s after a refused stdio mutation", p)
+		}
+	}
+	if got, ok := fake.Content("demo/shell.txt"); !ok || string(got) != shellContent {
+		t.Fatalf("backend copy of shell.txt after refused edit/move/delete: %q (%v)", got, ok)
+	}
+
+	// No journal row: C0 found one stuck at pending, needs_publish=1.
+	rowsAfter, err := d1.Journal.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsAfter) != len(rowsBefore) {
+		t.Fatalf("refused stdio mutations left journal rows: before %d, after %d: %+v", len(rowsBefore), len(rowsAfter), rowsAfter)
+	}
+	for _, u := range rowsAfter {
+		if u.NeedsPublish || u.State == journal.StatePending {
+			t.Fatalf("journal row waiting on a publisher after a refused write: %+v", u)
+		}
+	}
+
+	// No ghost at the mount: C0 saw the entry within a millisecond and
+	// EIO on read. The stat is repeated for a while, because "not yet
+	// visible" is not the same as "never written".
+	ghosts := []string{"side.txt", "sub", "moved.txt", "copy.txt", "vfs.txt"}
+	until := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(until) {
+		for _, g := range ghosts {
+			if _, err := os.Stat(filepath.Join(mountDir, "demo", g)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the mount shows %s after a refused stdio mutation: %v", g, err)
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if readAt < 0 {
-		rows, _ := d1.Journal.All(context.Background())
-		var queue []string
-		for _, u := range rows {
-			queue = append(queue, fmt.Sprintf("%s state=%s needs_publish=%v", u.Name, u.State, u.NeedsPublish))
-		}
-		t.Fatalf("(a) the shell never read the stdio side's file within 5 s: entry first visible after %v, last read error: %v; journal rows: %v", firstSeen, lastReadErr, queue)
+	if got, err := os.ReadFile(shellPath); err != nil || string(got) != shellContent {
+		t.Fatalf("shell.txt at the mount after refused edit/move/delete: %q, %v", got, err)
 	}
-	t.Logf("(a) entry visible at the mount after %v, content readable after %v", firstSeen, readAt)
+	entries, err := os.ReadDir(filepath.Join(mountDir, "demo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "shell.txt" {
+		t.Fatalf("mount lists %d entries in /demo after refused mutations, want [shell.txt]", len(entries))
+	}
 
-	// (b) The owner's uploader takes the row the stdio side queued: the
-	// backend holds the file, uploaded exactly once.
-	settleOwner := func(d *daemon.Daemon) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			st, err := d.Journal.Stats(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if st.Pending == 0 && st.Uploading == 0 {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		st, _ := d.Journal.Stats(context.Background())
-		t.Fatalf("upload queue did not drain: %+v", st)
+	// The stdio side does not believe its own refused write either: C0's
+	// stdio stat reported "file, 6 bytes, local".
+	if res := call("stat", map[string]any{"path": "/demo/side.txt"}, nil); !res.IsError || !strings.Contains(toolText(res), "does not exist") {
+		t.Fatalf("stdio stat of the refused write: IsError=%v %s", res.IsError, toolText(res))
 	}
-	settleOwner(d1)
-	if got, ok := fake.Content("demo/side.txt"); !ok || string(got) != content {
-		t.Fatalf("(b) backend holds %q (%v), want the stdio side's content", got, ok)
+
+	// Reads over stdio keep working on what the shell wrote: stat,
+	// read_text, list_directory and search all see shell.txt and only it.
+	var statOut struct {
+		Size int64 `json:"size"`
 	}
-	if n := fake.Calls("BeginUpload"); n != 1 {
-		t.Fatalf("(b) the file was uploaded %d times, want exactly once", n)
+	if res := call("stat", map[string]any{"path": "/demo/shell.txt"}, &statOut); res.IsError || statOut.Size != int64(len(shellContent)) {
+		t.Fatalf("stdio stat of the shell's file: %s %+v", toolText(res), statOut)
+	}
+	var readOut struct {
+		Content string `json:"content"`
+	}
+	if res := call("read_text", map[string]any{"path": "/demo/shell.txt"}, &readOut); res.IsError || readOut.Content != shellContent {
+		t.Fatalf("stdio read_text of the shell's file: %s %q", toolText(res), readOut.Content)
+	}
+	var listOut struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+	}
+	if res := call("list_directory", map[string]any{"path": "/demo"}, &listOut); res.IsError || len(listOut.Entries) != 1 || listOut.Entries[0].Name != "shell.txt" {
+		t.Fatalf("stdio list_directory of /demo: %s %+v", toolText(res), listOut.Entries)
+	}
+	var searchOut struct {
+		Hits []struct {
+			Path string `json:"path"`
+		} `json:"hits"`
+	}
+	if res := call("search", map[string]any{"query": "shell"}, &searchOut); res.IsError || len(searchOut.Hits) != 1 || searchOut.Hits[0].Path != "/demo/shell.txt" {
+		t.Fatalf("stdio search for the shell's file: %s %+v", toolText(res), searchOut.Hits)
+	}
+	if res := call("search", map[string]any{"query": "side"}, &searchOut); res.IsError || len(searchOut.Hits) != 0 {
+		t.Fatalf("stdio search finds the refused write: %s %+v", toolText(res), searchOut.Hits)
+	}
+	// A dry-run edit is a read and still works.
+	if res := call("edit_file", map[string]any{"path": "/demo/shell.txt", "dry_run": true, "edits": []map[string]any{{"old_text": "shell", "new_text": "agent"}}}, nil); res.IsError {
+		t.Fatalf("stdio dry-run edit_file: %s", toolText(res))
 	}
 
 	// The stdio process exits: its session is finished, its heartbeat gone,
@@ -262,8 +376,10 @@ func TestStdioBesideMountSharesWrites(t *testing.T) {
 		t.Fatalf("doctor after the stdio server left: %+v", c)
 	}
 
-	// (c) The owner restarts on the same cache: the file is still there,
-	// once, with the same bytes, and the queue is clean.
+	// The owner restarts on the same cache: C0 saw RecoverPublications
+	// publish and upload the refused write here. Now there is nothing to
+	// recover: the shell's file is the only one, once, and the queue is
+	// clean.
 	unmount()
 	closeOwner()
 	ctx3, cancel3 := context.WithCancel(context.Background())
@@ -277,36 +393,41 @@ func TestStdioBesideMountSharesWrites(t *testing.T) {
 		t.Fatal("the restarted daemon did not become the owner")
 	}
 	settleOwner(d3)
-	got, err := d3.FS.ReadFileRange(ctx3, "/demo/side.txt", 0, 0)
-	if err != nil || string(got) != content {
-		t.Fatalf("(c) after restart the file reads %q, %v", got, err)
+	if _, err := d3.FS.ReadFileRange(ctx3, "/demo/side.txt", 0, 0); !errors.Is(err, vfs.ErrNotFound) {
+		t.Fatalf("after restart the refused write is back: %v", err)
 	}
-	entries, err := d3.FS.ReadDirPath(ctx3, "/demo")
+	got, err := d3.FS.ReadFileRange(ctx3, "/demo/shell.txt", 0, 0)
+	if err != nil || string(got) != shellContent {
+		t.Fatalf("after restart the shell's file reads %q, %v", got, err)
+	}
+	dirEntries, err := d3.FS.ReadDirPath(ctx3, "/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, e := range entries {
+	for _, e := range dirEntries {
 		names = append(names, e.Name)
 	}
-	if len(names) != 1 || names[0] != "side.txt" {
-		t.Fatalf("(c) after restart /demo lists %v, want [side.txt]", names)
+	if len(names) != 1 || names[0] != "shell.txt" {
+		t.Fatalf("after restart /demo lists %v, want [shell.txt]", names)
 	}
 	if st, err := d3.Journal.Stats(ctx3); err != nil || st.Dead > 0 || st.Pending > 0 {
-		t.Fatalf("(c) journal after restart: %+v %v", st, err)
+		t.Fatalf("journal after restart: %+v %v", st, err)
 	}
-	if got, ok := fake.Content("demo/side.txt"); !ok || string(got) != content {
-		t.Fatalf("(c) backend after restart holds %q (%v)", got, ok)
+	for _, p := range []string{"demo/side.txt", "demo/sub", "demo/moved.txt", "demo/copy.txt", "demo/vfs.txt"} {
+		if _, ok := fake.Content(p); ok {
+			t.Fatalf("backend holds %s after the owner restarted", p)
+		}
 	}
-	if n := fake.Calls("BeginUpload"); n != 1 {
-		t.Fatalf("(c) restart uploaded the file again: %d uploads", n)
+	if n := fake.Calls("BeginUpload"); n != uploadsBefore {
+		t.Fatalf("the restart uploaded something: %d uploads, was %d", n, uploadsBefore)
 	}
 	sess, err := d3.Sessions.Get(ctx3, stdioSessions[0].ID)
 	if err != nil || sess.State != "finished" {
-		t.Fatalf("(c) the stdio session after its process exited: %+v %v", sess, err)
+		t.Fatalf("the stdio session after its process exited: %+v %v", sess, err)
 	}
 	if c := doctorOf(d3)["agent_db"]; c.Level != control.LevelOK {
-		t.Fatalf("(c) agent.db after restart: %+v", c)
+		t.Fatalf("agent.db after restart: %+v", c)
 	}
 }
 

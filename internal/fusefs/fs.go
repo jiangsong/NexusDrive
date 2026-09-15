@@ -154,7 +154,9 @@ func errno(err error) syscall.Errno {
 		return syscall.ENOTDIR
 	case errors.Is(err, vfs.ErrNotEmpty):
 		return syscall.ENOTEMPTY
-	case errors.Is(err, vfs.ErrReadOnly):
+	case errors.Is(err, vfs.ErrReadOnly), errors.Is(err, vfs.ErrNotOwner):
+		// A kernel mount is always the owner; the second case only exists
+		// so an assembly mistake reads as read-only rather than EIO.
 		return syscall.EROFS
 	case errors.Is(err, vfs.ErrUploadCancelled), errors.Is(err, vfs.ErrUploadPurging):
 		return syscall.EBUSY

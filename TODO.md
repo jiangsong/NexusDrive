@@ -2181,8 +2181,29 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
 
 ### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成）
 
-- **2026-09-15 结论（线 C C0，e2e 复现失败，用例保持红色）**：`test/e2e/coexist_e2e_test.go`
-  `TestStdioBesideMountSharesWrites`——同进程第二次 `daemon.Open` 同一 cache 目录拿不到 journal/agent flock
+- **2026-09-15 结论（线 C C0.5，写栅栏已落地，e2e 转绿）**：并存拓扑下 stdio 的写入**一律被拒绝**，且拒绝发生在碰
+  meta / journal / 网盘之前。`test/e2e/coexist_e2e_test.go` 改名 `TestStdioBesideMountRefusesWritesCleanly`，
+  固定契约：stdio 的 `write_file`/`edit_file`/`create_directory`/`move`/`copy`/`delete` 全部返回
+  `… requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http`（不再是
+  `journal: publication requires storage ownership`）；随后挂载侧对这些路径 `stat` 得 `ENOENT`（轮询 500 ms），
+  journal 行数不变且没有 `pending`/`needs_publish` 行，fake provider 调用数不变、网盘无这些文件；stdio 自己
+  `stat` 该文件也是 "does not exist"；终端写的 `shell.txt` 在 stdio 侧 `stat`/`read_text`/`list_directory`/`search`
+  与 `edit_file dry_run` 正常；owner 重启后 `/demo` 仍只有 `shell.txt`、`BeginUpload` 计数不变、队列干净。
+  下面 C0 观察到的每一条现象都成了这个用例的否定断言。
+  - 实现：`internal/mcpsrv/owner_fence.go` `requireOwner`——`Options.NonOwner` 时每个写工具在 scope 检查之后、
+    第一次调 VFS/export/index 之前返回 `errNonOwnerWrite`（包装 `errRequiresOwner`，后者的文案补上了
+    `cloudfs mcp install --transport http`），审计行记 `denied`；覆盖 `write_file`、`edit_file`（非 dry_run）、
+    `create_directory`、`move`、`copy`、`delete`、`pin`、`unpin`、`export`、`cancel_export_job`、四个 `*_upload`、
+    `flush_uploads`、三个 `*_copy_job`、`index`、`unindex`（会话三工具沿用原有拒绝）。
+    `TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS` 遍历 `tools/list`，未归类的新工具直接报错。
+  - 兜底：`internal/vfs` 加 `ErrNotOwner` 与 `FS.requireOwner`（journal 存在且 `!Owner()` 才生效，无 journal 的
+    只读装配与测试不受影响），`WriteFile/Create/Open(write)/Mkdir/Remove/Rename/Copy` 在任何 meta 变更之前返回它；
+    fusefs/winfs 映射为 `EROFS`（内核挂载永远是 owner，只是别再报 EIO）。`TestWritesNeedTheJournalOwner`
+    用同目录第二次 `journal.Open` 复现非 owner，断言 provider 调用数、journal 行、meta 节点数全部不变。
+  - stdio→HTTP 桥（让 stdio 进程把写转发给 owner）仍是根治方案：**三期提前候选，见计划结论**。本条剩余
+    验收（doctor warn、横幅）C0 已交付，桥落地前本条保持开放。
+- **2026-09-15 C0 观察（当时 e2e 复现失败，用例 `TestStdioBesideMountSharesWrites` 保持红色；已被 C0.5 的
+  栅栏修掉，保留作为否定断言的依据）**：同进程第二次 `daemon.Open` 同一 cache 目录拿不到 journal/agent flock
   （flock 按打开文件描述计，`d2.Journal.Owner() == false` 已断言），再按 `cmdMCP` 非 owner 分支起
   `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})`，两个 daemon 共用同一个
   `fakeprovider.Shared` 实例（`remotes.demo: {type: fake, shared: <key>}`，模拟同一账号）。观察到（逐字）：
@@ -2200,9 +2221,7 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
     `/demo/side.txt` 读回 `hello\n`，网盘上出现该文件——**agent 被告知失败的写入在下一次 `cloudfs mount`
     启动时"复活"**。
   - 断言 (a)"5 s 内挂载侧读到"失败（错误信息含上面两条）；(b)(c) 因 (a) `Fatalf` 未执行。
-  - **决定**：stdio→HTTP 桥提前（见计划"结论记录"）。在桥落地前，非 owner stdio 的写入应在碰 meta 之前
-    就拒绝（`vfs` 在 `journal.Owner()==false` 时让 `commitWrite` 早退，或 mcpsrv `NonOwner` 直接拒绝写工具），
-    否则会留下"本地有、网盘无、重启复活"的半发布行；这不属于 C0，登记为 C3/三期前置。
+  - **决定**：stdio→HTTP 桥提前（见计划"结论记录"）。桥落地前的栅栏由 C0.5 完成（见上），mcpsrv 与 vfs 各一道。
 - **本条已交付（C0）**：`internal/agent/heartbeat.go`（`WriteHeartbeat/RemoveHeartbeat/LiveStdioProcesses`，
   `<cache.dir>/agent/stdio-<pid>.hb`，30 s 一次，超 2 min 陈旧并清理）；`cmdMCP` 非 owner 写心跳、退出删除、
   传输结束时 `Server.FinishStdioSessions` 结束自己的会话（修掉 T-34 遗留"stdio 会话退出后仍 active"）；

@@ -206,7 +206,11 @@ func (s *Server) getCopyJob(ctx context.Context, _ *mcp.CallToolRequest, in copy
 }
 
 func (s *Server) mutateCopyJob(ctx context.Context, id, action string, confirm bool) (*mcp.CallToolResult, copyMutationOutput, error) {
-	if err := s.checkWrite(ctx); err != nil {
+	err := s.checkWrite(ctx)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
+	if err != nil {
 		r, _ := fail(err)
 		return r, copyMutationOutput{}, nil
 	}
@@ -218,7 +222,6 @@ func (s *Server) mutateCopyJob(ctx context.Context, id, action string, confirm b
 		r, _ := fail(copyManagementError(err))
 		return r, copyMutationOutput{}, nil
 	}
-	var err error
 	switch action {
 	case "retry":
 		err = s.opt.FS.RetryCopy(ctx, id)

@@ -41,9 +41,9 @@ func noteFrom(ctx context.Context) *callNote {
 	return n
 }
 
-// recordCheck is called by checkPath and checkWrite with what they decided.
-// A refusal marks the call denied; the path is kept either way, deduplicated
-// and capped, so a denied row names what was asked for.
+// recordCheck is called by checkPath, checkWrite and requireOwner with what
+// they decided. A refusal marks the call denied; the path is kept either
+// way, deduplicated and capped, so a denied row names what was asked for.
 func recordCheck(ctx context.Context, p string, err error) {
 	n := noteFrom(ctx)
 	if n == nil {
@@ -51,7 +51,7 @@ func recordCheck(ctx context.Context, p string, err error) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if errors.Is(err, agent.ErrDenied) || errors.Is(err, agent.ErrReadOnly) || errors.Is(err, agent.ErrExpired) {
+	if errors.Is(err, agent.ErrDenied) || errors.Is(err, agent.ErrReadOnly) || errors.Is(err, agent.ErrExpired) || errors.Is(err, errRequiresOwner) {
 		n.denied = true
 	}
 	if p == "" || len(n.paths) >= maxAuditPaths {

@@ -189,6 +189,9 @@ func (s *Server) indexStatus(ctx context.Context, _ *mcp.CallToolRequest, in ind
 // read-only server allows it.
 func (s *Server) indexRule(ctx context.Context, _ *mcp.CallToolRequest, in indexInput) (*mcp.CallToolResult, indexRuleOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, false)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, indexRuleOutput{}, nil
@@ -218,6 +221,9 @@ func (s *Server) indexRule(ctx context.Context, _ *mcp.CallToolRequest, in index
 
 func (s *Server) unindexRule(ctx context.Context, _ *mcp.CallToolRequest, in unindexInput) (*mcp.CallToolResult, indexRuleOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, false)
+	if err == nil {
+		err = s.requireOwner(ctx)
+	}
 	if err != nil {
 		r, _ := fail(err)
 		return r, indexRuleOutput{}, nil

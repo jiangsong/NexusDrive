@@ -141,11 +141,19 @@ test/perf/embed_perf_test.go（D1）
 - Modify: `docs/mcp.md`"与挂载并存"一节；`TODO.md` T-43 写结论（**通过或失败都写**）
 
 **Steps:**
-- [x] RED e2e（**保持红色**，见"结论记录"）：`TestStdioBesideMountSharesWrites`——`newStack` 之外再 `daemon.Open` 同一 cacheDir（同进程第二个 fd 拿不到 flock → 非 owner），用 `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})` in-memory 连接；三个断言：(a) stdio 侧 `write_file /demo/side.txt` 后 owner 侧 `cat mnt/demo/side.txt` 在 5 s 内可见且内容一致；(b) owner 侧 `settle` 后 fake provider 有该文件且 `Calls("Upload") == 1`（无重复上传）；(c) 关闭 d2、重开 owner 后文件不"复活/丢失"。任何一条失败即把现象逐字写进 TODO T-43，测试用 `t.Skip` **不允许**——失败就保留红，作为三期 stdio→HTTP 桥提前的证据，并在计划末尾"结论"处记录
+- [x] RED e2e（C0 时保持红色，C0.5 改名 `TestStdioBesideMountRefusesWritesCleanly` 转绿，见"结论记录"）：`TestStdioBesideMountSharesWrites`——`newStack` 之外再 `daemon.Open` 同一 cacheDir（同进程第二个 fd 拿不到 flock → 非 owner），用 `mcpsrv.New(Options{FS: d2.FS, NonOwner: true, Sessions: d2.Sessions})` in-memory 连接；三个断言：(a) stdio 侧 `write_file /demo/side.txt` 后 owner 侧 `cat mnt/demo/side.txt` 在 5 s 内可见且内容一致；(b) owner 侧 `settle` 后 fake provider 有该文件且 `Calls("Upload") == 1`（无重复上传）；(c) 关闭 d2、重开 owner 后文件不"复活/丢失"。任何一条失败即把现象逐字写进 TODO T-43，测试用 `t.Skip` **不允许**——失败就保留红，作为三期 stdio→HTTP 桥提前的证据，并在计划末尾"结论"处记录
 - [x] RED doctor：`TestDoctorWarnsWhenStdioRunsBesideTheMount`（写一个心跳文件 → warn；无心跳 → ok；陈旧心跳 → ok 且文件被清理）、`TestDoctorReportsAgentDB`
 - [x] RED UI：`TestConnectPanelWarnsAboutStdioNonOwner`（`stdio_non_owner:true` → 横幅渲染且 `href="#/diagnostics"`；false → 无）
 - [x] GREEN（e2e 复现用例除外，它按约定保持红色）：`./gow test ./internal/agent/ ./internal/control/ ./cmd/cloudfs/ -count=1 && ./gow test ./test/e2e/ -run 'TestStdioBesideMount|TestDoctorOnALiveSystem' -count=1 -v`
 - [x] 提交：`feat(agent,control): verify stdio MCP beside a mount and warn about it in doctor and the console`
+
+### Task C0.5：T-43 写栅栏——非 owner MCP 在碰 meta/journal 之前拒绝写
+
+**Files:** `internal/mcpsrv/owner_fence.go`（新，`requireOwner`/`errNonOwnerWrite`）+ `owner_fence_test.go`；`server.go`/`upload_jobs.go`/`copy_jobs.go`/`export_jobs.go`/`index_tools.go` 每个写工具各插一行；`audit_mw.go` 把栅栏记为 `denied`；`internal/vfs/{vfs.go,write.go,read.go,copy.go}` `ErrNotOwner` + `FS.requireOwner` + `owner_fence_test.go`；`fusefs`/`winfs` errno 映射；`test/e2e/coexist_e2e_test.go` 改写；`docs/mcp.md`、`TODO.md` T-43。
+
+- [x] RED `TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS`（遍历 `tools/list`：写工具全部返回 owner 错误，provider 调用数/journal 行/meta 节点/export 请求/索引规则不变，审计 `denied`；读工具与 `edit_file dry_run` 成功）、`TestWritesNeedTheJournalOwner`（同目录第二次 `journal.Open` → 非 owner，七个写入口返回 `ErrNotOwner`，换回 owner journal 后写入成功）
+- [x] GREEN 并改写 e2e 为 `TestStdioBesideMountRefusesWritesCleanly`：每个 C0 观察到的现象都是否定断言
+- [x] 提交：`fix(mcpsrv,vfs): refuse writes from a non-owner MCP server before they reach meta or the journal`
 
 ## Task C1：T-38 后端 — `session_ops`、前像、回滚、MCP/控制面/CLI
 
@@ -415,3 +423,9 @@ test/perf/embed_perf_test.go（D1）
 - stdio→HTTP 桥是否提前到三期之前：**提前**。并存拓扑下文件写入根本不可用且会留下半发布行，doctor/横幅只是提示。
   在桥落地前先补一道栅栏：非 owner 的 `commitWrite` 在碰 meta/journal 之前就拒绝（或 mcpsrv `NonOwner` 拒绝写工具），
   建议放进 C3 收口或三期第一项；C0 未动 vfs。
+- T-43 C0.5 结论（2026-09-15）：**栅栏已落地，e2e 改名 `TestStdioBesideMountRefusesWritesCleanly` 转绿**。
+  与挂载并存的 stdio 进程对一切改动（文件、pin、上传/复制/导出任务、索引规则、会话）在碰 meta/journal/网盘之前
+  返回同一条错误 `… requires the storage owner; use the HTTP transport: cloudfs mcp install --transport http`，
+  审计记 `denied`；vfs 同时加 `ErrNotOwner` 兜底（journal 存在且非 owner）。实测：挂载侧无幽灵条目（`ENOENT`）、
+  journal 无新行、网盘无文件、stdio 读工具照常、owner 重启不复活。**并存拓扑下 stdio 只读**是当前契约；
+  让 stdio 进程把写转发给 owner 的 stdio→HTTP 桥仍是根治方案——**三期提前候选，见本节上一条**，本次未实现。

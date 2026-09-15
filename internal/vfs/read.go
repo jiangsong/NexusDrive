@@ -105,6 +105,9 @@ func (f *FS) Open(ctx context.Context, ino uint64, write bool) (*Handle, error) 
 		if m.Mode == "readonly" {
 			return nil, ErrReadOnly
 		}
+		if err := f.requireOwner(); err != nil {
+			return nil, err
+		}
 		ws, err := f.newWriteState(ctx, h)
 		if err != nil {
 			return nil, err
