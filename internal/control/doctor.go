@@ -107,6 +107,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	out = append(out, d.checkPools(ctx)...)
 	out = append(out, d.checkIndex(ctx)...)
 	out = append(out, d.checkAgent(ctx)...)
+	out = append(out, d.checkTriggers()...)
 	if cfg := d.config(); cfg != nil {
 		for name, r := range cfg.Remotes {
 			level, detailKey := LevelOK, "doctor.creds.keyring"
@@ -505,6 +506,29 @@ func (d *Doctor) checkIndex(ctx context.Context) []Check {
 		out = append(out, bc)
 	}
 	return out
+}
+
+// checkTriggers repeats what Validate accepted with a warning — an exec
+// rule the agent's own writes can fire — so it is seen on the diagnostics
+// page after the mount's log line has scrolled away. A configuration with
+// no rules and no agents has nothing to report.
+func (d *Doctor) checkTriggers() []Check {
+	cfg := d.config()
+	if cfg == nil || (len(cfg.Triggers) == 0 && len(cfg.Agents) == 0 && len(cfg.Warnings) == 0) {
+		return nil
+	}
+	c := Check{Name: "triggers_config"}
+	if len(cfg.Warnings) == 0 {
+		c.Level = LevelOK
+		c.setDetail("doctor.triggers.ok", len(cfg.Triggers), len(cfg.Agents))
+		return []Check{c}
+	}
+	// The warnings are Validate's own sentences, which name the rule and
+	// the fix; they are passed through as the argument of one key.
+	c.Level = LevelWarn
+	c.setDetail("doctor.triggers.warn", strings.Join(cfg.Warnings, "; "))
+	c.setFix("doctor.triggers.fix")
+	return []Check{c}
 }
 
 // Fix repairs what it safely can and reports what it did, in lang: the

@@ -146,6 +146,8 @@ func main() {
 		err = runSessions(ctx, os.Args[2:], os.Stdout)
 	case "index":
 		err = runIndex(ctx, os.Args[2:], os.Stdout)
+	case "triggers":
+		err = runTriggers(ctx, os.Args[2:], os.Stdout)
 	case "bench":
 		err = cmdBench(ctx, os.Args[2:])
 	case "ui", "open":
@@ -209,6 +211,12 @@ Agents
                             clear and rebuild the index, or requeue failed documents
   index search <query> [--path P] [--mode keyword|hybrid] [--limit N] [--json]
                             search extracted file contents
+  triggers list [--json]    show the trigger rules and agents; reads the config file when no daemon runs
+  triggers deliveries [--rule R] [--state pending|running|done|dead] [--limit N] [--json]
+                            list trigger deliveries, newest first; reads agent.db when no daemon runs
+  triggers show <id>        one delivery with its output
+  triggers test <rule> <path> --confirm | retry <id>
+                            queue a real run of a rule, or reopen a dead delivery; both need the running daemon
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)

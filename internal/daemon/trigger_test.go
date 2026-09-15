@@ -43,6 +43,14 @@ func TestTriggerEngineRunsOnlyInTheOwner(t *testing.T) {
 	if other.Trigger != nil {
 		t.Fatal("a non-owner must not run a second engine over the same queue")
 	}
+	// The control plane sees the engine exactly where it runs, and a nil
+	// interface (not a typed nil) where it does not.
+	if owner.Collector().Trigger == nil {
+		t.Fatal("the owner's collector should serve /triggers")
+	}
+	if other.Collector().Trigger != nil {
+		t.Fatal("the non-owner's collector must answer {enabled:false}")
+	}
 
 	kctx := vfs.FromKernel(ctx)
 	parent, err := owner.FS.StatPath(kctx, "/demo")

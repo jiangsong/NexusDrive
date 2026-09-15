@@ -256,6 +256,18 @@ var zh = map[string]string{
 	"doctor.agent.stdio.fix":         "改用 HTTP 传输注册客户端：cloudfs mcp install --transport http",
 	"fix.index_requeued":             "已把 %d 个失败文档重新排队抽取",
 
+	// 触发器路由与诊断。规则在这里只读：能在浏览器里改命令就等于远程执行面，
+	// 所以只在配置文件里定义。
+	"err.triggers_disabled":  "这个守护进程没有运行触发器规则（配置文件里的 triggers:，仅 owner 进程）",
+	"err.trigger_not_found":  "没有这条触发器规则",
+	"err.delivery_not_found": "没有这条投递",
+	"err.delivery_not_dead":  "只有失败（dead）的投递可以重试；这条还在待处理、执行中或已完成",
+	"err.trigger_failed":     "触发器引擎无法应答：%v",
+	"confirm.trigger.test":   "真实运行触发器 %s（路径 %s）：会执行它的命令或发送它的 webhook",
+	"doctor.triggers.ok":     "已配置 %d 条触发器规则与 %d 个 agent，无警告",
+	"doctor.triggers.warn":   "配置警告：%s",
+	"doctor.triggers.fix":    "在配置文件里修改规则；不希望被 Agent 自身写入触发的 exec 规则需要 origins: [kernel, remote]",
+
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。
 	// 每一句对应守护进程真的提供的一个工具；没有的功能不提。
 	"err.prompt_path":        "找不到这个路径",

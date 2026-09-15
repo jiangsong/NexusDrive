@@ -27,3 +27,13 @@ func (d *Daemon) indexView() control.IndexControl {
 	}
 	return indexControl{d.Index}
 }
+
+// triggerView keeps a missing engine a nil interface for the same reason:
+// /triggers answers {"enabled":false} and the delivery routes 404 when the
+// daemon runs no engine.
+func (d *Daemon) triggerView() control.TriggerControl {
+	if d.Trigger == nil {
+		return nil
+	}
+	return d.Trigger
+}

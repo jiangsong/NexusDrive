@@ -554,6 +554,7 @@ func (d *Daemon) Collector() *control.Collector {
 	col.Agent = d.agentView()
 	col.MCP = d.mcpView()
 	col.Index = d.indexView()
+	col.Trigger = d.triggerView()
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.
 	// The control plane republishes a copy after every edit, so a hook that

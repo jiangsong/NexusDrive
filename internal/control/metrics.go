@@ -147,6 +147,11 @@ func (s *Server) routes() []route {
 		{pattern: "/index/search", handler: s.indexSearch},
 		{pattern: "/index/text", handler: s.indexText},
 		{pattern: "/agent/prompt", handler: s.agentPrompt},
+		{pattern: "/triggers", handler: s.triggers},
+		{pattern: "/triggers/deliveries", handler: s.triggerDeliveries},
+		{pattern: "/triggers/deliveries/", handler: s.triggerDeliveryByPath, probe: "/triggers/deliveries/1"},
+		{pattern: "/triggers/test", handler: s.triggerTest},
+		{pattern: "/triggers/retry", handler: s.triggerRetry},
 	}
 }
 
@@ -373,6 +378,12 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 			metric{name: "cloudfs_index_text_bytes", help: "Extracted text held by the content index", typ: "gauge", value: float64(st.Index.TextBytes)},
 			metric{name: "cloudfs_index_fetch_bytes_total", help: "Bytes the indexer downloaded from remotes since start", typ: "counter", value: float64(st.Index.FetchBytesTotal)},
 			metric{name: "cloudfs_index_failures_total", help: "Extraction failures since start", typ: "counter", value: float64(st.Index.Failures)},
+		)
+	}
+	if st.Triggers != nil {
+		ms = append(ms,
+			metric{name: "cloudfs_trigger_deliveries_pending", help: "Trigger deliveries waiting to run", typ: "gauge", value: float64(st.Triggers.Pending)},
+			metric{name: "cloudfs_trigger_deliveries_dead", help: "Trigger deliveries that spent their retries and wait for a person", typ: "gauge", value: float64(st.Triggers.Dead)},
 		)
 	}
 	for _, p := range st.Proxies {

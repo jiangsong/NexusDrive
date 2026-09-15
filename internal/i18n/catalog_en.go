@@ -257,6 +257,19 @@ var en = map[string]string{
 	"doctor.agent.stdio.fix":         "register the client over HTTP instead: cloudfs mcp install --transport http",
 	"fix.index_requeued":             "requeued %d failed documents for extraction",
 
+	// Trigger routes and diagnostics. The rules are read-only here: a
+	// command that could be edited from the browser would be a remote
+	// execution surface, so they live in the configuration file only.
+	"err.triggers_disabled":  "no trigger rules run on this daemon (triggers: in the configuration file, owner process only)",
+	"err.trigger_not_found":  "no such trigger rule",
+	"err.delivery_not_found": "no such delivery",
+	"err.delivery_not_dead":  "only a dead delivery can be retried; this one is pending, running or done",
+	"err.trigger_failed":     "the trigger engine could not answer: %v",
+	"confirm.trigger.test":   "runs trigger %s on %s for real: its command executes or its webhook is sent",
+	"doctor.triggers.ok":     "%d trigger rules and %d agents configured, no warnings",
+	"doctor.triggers.warn":   "configuration warnings: %s",
+	"doctor.triggers.fix":    "edit the rules in the configuration file; an exec rule the agent's own writes must not fire needs origins: [kernel, remote]",
+
 	// Send to agent: the console hands this prompt to the person to paste
 	// into their own MCP client. Each sentence names a tool the daemon
 	// really offers; a feature that is off is not mentioned.

@@ -84,3 +84,54 @@ func CallRollbackSession(ctx context.Context, socket, tcp, id string, dryRun boo
 	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/rollback", body, &out)
 	return out, online, err
 }
+
+// CallTriggers asks the running daemon for the trigger rules view.
+func CallTriggers(ctx context.Context, socket, tcp string) (TriggersResponse, bool, error) {
+	var out TriggersResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/triggers", nil, &out)
+	return out, online, err
+}
+
+// CallDeliveries asks the running daemon for a page of trigger deliveries.
+func CallDeliveries(ctx context.Context, socket, tcp string, q agent.DeliveryQuery) (DeliveriesResponse, bool, error) {
+	params := url.Values{}
+	setIf(params, "cursor", q.Cursor)
+	setIf(params, "rule", q.Rule)
+	setIf(params, "state", q.State)
+	if q.Limit > 0 {
+		params.Set("limit", strconv.Itoa(q.Limit))
+	}
+	var out DeliveriesResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/triggers/deliveries?"+params.Encode(), nil, &out)
+	return out, online, err
+}
+
+// CallDelivery asks the running daemon for one delivery with its output.
+func CallDelivery(ctx context.Context, socket, tcp string, id int64) (agent.Delivery, bool, error) {
+	var out agent.Delivery
+	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/triggers/deliveries/"+strconv.FormatInt(id, 10), nil, &out)
+	return out, online, err
+}
+
+// CallTriggerTest queues a test delivery through the running daemon. The
+// daemon refuses it without confirm, the way the console's prompt does.
+func CallTriggerTest(ctx context.Context, socket, tcp, name, path string, confirm bool) (TriggerActionResponse, bool, error) {
+	body, err := json.Marshal(TriggerTestRequest{Name: name, Path: path, Confirm: confirm})
+	if err != nil {
+		return TriggerActionResponse{}, false, err
+	}
+	var out TriggerActionResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/triggers/test", body, &out)
+	return out, online, err
+}
+
+// CallTriggerRetry reopens a dead delivery through the running daemon.
+func CallTriggerRetry(ctx context.Context, socket, tcp string, id int64) (TriggerActionResponse, bool, error) {
+	body, err := json.Marshal(TriggerRetryRequest{ID: id})
+	if err != nil {
+		return TriggerActionResponse{}, false, err
+	}
+	var out TriggerActionResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/triggers/retry", body, &out)
+	return out, online, err
+}

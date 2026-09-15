@@ -50,6 +50,9 @@ type Status struct {
 	// Index is present when this daemon has a content index: the counts
 	// the overview cards show and the cloudfs_index_* metrics are read from.
 	Index *IndexStatus `json:"index,omitempty"`
+	// Triggers is present when this daemon runs the trigger engine: the
+	// queue counts the console badge and the cloudfs_trigger_* metrics show.
+	Triggers *TriggerStatus `json:"triggers,omitempty"`
 	// Warnings names conditions an operator should act on, most urgent first.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -242,7 +245,12 @@ type Collector struct {
 	// nil on a daemon started with index.enabled false; /index/status then
 	// answers {"enabled":false} and the other index routes 404.
 	Index IndexControl
-	Now   func() time.Time
+	// Trigger, when set, serves /triggers/* and counts the delivery queue
+	// for /status. nil on a daemon that runs no engine (no rules, or not
+	// the owner of agent.db); /triggers then answers {"enabled":false} and
+	// the other trigger routes 404.
+	Trigger TriggerControl
+	Now     func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value
@@ -297,6 +305,12 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 		s.Index = &IndexStatus{Enabled: true}
 		if st, err := c.Index.Status(ctx, ""); err == nil {
 			s.Index = indexStatusOf(st)
+		}
+	}
+	if c.Trigger != nil {
+		s.Triggers = &TriggerStatus{Enabled: true}
+		if pending, dead, err := c.Trigger.Counts(ctx); err == nil {
+			s.Triggers.Pending, s.Triggers.Dead = pending, dead
 		}
 	}
 

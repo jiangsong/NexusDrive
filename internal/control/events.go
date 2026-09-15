@@ -36,7 +36,8 @@ type EventChange struct {
 // GET /events is a server-sent event stream: "change" events from the VFS's
 // own change feed, a "status" event every statusTick, an "export" event
 // every exportTick carrying the first page of live job progress, and an
-// "audit" or "session" event for every row the agent store records, and
+// "audit" or "session" event for every row the agent store records, a
+// "trigger" event for every delivery state change it publishes, and
 // an "index" event carrying the indexer's latest progress at most once per
 // indexTick. One subscription per open page; the VFS never blocks on a slow
 // one — a full queue collapses into a rescan hint instead — and the agent
@@ -132,6 +133,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				// The session changed, so its cached client name may be stale.
 				names.names[ev.Session.ID] = ev.Session.ClientName
 				if !send("session", sessionView(*ev.Session)) {
+					return
+				}
+			case ev.Delivery != nil:
+				if !send("trigger", triggerEventOf(*ev.Delivery)) {
 					return
 				}
 			}

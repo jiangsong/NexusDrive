@@ -467,6 +467,17 @@ func (e *Engine) Counts(ctx context.Context) (pending, dead int, err error) {
 	return e.q.Counts(ctx)
 }
 
+// Deliveries lists rows for the console and the CLI; it is the DAO's List,
+// exposed here so the control plane talks to the queue through one door.
+func (e *Engine) Deliveries(ctx context.Context, q agent.DeliveryQuery) ([]agent.Delivery, string, error) {
+	return e.q.List(ctx, q)
+}
+
+// Delivery returns one row, output included.
+func (e *Engine) Delivery(ctx context.Context, id int64) (agent.Delivery, error) {
+	return e.q.Get(ctx, id)
+}
+
 // DeadCount is the console badge: deliveries waiting for a human.
 func (e *Engine) DeadCount(ctx context.Context) (int, error) {
 	_, dead, err := e.q.Counts(ctx)
