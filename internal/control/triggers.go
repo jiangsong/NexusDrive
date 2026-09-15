@@ -32,6 +32,11 @@ type TriggerControl interface {
 	// Retry reopens a dead delivery; agent.ErrDeliveryNotDead otherwise.
 	Retry(ctx context.Context, id int64) error
 	Counts(ctx context.Context) (pending, dead int, err error)
+	// Invoke runs agent name on paths with prompt and returns the delivery
+	// id; trigger.ErrUnknownAgent for a name that is not configured and
+	// trigger.ErrAlreadyQueued while an earlier run on the same first path
+	// is still pending.
+	Invoke(ctx context.Context, name string, paths []string, prompt string) (int64, error)
 }
 
 // TriggersResponse is GET /triggers: the rules as the console renders them,

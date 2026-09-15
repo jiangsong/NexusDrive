@@ -280,6 +280,11 @@ var en = map[string]string{
 	"agent.prompt.read":      "Read files with read_text; to change one, use edit_file for a targeted replacement rather than rewriting the whole file.",
 	"agent.prompt.extracted": "PDF and Office documents: read the extracted text with read_extracted_text.",
 	"agent.prompt.session":   "Call begin_session before you start and finish_session with a summary when you are done.",
+	// Running a configured agent on a path from that panel.
+	"err.agent_not_configured": "no such agent (agents: in the configuration file, owner process only)",
+	"err.agent_queued":         "a run of this agent on this path is still queued: %v",
+	"err.agent_no_paths":       "at least one path is required",
+	"confirm.agent.invoke":     "runs agent %s on %s: its local command executes with the prompt and the paths as arguments",
 
 	// The storage pool is a backend like any other on the add-drive form.
 	"field.pool.pool": "Pool name (its members and replica count live under pools.<name>)",

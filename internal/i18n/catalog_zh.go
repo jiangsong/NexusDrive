@@ -277,6 +277,11 @@ var zh = map[string]string{
 	"agent.prompt.read":      "用 read_text 读取文件；需要修改时用 edit_file 做局部替换，不要整份重写。",
 	"agent.prompt.extracted": "PDF / Office 文档用 read_extracted_text 读取抽取后的文本。",
 	"agent.prompt.session":   "开始前先调用 begin_session，结束时调用 finish_session 并写一段 summary。",
+	// 从该浮层运行已配置的 agent。
+	"err.agent_not_configured": "没有这个 agent（配置文件里的 agents:，仅 owner 进程）",
+	"err.agent_queued":         "这个 agent 在该路径上的一次运行仍在排队：%v",
+	"err.agent_no_paths":       "至少需要一个路径",
+	"confirm.agent.invoke":     "运行 agent %s（路径 %s）：它的本机命令会以提示词和路径为参数真实执行",
 
 	// 存储池在添加网盘的表单里和其它后端一样。
 	"field.pool.pool": "存储池名称（成员与副本数写在 pools.<name> 下）",

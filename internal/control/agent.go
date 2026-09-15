@@ -214,6 +214,12 @@ func (v *storeAgentView) Summary(ctx context.Context) (agent.Summary, error) {
 }
 
 func (v *storeAgentView) Watch() (<-chan agent.Event, func()) { return v.st.Watch() }
+
+// AppendAudit lets the control plane's own actions (an agent run started
+// from the console) leave audit rows next to the MCP tools' rows.
+func (v *storeAgentView) AppendAudit(ctx context.Context, row agent.AuditRow) (int64, error) {
+	return v.st.AppendAudit(ctx, row)
+}
 func (v *storeAgentView) AuditWriteFailures() int64           { return v.st.AuditWriteFailures() }
 func (v *storeAgentView) Workspace() string                   { return v.workspace }
 

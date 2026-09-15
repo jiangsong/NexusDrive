@@ -147,6 +147,8 @@ func (s *Server) routes() []route {
 		{pattern: "/index/search", handler: s.indexSearch},
 		{pattern: "/index/text", handler: s.indexText},
 		{pattern: "/agent/prompt", handler: s.agentPrompt},
+		{pattern: "/agent/endpoints", handler: s.agentEndpoints},
+		{pattern: "/agent/invoke", handler: s.agentInvoke},
 		{pattern: "/triggers", handler: s.triggers},
 		{pattern: "/triggers/deliveries", handler: s.triggerDeliveries},
 		{pattern: "/triggers/deliveries/", handler: s.triggerDeliveryByPath, probe: "/triggers/deliveries/1"},
