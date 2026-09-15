@@ -317,3 +317,90 @@ func TestAgentClientHelpersRoundTrip(t *testing.T) {
 		t.Fatalf("no daemon: online=%v err=%v", online, err)
 	}
 }
+
+// beginSession opens an explicit session with a workspace the way the MCP
+// begin_session tool does.
+func beginSession(t *testing.T, m *agent.Sessions, key, client string, sandbox bool) agent.Session {
+	t.Helper()
+	implicit := openSession(t, m, key, client)
+	s, err := m.Begin(context.Background(), implicit, agent.BeginOptions{Sandbox: sandbox, Workspace: "/work/.agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestSessionsByPathFindsTheSession(t *testing.T) {
+	f, _, m := agentFixture(t)
+	s := beginSession(t, m, "stdio:1", "codex", false)
+	beginSession(t, m, "stdio:2", "claude", false)
+	h := NewServer(f.coll).Handler()
+	var list SessionsResponse
+	w := uiCallControl(t, h, "GET", "/sessions?path="+url.QueryEscape(s.Workspace+"/a.md"), "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0].ID != s.ID || list.Sessions[0].Workspace != s.Workspace {
+		t.Fatalf("%+v", list.Sessions)
+	}
+	w = uiCallControl(t, h, "GET", "/sessions?path="+url.QueryEscape("/work/.agent"), "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Sessions) != 0 {
+		t.Fatalf("the workspace root belongs to no session: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestSessionsSandboxFilter(t *testing.T) {
+	f, _, m := agentFixture(t)
+	boxed := beginSession(t, m, "stdio:1", "codex", true)
+	beginSession(t, m, "stdio:2", "claude", false)
+	h := NewServer(f.coll).Handler()
+	var list SessionsResponse
+	w := uiCallControl(t, h, "GET", "/sessions?sandbox=1", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0].ID != boxed.ID || !list.Sessions[0].Sandbox || list.Sessions[0].Scope.Sandbox != boxed.Workspace {
+		t.Fatalf("%+v", list.Sessions)
+	}
+	w = uiCallControl(t, h, "GET", "/sessions", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Sessions) != 4 {
+		t.Fatalf("all sessions: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestSessionDetailListsArtifacts(t *testing.T) {
+	f, _, m := agentFixture(t)
+	s := beginSession(t, m, "stdio:1", "codex", false)
+	arts := []agent.Artifact{
+		{Path: s.Workspace + "/report.md", URI: "cloudfs://ali" + s.Workspace + "/report.md", Size: 10, State: "synced"},
+		{Path: s.Workspace + "/data.csv", URI: "cloudfs://ali" + s.Workspace + "/data.csv", Size: 20, State: "local"},
+	}
+	if _, err := m.FinishWith(context.Background(), s.ID, "done", arts); err != nil {
+		t.Fatal(err)
+	}
+	h := NewServer(f.coll).Handler()
+	w := uiCallControl(t, h, "GET", "/sessions/"+s.ID, "")
+	var detail SessionDetail
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(detail.Artifacts) != 2 || detail.Artifacts[0].Path != arts[0].Path || detail.Artifacts[1].State != "local" {
+		t.Fatalf("%+v", detail.Artifacts)
+	}
+	if detail.Session.ArtifactCount != 2 || detail.Session.Summary != "done" || detail.Session.State != "finished" {
+		t.Fatalf("%+v", detail.Session)
+	}
+	if raw, _ := json.Marshal(detail.Artifacts); strings.Contains(string(raw), "0001-01-01") {
+		t.Fatalf("an artifact without a link carries a zero expiry: %s", raw)
+	}
+	var list SessionsResponse
+	w = uiCallControl(t, h, "GET", "/sessions?state=finished", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Sessions) != 2 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	for _, sv := range list.Sessions {
+		if sv.ID == s.ID && sv.ArtifactCount != 2 {
+			t.Fatalf("listing artifact count: %+v", sv)
+		}
+	}
+}

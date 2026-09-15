@@ -3,6 +3,7 @@ package daemon
 import (
 	"sync"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/control"
 )
 
@@ -13,7 +14,19 @@ func (d *Daemon) agentView() control.AgentView {
 	if d.Agent == nil || d.Sessions == nil {
 		return nil
 	}
-	return control.NewAgentView(d.Agent, d.Sessions, "")
+	return control.NewAgentView(d.Agent, d.Sessions, d.Workspace())
+}
+
+// Workspace is the directory MCP sessions deliver into: mcp.workspace, or
+// the first allow prefix plus "/.agent" when the file sets none. It is ""
+// when neither gives one, which is what /status shows and what
+// begin_session reports as a configuration error.
+func (d *Daemon) Workspace() string {
+	ws, err := agent.DefaultWorkspace(d.Config.MCP.Workspace, agent.Scope{Read: d.Config.MCP.Allow})
+	if err != nil {
+		return ""
+	}
+	return ws
 }
 
 // mcpHTTP is what this process knows about its MCP HTTP transport. The

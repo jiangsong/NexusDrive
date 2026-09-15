@@ -156,6 +156,9 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"list_copy_jobs": "filters by scope", "get_copy_job": "filters by scope", "retry_copy_job": "write gate only",
 		"cancel_copy_job": "write gate only", "forget_copy_job": "write gate only",
 		"list_export_jobs": "job ids only", "get_export_job": "job ids only", "cancel_export_job": "write gate only",
+		// The session tools derive their paths from the configuration and
+		// check them internally; list_sessions filters by principal.
+		"begin_session": "workspace checked internally", "finish_session": "session ids only", "list_sessions": "filters by principal",
 	}
 	// perEntry tools report a denied path inside their structured result
 	// instead of failing the whole call.

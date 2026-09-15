@@ -188,6 +188,12 @@ type MCP struct {
 	ExportRoots []string   `yaml:"export_roots"`
 	Audit       MCPAudit   `yaml:"audit"`
 	Session     MCPSession `yaml:"session"`
+	// Workspace is the mount-relative directory agent sessions deliver
+	// into, one subdirectory per session. Empty derives it from the first
+	// allow prefix plus "/.agent"; with no allow prefix either there is no
+	// default, because the mount root is a synthesised layout directory,
+	// and begin_session reports a configuration error.
+	Workspace string `yaml:"workspace"`
 }
 
 // MCPAudit controls the audit trail agent.db keeps of every tool call.
@@ -226,6 +232,9 @@ func (m *MCP) validateAgent() error {
 	}
 	if m.Session.Idle < 0 {
 		return fmt.Errorf("config: mcp.session.idle must not be negative, got %s", m.Session.Idle)
+	}
+	if w := m.Workspace; w != "" && (!strings.HasPrefix(w, "/") || path.Clean(w) != w || w == "/" || strings.ContainsAny(w, "\x00\\")) {
+		return fmt.Errorf("config: mcp.workspace must be a canonical non-root virtual path, got %q", w)
 	}
 	return nil
 }

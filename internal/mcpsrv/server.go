@@ -84,6 +84,12 @@ type Options struct {
 	// separate view, so the tools that need the shared journal and session
 	// state refuse with errRequiresOwner and point at the HTTP transport.
 	NonOwner bool
+	// Workspace is the mount directory begin_session creates session
+	// directories under (config mcp.workspace). Empty derives it from the
+	// caller's first read prefix plus "/.agent"; a caller who may read the
+	// whole mount then gets a configuration error, since the mount root is
+	// not writable.
+	Workspace string
 }
 
 // errRequiresOwner is the refusal a session or rollback tool gives on a
@@ -183,6 +189,7 @@ func New(opt Options) (*Server, error) {
 	s.registerCopyTools()
 	s.registerUploadTools()
 	s.registerExportTools()
+	s.registerSessionTools()
 	s.registerResources()
 	if opt.Sessions != nil {
 		s.revokeStop = make(chan struct{})

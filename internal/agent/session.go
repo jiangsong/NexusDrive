@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,21 @@ type ListQuery struct {
 	State   string // "" | active | finished | expired
 	Sandbox bool
 	Path    string // sessions whose workspace contains this path
+	// PrincipalID keeps only the sessions of one principal; the MCP
+	// list_sessions tool sets it so an agent sees its own sessions only.
+	PrincipalID string
+}
+
+// BeginOptions is what begin_session asks for.
+type BeginOptions struct {
+	// Name is a short label for the task; it is kept as the session's
+	// summary until finish_session replaces it with a real one.
+	Name string
+	// Sandbox narrows the session's writes to its own directory.
+	Sandbox bool
+	// Workspace is the root the session directory is created under; Begin
+	// appends SessionDirName.
+	Workspace string
 }
 
 // Sessions maps connections to sessions and principals to their scope.
@@ -275,6 +291,10 @@ func (m *Sessions) List(ctx context.Context, q ListQuery) ([]Session, string, er
 		where = append(where, "workspace != '' AND (workspace = ? OR substr(?, 1, length(workspace) + 1) = workspace || '/')")
 		args = append(args, p, p)
 	}
+	if q.PrincipalID != "" {
+		where = append(where, "principal_id = ?")
+		args = append(args, q.PrincipalID)
+	}
 	args = append(args, limit+1)
 	rows, err := m.store.db.QueryContext(ctx, sessionColumns+` WHERE `+strings.Join(where, " AND ")+
 		` ORDER BY started_at DESC, id ASC LIMIT ?`, args...)
@@ -319,6 +339,100 @@ func decodeCursor(cursor string) (int64, string, error) {
 	return startedAt, id, nil
 }
 
+// Begin opens an explicit session on the connection of current, with its
+// own delivery directory under opt.Workspace. The connection's active
+// session (current itself, normally) is finished first, so a connection
+// still has exactly one active session and the next call resolves to the
+// new one. The new session inherits the principal, connection and client
+// of current and its scope; with Sandbox the scope's writes are narrowed to
+// the new directory, and without it a sandbox inherited from an earlier
+// explicit session is lifted, since the principal's scope never had one.
+// The directory itself is created by the caller: this store never touches
+// the mount.
+func (m *Sessions) Begin(ctx context.Context, current Session, opt BeginOptions) (Session, error) {
+	if current.ConnKey == "" || current.PrincipalID == "" {
+		return Session{}, errors.New("agent: the current session has no connection")
+	}
+	if opt.Workspace == "" {
+		return Session{}, ErrWorkspaceUnset
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.opt.Now()
+	tx, err := m.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	defer tx.Rollback()
+	client := current.ClientName
+	if current.Transport == "http-token" {
+		// Over HTTP the token's own name says who this is; the client name
+		// is whatever SDK the token holder happened to use.
+		if p, err := scanPrincipal(tx.QueryRowContext(ctx, principalColumns+` WHERE id = ?`, current.PrincipalID)); err == nil && p.Kind == "token" {
+			client = p.Name
+		}
+	}
+	s := Session{
+		ID: uuid.NewString(), PrincipalID: current.PrincipalID, ConnKey: current.ConnKey,
+		ClientName: current.ClientName, ClientVersion: current.ClientVersion, Transport: current.Transport,
+		Scope: current.Scope, Sandbox: opt.Sandbox, State: "active", StartedAt: now, LastSeenAt: now,
+		Summary: opt.Name,
+	}
+	s.Workspace = path.Join(Normalise(opt.Workspace), SessionDirName(client, now, s.ID))
+	s.Scope.Sandbox = ""
+	if opt.Sandbox {
+		s.Scope.Sandbox = s.Workspace
+	}
+	scope, err := json.Marshal(s.Scope)
+	if err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	var finished []Session
+	rows, err := tx.QueryContext(ctx, sessionColumns+` WHERE conn_key = ? AND state = 'active'`, current.ConnKey)
+	if err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	for rows.Next() {
+		old, err := scanSession(rows)
+		if err != nil {
+			rows.Close()
+			return Session{}, err
+		}
+		old.State, old.FinishedAt = "finished", now
+		finished = append(finished, old)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	rows.Close()
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET state = 'finished', finished_at = ? WHERE conn_key = ? AND state = 'active'`,
+		now.UnixNano(), current.ConnKey); err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, summary)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+		s.ID, s.PrincipalID, s.ConnKey, s.ClientName, s.ClientVersion, s.Transport, string(scope), s.Workspace, boolInt(s.Sandbox),
+		now.UnixNano(), now.UnixNano(), s.Summary); err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	for i := range finished {
+		m.store.publish(Event{Kind: "session", Session: &finished[i]})
+	}
+	m.store.publish(Event{Kind: "session", Session: &s})
+	return s, nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // Finish closes a session with a summary. Finishing is terminal: the next
 // call on the same connection starts a new session. A session that is no
 // longer active is returned as it is.
@@ -329,6 +443,33 @@ func (m *Sessions) Finish(ctx context.Context, id, summary string) (Session, err
 	if err != nil {
 		return Session{}, fmt.Errorf("agent: %w", err)
 	}
+	return m.finished(ctx, id, res)
+}
+
+// FinishWith is Finish for an explicit session: it also records the
+// artifacts the session delivered, and an empty summary keeps the label
+// the session was begun with rather than blanking it.
+func (m *Sessions) FinishWith(ctx context.Context, id, summary string, arts []Artifact) (Session, error) {
+	if arts == nil {
+		arts = []Artifact{}
+	}
+	artifacts, err := json.Marshal(arts)
+	if err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	now := m.opt.Now()
+	res, err := m.store.db.ExecContext(ctx, `UPDATE sessions SET state = 'finished', finished_at = ?, artifacts = ?,
+		summary = CASE WHEN ? = '' THEN summary ELSE ? END WHERE id = ? AND state = 'active'`,
+		now.UnixNano(), string(artifacts), summary, summary, id)
+	if err != nil {
+		return Session{}, fmt.Errorf("agent: %w", err)
+	}
+	return m.finished(ctx, id, res)
+}
+
+// finished reads a session back after a finishing update and publishes it
+// when the update took effect.
+func (m *Sessions) finished(ctx context.Context, id string, res sql.Result) (Session, error) {
 	s, err := m.Get(ctx, id)
 	if err != nil {
 		return Session{}, err

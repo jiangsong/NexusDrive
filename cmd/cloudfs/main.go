@@ -697,7 +697,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
-		Sessions: d.Sessions, NonOwner: nonOwner,
+		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
 	})
 	if err != nil {
 		return err
@@ -723,7 +723,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
-		Sessions: d.Sessions,
+		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
 	})
 	if err != nil {
 		return err

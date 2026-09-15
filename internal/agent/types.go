@@ -61,7 +61,7 @@ type Artifact struct {
 	SHA256      string    `json:"sha256,omitempty"`
 	State       string    `json:"state"` // synced | local
 	DownloadURL string    `json:"download_url,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
 }
 
 // AuditRow is one recorded tool call. Args is the redacted argument object;

@@ -223,6 +223,21 @@ func TestMCPAgentExplicitDurationsAreKept(t *testing.T) {
 	}
 }
 
+func TestMCPWorkspaceMustBeCanonical(t *testing.T) {
+	for _, bad := range []string{"work/.agent", "/work/../x", "/", "/work/", "/work/./x"} {
+		if _, err := Parse([]byte("mcp:\n  workspace: " + bad + "\n")); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	cfg, err := Parse([]byte("mcp:\n  workspace: /work/.box\n"))
+	if err != nil || cfg.MCP.Workspace != "/work/.box" {
+		t.Fatalf("%+v %v", cfg.MCP, err)
+	}
+	if cfg, err := Parse([]byte(example)); err != nil || cfg.MCP.Workspace != "" {
+		t.Fatalf("workspace has no default in the file: %q %v", cfg.MCP.Workspace, err)
+	}
+}
+
 func TestMCPAgentNegativeDurationsAreRejected(t *testing.T) {
 	// The example fixture already carries an mcp section, and YAML refuses a
 	// second one, so these documents stand on their own over Default().
