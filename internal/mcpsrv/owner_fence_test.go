@@ -8,6 +8,7 @@ import (
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
+	"cloudfs/internal/memory"
 	"cloudfs/internal/meta"
 )
 
@@ -22,9 +23,12 @@ import (
 func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 	root := t.TempDir()
 	exports := newFakeExportJobs()
+	memFS := &lateFS{}
+	memStore := memory.New(memory.Options{FS: memFS, Config: config.Memory{Root: "/work/.agent", MaxFactBytes: 1 << 16, MaxAgentBytes: 1 << 25}})
 	e, st, x := newIndexAgentEnv(t,
-		Options{Export: exports, ExportRoots: []string{root}, NonOwner: true, Workspace: "/work/.agent"},
+		Options{Export: exports, ExportRoots: []string{root}, NonOwner: true, Workspace: "/work/.agent", Memory: memStore},
 		agent.Scope{Read: []string{"/"}}, config.Index{Enabled: true})
+	memFS.fs = e.fs
 	e.fake.Seed("work/a.txt", []byte("hello"))
 	e.fake.Seed("work/b.txt", []byte("bye"))
 	// Warm the tree so the read tools below need no provider round trip
@@ -69,6 +73,8 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"finish_session":    {},
 		"list_sessions":     {},
 		"rollback_session":  {"session_id": "x", "confirm": true},
+		"memory_put":        {"name": "style", "content": "x"},
+		"memory_delete":     {"name": "style", "confirm": true},
 	}
 	// Read tools that must succeed outright on the warmed tree.
 	readOK := map[string]map[string]any{
@@ -94,6 +100,9 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"get_copy_job":        {"id": "x"},
 		"get_export_job":      {"id": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"},
 		"read_extracted_text": {"path": "/work/a.txt"},
+		"memory_list":         {},
+		"memory_get":          {"name": "style"},
+		"memory_search":       {"query": "style"},
 	}
 
 	tools, err := e.session.ListTools(ctx, nil)

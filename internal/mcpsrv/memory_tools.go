@@ -230,8 +230,8 @@ func (s *Server) memoryGet(ctx context.Context, req *mcp.CallToolRequest, in mem
 }
 
 func (s *Server) memoryPut(ctx context.Context, req *mcp.CallToolRequest, in memoryPutInput) (*mcp.CallToolResult, memoryPutOutput, error) {
-	if s.opt.NonOwner {
-		r, _ := fail(errRequiresOwner)
+	if err := s.requireOwner(ctx); err != nil {
+		r, _ := fail(err)
 		return r, memoryPutOutput{}, nil
 	}
 	ag, err := s.memoryAgent(ctx, req, in.Agent)
@@ -275,8 +275,8 @@ func (s *Server) memoryPut(ctx context.Context, req *mcp.CallToolRequest, in mem
 }
 
 func (s *Server) memoryDelete(ctx context.Context, req *mcp.CallToolRequest, in memoryDeleteInput) (*mcp.CallToolResult, memoryDeleteOutput, error) {
-	if s.opt.NonOwner {
-		r, _ := fail(errRequiresOwner)
+	if err := s.requireOwner(ctx); err != nil {
+		r, _ := fail(err)
 		return r, memoryDeleteOutput{}, nil
 	}
 	ag, err := s.memoryAgent(ctx, req, in.Agent)

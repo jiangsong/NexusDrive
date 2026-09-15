@@ -1075,10 +1075,10 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
 ### [ ] T-11 92 处 `UNVERIFIED` 待真实账号核对
 
 按协议资料推断、未在真实账号上跑通的细节。2026-09-07 重新计数：
-`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **100 处**（2026-09-15 二期合并后重数：线 D 加了 3 处——
+`grep -rn UNVERIFIED --include='*.go' internal cmd` 命中 **100 处**（2026-09-15 二期合并后重数，严格 `UNVERIFIED:` 为 92：线 D 加了 3 处——
 `internal/embed/openai.go` 的 openai 线上格式与 `dimensions`、`internal/embed/ollama.go` 的 ollama 批量接口返回顺序、
 `internal/index/embed_worker.go` 的 64 条批是否超真实端点上限；线 E 加了 1 处——`internal/trigger/exec_windows.go` Windows 无 `Setpgid`
-的进程组终止；严格的 `grep -rn 'UNVERIFIED:' --include=*.go | wc -l` 计数见合并后的重数；此前 96 处：一期加了 4 处——PDF 中文抽取质量、
+的进程组终止；此前 96 处：一期加了 4 处——PDF 中文抽取质量、
 爬取器与索引 worker 的 quark 风控映射、Codex HTTP 配置键；再此前为 92 处 / 31 个文件，2026-09-12 重数；
 其中 5 处是 T-33 配额哨兵新加的驱动映射，其余差额来自此前未计入的测试与工具文件），
 不是此前记的 56——差额主要是 `internal/winfs`（10 处）与 `cmd/cloudfs-desktop`（1 处）
