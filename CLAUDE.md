@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 CloudFS：把国内外网盘挂载为本地目录的单机守护进程，同时通过 MCP 把同一份文件系统暴露给 agent。
-Go 1.27，模块名 `cloudfs`，约 105k 行、41 个包目录、1141 个测试函数。
+Go 1.27，模块名 `cloudfs`，约 200k 行、57 个包目录、2200+ 个测试函数。
 
 ## 工具链与常用命令
 
@@ -95,7 +95,7 @@ cmd/cloudfs ── fusefs (内核) ─┐
 外加测试用的 `fake`。
 
 部分 API 与平台细节尚未在真实账号/真机上验证，代码里用 `UNVERIFIED:` 注释标注
-（当前 78 处，含 `internal/winfs` 的 10 处），每处都写清楚要验证什么。**改这些地方时保留或更新标注，验证通过才删除**。`Caps.Tier` 为
+（当前约 100 处，含 `internal/winfs` 的 10 处；TODO.md T-11 有按包的分布），每处都写清楚要验证什么。**改这些地方时保留或更新标注，验证通过才删除**。`Caps.Tier` 为
 `unofficial` 的驱动（quark）默认限流更保守，风控信号映射为 `provider.ErrRiskControl` 以触发
 熔断而不是重试进封号。各驱动的具体约束见 `docs/providers.md`。
 

@@ -401,6 +401,8 @@ test/perf/embed_perf_test.go（D1）
 
 ## 合入与二期总验证
 
+> 2026-09-15 完成：C → E → D 依次 rebase + ff 合入；合入后 `memory_put/delete` 改走 `requireOwner` 并进栅栏测试；总验证全绿（`./gow test ./...`、node 113/113、perf 基线不变、chaos -race、6 个浏览器冒烟 PASS、11 个新改包 -race）。`grep -c` 关闭数为 5/6：T-43 保持开放（桥）。
+
 1. 顺序 C → E → D，各自 `git rebase feat/agent-phase1` 后 ff 合入；每次合入后立刻 `./gow build ./... && ./gow vet ./... && ./gow test ./internal/... -count=1`。
 2. 合入后收口（在 `feat/agent-phase1` 上一个提交）：`TestEveryToolChecksItsPaths` 登记齐 `rollback_session` 与 5 个 `memory_*`；`cmd/cloudfs/main.go` 两处 `mcpsrv.Options` 同时带 `Preimages`/`Memory`；导航顺序与 `docs/ui-plan.md` 一致；`docs/agent-roadmap.md` §7.1/§7.2 状态列。
 3. 总验证：
