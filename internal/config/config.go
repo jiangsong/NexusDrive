@@ -185,7 +185,49 @@ type MCP struct {
 	// agent may read out of the mount; this is about where it may write on
 	// this machine, which is a different question and needs its own answer.
 	// An empty list means the tool refuses every destination.
-	ExportRoots []string `yaml:"export_roots"`
+	ExportRoots []string   `yaml:"export_roots"`
+	Audit       MCPAudit   `yaml:"audit"`
+	Session     MCPSession `yaml:"session"`
+}
+
+// MCPAudit controls the audit trail agent.db keeps of every tool call.
+type MCPAudit struct {
+	// Retain is how long audit rows are kept; zero means the default of
+	// 90 days.
+	Retain time.Duration `yaml:"retain"`
+}
+
+// MCPSession controls how MCP sessions are scoped over time.
+type MCPSession struct {
+	// Idle is how long a session may stay silent before it is finished and
+	// a token connection starts a new one; zero means the default of 30
+	// minutes.
+	Idle time.Duration `yaml:"idle"`
+}
+
+// DefaultMCPAudit is the audit configuration used when the file sets none.
+func DefaultMCPAudit() MCPAudit { return MCPAudit{Retain: 90 * 24 * time.Hour} }
+
+// DefaultMCPSession is the session configuration used when the file sets
+// none.
+func DefaultMCPSession() MCPSession { return MCPSession{Idle: 30 * time.Minute} }
+
+// validateAgent fills in the audit and session defaults and rejects
+// durations that would keep nothing or expire everything at once.
+func (m *MCP) validateAgent() error {
+	if m.Audit.Retain == 0 {
+		m.Audit.Retain = DefaultMCPAudit().Retain
+	}
+	if m.Session.Idle == 0 {
+		m.Session.Idle = DefaultMCPSession().Idle
+	}
+	if m.Audit.Retain < 0 {
+		return fmt.Errorf("config: mcp.audit.retain must not be negative, got %s", m.Audit.Retain)
+	}
+	if m.Session.Idle < 0 {
+		return fmt.Errorf("config: mcp.session.idle must not be negative, got %s", m.Session.Idle)
+	}
+	return nil
 }
 
 type Control struct {
@@ -397,6 +439,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: cache.block_size must be a positive multiple of 64KiB, got %s", c.Cache.BlockSize)
 	}
 	if err := c.Export.Validate(); err != nil {
+		return err
+	}
+	if err := c.MCP.validateAgent(); err != nil {
 		return err
 	}
 	// Validate the global cache policy on its own, so an unknown preset or a

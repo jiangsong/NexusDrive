@@ -199,3 +199,39 @@ pools:
 		t.Fatalf("adding a member changed the pool remote's binding: %q -> %q", before, after)
 	}
 }
+
+func TestMCPAgentDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCP.Audit.Retain != 90*24*time.Hour {
+		t.Fatalf("retain = %v", cfg.MCP.Audit.Retain)
+	}
+	if cfg.MCP.Session.Idle != 30*time.Minute {
+		t.Fatalf("idle = %v", cfg.MCP.Session.Idle)
+	}
+}
+
+func TestMCPAgentExplicitDurationsAreKept(t *testing.T) {
+	cfg, err := Parse([]byte("mcp:\n  audit:\n    retain: 24h\n  session:\n    idle: 5m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCP.Audit.Retain != 24*time.Hour || cfg.MCP.Session.Idle != 5*time.Minute {
+		t.Fatalf("audit=%+v session=%+v", cfg.MCP.Audit, cfg.MCP.Session)
+	}
+}
+
+func TestMCPAgentNegativeDurationsAreRejected(t *testing.T) {
+	// The example fixture already carries an mcp section, and YAML refuses a
+	// second one, so these documents stand on their own over Default().
+	for _, doc := range []string{
+		"mcp:\n  audit:\n    retain: -1h\n",
+		"mcp:\n  session:\n    idle: -1m\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Fatalf("negative duration accepted: %q", doc)
+		}
+	}
+}

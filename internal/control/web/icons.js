@@ -9,6 +9,7 @@ export const icons = {
   globe: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>'),
   wrench: svg('<path d="M14 6a4 4 0 0 1 5 5l-9 9-4-1-1-4z"/>'),
   download: svg('<path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/>'),
+  bot: svg('<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 4v4"/><circle cx="9" cy="13.5" r="1"/><circle cx="15" cy="13.5" r="1"/><path d="M9.5 17h5"/>'),
   transfer: svg('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>'),
   search: svg('<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>'),
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
