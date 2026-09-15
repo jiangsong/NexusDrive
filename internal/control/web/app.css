@@ -134,6 +134,10 @@ tbody tr.denied:hover td { background: #1f1414; }
 /* Tabs on a screen that holds several tables. */
 .tabs { display: flex; gap: 6px; padding: 0 20px 14px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tabs button[aria-selected="true"] { border-color: var(--accent-border); background: var(--accent-bg); font-weight: 600; }
+/* A search hit inside a file name. The browser default is black on yellow,
+   which on this page reads as an error. */
+mark { background: var(--accent-bg); color: var(--accent-text); border-radius: 3px; padding: 0 1px; }
+th[aria-sort="ascending"], th[aria-sort="descending"] { color: var(--accent-text); }
 
 button, .btn {
   display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px;

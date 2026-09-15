@@ -39,9 +39,11 @@ func TestListingScreensFollowTheCursor(t *testing.T) {
 }
 
 // A truncated search is a fact about the result, so it belongs beside the
-// results and not in a toast that fades after three seconds.
+// results and not in a toast that fades after three seconds. The search
+// listener moved out of main.js into name_search.js, and the line went with
+// it.
 func TestTruncatedSearchSaysSoInTheResults(t *testing.T) {
-	if !strings.Contains(webSource(t, "web/screens/main.js"), "t('search.truncated'") {
+	if !strings.Contains(webSource(t, "web/name_search.js"), "t('search.truncated'") {
 		t.Fatal("a truncated search result set is not marked in the table")
 	}
 }

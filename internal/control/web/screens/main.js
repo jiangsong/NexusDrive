@@ -6,6 +6,7 @@ import { linkExpiry } from '/ui/expiry.js';
 import { openAddDrive } from '/ui/add_drive.js';
 import { openConnection } from '/ui/connection.js';
 import { onFsChange } from '/ui/app.js';
+import { mountNameSearch } from '/ui/name_search.js';
 import { get, subscribe } from '/ui/store.js';
 import { workspaceMark, sessionDirOf } from '/ui/workspace_view.js';
 import { openSessionPanel } from '/ui/session_panel.js';
@@ -76,6 +77,10 @@ export function renderMain(host) {
 
   const crumb = el('div', { style: 'display:flex;align-items:center;gap:6px;min-width:0;font-size:14px' });
   const rows = el('tbody');
+  // The directory's header; the search module swaps its sortable one in.
+  const thead = el('thead');
+  const browseHeader = el('tr', {}, el('th', {}, t('col.name')), el('th', { class: 'num' }, t('col.size')),
+    el('th', { style: 'padding-left:20px' }, t('col.modified')), el('th', { style: 'padding-left:20px' }, t('col.state')));
   const searchBox = el('input', { type: 'search', placeholder: t('search.placeholder'), style: 'width:220px' });
 
   // The dot beside each connection is its reachability from /status: the
@@ -212,6 +217,7 @@ export function renderMain(host) {
     if (!cursor) {
       markedWith = workspaceRoot();
       fill(rows);
+      fill(thead, browseHeader);
       fill(crumb, iconEl('folder'),
         ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
           const p = '/' + all.slice(0, i + 1).join('/');
@@ -223,7 +229,7 @@ export function renderMain(host) {
       const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500'
         + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
       rows.append(...(page.entries || []).map((e) => {
-        const tr = el('tr', { onclick: () => select(e, tr) },
+        const tr = el('tr', { 'data-path': e.path, onclick: () => select(e, tr) },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' },
             el('span', { style: 'color:' + (e.is_dir ? 'var(--accent-text)' : 'var(--muted)') }, iconEl(e.is_dir ? 'folder' : 'file')), e.name, workspaceMarkEl(e))),
           el('td', { class: 'num dim' }, e.is_dir ? '—' : bytes(e.size)),
@@ -377,34 +383,25 @@ export function renderMain(host) {
     catch (err) { toast(err.message, 'bad'); }
   }
 
-  let searchTimer;
-  searchBox.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(async () => {
-      const q = searchBox.value.trim();
-      if (!q) { load(); return; }
-      try {
-        const r = await api.get('/search?q=' + encodeURIComponent(q) + '&path=' + encodeURIComponent(cwd) + '&limit=100');
-        fill(rows, ...(r.results || []).map((hit) => el('tr', { onclick: () => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load(); } },
-          el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' }, iconEl('file'), hit.name)),
-          el('td', { class: 'num dim' }, ''), el('td', { class: 'detail', style: 'padding-left:20px' }, hit.path), el('td', {}))));
-        if (!(r.results || []).length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
-        // Truncation is a property of this result set, so it stays on screen
-        // with the rows instead of fading out of a toast.
-        if (!r.complete) rows.append(el('tr', {}, el('td', { colspan: '4', class: 'dim', style: 'text-align:center;padding:12px' }, t('search.truncated'))));
-      } catch (err) { toast(err.message, 'bad'); }
-    }, 250);
+  // Scope, shortcuts, request, result rows and the coverage line live in
+  // name_search.js; this screen only says what clear, render, open and
+  // select do here. Opening goes to the folder and selects the row by data-path.
+  const search = mountNameSearch({
+    searchBox, rows, getCwd: () => cwd,
+    onClear: () => load(),
+    onSearch: () => fill(thead, search.header),
+    onOpen: (hit) => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load().then(() => selectPath(hit.path)); },
+    onSelect: (hit, tr) => select({ name: hit.name, path: hit.path, size: hit.size, mtime: hit.mtime, is_dir: hit.kind === 'dir', cached: hit.cached ? 1 : 0 }, tr),
   });
+  function selectPath(p) { const tr = rows.querySelector('tr[data-path="' + CSS.escape(p) + '"]'); if (tr) tr.click(); }
 
   main.append(
     el('div', { style: 'height:52px;flex-shrink:0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 18px' },
-      crumb, el('div', { class: 'grow' }), searchBox,
+      crumb, el('div', { class: 'grow' }), search.scopeControl, searchBox,
       el('button', { onclick: newFolder, 'aria-label': t('action.newfolder'), title: t('action.newfolder') }, iconEl('plus')),
       el('button', { onclick: () => load(), 'aria-label': t('action.refresh'), title: t('action.refresh') }, iconEl('refresh'))),
-    el('div', { style: 'flex-grow:1;overflow:auto' },
-      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, t('col.name')), el('th', { class: 'num' }, t('col.size')),
-        el('th', { style: 'padding-left:20px' }, t('col.modified')), el('th', { style: 'padding-left:20px' }, t('col.state')))), rows)));
-
+    search.statusLine,
+    el('div', { style: 'flex-grow:1;overflow:auto' }, el('table', {}, thead, rows)));
 
   // An upload finishing is not a reason to throw away the page the reader
   // walked to: reloading from the top is what a directory of more than 500
@@ -414,7 +411,9 @@ export function renderMain(host) {
     if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) load();
   });
   loadAccounts();
-  load();
   renderInspector();
-  return () => { off(); unsubscribeHealth(); clearTimeout(searchTimer); };
+  // A deep link (#/connections?q=plan) searches after the directory is in.
+  searchBox.value = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
+  load().then(() => searchBox.value && search.run());
+  return () => { off(); unsubscribeHealth(); search.dispose(); };
 }
