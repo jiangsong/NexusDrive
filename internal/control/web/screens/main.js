@@ -10,6 +10,9 @@ import { mountNameSearch } from '/ui/name_search.js';
 import { get, subscribe } from '/ui/store.js';
 import { workspaceMark, sessionDirOf } from '/ui/workspace_view.js';
 import { openSessionPanel } from '/ui/session_panel.js';
+import { readSearchMode, writeSearchMode, runContentSearch, contentSearchHeader } from '/ui/content_search.js';
+import { openExtractedText } from '/ui/extracted_text.js';
+import { renderIndexInfo } from '/ui/index_inspector.js';
 
 // The main window: connections on the left, the file table in the middle, an
 // inspector on the right. Everything it does goes through the /fs and /accounts
@@ -46,6 +49,14 @@ function stateCell(entry) {
 function workspaceRoot() {
   const s = get().status;
   return s && s.agent ? s.agent.workspace || '' : '';
+}
+
+// indexEnabled is whether the daemon has a content index, from its last
+// status tick. The "content" search segment and the inspector's index line
+// exist only while it does.
+function indexEnabled() {
+  const status = get().status;
+  return !!(status && status.index && status.index.enabled);
 }
 
 // workspaceMarkEl is the small bot beside a workspace or session directory.
@@ -119,12 +130,23 @@ export function renderMain(host) {
   // redraws them once. The workspace does not change while the daemon runs,
   // so this is one extra list per page, not one per tick.
   let markedWith = '';
+  // indexWas is what the search segments and the inspector were last drawn
+  // with; the tick that turns the index on or off redraws both (a deep link
+  // selects its entry before the first tick), and reruns a search that is
+  // on screen so it is answered in the mode the box now shows.
+  let indexWas = indexEnabled();
   const unsubscribeHealth = subscribe(() => {
     for (const [name, dot] of dots) {
       dot.className = 'dot ' + dotClass(remoteState(name));
       dot.title = remoteStateTitle(name);
     }
     if (!paged && workspaceRoot() !== markedWith) load();
+    if (indexEnabled() !== indexWas) {
+      indexWas = indexEnabled();
+      search.refresh();
+      if (searchBox.value.trim()) search.run();
+      if (selected) renderInspector();
+    }
   });
 
   async function loadAccounts() {
@@ -262,6 +284,10 @@ export function renderMain(host) {
   function renderInspector() {
     if (!selected) { fill(inspector, el('div', { class: 'eyebrow' }, t('inspector.title')), el('p', { class: 'dim' }, t('inspector.empty'))); return; }
     const e = selected;
+    // The index line arrives after the rest: index_inspector.js asks the
+    // daemon and fills the host, or leaves it empty when there is no index.
+    const indexHost = el('div', {});
+    if (indexEnabled()) renderIndexInfo(e, indexHost);
     fill(inspector,
       el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, t('inspector.title')),
       el('div', { style: 'font-weight:620;overflow-wrap:anywhere' }, e.name),
@@ -271,6 +297,7 @@ export function renderMain(host) {
       e.availability ? infoRow(t('inspector.replicas'), e.degraded_reason
         ? t('inspector.replicas.reason', t('avail.' + e.availability), e.replicas_live, e.replicas_target, e.degraded_reason)
         : `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}`) : null,
+      indexHost,
       e.is_dir ? null : el('div', { class: 'progress' + (e.cached < 1 ? ' warn' : ''), style: 'margin:12px 0' }, el('span', { style: `width:${Math.round((e.cached || 0) * 100)}%` })),
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),
@@ -398,12 +425,27 @@ export function renderMain(host) {
   // Scope, shortcuts, request, result rows and the coverage line live in
   // name_search.js; this screen only says what clear, render, open and
   // select do here. Opening goes to the folder and selects the row by data-path.
+  // The "content" segment is an extra mode of that control: offered only
+  // while the daemon reports index.enabled, remembered by content_search.js
+  // so a reload keeps it, and answered by /index/search with the extracted
+  // text panel behind each row.
+  const contentHeader = contentSearchHeader();
   const search = mountNameSearch({
     searchBox, rows, getCwd: () => cwd,
     onClear: () => load(),
     onSearch: () => fill(thead, search.header),
     onOpen: (hit) => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load().then(() => selectPath(hit.path)); },
     onSelect: (hit, tr) => select({ name: hit.name, path: hit.path, size: hit.size, mtime: hit.mtime, is_dir: hit.kind === 'dir', cached: hit.cached ? 1 : 0 }, tr),
+    extraModes: [{
+      id: 'content', when: () => indexEnabled(), label: t('search.mode.content'),
+      active: () => readSearchMode() === 'content',
+      select: (on) => writeSearchMode(on ? 'content' : 'name'),
+      run: (q) => runContentSearch({
+        rows, query: q,
+        onSearch: () => fill(thead, contentHeader),
+        onOpen: (hit) => openExtractedText(hit.path, hit.start_off, hit.end_off),
+      }),
+    }],
   });
   function selectPath(p) { const tr = rows.querySelector('tr[data-path="' + CSS.escape(p) + '"]'); if (tr) tr.click(); }
 
@@ -425,8 +467,11 @@ export function renderMain(host) {
   });
   loadAccounts();
   renderInspector();
-  // A deep link (#/connections?q=plan) searches after the directory is in.
-  searchBox.value = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
+  // A deep link (#/connections?q=plan) searches after the directory is in;
+  // &mode=content asks the content index, once the status tick that says
+  // there is one has arrived.
+  searchBox.value = link.get('q') || '';
+  if (link.get('mode') === 'content') { writeSearchMode('content'); search.refresh(); }
   load().then(() => searchBox.value && search.run());
   return () => { off(); unsubscribeHealth(); search.dispose(); };
 }

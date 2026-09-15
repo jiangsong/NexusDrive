@@ -240,7 +240,9 @@ export function mountNameSearch({ searchBox, rows, getCwd, onClear, onSearch, on
     // authoritative one and arrives as a toast.
     syncFilters(parsed);
     const mode = currentMode();
-    if (mode) { await mode.run(query); return; }
+    // An extra mode answers the query itself; the coverage line describes
+    // the name index and would be wrong under its rows.
+    if (mode) { statusLine.style.display = 'none'; await mode.run(query); return; }
     let r;
     try { r = await api.get(searchURL({ query, scope, cwd: getCwd(), sort, limit: LIMIT })); } catch (err) { toast(err.message, 'bad'); return; }
     if (mine !== seq) return;
