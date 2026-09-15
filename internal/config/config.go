@@ -387,6 +387,13 @@ type Index struct {
 	// as "<size>/h". FetchBudgetPerHour is its parsed value.
 	FetchBudget        string `yaml:"fetch_budget"`
 	FetchBudgetPerHour int64  `yaml:"-"`
+	// MaxChunks is the hard cap on chunks the vector store holds; past it
+	// new chunks are indexed for keyword search only (docs/agent-roadmap.md
+	// §3.5). Default 200 000.
+	MaxChunks int `yaml:"max_chunks"`
+	// Embedding names the endpoint semantic search sends chunk text to;
+	// the default provider none keeps the index keyword-only.
+	Embedding IndexEmbedding `yaml:"embedding"`
 }
 
 // IndexRule indexes one virtual subtree.
@@ -435,6 +442,15 @@ func (x *Index) Validate() error {
 	}
 	if x.FetchBudget == "" {
 		x.FetchBudget = defaultIndexFetchBudget
+	}
+	if x.MaxChunks == 0 {
+		x.MaxChunks = defaultIndexMaxChunks
+	}
+	if x.MaxChunks < 0 {
+		return fmt.Errorf("config: index.max_chunks must be positive, got %d", x.MaxChunks)
+	}
+	if err := x.Embedding.validate(); err != nil {
+		return err
 	}
 	if x.MaxTextBytes <= 0 {
 		return fmt.Errorf("config: index.max_text_bytes must be positive, got %s", x.MaxTextBytes)
@@ -686,6 +702,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateTriggers(names); err != nil {
 		return err
+	}
+	if p := c.Index.Embedding.Proxy; p != "" && !names[p] {
+		return fmt.Errorf("config: index.embedding.proxy references unknown proxy %q", p)
 	}
 	for name, r := range c.Remotes {
 		if r.Type == "" {
