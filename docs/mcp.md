@@ -2,7 +2,7 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
-> **规划中**：会话与交付箱（`begin_session`/`finish_session`）、按令牌授权的读写分离作用域、持久审计、会话回滚、内容索引与 `semantic_search`、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-34 ~ T-43）。这些工具**尚未实现**，下文工具表只列出已实现的工具。
+> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"。**仍在规划中**：会话回滚、内容索引与 `semantic_search`、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-37 ~ T-43）。工具表只列出已实现的工具。
 
 ## 注册
 
@@ -36,6 +36,14 @@ cloudfs mcp --http 127.0.0.1:8765
 空主机地址（如 `:8765`）实际绑定所有网卡，同样必须认证。HTTP 启用跨源请求保护，
 包括旧版 GET 通知流的 Origin 校验；原 SDK 的本地 Host 防护仍保留。
 
+bearer token 有两种：`CLOUDFS_MCP_TOKEN` 环境变量（旧方式，全权，保留兼容）和
+`cloudfs mcp token create` 签发的**作用域令牌**（推荐，见"[访问令牌与 HTTP 接入](#访问令牌与-http-接入)"）。
+回环监听在签发第一个令牌之前保持免认证（本机进程直接连），一旦存在有效令牌就只认令牌。
+
+```sh
+cloudfs mcp install --client claude --transport http   # 打印带 Authorization 头的 HTTP 注册片段
+```
+
 同一端点按协议版本选择传输：`2026-07-28` 使用无会话 POST；旧版继续使用
 initialize/session/GET。旧版会话 5 分钟没有 POST 会过期，长期订阅客户端需发送
 keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后续文件变更触发清理。
@@ -44,8 +52,10 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 
 | 机制 | 说明 |
 |---|---|
-| `--allow <path>` | 允许列表。路径先规范化再校验，`..` 穿越无效。列表为空表示整个挂载可见 |
+| `--allow <path>` | 允许列表。路径先规范化再校验，`..` 穿越无效。列表为空表示整个挂载可见。它是 stdio、环境变量 token 与回环免认证调用的默认作用域；签发的访问令牌带自己的作用域（见下） |
 | `--read-only` | 拒绝所有修改类工具 |
+| 会话作用域 | 每个连接都有一个会话，读写分开检查；`sandbox` 会话只能写自己的目录。见"会话与作用域" |
+| 审计 | 每次工具调用（含拒绝）落到 `agent.db`，参数脱敏；`cloudfs audit` 与控制台「Agent」屏可查 |
 | `delete` 需要 `confirm=true` | 删除同时作用于远端且不可撤销 |
 | 响应上限 | 每个工具都有 `limit` / `max_bytes`，超出返回 `truncated: true` 与续读游标 |
 | 不暴露凭据 | token、cookie 永不出现在任何工具的返回里 |
@@ -97,6 +107,18 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `resume_upload` | `id`, `confirm` | 必须 confirm=true；校验当前本地版本并按当前数据库/挂载/授权代次重新绑定后开始全新尝试，接受远端重放风险 |
 | `discard_upload` | `id`, `confirm` | 仅无 `--allow` 限制的服务；永久清理已停止的当前本地版本，不撤销远端结果 |
 | `flush_uploads` | 无 | 仅无 `--allow` 限制的服务；等待整个当前队列快照，不跳过死信、取消或清理记录 |
+
+### 会话
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `begin_session` | `name?`, `sandbox?` | 在工作区下建一个本会话专属目录（`<workspace>/<client>-<日期>-<sid前8位>/`，永不复用），写入 `manifest.json` 骨架，返回 `session_id`、`workspace`、`uri`。`sandbox=true` 时本会话的写被收窄到该目录，读不变 |
+| `finish_session` | `session_id?`, `summary?`, `share?` | 结束会话（默认当前会话，只能结束自己 principal 的会话）：从审计里取本会话成功写过的路径作为产物，写全 `manifest.json`，返回 `artifacts[]`。`share=true` 只对已同步（`state=synced`）的文件附 `download_url`，仍在本地的不等待、不请求直链 |
+| `list_sessions` | `cursor?`, `limit?`, `state?` | 列本 principal 的会话，最新在前，含工作区与产物 |
+
+三个工具只在服务持有 `Sessions`（`cloudfs mount`/`cloudfs mcp` 常规启动都持有）时注册；
+在非 owner 的 stdio 进程里它们返回 `requires the storage owner; use the HTTP transport`（见"与挂载并存"）。
+产物用现有写工具直接写进会话目录即可，没有单独的 `write_artifact`。
 
 ### 复制任务管理
 
@@ -253,6 +275,85 @@ SDK 仍然没有按会话投递的入口，所以定向是这样做到的：发�
 会话反复连断后 `sessions`/`streams`/`count`/`senders` 全部归零，但外层条目在 SDK 内部，
 这里不假装修好了它。真实 FUSE/网盘事件仍需验收。
 
+## 会话与作用域
+
+一期 Agent 底座把"谁在调用、能碰什么、做了什么"落成三张表，存在 `<cache.dir>/agent/agent.db`
+（独立 SQLite，不动 meta/journal；任何进程都能追加审计行，保留期清理只在 owner 进程跑）。
+设计背景见 [Agent 工作底座路线图](agent-roadmap.md)。
+
+### 作用域模型
+
+`Scope{read, write, read_only, expires_at, sandbox}`：`read` 是可见前缀（空 = 整个挂载），`write`
+省略时同 `read`、给空列表表示不可写，`sandbox` 非空时写再收窄到该目录。每个工具调用都按
+"读还是写"分别检查：`delete`/`move`/`copy` 的两端都按写检查，`resources/subscribe` 按读检查。
+`--allow`/`--read-only` 是本进程的**默认作用域**，stdio、`CLOUDFS_MCP_TOKEN` 与回环免认证的调用都用它；
+签发的访问令牌是用户显式授予的一份独立作用域（`--write` 必须在 `--read` 内），**不**与 `mcp.allow`
+求交，所以只签发你真的想给出去的前缀。会话只能在自己 principal 的作用域内收窄（`sandbox`），
+不能放大。越界调用返回 denied 并进审计。
+
+每个 MCP 连接对应一个**会话**（principal、传输、作用域、开始/最后活动时间、写次数、产物）：
+
+| 传输 | 会话身份 |
+|---|---|
+| stdio | 一进程一会话，principal 是本进程的默认作用域 |
+| HTTP 作用域令牌 | 同一令牌的所有请求是一条连接（无状态 HTTP 下每个 POST 都是新的 SDK session，不能当身份）；空闲超过 `mcp.session.idle`（默认 30 分钟）自动结束并轮转新会话 |
+| HTTP 旧版有状态协议 | 按 SDK session id |
+| HTTP 回环免认证 | 一个本机默认 principal，同样按空闲轮转 |
+
+### 访问令牌与 HTTP 接入
+
+```sh
+cloudfs mcp token create --name codex --read /work --write /work/.agent --ttl 720h
+cloudfs mcp token list                  # 只显示名称、4 位指纹、作用域、过期与最后使用
+cloudfs mcp token revoke codex --confirm
+cloudfs mcp install --client claude --transport http [--url http://127.0.0.1:8765/] [--token <token>]
+```
+
+令牌明文只在创建时打印一次，库里只存 `sha256`；`list` 与控制面 `GET /mcp/tokens` 只给指纹。
+过期或吊销的令牌 `initialize` 得 401，吊销同时关闭该 principal 仍活着的旧版有状态会话
+（其它进程吊销的在 2 秒内生效）。`--write` 的每个前缀必须落在某个 `--read` 前缀内。
+
+`mcp install --transport http` 输出带 `Authorization: Bearer <token>` 的注册片段，并在
+stderr 给出可直接执行的 `claude mcp add --transport http cloudfs <url> --header "Authorization: Bearer <token>"`；
+不传 `--token` 时片段里保留字面 `<token>` 占位，命令本身永远不会替你造一个令牌。
+控制台「Agent」屏的"访问令牌"标签能做同样的事（新建时明文只显示一次，关闭浮层即丢弃）。
+
+### 交付箱
+
+`mcp.workspace` 是会话目录的根（省略时取第一个 `--allow` 前缀 + `/.agent`；`allow` 为空且未配置
+时 `begin_session` 报配置错误，不建目录）。会话目录里唯一受管的文件是 `manifest.json`：
+
+```json
+{
+  "session_id": "…", "client": "codex", "principal": "token:codex",
+  "started_at": "…", "finished_at": "…",
+  "scope": { "read": ["/work"], "write": ["/work/.agent"], "sandbox": "/work/.agent/codex-20260915-0a1b2c3d" },
+  "summary": "…",
+  "artifacts": [ { "path": "…", "uri": "cloudfs://…", "size": 123, "sha256": "…", "state": "synced" } ]
+}
+```
+
+产物清单来自审计表里本会话成功的写路径，所以终端里 `ls` 会话目录与 `manifest.json` 的
+`artifacts` 一致（`test/e2e` `TestAgentSessionManifestMatchesTheMount` 在真实挂载上验证）。
+`share=true` 给出的直链会过期（`expires_at`），只对已同步的文件有；控制台会话浮层的"复制链接"
+也是点击时才向 daemon 要一次链接，不写进页面。
+
+### 审计
+
+每次 `tools/call`（加 `initialize` 与订阅注册）同步写一行：时间、principal、会话、传输、工具、
+涉及路径、脱敏参数（`content`/`new_text` 只记 `{bytes:n}`，整体 ≤ 4 KiB，不含直链、token、cookie）、
+进出字节、结果（`ok`/`denied`/`error`）与耗时。写失败不影响工具本身，只计
+`cloudfs_audit_write_failures_total`。保留期 `mcp.audit.retain`（默认 90 天）。
+
+```sh
+cloudfs audit --result denied --since 24h        # daemon 未运行时直接只读 agent.db
+cloudfs sessions list | show <id> | finish <id> --summary "…"
+```
+
+控制面：`GET /audit`、`GET /sessions`、`GET /sessions/{id}`、`POST /sessions/{id}/finish`，SSE 事件
+`audit`/`session`；控制台「Agent」屏的"会话"与"审计"标签就是它们的视图（denied 行有文字标签，
+不只靠颜色）。
+
 ## Agent 使用建议
 
 **搜索只覆盖已知目录树。** `query` 不含 `/` 时匹配名称；含 `/` 时按完整虚拟路径的字面子串匹配（例如 `work/src/`），不会把 `%`、`_` 当通配符。匹配忽略大小写，权限路径仍区分大小写。结果按路径深度、路径排序。目录改名后无需重写子树索引，查询在一个数据库快照内重建路径。1～2 个字符使用独立短字符串索引，从不查询待索引记录；较长查询同时检查尚未完成后台索引的记录，
@@ -273,4 +374,10 @@ SDK 仍然没有按会话投递的入口，所以定向是这样做到的：发�
 
 MCP 与 FUSE 挂载共用同一个 VFS 实例，所以两边看到的是同一份文件系统：agent 写的文件，终端里 `cat` 立刻能读到；终端里改的文件，agent 下次 `read_text` 就看到新内容。端到端测试 `test/e2e` 专门验证这一点。
 
-这个"同一实例"只对 storage owner 进程内的 MCP（例如 `cloudfs mount` 同进程启用的 HTTP 传输）成立：挂载已在运行时再单独启动的 `cloudfs mcp --stdio` 不是 journal owner，拿到的是另一份 VFS 实例（写入进共享 journal 但不运行上传器，看不到内核写的变更事件），其与挂载并存时的一致性尚未核实，登记为 TODO.md T-43；与挂载并存时建议改用 HTTP 传输。
+这个"同一实例"只对 storage owner 进程内的 MCP（例如 `cloudfs mount` 同进程启用的 HTTP 传输）成立。挂载已在运行时再单独启动的 `cloudfs mcp --stdio` 不是 journal owner，拿到的是另一份 VFS 实例：写入进共享 journal 但不运行上传器，看不到内核写的变更事件。这种进程现在会：
+
+- 启动时在 stderr 打印 `cloudfs: another process owns this cache (is "cloudfs mount" running?) … use the HTTP transport: cloudfs mcp install --transport http`（stdout 是传输，不能写）；
+- 读写工具照常工作，调用照常写进共享的 `agent.db` 审计（agent 库在 owner 判断之前打开）；但 owner 进程的 SSE 只推送自己写的行，控制台要刷新一次才看到这些审计；
+- `begin_session`/`finish_session`/`list_sessions` 拒绝并返回 `requires the storage owner; use the HTTP transport`。
+
+其与挂载并存时的一致性（内核写与 stdio 进程视图）仍登记为 TODO.md T-43；与挂载并存时请改用 HTTP 传输，控制台「Agent」屏的接入面板在这种情况下也会提示。

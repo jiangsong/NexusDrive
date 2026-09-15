@@ -33,8 +33,11 @@ mkdir -p ~/.config/cloudfs && $EDITOR ~/.config/cloudfs/config.yaml
 ./cloudfs mount
 
 # 4. 让 agent 用起来
-./cloudfs mcp install --client claude   # 打印 .mcp.json 片段
+./cloudfs mcp install --client claude   # 打印 .mcp.json 片段（stdio）
 ./cloudfs mcp install --client codex    # 打印 ~/.codex/config.toml 片段
+# 挂载已在运行时，给 agent 签一个只能碰 /work 的令牌，走同一进程的 HTTP：
+./cloudfs mcp token create --name claude --read /work
+./cloudfs mcp install --client claude --transport http --token <上一步打印的令牌>
 ```
 
 也可以不安装 Go，直接启动只使用 VFS 的 MCP HTTP 服务（不需要 FUSE 权限）：
@@ -137,8 +140,13 @@ mounts:
 
 mcp:
   http: 127.0.0.1:8765
-  allow: [/work]        # MCP 只能碰这些子树
+  allow: [/work]        # MCP 只能碰这些子树；令牌与会话只能在其内收窄
   read_only: false
+  workspace: /work/.agent   # agent 会话的交付目录，每会话一个子目录；省略时取第一个 allow 前缀 + /.agent
+  audit:
+    retain: 2160h       # 工具调用审计（agent.db）的保留期，默认 90 天
+  session:
+    idle: 30m           # HTTP 令牌会话空闲多久自动结束并轮转，默认 30 分钟
 
 control:
   metrics: 127.0.0.1:9101
@@ -304,9 +312,17 @@ export:
 mount [path]              挂载并前台运行
 umount <path>             卸载
 service install|uninstall|status 管理当前用户的 systemd/launchd 挂载服务
-mcp --stdio               以 stdio 提供 MCP（Claude Code / Codex 用这个）
-mcp --http [addr]         以 Streamable HTTP 提供 MCP（非回环需 CLOUDFS_MCP_TOKEN）
-mcp install --client claude|codex [--write <file>]
+mcp --stdio               以 stdio 提供 MCP（Claude Code / Codex 用这个；挂载已在运行时请改用 HTTP）
+mcp --http [addr]         以 Streamable HTTP 提供 MCP（非回环需令牌；回环在签发第一个令牌后也只认令牌）
+mcp install --client claude|codex [--transport stdio|http] [--url <url>] [--token <token>] [--write <file>]
+                          打印或写入客户端注册片段；--transport http 附带可直接执行的 claude mcp add 命令
+mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h]
+                          签发作用域访问令牌，明文只打印一次
+mcp token list | revoke <name|id> --confirm   列出（只显示指纹）或吊销令牌，吊销同时关闭其会话
+audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
+                          查看 MCP 工具调用审计，最新在前；daemon 未运行时直接读 agent.db
+sessions list [--state active|finished|expired] | show <id> | finish <id> [--summary text]
+                          查看 agent 会话及其作用域、产物；finish 需要运行中的 daemon
 strm <virtual-path> --out <dir> [--prune] 通过运行中的 WebDAV 生成媒体库 .strm
 status [--json]           缓存、上传队列、代理、限流状态
 ui | open [--print]       在浏览器打开桌面式控制台（需 control.metrics）
