@@ -145,8 +145,8 @@ func TestWebAppRefusesReboundHostAndCrossSite(t *testing.T) {
 
 // TestWebAppNeverAsksForACredential: the boundary is visible in the served
 // bytes. No password input, and no credential field name appears as an input
-// name or id anywhere in the app — credentials go through the terminal, and
-// the page must not so much as offer a field for one.
+// name or id anywhere in the app — credentials are obtained by a daemon-driven
+// exchange or imported through the terminal, and the page never collects one.
 func TestWebAppNeverAsksForACredential(t *testing.T) {
 	srv := NewServer(&Collector{Version: "ui-test"})
 	srv.EnableUI()

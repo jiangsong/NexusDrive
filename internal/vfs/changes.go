@@ -113,6 +113,7 @@ func (f *FS) changedNode(ctx context.Context, ino uint64, subtree bool) {
 }
 
 func (f *FS) changedEntry(ctx context.Context, parent uint64, name string, subtree bool) {
+	f.forgetDirReadAhead(parent)
 	if !f.hasChangeWatchers.Load() {
 		return
 	}
@@ -125,6 +126,10 @@ func (f *FS) changedEntry(ctx context.Context, parent uint64, name string, subtr
 }
 
 func (f *FS) changedRename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) {
+	f.forgetDirReadAhead(oldParent)
+	if newParent != oldParent {
+		f.forgetDirReadAhead(newParent)
+	}
 	if !f.hasChangeWatchers.Load() {
 		return
 	}

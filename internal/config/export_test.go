@@ -30,7 +30,7 @@ func TestExportDefaultsSurviveAnAbsentBlock(t *testing.T) {
 	if c.Export.Transfers != 8 || c.Export.RangeSize != 8<<20 {
 		t.Fatalf("explicit keys did not win: %+v", c.Export)
 	}
-	if c.Export.Streams != want.Streams || c.Export.DiskProbeInterval != want.DiskProbeInterval {
+	if c.Export.Streams != want.Streams || c.Export.MemoryBudget != want.MemoryBudget || c.Export.DiskProbeInterval != want.DiskProbeInterval {
 		t.Fatalf("keys that were not mentioned lost their defaults: %+v", c.Export)
 	}
 }
@@ -43,6 +43,7 @@ func TestExportValidation(t *testing.T) {
 	}{
 		{"range size must be a whole number of 64KiB blocks", Export{RangeSize: 100}, "range_size"},
 		{"range size is bounded", Export{RangeSize: 4 << 30}, "range_size"},
+		{"memory budget covers one range", Export{RangeSize: 64 << 20, MemoryBudget: 32 << 20}, "memory_budget"},
 		{"transfers are bounded", Export{Transfers: 1000}, "transfers"},
 		{"streams are bounded", Export{Streams: 100}, "streams"},
 		{"jobs are bounded", Export{JobsParallel: 99}, "jobs_parallel"},

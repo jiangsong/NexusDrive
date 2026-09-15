@@ -1,7 +1,8 @@
 import { api, ApiError } from '/ui/api.js';
-import { el, fill, bytes, toast, confirmDelete, openForm, moreRow } from '/ui/ui.js';
+import { el, fill, bytes, toast, confirmDelete, openForm, showPanel, moreRow } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { pageCursor, pageFailureMode } from '/ui/paged.js';
+import { onExportChange } from '/ui/app.js';
 
 // Export copies files out of the mount and onto this machine's own storage —
 // a directory, or an external drive. A job is durable and resumable, so it
@@ -41,16 +42,22 @@ function duration(seconds) {
 
 export function renderExports(host) {
   const rows = el('tbody');
+  let paged = false;
+
+  function appendResponse(r) {
+    rows.append(...(r.jobs || []).map(jobRow));
+    if (!rows.children.length) fill(rows, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('exports.empty'))));
+    if (r.next_cursor) rows.append(moreRow(5, () => load(r.next_cursor)));
+  }
 
   async function load(cursor) {
     // A cursor is a string the daemon issued; a click event is not one.
     cursor = pageCursor(cursor);
+    paged = !!cursor;
     if (!cursor) fill(rows);
     try {
       const r = await api.get('/exports?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
-      rows.append(...(r.jobs || []).map(jobRow));
-      if (!rows.children.length) fill(rows, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('exports.empty'))));
-      if (r.next_cursor) rows.append(moreRow(5, () => load(r.next_cursor)));
+      appendResponse(r);
     } catch (e) {
       const failed = el('tr', {}, el('td', { colspan: '5' }, e.message));
       if (pageFailureMode(cursor) === 'append') rows.append(failed);
@@ -62,6 +69,7 @@ export function renderExports(host) {
     const color = STATE_COLOR[j.state] || 'var(--dim)';
     const done = j.bytes_total > 0 ? Math.min(1, (j.bytes_done || 0) / j.bytes_total) : 0;
     const actions = el('div', { class: 'row' });
+    actions.append(btn(t('exports.details'), () => details(j)));
     if (j.state === 'running' || j.state === 'planning') actions.append(btn(t('action.pause'), () => act('pause', j)));
     if (j.state === 'paused') actions.append(btn(t('action.resume'), () => act('resume', j)));
     if (j.state !== 'done' && j.state !== 'failed' && j.state !== 'cancelled') actions.append(btn(t('action.stop'), () => act('cancel', j)));
@@ -84,6 +92,59 @@ export function renderExports(host) {
           el('span', { class: 'dot', style: 'background:' + color }), stateLabel(j)),
         j.files_failed > 0 ? el('div', { class: 'dim', style: 'font-size:11.5px;color:var(--bad)' }, t('exports.failed.files', String(j.files_failed))) : null),
       el('td', { style: 'padding-left:20px' }, actions));
+  }
+
+  async function details(job) {
+    const itemRows = el('tbody');
+    const state = el('select', {},
+      el('option', { value: '' }, t('exports.items.all')),
+      ...['pending', 'active', 'done', 'skipped', 'failed'].map((value) =>
+        el('option', { value }, t('export.item.' + value))));
+    const summary = el('div', { class: 'detail', style: 'margin-bottom:12px' },
+      `${(job.sources || []).join(', ')} → ${job.dest}`);
+    const members = el('div');
+
+    const loadItems = async (cursor) => {
+      if (!cursor) fill(itemRows);
+      try {
+        const query = new URLSearchParams({ limit: '100' });
+        if (cursor) query.set('cursor', cursor);
+        if (state.value) query.set('state', state.value);
+        const r = await api.get('/exports/' + job.id + '/items?' + query.toString());
+        itemRows.append(...(r.items || []).map((item) => el('tr', {},
+          el('td', {}, item.rel),
+          el('td', { class: 'num detail' }, item.kind === 'directory' ? '—' : bytes(item.size)),
+          el('td', {}, t('export.item.' + item.state)),
+          el('td', { class: 'num detail' }, String(item.attempts || 0)),
+          el('td', { class: 'detail' }, item.last_error || '—'))));
+        if (!itemRows.children.length) fill(itemRows, el('tr', {}, el('td', { colspan: '5', class: 'dim' }, t('exports.items.empty'))));
+        if (r.item_next_cursor) itemRows.append(moreRow(5, () => loadItems(r.item_next_cursor)));
+      } catch (e) {
+        fill(itemRows, el('tr', {}, el('td', { colspan: '5', class: 'detail' }, e.message)));
+      }
+    };
+
+    try {
+      const r = await api.get('/exports/' + job.id);
+      const p = r.progress || {};
+      if ((p.members || []).length) {
+        fill(members,
+          el('div', { class: 'eyebrow', style: 'margin:12px 0 6px' }, t('exports.members')),
+          ...p.members.map((m) => el('div', { class: 'detail' },
+            `${m.remote}: ${bytes(m.bytes || 0)} · ${m.inflight || 0} · ${bytes(Math.round(m.rate || 0))}/s`)));
+      }
+    } catch (e) { toast(e.message, 'bad'); }
+
+    state.addEventListener('change', () => loadItems());
+    const content = el('div', {}, summary, members,
+      el('div', { class: 'row', style: 'margin:0 0 8px' }, el('label', { for: state.id = `export-items-${job.id}` }, t('exports.items.state')), state),
+      el('div', { class: 'panel', style: 'overflow:auto;max-height:55vh' }, el('table', {},
+        el('thead', {}, el('tr', {},
+          el('th', {}, t('col.path')), el('th', { class: 'num' }, t('col.size')),
+          el('th', {}, t('col.status')), el('th', {}, t('exports.items.attempts')),
+          el('th', {}, t('exports.items.error')))), itemRows)));
+    loadItems();
+    await showPanel({ title: t('exports.details.title'), content, width: 920 });
   }
 
   const btn = (label, fn, danger) => el('button', { class: danger ? 'danger' : '', onclick: fn, style: 'padding:6px 12px' }, label);
@@ -109,6 +170,51 @@ export function renderExports(host) {
     } catch (e) { toast(e instanceof ApiError ? e.message : String(e), 'bad'); }
   }
 
+  async function pickSource(input) {
+    let cwd = '/';
+    const current = el('span', { class: 'detail' }, cwd);
+    const list = el('select', { size: '12', style: 'height:auto;width:100%' });
+    const up = el('button', { type: 'button' }, t('exports.pick.up'));
+    const load = async (path) => {
+      const r = await api.get('/fs/list?path=' + encodeURIComponent(path));
+      cwd = r.path || path;
+      current.textContent = cwd;
+      fill(list, el('option', { value: cwd, 'data-dir': 'true' }, t('exports.pick.current')),
+        ...(r.entries || []).map((entry) => el('option', {
+          value: entry.path, 'data-dir': entry.is_dir ? 'true' : 'false',
+        }, (entry.is_dir ? '📁 ' : '📄 ') + entry.name)));
+      list.value = cwd;
+    };
+    up.addEventListener('click', () => load(cwd === '/' ? '/' : (cwd.replace(/\/[^/]+$/, '') || '/')));
+    list.addEventListener('dblclick', () => {
+      const opt = list.selectedOptions[0];
+      if (opt && opt.getAttribute('data-dir') === 'true') load(opt.value);
+    });
+    try { await load('/'); }
+    catch (e) { toast(e.message, 'bad'); return; }
+    const ok = await openForm({
+      title: t('exports.pick.title'), rows: [[t('exports.pick.path'), list]],
+      note: el('div', {}, el('div', { class: 'row', style: 'margin-bottom:8px' }, up, current),
+        el('div', { class: 'dim', style: 'font-size:11.5px' }, t('exports.pick.note'))),
+      confirmLabel: t('exports.pick.choose'), width: 620,
+      validate: () => list.value ? '' : t('exports.pick.required'),
+    });
+    if (ok) input.value = list.value;
+  }
+
+  async function pickDestination(input) {
+    const picker = globalThis.cloudfsChooseDirectory;
+    if (typeof picker !== 'function') {
+      toast(t('exports.dest.manual'));
+      input.focus();
+      return;
+    }
+    try {
+      const chosen = await picker();
+      if (chosen) input.value = chosen;
+    } catch (e) { toast(e.message || String(e), 'bad'); }
+  }
+
   async function startExport() {
     const sources = el('input', { type: 'text', placeholder: '/mnt/prefix/photos', autocomplete: 'off', spellcheck: 'false' });
     const dest = el('input', { type: 'text', placeholder: '/Volumes/backup', autocomplete: 'off', spellcheck: 'false' });
@@ -117,12 +223,20 @@ export function renderExports(host) {
     const ok = await openForm({
       title: t('exports.new'),
       rows: [[t('col.source'), sources], [t('exports.dest'), dest], [t('exports.verify'), verify], [t('exports.mirror'), mirror]],
-      note: el('div', { class: 'dim', style: 'font-size:11.5px' }, t('exports.new.note')),
+      note: el('div', {},
+        el('div', { class: 'row', style: 'margin-bottom:8px' },
+          el('button', { type: 'button', onclick: () => pickSource(sources) }, t('exports.pick.source')),
+          el('button', { type: 'button', onclick: () => pickDestination(dest) }, t('exports.pick.dest'))),
+        el('div', { class: 'dim', style: 'font-size:11.5px' }, t('exports.new.note'))),
       confirmLabel: t('exports.start'),
+      validate: () => {
+        if (sources.value.split(',').some((s) => s.trim()) && dest.value.trim()) return '';
+        (sources.value.trim() ? dest : sources).focus();
+        return t('exports.new.needpaths');
+      },
     });
     if (!ok) return;
     const list = sources.value.split(',').map((s) => s.trim()).filter(Boolean);
-    if (!list.length || !dest.value.trim()) { toast(t('exports.new.needpaths'), 'bad'); return; }
     const q = { sources: list, dest: dest.value.trim(), verify: verify.checked };
     if (mirror.checked) {
       // A mirror is the only export that deletes anything, so it is typed
@@ -157,9 +271,13 @@ export function renderExports(host) {
     el('div', { class: 'dim', style: 'padding:0 20px 20px;font-size:12px' }, t('exports.note')));
 
   load();
-  // A running export moves; a table that does not is a table nobody trusts.
-  // The returned function is what the shell calls when the screen goes away,
-  // so the timer cannot outlive it.
-  const timer = setInterval(() => { if (!document.hidden) load(); }, 5000);
-  return () => clearInterval(timer);
+  // The daemon publishes export snapshots every second on the page's one SSE
+  // stream. A reader who paged deeper keeps that stable view until explicitly
+  // refreshing; otherwise the first page tracks progress without polling.
+  const off = onExportChange((r) => {
+    if (paged || document.hidden) return;
+    fill(rows);
+    appendResponse(r);
+  });
+  return () => off();
 }

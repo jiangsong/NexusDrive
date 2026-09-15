@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 // The authorization routes let a page start an OAuth or QR login for a
@@ -19,9 +22,9 @@ import (
 // token itself (internal/daemon/auth.go). So a browser can drive a login for
 // aliyun, baidu or 115 without the token ever passing through it.
 //
-// Password-, cookie- and external-token-type accounts have no such flow — the
-// daemon cannot fetch their credential — and stay `cloudfs config auth
-// --stdin`. The page shows the command; it never takes the value.
+// Quark is the exception among cookie-backed accounts: its web QR exchange
+// lets the daemon obtain the cookie without the browser page ever seeing it.
+// Password- and external-token-type accounts remain terminal-only imports.
 
 // AuthStarter is what the daemon supplies so this package need not import it.
 // present is called with a URL (OAuth) or QR content (device); it must not
@@ -166,7 +169,8 @@ func randomID() string {
 type AuthStartRequest struct{}
 
 // AuthStartResponse hands back what to present. Kind is "url" for OAuth or
-// "qr" for a device code; Value is the URL or the QR content string.
+// "qr" for a device flow. Value is populated only for OAuth; QR content stays
+// in the server-side session and is exposed solely as a same-origin PNG.
 type AuthStartResponse struct {
 	Session     string `json:"session"`
 	Kind        string `json:"kind"`
@@ -217,7 +221,7 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 	var wait func(context.Context) error
 	var startErr error
 	var redirectURI string
-	if rtype == "pan115" {
+	if rtype == "pan115" || rtype == "quark" {
 		sess.kind = "qr"
 		wait, startErr = s.auth.Device(ctx, name,
 			func(qr string) { sess.mu.Lock(); sess.value = qr; sess.mu.Unlock(); closeOnce(shown) },
@@ -248,7 +252,7 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		httpErrorT(w, r, http.StatusBadGateway, "err.auth_start_failed")
 		return
 	}
-	if rtype == "pan115" {
+	if rtype == "pan115" || rtype == "quark" {
 		select {
 		case <-shown:
 		case <-time.After(authPresentTimeout):
@@ -278,6 +282,11 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		err := wait(ctx)
 		switch {
 		case err == nil:
+			// OAuth/device implementations persist credentials before wait
+			// succeeds. Publish that disk state before reporting done, otherwise
+			// the very GET the page performs on completion still says
+			// has_credentials=false until some unrelated config edit or restart.
+			s.reloadConfigView()
 			sess.set("done", "")
 		case errors.Is(err, context.Canceled):
 			sess.set("denied", "authorization was cancelled")
@@ -286,10 +295,14 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 		default:
 			// SaveCredentials and auth already redact; still, never the raw
 			// provider text of a token exchange.
+			log.Printf("control: authorization for %q failed: %v", name, err)
 			sess.set("error", "authorization failed")
 		}
 	}()
 	kind, value, _, _ := sess.snapshot()
+	if kind == "qr" {
+		value = ""
+	}
 	writeJSON(w, AuthStartResponse{Session: id, Kind: kind, Value: value, RedirectURI: redirectURI})
 }
 
@@ -320,6 +333,29 @@ func (s *Server) authCancel(w http.ResponseWriter, r *http.Request, name string)
 	writeJSON(w, map[string]any{"cancelled": true})
 }
 
+func (s *Server) authQR(w http.ResponseWriter, r *http.Request, name string) {
+	id := r.URL.Query().Get("session")
+	sess := s.authReg.get(id)
+	if sess == nil || sess.remote != name {
+		http.NotFound(w, r)
+		return
+	}
+	kind, value, state, _ := sess.snapshot()
+	if kind != "qr" || value == "" || state == "done" || state == "error" || state == "denied" {
+		http.NotFound(w, r)
+		return
+	}
+	png, err := qrcode.Encode(value, qrcode.Medium, 256)
+	if err != nil {
+		http.Error(w, "cannot render authorization QR", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", fmt.Sprint(len(png)))
+	w.Write(png)
+}
+
 func closeOnce(ch chan struct{}) {
 	select {
 	case <-ch:
@@ -328,7 +364,7 @@ func closeOnce(ch chan struct{}) {
 	}
 }
 
-// authByName handles /accounts/{name}/auth/{start,status,cancel}.
+// authByName handles /accounts/{name}/auth/{start,status,cancel,qr}.
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request, name, action string) {
 	switch action {
 	case "start":
@@ -346,6 +382,11 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request, name, action
 			return
 		}
 		s.authCancel(w, r, name)
+	case "qr":
+		if !allowMethod(w, r, http.MethodGet) {
+			return
+		}
+		s.authQR(w, r, name)
 	default:
 		http.NotFound(w, r)
 	}

@@ -75,3 +75,18 @@ func TestTheRestartCarriesTheConfigTheWizardWasGiven(t *testing.T) {
 		t.Fatalf("argv[0] = %q, want the executable that was running", argv[0])
 	}
 }
+
+func TestSetupListenOverrideCanRunBesideTheConfiguredDaemon(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Control.Socket = "/tmp/cloudfs-live.sock"
+	cfg.Control.Metrics = "127.0.0.1:9101"
+
+	socket, tcp := setupControlEndpoints(cfg, "127.0.0.1:9202")
+	if socket != "" || tcp != "127.0.0.1:9202" {
+		t.Fatalf("override endpoints = (%q, %q), want no socket and recovery TCP", socket, tcp)
+	}
+	socket, tcp = setupControlEndpoints(cfg, "")
+	if socket != cfg.Control.Socket || tcp != cfg.Control.Metrics {
+		t.Fatalf("configured endpoints = (%q, %q)", socket, tcp)
+	}
+}

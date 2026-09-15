@@ -4,7 +4,7 @@
 // CLI uses; configuration edits say "restart required" because that is
 // what they are.
 import { api } from '/ui/api.js';
-import { el, fill, bytes, toast, confirmDelete, promptText, openForm } from '/ui/ui.js';
+import { el, fill, bytes, toast, confirmDelete, promptText, openForm, showPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { openAddDrive } from '/ui/add_drive.js';
 
@@ -149,6 +149,75 @@ export function renderPool(host) {
       (r) => t('pool.rebalance.queued', (r.moves || []).length));
   }
 
+  async function editPolicy(p) {
+    const cfg = p.config || {};
+    const replicas = el('input', { type: 'number', min: '1', max: String(Math.max(1, p.members.length)), value: String(p.replicas) });
+    const minimum = el('input', { type: 'number', min: '1', max: String(Math.max(1, p.members.length)), value: String(p.min_replicas) });
+    const domain = el('select', {}, ...['account', 'provider', 'member'].map((x) => el('option', { value: x }, x)));
+    domain.value = cfg.failure_domain || 'account';
+    const mode = el('select', {}, ...['relaxed', 'strict'].map((x) => el('option', { value: x }, x)));
+    mode.value = cfg.write_mode || 'relaxed';
+    const timeout = el('input', { type: 'text', value: cfg.min_replicas_timeout || '2m' });
+    const outAfter = el('input', { type: 'text', value: cfg.out_after || '10m' });
+    const repair = el('input', { type: 'number', min: '1', max: '64', value: String(cfg.repair_concurrency || 1) });
+    const skew = el('input', { type: 'text', value: `${Math.round((cfg.target_skew || .1) * 100)}%` });
+    const backfill = el('input', { type: 'checkbox', checked: cfg.auto_backfill !== false });
+    const maxRate = el('input', { type: 'number', min: '1', value: String(cfg.rebalance_max_rate || 31457280) });
+    const pause = el('input', { type: 'text', value: cfg.pause_between || '500ms' });
+    const classes = el('textarea', { rows: '4', spellcheck: 'false' });
+    classes.value = (p.members || []).map((m) => `${m.remote}=${(m.class || []).join(',')}`).join('\n');
+    const rules = el('textarea', { rows: '6', spellcheck: 'false' });
+    rules.value = (cfg.rules || []).map((r) => [r.prefix, r.replicas || 0, (r.prefer || []).join(','), (r.avoid || []).join(','), (r.require || []).join(',')].join('|')).join('\n');
+    const ok = await openForm({
+      title: t('pool.config.title'), width: 760,
+      rows: [[t('pool.replicas'), replicas], [t('pool.config.minimum'), minimum], [t('pool.config.domain'), domain],
+        [t('pool.config.mode'), mode], [t('pool.config.timeout'), timeout], [t('pool.config.outafter'), outAfter],
+        [t('pool.config.repair'), repair], [t('pool.config.skew'), skew], [t('pool.config.backfill'), backfill],
+        [t('pool.config.rate'), maxRate], [t('pool.config.pause'), pause], [t('pool.config.classes'), classes], [t('pool.config.rules'), rules]],
+      note: el('div', { class: 'dim', style: 'font-size:11.5px' }, t('pool.config.note')),
+      confirmLabel: t('pool.config.save'),
+      validate: () => Number(minimum.value) > Number(replicas.value) ? t('pool.config.badminimum') : '',
+    });
+    if (!ok) return;
+    const split = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
+    const memberClasses = {};
+    for (const line of classes.value.split('\n')) {
+      const [remote, values = ''] = line.split('=', 2);
+      if (remote.trim()) memberClasses[remote.trim()] = split(values);
+    }
+    const parsedRules = rules.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+      const [prefix, count, prefer = '', avoid = '', require = ''] = line.split('|');
+      return { prefix: prefix.trim(), replicas: Number(count) || 0, prefer: split(prefer), avoid: split(avoid), require: split(require) };
+    });
+    try {
+      const result = await api.post('/pool/config', {
+        pool: p.name, replicas: Number(replicas.value), min_replicas: Number(minimum.value),
+        failure_domain: domain.value, write_mode: mode.value, min_replicas_timeout: timeout.value.trim(), out_after: outAfter.value.trim(),
+        repair_concurrency: Number(repair.value), target_skew: parseSkew(skew.value), auto_backfill: backfill.checked,
+        rebalance_max_rate: Number(maxRate.value), pause_between: pause.value.trim(), member_classes: memberClasses, rules: parsedRules,
+      });
+      toast(result.restart_required ? t('pool.restart') : t('pool.config.applied'));
+      load();
+    } catch (e) { toast(e.message, 'bad'); }
+  }
+
+  async function previewPlacement(p) {
+    const path = await promptText({ title: t('pool.preview.title'), label: t('pool.preview.path'), initial: '/', confirmLabel: t('pool.preview.run') });
+    if (!path) return;
+    try {
+      const result = await api.post('/pool/preview', { pool: p.name, path });
+      const rows = (result.candidates || []).map((c) => el('tr', {},
+        el('td', {}, c.remote), el('td', {}, c.domain), el('td', {}, (c.class || []).join(', ') || '—'),
+        el('td', {}, c.selected ? t('pool.preview.selected') : (c.eligible ? t('pool.preview.candidate') : t('pool.preview.excluded'))),
+        el('td', { class: 'detail' }, (c.reasons || []).join('; '))));
+      await showPanel({ title: t('pool.preview.title'), width: 820, content: el('div', {},
+        el('div', { class: 'detail', style: 'margin-bottom:10px' }, t('pool.preview.summary', result.path, result.rule || t('pool.preview.default'), result.replicas)),
+        el('div', { class: 'panel', style: 'overflow:auto' }, el('table', {}, el('thead', {}, el('tr', {},
+          el('th', {}, t('pool.col.member')), el('th', {}, t('pool.config.domain')), el('th', {}, t('pool.config.classes')),
+          el('th', {}, t('col.status')), el('th', {}, t('pool.preview.reason')))), el('tbody', {}, ...rows)))) });
+    } catch (e) { toast(e.message, 'bad'); }
+  }
+
   // The skew is a fill-ratio difference; people write it as a percentage.
   function parseSkew(v) {
     const raw = String(v || '').trim();
@@ -188,6 +257,8 @@ export function renderPool(host) {
       el('div', { class: 'pad', style: 'display:flex;align-items:end;justify-content:space-between' },
         el('div', {}, el('div', { class: 'eyebrow' }, t('pool.eyebrow')), el('h2', { class: 'section', style: 'margin:6px 0 0' }, p.name)),
         el('div', { class: 'row', style: 'gap:8px' },
+          p.config ? el('button', { onclick: () => editPolicy(p) }, t('pool.config.edit')) : null,
+          p.config ? el('button', { onclick: () => previewPlacement(p) }, t('pool.preview.action')) : null,
           el('button', { onclick: () => act('/pool/repair', { pool: p.name }, (r) => `${t('pool.repaired')} ${r.made || 0}`) }, t('pool.action.repair')),
           el('button', { onclick: () => act('/pool/scrub', { pool: p.name }, (r) => `${t('pool.scrubbed')} ${r.looked || 0}`) }, t('pool.action.scrub')),
           el('button', { onclick: () => scrubPath(p) }, t('pool.action.scrubpath')),
@@ -220,6 +291,16 @@ export function renderPool(host) {
   function createForm(res) {
     const name = el('input', { type: 'text', value: 'home', autocomplete: 'off', spellcheck: 'false' });
     const replicas = el('input', { type: 'number', value: '3', min: '1', max: '9', style: 'width:80px' });
+    const minimum = el('input', { type: 'number', value: '1', min: '1', max: '9', style: 'width:80px' });
+    const domain = el('select', {}, ...['account', 'provider', 'member'].map((x) => el('option', { value: x }, x)));
+    const mode = el('select', {}, ...['relaxed', 'strict'].map((x) => el('option', { value: x }, x)));
+    const timeout = el('input', { type: 'text', value: '2m' });
+    const outAfter = el('input', { type: 'text', value: '10m' });
+    const repair = el('input', { type: 'number', value: '1', min: '1', max: '64' });
+    const skew = el('input', { type: 'text', value: '10%' });
+    const backfill = el('input', { type: 'checkbox', checked: true });
+    const classes = el('textarea', { rows: '3', spellcheck: 'false' });
+    const rules = el('textarea', { rows: '4', spellcheck: 'false' });
     const checks = (res.candidates || []).map((c) => {
       const chk = el('input', { type: 'checkbox', value: c, checked: true });
       return el('label', { style: 'display:flex;align-items:center;gap:8px' }, chk, c);
@@ -228,16 +309,37 @@ export function renderPool(host) {
     create.addEventListener('click', () => {
       const members = checks.map((l) => l.querySelector('input')).filter((i) => i.checked).map((i) => i.value);
       if (!members.length) { toast(t('pool.create.nomembers'), 'bad'); return; }
-      act('/pool/create', { name: name.value.trim() || 'home', members, replicas: Number(replicas.value) || 3, mount: res.mount || '', prefix: '/' }, () => t('pool.restart'));
+      if (Number(minimum.value) > Number(replicas.value)) { toast(t('pool.config.badminimum'), 'bad'); minimum.focus(); return; }
+      const split = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
+      const memberClasses = {};
+      for (const line of classes.value.split('\n')) { const [remote, values = ''] = line.split('=', 2); if (remote.trim()) memberClasses[remote.trim()] = split(values); }
+      const parsedRules = rules.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [prefix, count, prefer = '', avoid = '', require = ''] = line.split('|');
+        return { prefix: prefix.trim(), replicas: Number(count) || 0, prefer: split(prefer), avoid: split(avoid), require: split(require) };
+      });
+      act('/pool/create', { name: name.value.trim() || 'home', members, replicas: Number(replicas.value) || 3,
+        min_replicas: Number(minimum.value) || 1, mount: res.mount || '', prefix: '/', settings: {
+          failure_domain: domain.value, write_mode: mode.value, min_replicas_timeout: timeout.value.trim(), out_after: outAfter.value.trim(),
+          repair_concurrency: Number(repair.value) || 1, target_skew: parseSkew(skew.value), auto_backfill: backfill.checked,
+          rebalance_max_rate: 31457280, pause_between: '500ms', member_classes: memberClasses, rules: parsedRules,
+        } }, () => t('pool.restart'));
     });
+    let createFieldID = 0;
+    const field = (label, control) => {
+      control.id = `pool-create-${++createFieldID}`;
+      return el('div', {}, el('label', { for: control.id, style: 'display:block;font-size:12px;margin-bottom:4px' }, label), control);
+    };
     return el('div', { class: 'pad' },
       el('div', { class: 'eyebrow' }, t('pool.eyebrow')), el('h2', { class: 'section', style: 'margin:6px 0 12px' }, t('pool.none.title')),
       el('p', { class: 'detail', style: 'max-width:640px' }, t('pool.none.body')),
-      res.configurable ? el('div', { class: 'panel pad', style: 'max-width:640px;display:grid;gap:12px' },
-        el('div', {}, el('div', { style: 'font-size:12px;margin-bottom:4px' }, t('pool.create.name')), name),
+      res.configurable ? el('div', { class: 'panel pad', style: 'max-width:760px;display:grid;gap:12px' },
+        field(t('pool.create.name'), name),
         el('div', {}, el('div', { style: 'font-size:12px;margin-bottom:4px' }, t('pool.create.members')),
           checks.length ? el('div', { style: 'display:grid;gap:6px' }, ...checks) : el('div', { class: 'dim' }, t('pool.create.nocandidates'))),
-        el('div', {}, el('div', { style: 'font-size:12px;margin-bottom:4px' }, t('pool.replicas')), replicas),
+        field(t('pool.replicas'), replicas), field(t('pool.config.minimum'), minimum),
+        field(t('pool.config.domain'), domain), field(t('pool.config.mode'), mode), field(t('pool.config.timeout'), timeout),
+        field(t('pool.config.outafter'), outAfter), field(t('pool.config.repair'), repair), field(t('pool.config.skew'), skew),
+        field(t('pool.config.backfill'), backfill), field(t('pool.config.classes'), classes), field(t('pool.config.rules'), rules),
         el('div', { class: 'row', style: 'justify-content:flex-end;gap:8px' },
           el('button', { onclick: () => openAddDrive({ onDone: load }) }, t('pool.action.newdrive')),
           el('button', { onclick: () => joinPool(res) }, t('pool.join')), create)) : el('div', { class: 'dim' }, t('pool.noconfig')));

@@ -105,6 +105,8 @@ func (s *Server) routes() []route {
 		{pattern: "/mounts", handler: s.mounts},
 		{pattern: "/pool/status", handler: s.poolStatus},
 		{pattern: "/pool/create", handler: s.poolCreate},
+		{pattern: "/pool/config", handler: s.poolConfig},
+		{pattern: "/pool/preview", handler: s.poolPreview},
 		{pattern: "/pool/members", handler: s.poolMembers},
 		{pattern: "/pool/members/state", handler: s.poolMemberState},
 		{pattern: "/pool/members/drain", handler: s.poolMemberState},

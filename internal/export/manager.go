@@ -16,6 +16,7 @@ import (
 	"cloudfs/internal/vfs"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/semaphore"
 )
 
 // Backoff for a source that cannot be reached. The transfer is deferred, not
@@ -58,6 +59,13 @@ type Manager struct {
 	// writeFault is a test seam at the destination write, where an external
 	// drive fails in ways no unit test can arrange for real.
 	writeFault func(off int64) error
+	// syncEvery is the amount of newly written data allowed between durable
+	// checkpoints. Tests lower it so small files exercise crash-resume.
+	syncEvery int64
+	// files and memory are global across jobs. Job options are persisted but
+	// can never manufacture more process capacity than the current config.
+	files  chan struct{}
+	memory *semaphore.Weighted
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -66,6 +74,7 @@ type Manager struct {
 	wake    chan struct{}
 	probes  map[string]time.Time
 	rates   map[string]*rateMeter
+	members map[string]map[string]*memberMeter
 	running map[string]context.CancelFunc
 }
 
@@ -91,10 +100,14 @@ func New(opt Options) (*Manager, error) {
 	}
 	m := &Manager{
 		store: opt.Store, fs: opt.FS, cfg: opt.Config, now: opt.Now,
-		wake:    make(chan struct{}, 1),
-		probes:  map[string]time.Time{},
-		rates:   map[string]*rateMeter{},
-		running: map[string]context.CancelFunc{},
+		syncEvery: syncEvery,
+		files:     make(chan struct{}, opt.Config.Transfers),
+		memory:    semaphore.NewWeighted(int64(opt.Config.MemoryBudget)),
+		wake:      make(chan struct{}, 1),
+		probes:    map[string]time.Time{},
+		rates:     map[string]*rateMeter{},
+		members:   map[string]map[string]*memberMeter{},
+		running:   map[string]context.CancelFunc{},
 	}
 	if opt.Store.Owner() {
 		// Whatever the last run had in flight goes back on the queue. Its
@@ -223,9 +236,9 @@ func (m *Manager) Create(ctx context.Context, req Request) (Job, error) {
 		MetaIdentity: identity, Bindings: bindings, CreatedAt: now, UpdatedAt: now,
 		Options: JobOptions{
 			Mirror: req.Mirror, Verify: req.Verify, PreserveMTime: true,
-			Transfers:     pick(req.Transfers, m.cfg.Transfers),
-			Streams:       pick(req.Streams, m.cfg.Streams),
-			RangeSize:     pick64(req.RangeSize, int64(m.cfg.RangeSize)),
+			Transfers:     lowerPositive(req.Transfers, m.cfg.Transfers),
+			Streams:       lowerPositive(req.Streams, m.cfg.Streams),
+			RangeSize:     lowerPositive64(req.RangeSize, int64(m.cfg.RangeSize)),
 			MultiRangeMin: int64(m.cfg.MultiRangeMin),
 		},
 	}
@@ -236,18 +249,18 @@ func (m *Manager) Create(ctx context.Context, req Request) (Job, error) {
 	return job, nil
 }
 
-func pick(v, dflt int) int {
-	if v > 0 {
-		return v
+func lowerPositive(v, ceiling int) int {
+	if v <= 0 || v > ceiling {
+		return ceiling
 	}
-	return dflt
+	return v
 }
 
-func pick64(v, dflt int64) int64 {
-	if v > 0 {
-		return v
+func lowerPositive64(v, ceiling int64) int64 {
+	if v <= 0 || v > ceiling {
+		return ceiling
 	}
-	return dflt
+	return v
 }
 
 // canonicalSources rejects anything that is not a canonical absolute virtual

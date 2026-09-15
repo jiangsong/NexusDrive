@@ -15,6 +15,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cloudfs/internal/provider"
@@ -32,8 +33,11 @@ import (
 
 // RepairStats summarises the queue.
 type RepairStats struct {
-	Queued  int
-	Blocked int // waiting for a member or a retry
+	Queued   int
+	Blocked  int // waiting for a member or a retry
+	Inflight int
+	// OldestWait is the age of the oldest queued item.
+	OldestWait time.Duration
 }
 
 // repairInterval is how often the worker looks at the queue; scanInterval
@@ -138,28 +142,74 @@ func (p *Pool) RepairOnce(ctx context.Context) (int, error) {
 		paths = append(paths, d)
 	}
 	rows.Close()
-	made := 0
+	limit := p.settings.RepairConcurrency
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(paths) {
+		limit = len(paths)
+	}
+	type result struct {
+		made int
+		err  error
+	}
+	work := make(chan due)
+	results := make(chan result, len(paths))
+	var wg sync.WaitGroup
+	for i := 0; i < limit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for d := range work {
+				if _, loaded := p.repairClaims.LoadOrStore(d.path, struct{}{}); loaded {
+					continue
+				}
+				p.repairActive.Add(1)
+				n, err := p.repairDue(ctx, d.path, d.reason)
+				p.repairActive.Add(-1)
+				p.repairClaims.Delete(d.path)
+				results <- result{made: n, err: err}
+			}
+		}()
+	}
 	for _, d := range paths {
-		if ctx.Err() != nil {
+		select {
+		case work <- d:
+		case <-ctx.Done():
+			close(work)
+			wg.Wait()
+			close(results)
+			made := 0
+			for r := range results {
+				made += r.made
+			}
 			return made, ctx.Err()
 		}
-		pth := d.path
-		if strings.HasPrefix(d.reason, reasonCopyUnsure) {
-			// A server-side copy failed in a way that does not say
-			// whether it landed. Re-list before deciding: a copy that did
-			// land is a replica like any other, and sending the file
-			// again would make a second one.
-			if err := p.ScrubPath(ctx, pth); err != nil && ctx.Err() != nil {
-				return made, err
-			}
-		}
-		n, err := p.repairPath(ctx, pth)
-		made += n
-		if err != nil && ctx.Err() != nil {
-			return made, err
+	}
+	close(work)
+	wg.Wait()
+	close(results)
+	made := 0
+	for r := range results {
+		made += r.made
+		if r.err != nil && ctx.Err() != nil {
+			return made, r.err
 		}
 	}
 	return made, nil
+}
+
+func (p *Pool) repairDue(ctx context.Context, pth, reason string) (int, error) {
+	if strings.HasPrefix(reason, reasonCopyUnsure) {
+		// A server-side copy failed in a way that does not say
+		// whether it landed. Re-list before deciding: a copy that did
+		// land is a replica like any other, and sending the file
+		// again would make a second one.
+		if err := p.ScrubPath(ctx, pth); err != nil && ctx.Err() != nil {
+			return 0, err
+		}
+	}
+	return p.repairPath(ctx, pth)
 }
 
 // repairPath makes the copies one file is missing.
@@ -483,8 +533,13 @@ func (p *Pool) copyReplica(ctx context.Context, pth string, row entryRow, live [
 func (p *Pool) RepairStatus(ctx context.Context) (RepairStats, error) {
 	var st RepairStats
 	now := p.now().UnixNano()
-	if err := p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(next_at > ?), 0) FROM repair_queue`, now).Scan(&st.Queued, &st.Blocked); err != nil {
+	var oldest int64
+	if err := p.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(next_at > ?), 0), COALESCE(MIN(created_at), 0) FROM repair_queue`, now).Scan(&st.Queued, &st.Blocked, &oldest); err != nil {
 		return st, fmt.Errorf("pool: %w", err)
+	}
+	st.Inflight = int(p.repairActive.Load())
+	if oldest > 0 && oldest < now {
+		st.OldestWait = time.Duration(now - oldest)
 	}
 	return st, nil
 }

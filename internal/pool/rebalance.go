@@ -167,7 +167,10 @@ func (p *Pool) PlanRebalance(ctx context.Context, targetSkew float64, dryRun boo
 		if plan.Bytes >= budget {
 			break
 		}
-		if c.size > emptiest.free && emptiest.free > 0 {
+		// Reserve space for moves already selected, not just for this file
+		// in isolation. Zero is known-full here; only a negative value means
+		// capacity is unknown.
+		if emptiest.free >= 0 && (plan.Bytes >= emptiest.free || c.size > emptiest.free-plan.Bytes) {
 			continue // it would not fit
 		}
 		plan.Moves = append(plan.Moves, RebalanceMove{Path: c.path, From: fullest.m.name, To: emptiest.m.name, Size: c.size})

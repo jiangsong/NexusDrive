@@ -28,9 +28,12 @@ type AccountDetail struct {
 	Fields        map[string]string `json:"fields"`
 	// HasCredentials says whether any credential is configured, never which
 	// or what.
-	HasCredentials bool           `json:"has_credentials"`
-	Caps           *CapsView      `json:"caps,omitempty"`
-	Mounts         []AccountMount `json:"mounts"`
+	HasCredentials bool `json:"has_credentials"`
+	// BrowserAuth says the daemon can drive authorization or reauthorization
+	// for this provider without accepting a credential field from the page.
+	BrowserAuth bool           `json:"browser_auth,omitempty"`
+	Caps        *CapsView      `json:"caps,omitempty"`
+	Mounts      []AccountMount `json:"mounts"`
 	// Live is true when this daemon has the remote assembled, so Caps come
 	// from the running backend rather than being absent.
 	Live bool `json:"live"`
@@ -128,6 +131,9 @@ func (s *Server) accountDetail(name string) (AccountDetail, bool) {
 		return AccountDetail{}, false
 	}
 	d := AccountDetail{Name: name, Type: r.Type, Proxy: r.Proxy, QPS: r.QPS, UploadWorkers: r.UploadWorkers, Fields: map[string]string{}, Mounts: []AccountMount{}}
+	if s.auth != nil && s.auth.Supported != nil {
+		d.BrowserAuth = s.auth.Supported(r.Type)
+	}
 	for k, v := range r.Extra {
 		// A legacy inline secret can still sit in Extra before migration;
 		// filter, do not assume none is there.

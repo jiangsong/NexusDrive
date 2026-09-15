@@ -4,7 +4,8 @@
 // where the backend supports it, or the exact terminal command where the secret
 // cannot travel through a browser. Which backends support which is the API's
 // answer at runtime, not a list kept here. It never renders a field for a
-// password, cookie or token: that boundary is the whole point.
+// credential secret: Quark's QR flow obtains its cookie in the daemon without
+// asking the page to collect it.
 import { api, ApiError } from '/ui/api.js';
 import { el, fill, toast, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';

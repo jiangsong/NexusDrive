@@ -24,20 +24,21 @@ import (
 
 // PoolMemberView is one member as the page shows it.
 type PoolMemberView struct {
-	Remote       string  `json:"remote"`
-	Root         string  `json:"root"`
-	State        string  `json:"state"`
-	LastOK       string  `json:"last_ok,omitempty"`
-	LastError    string  `json:"last_error,omitempty"`
-	DownSince    string  `json:"down_since,omitempty"`
-	LatencyMS    float64 `json:"latency_ms"`
-	Weight       float64 `json:"weight"`
-	Total        int64   `json:"total,omitempty"`
-	Used         int64   `json:"used,omitempty"`
-	Free         int64   `json:"free,omitempty"`
-	Files        int     `json:"files"`
-	PendingOps   int     `json:"pending_ops"`
-	NamingDenied int     `json:"naming_denied_count"`
+	Remote       string   `json:"remote"`
+	Root         string   `json:"root"`
+	State        string   `json:"state"`
+	LastOK       string   `json:"last_ok,omitempty"`
+	LastError    string   `json:"last_error,omitempty"`
+	DownSince    string   `json:"down_since,omitempty"`
+	LatencyMS    float64  `json:"latency_ms"`
+	Weight       float64  `json:"weight"`
+	Total        int64    `json:"total,omitempty"`
+	Used         int64    `json:"used,omitempty"`
+	Free         int64    `json:"free,omitempty"`
+	Files        int      `json:"files"`
+	PendingOps   int      `json:"pending_ops"`
+	NamingDenied int      `json:"naming_denied_count"`
+	Class        []string `json:"class"`
 	// PendingRestart is "add" or "remove" when the saved configuration and
 	// the running pool intentionally differ until the next daemon restart.
 	PendingRestart string `json:"pending_restart,omitempty"`
@@ -67,12 +68,74 @@ type PoolView struct {
 		BytesMoved int64   `json:"bytes_moved"`
 		Skew       float64 `json:"skew"`
 	} `json:"rebalance"`
-	HoldsBytes  int64    `json:"holds_bytes"`
-	Divergences int      `json:"divergences"`
-	Notices     []string `json:"notices"`
-	Total       int64    `json:"total,omitempty"`
-	Used        int64    `json:"used,omitempty"`
-	Free        int64    `json:"free,omitempty"`
+	HoldsBytes  int64           `json:"holds_bytes"`
+	Divergences int             `json:"divergences"`
+	Notices     []string        `json:"notices"`
+	Total       int64           `json:"total,omitempty"`
+	Used        int64           `json:"used,omitempty"`
+	Free        int64           `json:"free,omitempty"`
+	Config      *PoolConfigView `json:"config,omitempty"`
+}
+
+type PoolRuleView struct {
+	Prefix   string   `json:"prefix"`
+	Replicas int      `json:"replicas,omitempty"`
+	Prefer   []string `json:"prefer"`
+	Avoid    []string `json:"avoid"`
+	Require  []string `json:"require"`
+}
+
+type PoolConfigView struct {
+	FailureDomain      string         `json:"failure_domain"`
+	WriteMode          string         `json:"write_mode"`
+	MinReplicasTimeout string         `json:"min_replicas_timeout"`
+	OutAfter           string         `json:"out_after"`
+	RepairConcurrency  int            `json:"repair_concurrency"`
+	TargetSkew         float64        `json:"target_skew"`
+	AutoBackfill       bool           `json:"auto_backfill"`
+	RebalanceMaxRate   int64          `json:"rebalance_max_rate"`
+	PauseBetween       string         `json:"pause_between"`
+	Rules              []PoolRuleView `json:"rules"`
+	RestartRequired    bool           `json:"restart_required"`
+}
+
+type PoolConfigRequest struct {
+	Pool               string              `json:"pool"`
+	Replicas           int                 `json:"replicas"`
+	MinReplicas        int                 `json:"min_replicas"`
+	FailureDomain      string              `json:"failure_domain"`
+	WriteMode          string              `json:"write_mode"`
+	MinReplicasTimeout string              `json:"min_replicas_timeout"`
+	OutAfter           string              `json:"out_after"`
+	RepairConcurrency  int                 `json:"repair_concurrency"`
+	TargetSkew         float64             `json:"target_skew"`
+	AutoBackfill       *bool               `json:"auto_backfill"`
+	RebalanceMaxRate   int64               `json:"rebalance_max_rate"`
+	PauseBetween       string              `json:"pause_between"`
+	MemberClasses      map[string][]string `json:"member_classes"`
+	Rules              []PoolRuleView      `json:"rules"`
+}
+
+type PoolPreviewRequest struct {
+	Pool string `json:"pool"`
+	Path string `json:"path"`
+}
+
+type PoolPreviewCandidate struct {
+	Remote   string   `json:"remote"`
+	Domain   string   `json:"domain"`
+	Class    []string `json:"class"`
+	Eligible bool     `json:"eligible"`
+	Selected bool     `json:"selected"`
+	Reasons  []string `json:"reasons"`
+}
+
+type PoolPreviewResponse struct {
+	Pool       string                 `json:"pool"`
+	Path       string                 `json:"path"`
+	Rule       string                 `json:"rule,omitempty"`
+	Replicas   int                    `json:"replicas"`
+	Candidates []PoolPreviewCandidate `json:"candidates"`
 }
 
 // PoolStatusResponse is GET /pool/status.
@@ -112,7 +175,8 @@ type PoolCreateRequest struct {
 	// of members without, so a drive that answers nothing quietly stops
 	// receiving files; this is where someone setting a pool up can say how big
 	// it is. Members that report their own space are left out of this map.
-	MemberCapacity map[string]int64 `json:"member_capacity,omitempty"`
+	MemberCapacity map[string]int64   `json:"member_capacity,omitempty"`
+	Settings       *PoolConfigRequest `json:"settings,omitempty"`
 }
 
 // PoolPathRequest is POST /pool/repair and /pool/scrub.
@@ -246,6 +310,7 @@ func markPendingPoolMembers(views []PoolView, cfg *config.Config) {
 	for pi := range views {
 		configured := map[string]config.PoolMember{}
 		if p, ok := cfg.Pools[views[pi].Name]; ok {
+			views[pi].Config = poolConfigView(p)
 			for _, member := range p.Members {
 				configured[member.Remote] = member
 			}
@@ -253,6 +318,7 @@ func markPendingPoolMembers(views []PoolView, cfg *config.Config) {
 		running := make(map[string]bool, len(views[pi].Members))
 		for mi := range views[pi].Members {
 			name := views[pi].Members[mi].Remote
+			views[pi].Members[mi].Class = append([]string{}, configured[name].Class...)
 			running[name] = true
 			if _, ok := configured[name]; !ok {
 				views[pi].Members[mi].PendingRestart = "remove"
@@ -264,10 +330,29 @@ func markPendingPoolMembers(views []PoolView, cfg *config.Config) {
 			}
 			views[pi].Members = append(views[pi].Members, PoolMemberView{
 				Remote: member.Remote, Root: member.Root, Weight: member.Weight,
+				Class:          append([]string{}, member.Class...),
 				PendingRestart: "add",
 			})
 		}
 	}
+}
+
+func poolConfigView(p config.Pool) *PoolConfigView {
+	v := &PoolConfigView{
+		FailureDomain: p.FailureDomain, WriteMode: p.WriteMode,
+		MinReplicasTimeout: p.MinReplicasTimeout.String(), OutAfter: p.OutAfter.String(),
+		RepairConcurrency: p.RepairConcurrency, TargetSkew: p.Rebalance.TargetSkew,
+		RebalanceMaxRate: int64(p.Rebalance.MaxRate), PauseBetween: p.Rebalance.PauseBetween.String(),
+		Rules: []PoolRuleView{}, RestartRequired: true,
+	}
+	if p.Rebalance.AutoBackfill != nil {
+		v.AutoBackfill = *p.Rebalance.AutoBackfill
+	}
+	for _, rule := range p.Rules {
+		v.Rules = append(v.Rules, PoolRuleView{Prefix: rule.Prefix, Replicas: rule.Replicas,
+			Prefer: append([]string{}, rule.Prefer...), Avoid: append([]string{}, rule.Avoid...), Require: append([]string{}, rule.Require...)})
+	}
+	return v
 }
 
 // GET /pool/status
@@ -334,8 +419,37 @@ func (s *Server) poolCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		members = append(members, member)
 	}
-	if err := config.CreatePool(cfg.SourcePath, in.Name, members, in.Replicas, in.MinReplicas, ""); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	var createErr error
+	if in.Settings == nil {
+		createErr = config.CreatePool(cfg.SourcePath, in.Name, members, in.Replicas, in.MinReplicas, "")
+	} else {
+		settings := config.Pool{Members: members, Replicas: in.Replicas, MinReplicas: in.MinReplicas}
+		q := in.Settings
+		settings.FailureDomain, settings.WriteMode = q.FailureDomain, q.WriteMode
+		settings.RepairConcurrency = q.RepairConcurrency
+		settings.Rebalance.TargetSkew, settings.Rebalance.AutoBackfill = q.TargetSkew, q.AutoBackfill
+		settings.Rebalance.MaxRate = config.Size(q.RebalanceMaxRate)
+		if q.MinReplicasTimeout != "" {
+			settings.MinReplicasTimeout, createErr = time.ParseDuration(q.MinReplicasTimeout)
+		}
+		if createErr == nil && q.OutAfter != "" {
+			settings.OutAfter, createErr = time.ParseDuration(q.OutAfter)
+		}
+		if createErr == nil && q.PauseBetween != "" {
+			settings.Rebalance.PauseBetween, createErr = time.ParseDuration(q.PauseBetween)
+		}
+		if createErr == nil {
+			for i := range settings.Members {
+				settings.Members[i].Class = append([]string{}, q.MemberClasses[settings.Members[i].Remote]...)
+			}
+			for _, rule := range q.Rules {
+				settings.Rules = append(settings.Rules, config.PoolRule{Prefix: rule.Prefix, Replicas: rule.Replicas, Prefer: rule.Prefer, Avoid: rule.Avoid, Require: rule.Require})
+			}
+			createErr = config.CreatePoolAdvanced(cfg.SourcePath, in.Name, settings.Members, in.Replicas, in.MinReplicas, "", settings)
+		}
+	}
+	if createErr != nil {
+		http.Error(w, createErr.Error(), http.StatusBadRequest)
 		return
 	}
 	detail := ""
@@ -350,6 +464,228 @@ func (s *Server) poolCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.reloadConfigView()
 	writeJSON(w, PoolMutationResponse{Pool: in.Name, RestartRequired: true, Detail: detail})
+}
+
+// POST /pool/config atomically updates the editable placement policy. These
+// fields shape a running Pool at construction time, so the response is always
+// explicit that a restart is required.
+func (s *Server) poolConfig(w http.ResponseWriter, r *http.Request) {
+	if !privateRequest(w, r) {
+		return
+	}
+	var in PoolConfigRequest
+	if !decodeMutation(w, r, &in) {
+		return
+	}
+	cfg := s.collector.ConfigView()
+	if cfg == nil || cfg.SourcePath == "" {
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
+		return
+	}
+	next, ok := cfg.Pools[in.Pool]
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown pool %q", in.Pool), http.StatusNotFound)
+		return
+	}
+	if in.Replicas > 0 {
+		next.Replicas = in.Replicas
+	}
+	if in.MinReplicas > 0 {
+		next.MinReplicas = in.MinReplicas
+	}
+	if in.RepairConcurrency > 0 {
+		next.RepairConcurrency = in.RepairConcurrency
+	}
+	if in.FailureDomain != "" {
+		next.FailureDomain = in.FailureDomain
+	}
+	if in.WriteMode != "" {
+		next.WriteMode = in.WriteMode
+	}
+	if in.MinReplicasTimeout != "" {
+		d, err := time.ParseDuration(in.MinReplicasTimeout)
+		if err != nil {
+			http.Error(w, "min_replicas_timeout: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		next.MinReplicasTimeout = d
+	}
+	if in.OutAfter != "" {
+		d, err := time.ParseDuration(in.OutAfter)
+		if err != nil {
+			http.Error(w, "out_after: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		next.OutAfter = d
+	}
+	if in.TargetSkew > 0 {
+		next.Rebalance.TargetSkew = in.TargetSkew
+	}
+	if in.AutoBackfill != nil {
+		next.Rebalance.AutoBackfill = in.AutoBackfill
+	}
+	if in.RebalanceMaxRate > 0 {
+		next.Rebalance.MaxRate = config.Size(in.RebalanceMaxRate)
+	}
+	if in.PauseBetween != "" {
+		d, err := time.ParseDuration(in.PauseBetween)
+		if err != nil {
+			http.Error(w, "pause_between: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		next.Rebalance.PauseBetween = d
+	}
+	if in.MemberClasses != nil {
+		for i := range next.Members {
+			if classes, exists := in.MemberClasses[next.Members[i].Remote]; exists {
+				next.Members[i].Class = append([]string{}, classes...)
+			}
+		}
+	}
+	if in.Rules != nil {
+		next.Rules = make([]config.PoolRule, 0, len(in.Rules))
+		for _, rule := range in.Rules {
+			next.Rules = append(next.Rules, config.PoolRule{Prefix: rule.Prefix, Replicas: rule.Replicas,
+				Prefer: rule.Prefer, Avoid: rule.Avoid, Require: rule.Require})
+		}
+	}
+	if err := config.UpdatePoolSettings(cfg.SourcePath, in.Pool, next); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.reloadConfigView()
+	writeJSON(w, PoolMutationResponse{Pool: in.Pool, RestartRequired: true})
+}
+
+// POST /pool/preview explains the configured placement policy without
+// changing data. It is intentionally based on the saved configuration so a
+// person can preview a pending edit before restarting the daemon.
+func (s *Server) poolPreview(w http.ResponseWriter, r *http.Request) {
+	if !privateRequest(w, r) {
+		return
+	}
+	var in PoolPreviewRequest
+	if !decodeMutation(w, r, &in) {
+		return
+	}
+	clean, err := canonicalPath(in.Path)
+	if err != nil {
+		http.Error(w, "path: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	cfg := s.collector.ConfigView()
+	if cfg == nil {
+		httpErrorT(w, r, http.StatusConflict, "err.no_config_to_write")
+		return
+	}
+	p, ok := cfg.Pools[in.Pool]
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown pool %q", in.Pool), http.StatusNotFound)
+		return
+	}
+	var matched *config.PoolRule
+	for i := range p.Rules {
+		rule := &p.Rules[i]
+		if (clean == rule.Prefix || strings.HasPrefix(clean, strings.TrimSuffix(rule.Prefix, "/")+"/")) &&
+			(matched == nil || len(rule.Prefix) > len(matched.Prefix)) {
+			matched = rule
+		}
+	}
+	replicas := p.Replicas
+	if matched != nil && matched.Replicas > 0 {
+		replicas = matched.Replicas
+	}
+	out := PoolPreviewResponse{Pool: in.Pool, Path: clean, Replicas: replicas, Candidates: []PoolPreviewCandidate{}}
+	if matched != nil {
+		out.Rule = matched.Prefix
+	}
+	for _, member := range p.Members {
+		candidate := PoolPreviewCandidate{Remote: member.Remote, Class: append([]string{}, member.Class...), Eligible: true, Reasons: []string{}}
+		rc := cfg.Remotes[member.Remote]
+		switch p.FailureDomain {
+		case config.FailureDomainProvider:
+			candidate.Domain = rc.Type
+		case config.FailureDomainMember:
+			candidate.Domain = member.Remote
+		default:
+			candidate.Domain = rc.AccountBinding
+			if candidate.Domain == "" {
+				candidate.Domain = member.Remote
+			}
+		}
+		if matched != nil {
+			for _, required := range matched.Require {
+				if !hasPoolClass(member.Class, required) {
+					candidate.Eligible = false
+					candidate.Reasons = append(candidate.Reasons, "missing required class "+required)
+				}
+			}
+			for _, preferred := range matched.Prefer {
+				if hasPoolClass(member.Class, preferred) {
+					candidate.Reasons = append(candidate.Reasons, "preferred class "+preferred)
+				}
+			}
+			for _, avoided := range matched.Avoid {
+				if hasPoolClass(member.Class, avoided) {
+					candidate.Reasons = append(candidate.Reasons, "avoided class "+avoided)
+				}
+			}
+		}
+		if len(candidate.Reasons) == 0 {
+			candidate.Reasons = append(candidate.Reasons, "eligible")
+		}
+		out.Candidates = append(out.Candidates, candidate)
+	}
+	sort.SliceStable(out.Candidates, func(i, j int) bool {
+		a, b := out.Candidates[i], out.Candidates[j]
+		if a.Eligible != b.Eligible {
+			return a.Eligible
+		}
+		score := func(c PoolPreviewCandidate) int {
+			n := 0
+			for _, reason := range c.Reasons {
+				if strings.HasPrefix(reason, "preferred") {
+					n += 2
+				}
+				if strings.HasPrefix(reason, "avoided") {
+					n--
+				}
+			}
+			return n
+		}
+		if score(a) != score(b) {
+			return score(a) > score(b)
+		}
+		return a.Remote < b.Remote
+	})
+	usedDomains := map[string]bool{}
+	selected := 0
+	for i := range out.Candidates {
+		if !out.Candidates[i].Eligible || selected >= replicas || usedDomains[out.Candidates[i].Domain] {
+			continue
+		}
+		out.Candidates[i].Selected = true
+		usedDomains[out.Candidates[i].Domain] = true
+		selected++
+	}
+	for i := range out.Candidates {
+		if !out.Candidates[i].Eligible || out.Candidates[i].Selected || selected >= replicas {
+			continue
+		}
+		out.Candidates[i].Selected = true
+		selected++
+		out.Candidates[i].Reasons = append(out.Candidates[i].Reasons, "reused failure domain")
+	}
+	writeJSON(w, out)
+}
+
+func hasPoolClass(classes []string, want string) bool {
+	for _, class := range classes {
+		if class == want {
+			return true
+		}
+	}
+	return false
 }
 
 // POST /pool/members

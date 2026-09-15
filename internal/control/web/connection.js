@@ -10,6 +10,7 @@
 import { api, ApiError } from '/ui/api.js';
 import { el, fill, toast, confirmDelete, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
+import { startAuthorization } from '/ui/auth_step.js';
 
 const MODES = ['writeback', 'strict', 'readonly'];
 
@@ -31,11 +32,17 @@ export async function openConnection(name, opts = {}) {
   // once around a container the renders fill. openPanel owns the scrim, the
   // dialog semantics, the focus trap and giving the page back.
   const body = el('div');
+  let pending = null;
   const dismiss = openPanel({
     title: t('conn.title', name), content: body, width: 640,
     onEscape: () => close(),
   });
   function close() {
+    if (pending) {
+      const p = pending;
+      pending = null;
+      api.post('/accounts/' + encodeURIComponent(p.name) + '/auth/cancel?session=' + encodeURIComponent(p.session), {}).catch(() => {});
+    }
     dismiss();
     if (opts.onClose) opts.onClose();
   }
@@ -72,6 +79,26 @@ export async function openConnection(name, opts = {}) {
     const checkOut = el('span', { class: 'dim', style: 'font-size:12px' });
     const checkBtn = el('button', {}, t('action.check'));
     checkBtn.addEventListener('click', () => runCheck(checkBtn, checkOut));
+    const authHost = el('div');
+    const authBtn = detail.browser_auth
+      ? el('button', { class: detail.has_credentials ? '' : 'primary' }, t(detail.has_credentials ? 'conn.reauthorize' : 'conn.authorize'))
+      : null;
+    if (authBtn) authBtn.addEventListener('click', async () => {
+      authBtn.disabled = true;
+      const { started } = await startAuthorization({
+        name, host: authHost, alive: () => body.isConnected,
+        onPending: (p) => { pending = p; },
+        onSettled: async (result) => {
+          pending = null;
+          authBtn.disabled = false;
+          if (result.state === 'done') {
+            toast(t('conn.authorized', name));
+            await reload();
+          }
+        },
+      });
+      if (!started) authBtn.disabled = false;
+    });
 
     const save = el('button', { class: 'primary' }, t('conn.save'));
     save.addEventListener('click', () => {
@@ -99,6 +126,8 @@ export async function openConnection(name, opts = {}) {
         el('span', { class: 'dim', style: 'font-size:12px' }, detail.type),
         el('span', { class: 'dim', style: 'font-size:12px' }, detail.live ? t('conn.live') : t('conn.offline')),
         el('span', { class: 'dim', style: 'font-size:12px' }, detail.has_credentials ? t('conn.hascreds') : t('conn.nocreds'))),
+
+      detail.browser_auth ? section(t('conn.authorization'), authBtn, authHost) : null,
 
       section(t('conn.settings'),
         labeled(t('conn.proxy'), proxyInput),

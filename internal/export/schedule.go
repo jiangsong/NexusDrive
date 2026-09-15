@@ -130,7 +130,7 @@ func (m *Manager) stopJob(id string) {
 func (m *Manager) drain(ctx context.Context, id string) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	var sem chan struct{}
+	var jobFiles chan struct{}
 	for {
 		if ctx.Err() != nil {
 			return
@@ -143,11 +143,11 @@ func (m *Manager) drain(ctx context.Context, id string) {
 		if limit < 1 {
 			limit = 1
 		}
-		if sem == nil {
-			// One semaphore for the whole drain: a fresh one per round
-			// would let each round add another `limit` transfers on top of
-			// the ones still running.
-			sem = make(chan struct{}, limit)
+		if limit > m.cfg.Transfers {
+			limit = m.cfg.Transfers
+		}
+		if jobFiles == nil {
+			jobFiles = make(chan struct{}, limit)
 		}
 		items, err := m.store.DueItems(ctx, id, m.now(), j.Options.MultiRangeMin, limit)
 		if err != nil {
@@ -161,15 +161,23 @@ func (m *Manager) drain(ctx context.Context, id string) {
 			}
 			dispatched++
 			select {
-			case sem <- struct{}{}:
+			case jobFiles <- struct{}{}:
 			case <-ctx.Done():
+				_ = m.store.ReleaseItem(context.WithoutCancel(ctx), id, it.Rel, time.Time{}, false, "interrupted")
+				return
+			}
+			select {
+			case m.files <- struct{}{}:
+			case <-ctx.Done():
+				<-jobFiles
 				_ = m.store.ReleaseItem(context.WithoutCancel(ctx), id, it.Rel, time.Time{}, false, "interrupted")
 				return
 			}
 			wg.Add(1)
 			go func(it Item) {
 				defer wg.Done()
-				defer func() { <-sem }()
+				defer func() { <-jobFiles }()
+				defer func() { <-m.files }()
 				m.handleItem(ctx, j, it)
 			}(it)
 		}

@@ -228,6 +228,7 @@ export:
   transfers: 4            # 同时在飞的文件数
   streams: 4              # 每个大文件的并发 range 数
   range_size: 32MiB
+  memory_budget: 512MiB   # 所有作业的 range buffer 总预算
   multi_range_min: 64MiB
   yield_to_foreground: true
   disk_probe_interval: 30s

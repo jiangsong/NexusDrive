@@ -35,6 +35,7 @@ type ExportManager interface {
 	Job(ctx context.Context, id string) (export.Job, error)
 	Jobs(ctx context.Context, limit int, after string) ([]export.Job, string, error)
 	Items(ctx context.Context, id string) ([]export.Item, error)
+	ItemsPage(ctx context.Context, id, after string, limit int, state export.ItemState) ([]export.Item, string, error)
 	Progress(ctx context.Context, id string) (export.Progress, error)
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error
@@ -176,10 +177,18 @@ type ExportJobView struct {
 
 // ExportProgressView is the live rate and estimate of a running job.
 type ExportProgressView struct {
-	BytesDone  int64   `json:"bytes_done"`
-	BytesTotal int64   `json:"bytes_total"`
-	Rate       float64 `json:"rate"`
-	ETASeconds float64 `json:"eta_seconds"`
+	BytesDone  int64                      `json:"bytes_done"`
+	BytesTotal int64                      `json:"bytes_total"`
+	Rate       float64                    `json:"rate"`
+	ETASeconds float64                    `json:"eta_seconds"`
+	Members    []ExportMemberProgressView `json:"members"`
+}
+
+type ExportMemberProgressView struct {
+	Remote   string  `json:"remote"`
+	Inflight int     `json:"inflight"`
+	Bytes    int64   `json:"bytes"`
+	Rate     float64 `json:"rate"`
 }
 
 // ExportItemView is one planned file. Rel is where it lands under the
@@ -203,7 +212,8 @@ type ExportsResponse struct {
 	Progress   *ExportProgressView `json:"progress,omitempty"`
 	// Items is filled for a single job only; a listing would otherwise carry
 	// every planned file of every job.
-	Items []ExportItemView `json:"items,omitempty"`
+	Items          []ExportItemView `json:"items,omitempty"`
+	ItemNextCursor string           `json:"item_next_cursor,omitempty"`
 	// Forgotten names the job whose record and part files were removed.
 	Forgotten string `json:"forgotten,omitempty"`
 }
@@ -242,10 +252,16 @@ func exportKind(k provider.Kind) string {
 }
 
 func exportProgressView(p export.Progress) ExportProgressView {
-	return ExportProgressView{
+	v := ExportProgressView{
 		BytesDone: p.BytesDone, BytesTotal: p.BytesTotal,
-		Rate: p.Rate, ETASeconds: p.ETA.Seconds(),
+		Rate: p.Rate, ETASeconds: p.ETA.Seconds(), Members: []ExportMemberProgressView{},
 	}
+	for _, member := range p.Members {
+		v.Members = append(v.Members, ExportMemberProgressView{
+			Remote: member.Remote, Inflight: member.Inflight, Bytes: member.Bytes, Rate: member.Rate,
+		})
+	}
+	return v
 }
 
 func exportItemViews(items []export.Item) []ExportItemView {
@@ -440,6 +456,10 @@ func (s *Server) exportByPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tail := strings.TrimPrefix(r.URL.Path, "/exports/")
+	if strings.HasSuffix(tail, "/items") {
+		s.exportItems(w, r, strings.TrimSuffix(tail, "/items"))
+		return
+	}
 	if exportActions[tail] {
 		s.mutateExport(w, r, tail)
 		return
@@ -477,12 +497,50 @@ func (s *Server) exportDetail(ctx context.Context, m ExportManager, id string) (
 	pv := exportProgressView(p)
 	view.Rate, view.ETASeconds = pv.Rate, pv.ETASeconds
 	out := ExportsResponse{Jobs: []ExportJobView{view}, Progress: &pv}
-	items, err := m.Items(ctx, id)
+	items, next, err := m.ItemsPage(ctx, id, "", defaultExportLimit, "")
 	if err != nil {
 		return ExportsResponse{}, err
 	}
 	out.Items = exportItemViews(items)
+	out.ItemNextCursor = next
 	return out, nil
+}
+
+// GET /exports/<id>/items?cursor=&limit=&state=
+func (s *Server) exportItems(w http.ResponseWriter, r *http.Request, id string) {
+	if !validExportID(id) {
+		http.NotFound(w, r)
+		return
+	}
+	if !allowMethod(w, r, http.MethodGet) {
+		return
+	}
+	limit := defaultExportLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxExportLimit {
+			httpErrorT(w, r, http.StatusBadRequest, "err.invalid_limit")
+			return
+		}
+		limit = n
+	}
+	state := export.ItemState(r.URL.Query().Get("state"))
+	switch state {
+	case "", export.ItemPending, export.ItemActive, export.ItemDone, export.ItemSkipped, export.ItemFailed:
+	default:
+		http.Error(w, "exports: invalid item state", http.StatusBadRequest)
+		return
+	}
+	m, ok := s.exportManager(w, r)
+	if !ok {
+		return
+	}
+	items, next, err := m.ItemsPage(r.Context(), id, r.URL.Query().Get("cursor"), limit, state)
+	if err != nil {
+		httpErrorT(w, r, exportStatus(err), "err.export_not_found")
+		return
+	}
+	writeJSON(w, ExportsResponse{Jobs: []ExportJobView{}, Items: exportItemViews(items), ItemNextCursor: next})
 }
 
 func (s *Server) mutateExport(w http.ResponseWriter, r *http.Request, action string) {

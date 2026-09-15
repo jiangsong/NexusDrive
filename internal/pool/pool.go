@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloudfs/internal/config"
@@ -107,6 +108,10 @@ type Pool struct {
 
 	noticeMu sync.Mutex
 	notices  []string
+	// repairClaims prevents overlapping manual/background passes from
+	// repairing the same path twice. Different paths may run concurrently.
+	repairClaims sync.Map
+	repairActive atomic.Int64
 }
 
 // New assembles a pool over already-built members.

@@ -121,10 +121,13 @@ function refreshTitlebar() {
 // render, so changeHandlers must already exist.
 const changeHandlers = new Set();
 export function onFsChange(fn) { changeHandlers.add(fn); return () => changeHandlers.delete(fn); }
+const exportHandlers = new Set();
+export function onExportChange(fn) { exportHandlers.add(fn); return () => exportHandlers.delete(fn); }
 
 subscribe(() => refreshTitlebar());
 startRouter(() => render()); // performs the initial render
 events({
   onStatus: (s) => set({ status: s, health: healthOf(s), connected: true }),
   onChange: (c) => { for (const fn of changeHandlers) fn(c); },
+  onExport: (e) => { for (const fn of exportHandlers) fn(e); },
 });

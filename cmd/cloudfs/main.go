@@ -164,7 +164,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: cloudfs <command> [args]
 
 Getting started
-  setup                     first run: write a starter config, then add drives in the browser
+  setup [--force] [--listen addr]
+                            add or recover drives in the browser, even beside a running daemon
 
 Mounting
   mount [path]              mount the configured remotes and serve until interrupted

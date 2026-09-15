@@ -166,7 +166,10 @@ func exportDestination(roots []string, dest string) (string, error) {
 			continue
 		}
 		r = filepath.Clean(r)
-		if under(r, abs) || under(resolveExisting(r), resolved) {
+		// Authorization must be based on the paths the OS will actually
+		// use. A lexical match is not sufficient: root/link/out may spell a
+		// path below root while link sends the write somewhere else.
+		if under(resolveExisting(r), resolved) {
 			return abs, nil
 		}
 	}

@@ -88,6 +88,11 @@ func (m *Manager) fetch(ctx context.Context, job Job, it Item, part string) erro
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if err := m.memory.Acquire(runCtx, rangeSize); err != nil {
+				fail(err)
+				return
+			}
+			defer m.memory.Release(rangeSize)
 			buf := make([]byte, rangeSize)
 			for c := range work {
 				if runCtx.Err() != nil {
@@ -122,6 +127,12 @@ func (m *Manager) fetch(ctx context.Context, job Job, it Item, part string) erro
 	}
 	if err := f.Sync(); err != nil {
 		return asDisk(err)
+	}
+	// The last interval may be smaller than syncEvery. Now that it is on
+	// disk, publish its bitmap as well so a failure during verification or
+	// rename can resume without fetching it again.
+	if err := w.checkpoint(ctx); err != nil {
+		return err
 	}
 	return m.checkHash(ctx, job, it, part)
 }
@@ -159,12 +170,16 @@ func (m *Manager) checkHash(ctx context.Context, job Job, it Item, part string) 
 }
 
 func (m *Manager) fetchChunk(ctx context.Context, mt vfs.Mount, it Item, key cache.FileKey, w *fileWriter, c chunkWork, buf []byte) error {
+	finish := m.beginMemberRange(w.job.ID, it.Remote)
+	completed := int64(0)
+	defer func() { finish(completed) }()
 	if err := m.fillChunk(ctx, mt, it, key, c.off, buf); err != nil {
 		return err
 	}
 	if err := w.writeAt(buf, c.off); err != nil {
 		return err
 	}
+	completed = int64(len(buf))
 	return w.complete(ctx, c)
 }
 

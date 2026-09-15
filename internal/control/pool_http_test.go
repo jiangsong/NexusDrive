@@ -333,3 +333,32 @@ func TestPoolJoinReadsTheMarker(t *testing.T) {
 		t.Fatalf("joined config = %+v", joined.Pools)
 	}
 }
+
+func TestPoolConfigAndPlacementPreview(t *testing.T) {
+	f := newPoolFixture(t)
+	w := f.do(t, http.MethodPost, "/pool/config", `{
+        "pool":"home","replicas":2,"min_replicas":1,
+        "failure_domain":"provider","write_mode":"strict","min_replicas_timeout":"45s","out_after":"15m",
+        "repair_concurrency":3,"target_skew":0.08,"auto_backfill":false,
+        "rebalance_max_rate":1048576,"pause_between":"750ms",
+        "member_classes":{"a":["fast"],"b":["slow"]},
+        "rules":[{"prefix":"/photos","replicas":1,"require":["fast"],"prefer":[],"avoid":[]}]
+    }`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"restart_required":true`) {
+		t.Fatalf("config = %d %s", w.Code, w.Body.String())
+	}
+	cfg, err := config.Load(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Pools["home"]
+	if p.WriteMode != "strict" || p.FailureDomain != "provider" || p.RepairConcurrency != 3 || len(p.Rules) != 1 || len(p.Members[0].Class) != 1 {
+		t.Fatalf("saved policy = %+v", p)
+	}
+	w = f.do(t, http.MethodPost, "/pool/preview", `{"pool":"home","path":"/photos/example.jpg"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"rule":"/photos"`) ||
+		!strings.Contains(w.Body.String(), `"remote":"a"`) || !strings.Contains(w.Body.String(), `"selected":true`) ||
+		!strings.Contains(w.Body.String(), `missing required class fast`) {
+		t.Fatalf("preview = %d %s", w.Code, w.Body.String())
+	}
+}

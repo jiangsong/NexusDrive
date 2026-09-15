@@ -81,12 +81,32 @@ func (f *fakeExports) Items(_ context.Context, id string) ([]export.Item, error)
 	return f.items[id], nil
 }
 
+func (f *fakeExports) ItemsPage(ctx context.Context, id, after string, limit int, state export.ItemState) ([]export.Item, string, error) {
+	items, err := f.Items(ctx, id)
+	if err != nil {
+		return nil, "", err
+	}
+	filtered := make([]export.Item, 0, len(items))
+	for _, it := range items {
+		if it.Rel > after && (state == "" || it.State == state) {
+			filtered = append(filtered, it)
+		}
+	}
+	next := ""
+	if len(filtered) > limit {
+		next = filtered[limit-1].Rel
+		filtered = filtered[:limit]
+	}
+	return filtered, next, nil
+}
+
 func (f *fakeExports) Progress(_ context.Context, id string) (export.Progress, error) {
 	j, ok := f.jobs[id]
 	if !ok {
 		return export.Progress{}, export.ErrNotFound
 	}
-	return export.Progress{BytesDone: j.BytesDone, BytesTotal: j.BytesTotal, Rate: 1024, ETA: 4 * time.Second}, nil
+	return export.Progress{BytesDone: j.BytesDone, BytesTotal: j.BytesTotal, Rate: 1024, ETA: 4 * time.Second,
+		Members: []export.MemberProgress{{Remote: "demo", Inflight: 2, Bytes: j.BytesDone, Rate: 512}}}, nil
 }
 
 func (f *fakeExports) act(action, id string) error {
@@ -218,6 +238,10 @@ func TestExportListAndDetailOmitPrivatePlanState(t *testing.T) {
 	}
 	if len(detail.Jobs) != 1 || detail.Jobs[0].ID != id {
 		t.Fatalf("detail did not name the job: %+v", detail)
+	}
+	page := do(t, s, "GET", "/exports/"+id+"/items?limit=1&state=done", "")
+	if page.Code != 200 {
+		t.Fatalf("item page: got %d %s", page.Code, page.Body.String())
 	}
 	if detail.Progress == nil || detail.Progress.Rate != 1024 || detail.Progress.ETASeconds != 4 {
 		t.Fatalf("detail carries no live progress: %+v", detail.Progress)

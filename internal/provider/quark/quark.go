@@ -315,7 +315,7 @@ func init() {
 		{Name: "root_id", Prompt: "作为根的目录 id", Default: "0"},
 		{Name: "user_agent", Prompt: "请求 User-Agent，留空用内置值"},
 	}, provider.Credentials{Fields: []string{"cookie"},
-		Note: "浏览器登录后的 cookie；这是非官方接口，限流更保守"})
+		Note: "CloudFS 通过夸克 App 扫码授权取得会话；这是非官方接口，限流更保守"})
 	provider.Register("quark", func(name string, cfg map[string]any) (provider.Provider, error) {
 		return New(name, cfg)
 	})

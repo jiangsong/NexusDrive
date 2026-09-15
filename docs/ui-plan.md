@@ -278,3 +278,119 @@ E1–E8 已全部完成，每条的落地说明见本节末尾。
 - 阶段 C1 结束：CI 里 `GOOS=windows` vet + build 绿；`release.sh` 产出 `.exe`。
 - 阶段 B：Linux 真机打开窗口、附着已运行守护进程、杀掉守护进程后显示占位并自动拉起。
 - 阶段 C2：只能到 vet/交叉编译；真机清单留给有 Windows 的那天。
+
+---
+
+### 阶段 F —— Agent 底座界面（2026-09-14 登记）
+
+对应 [TODO.md](../TODO.md) 的 P4 节（T-34 ~ T-43），设计与安全边界见 [Agent 工作底座路线图](agent-roadmap.md)
+§6。本段只列界面侧逐项清单；证据、后端做法与验收断言以 TODO.md 为准。**纪律**：F 条目与对应 T 条目
+同期交付、同一验收，界面不落地不关 T 条目。F1–F4 属一期（F9 的"复制提示词"可提前到一期末），
+F5–F10 属二期。
+
+共用约定（每条都适用，不再逐条重复）：新屏与浮层只用 `openForm`/`openPanel`/`showPanel`/`confirmDelete`，
+不复制模态框逻辑；表格分页用 `moreRow` + `paged.js`；新文案进 `i18n.js` 两张表且 screens 内无汉字；
+纯逻辑模块零 import，放 `web/` 根，测试放 `web/_tests/*.test.mjs`；来自文件或子进程的文本一律按文本插入；
+破坏性动作 `confirmDelete` 键入确认 + 请求体 `confirm: true`。
+
+**F1 —— `#/agents` 屏骨架 + 会话 / 审计标签（T-34 · 一期）**
+
+- [ ] **F1-1** `icons.js` 加 `bot`；`router.js` 的 `routes` 与 `navItems` 加 `#/agents`（位于 `#/exports` 之后），`app.js` 导航项徽标显示活动会话数。
+- [ ] **F1-2** `screens/agents.js`：标签容器（会话 / 审计 / 访问令牌 / 记忆，后两个由 F2、F7 填充）；标签选择仅存 URL hash 参数。
+- [ ] **F1-3** 会话标签：三张卡（活动会话、今日写操作、今日拒绝次数）；表格 客户端 / 作用域摘要 / 状态点+文字 / 开始时间 / 写操作数，调 `GET /sessions` 并跟随 `next_cursor`。
+- [ ] **F1-4** `session_panel.js`（`openPanel`）一期内容：作用域、客户端、审计尾巴 50 条、"结束会话"（`POST /sessions/{id}/finish`）。
+- [ ] **F1-5** 审计标签：过滤条（会话、工具、结果 ok/denied/error、时间 1h/24h/7d）；表格 时间 / 客户端 / 工具 / 路径（多路径折叠）/ 结果 / 字节 / 耗时；denied 行红底且带文字标签；`args` 点击展开只读 JSON。
+- [ ] **F1-6** `api.js` 的 `events()` 增加 `onAudit`、`onSession`；未翻页、无过滤时审计新行插顶部，会话表刷新；`store.js` 不缓存审计行。
+- [ ] **F1-7** `scope_view.js`（Scope → 可读摘要）+ `_tests/scope_view.test.mjs`。
+- [ ] **F1-8** i18n 键 `agents.*`、`sessions.*`、`audit.*`；`ui_agents_test.go`：模块嵌入、`#/agents` 在 `routes` 与 `navItems`、调用 `/sessions` 与 `/audit` 并跟随游标、denied 行有文字标签。
+
+**F2 —— 访问令牌标签 + 揭示浮层 + 接入面板 + 设置完成页卡片（T-35 · 一期）**
+
+- [ ] **F2-1** 访问令牌标签：表格 名称 / 指纹（前 4 位）/ 可读 / 可写 / 过期 / 最后使用 / 状态（点+文字），调 `GET /mcp/tokens`。
+- [ ] **F2-2** "新建令牌"`openForm`：名称、可读路径（多行）、可写路径、有效期（1 天/7 天/30 天/永不）、只读开关；`scope_view.js` 校验"可写必须在可读内"后 `POST /mcp/tokens`。
+- [ ] **F2-3** 令牌揭示浮层（agents.js 内，`openPanel`）：明文 + `copyBtn` + "关闭后无法再次查看" + Claude Code / Codex HTTP 注册片段各带复制；令牌只在局部变量，关闭即丢，模块不 import `store.js`、源码无 `localStorage`。**待确认**：若改为只给命令，本项改为显示 `cloudfs mcp token create …` 片段（见 roadmap §6.4）。
+- [ ] **F2-4** 吊销：`confirmDelete` 键入令牌名称 → `POST /mcp/tokens/{id}/revoke`，带 `confirm: true`。
+- [ ] **F2-5** 接入面板（Agent 屏顶部可折叠）：`GET /mcp/connect` 的 HTTP 监听状态点与地址、owner 状态、未启用 HTTP 时的配置说明。
+- [ ] **F2-6** `screens/setup.js` 完成页加"连接 Agent"卡片，跳 `#/agents` 并展开接入面板。
+- [ ] **F2-7** i18n 键 `tokens.*`；`_tests/scope_view.test.mjs` 补可写/可读包含校验；`ui_tokens_test.go`：揭示浮层无 `store.js`/`localStorage`、吊销带 `confirm: true`、接入面板调 `/mcp/connect`、`setup.js` 含 `#/agents` 链接、全部嵌入字节无 `type="password"`。
+
+**F3 —— 会话产物表 + 主窗口工作区标记 + 检查器"来自会话"（T-36 · 一期）**
+
+- [ ] **F3-1** `session_panel.js` 产物表：路径 / 大小 / 状态（已同步、上传中，点+文字，SSE `change` 刷新）/ 动作；摘要文本、sandbox 标记、"打开工作区目录"。
+- [ ] **F3-2** 产物动作"在文件中打开"跳主窗口并选中；"复制链接"只在点击时请求 `/fs/download-url`，结果交给剪贴板不写入表格 DOM。
+- [ ] **F3-3** 会话表加"产物数"列与"仅 sandbox"过滤（`GET /sessions?sandbox=1`）。
+- [ ] **F3-4** `screens/main.js` 文件表：工作区根与会话目录名称旁 `bot` 小标记，带 `aria-label`。
+- [ ] **F3-5** `screens/main.js` 检查器：会话目录内文件显示"来自会话 <client>-<日期>"链接，`GET /sessions?path=` 反查后打开会话详情。
+- [ ] **F3-6** `ui_sessions_test.go`：复制链接仅点击时请求、结果不入表格；检查器调用 `/sessions?path=`；工作区标记用 `bot` 且带 `aria-label`。
+
+**F4 —— `#/index` 屏 + 主窗口内容搜索 + 检查器索引动作（T-37 · 一期）**
+
+- [ ] **F4-1** `icons.js` 加 `layers`；`routes`/`navItems` 加 `#/index`（位于 `#/agents` 之后）。
+- [ ] **F4-2** `screens/index.js` 未启用态：`GET /index/status` 返回 `enabled:false` 时整屏说明与配置示例，不请求 `/index/rules`。
+- [ ] **F4-3** 概况卡（照缓存屏四卡）：文档 正常/待处理/失败、分块数、文本占用 / `max_total_text`、本小时下载 / `fetch_budget`；`events()` 增加 `onIndex`，进度条与让路/风控休眠原因及恢复时间。
+- [ ] **F4-4** 规则表：路径 / 包含 / 排除 / 单文件上限 / 来源 / 已覆盖文档数 / 动作；配置来源只显示"在配置文件中修改"；界面来源"移除"`confirmDelete` 键入路径 → `POST /index/remove`。
+- [ ] **F4-5** "添加规则"`openForm`：路径、包含 glob 预设（文档/代码/全部文本）、单文件上限；常驻风控提示 → `POST /index/add`。
+- [ ] **F4-6** 失败文档表：路径 / 类型 / 错误 / 时间 / "重试"（`POST /index/retry`），`GET /index/failed` 分页；"重建索引"`confirmDelete` 键入 `rebuild` → `POST /index/rebuild`。
+- [ ] **F4-7** `screens/main.js` 搜索框：仅 `status.index.enabled` 时渲染"文件名 / 内容"分段切换（偏好存 localStorage）；内容模式调 `/index/search`；结果行 文件图标 / 路径 / 标题路径 / 片段 / "可能已过期"；`degraded`、`truncated` 为结果内常驻说明行。
+- [ ] **F4-8** `snippet.js`（片段 + 查询 → 高亮分段数据，截断 240 字符不切半字）+ `_tests/snippet.test.mjs`（高亮、CJK 截断、特殊字符按文本处理）。
+- [ ] **F4-9** 检查器"索引"信息行（已索引 · N 块 / 待处理 / 失败原因 / 未覆盖）；"加入索引"（`POST /index/add`）、"移出索引"（仅界面来源）、"查看抽取文本"（`showPanel` 分页读 `/index/text`，"加载更多"）；点内容搜索结果打开同一浮层并滚到命中段。
+- [ ] **F4-10** i18n 键 `index.*`；`ui_index_test.go`：路由与导航、未启用不请求 `/index/rules`、移除与重建带 `confirm: true`、配置来源无移除按钮、搜索切换条件渲染、内容模式调 `/index/search` 并渲染两条说明行、检查器三动作路由。
+
+**F5 —— 会话操作表 + 回滚预览 / 确认 / 结果 + 检查器"被 Agent 修改"（T-38 · 二期）**
+
+- [ ] **F5-1** `icons.js` 加 `undo`。
+- [ ] **F5-2** `session_panel.js` 操作表：序号 / 操作（新建、覆盖、编辑、改名、删除、建目录）/ 路径（改名显示旧、新路径）/ 前像（可恢复、过大、未缓存、目录，点+文字）/ 回滚结果。
+- [ ] **F5-3** "回滚此会话"先 `POST /sessions/{id}/rollback {dry_run: true}` → 预览浮层：将恢复 / 将跳过（原因）/ 冲突三组 + 回滚承诺三句话；无预览不能执行。
+- [ ] **F5-4** 预览确认：`confirmDelete` 键入会话短 ID → `{confirm: true}`；结果浮层同三组并提供"回滚这次回滚"。
+- [ ] **F5-5** `rollback_plan.js`（dry-run 结果 → 分组，含空计划）+ `_tests/rollback_plan.test.mjs`。
+- [ ] **F5-6** 会话表状态新增"已回滚"、行内快捷"回滚"；检查器"被 Agent 修改 · <client> · <时间>"（`GET /sessions?path=`）。
+- [ ] **F5-7** `ui_rollback_test.go`：先 `dry_run: true` 后 `confirm: true` 的请求顺序；检查器标记调用 `/sessions?path=`。
+
+**F6 —— 嵌入端点面板 + 远端横幅 + 语义模式（T-39 · 二期）**
+
+- [ ] **F6-1** `screens/index.js` 嵌入端点面板（`GET /index/embedding`）：provider / 模型 / 维度 / 地址、健康点 + 最后错误 + 熔断恢复时间、已嵌入 / 待嵌入、本月字符数与标明"估算"的费用。
+- [ ] **F6-2** `remote=true` 时黄色横幅"文件内容会发送到 <host>"常驻，无关闭按钮。
+- [ ] **F6-3** "测试端点"：说明"会产生一次调用"后才 `POST /index/embedding/check`，仅点击时请求。
+- [ ] **F6-4** 未配置 `api_key`：显示 `cloudfs index auth` + `copyBtn`，无输入框、无秘密字段名；面板底部"在配置文件中修改"。
+- [ ] **F6-5** 概况卡加"向量 N / max_chunks"；主窗口搜索切换扩为"文件名 / 关键词 / 语义"，降级时显示"已降级为关键词"。
+- [ ] **F6-6** `ui_embedding_test.go`：横幅条件渲染且无关闭按钮、无 key 输入、测试端点仅点击请求、降级说明行。
+
+**F7 —— 记忆标签 + 编辑浮层 + 冲突合并浮层（T-40 · 二期）**
+
+- [ ] **F7-1** `screens/agents.js` 记忆标签：左侧 agent 列表（`GET /memory/agents`，条数与占用 / 上限）；右侧表格 名称 / 描述 / 类型 / 更新时间 / 冲突标记（红点+"有冲突副本"）；顶部记忆搜索框。
+- [ ] **F7-2** 记忆编辑浮层：frontmatter（名称只读、描述、类型）+ 正文 `textarea`（按文本填充）+ 字节计数 / 上限；`PUT /memory/{agent}/{name}` 带 `expected_version`，版本冲突提示"已在其他设备修改"并提供"重新载入"。
+- [ ] **F7-3** `memory_conflicts.js`（同目录文件名 → 本体与副本配对，只按前缀与同目录）+ `_tests/memory_conflicts.test.mjs`。
+- [ ] **F7-4** 冲突合并浮层：左右只读并排；"保留本体并删除副本"（`POST /fs/delete`，path 取自 `conflicts[]`，`confirmDelete` + `confirm: true`）、"用副本覆盖本体"（`GET /fs/preview` 读副本 → `PUT` 带 `expected_version` → 删副本）、"手动合并"（编辑浮层预填两段）。
+- [ ] **F7-5** "新建记忆"`openForm`：agent、名称（前端 `^[a-z0-9][a-z0-9-]{0,63}$` 校验）、描述、类型；删除记忆 `confirmDelete` 键入名称 → `DELETE /memory/{agent}/{name}` 带 `confirm: true`。
+- [ ] **F7-6** 未配置 `memory.root` 或不在 allow 内：标签页显示说明与配置示例。
+- [ ] **F7-7** i18n 键 `memory.*`；`ui_memory_test.go`：保存带 `expected_version`、删除带 `confirm: true`、冲突浮层三动作各自路由、正文按文本插入。
+
+**F8 —— `#/triggers` 屏 + 投递详情 + 测试投递（T-41 · 二期）**
+
+- [ ] **F8-1** `icons.js` 加 `bolt`；`routes`/`navItems` 加 `#/triggers`（位于 `#/index` 之后）；导航徽标显示 dead 投递数。
+- [ ] **F8-2** `screens/triggers.js` 规则卡片（`GET /triggers`，只读）：名称 / 路径 glob / 事件 / 来源 / 动作类型；exec argv 逐元素等宽渲染不拼接；webhook 显示 URL 与"签名密钥已配置"；卡片底部"在配置文件中修改"。
+- [ ] **F8-3** `trigger_view.js`（规则 → 自激风险）+ `_tests/trigger_view.test.mjs`；风险规则黄色标记。
+- [ ] **F8-4** 投递表（`GET /triggers/deliveries`）：时间 / 规则 / 路径 / 事件 / 来源 / 次数 / 状态（点+文字）/ dead 行"重试"（`POST /triggers/retry`）；规则与状态过滤；`events()` 增加 `onTrigger`，未翻页时刷新。
+- [ ] **F8-5** 投递详情 `showPanel`（`GET /triggers/deliveries/{id}`）：stdout/stderr 与截断提示，或 webhook 响应码与错误；支持 `#/triggers?delivery=<id>` 直接打开。
+- [ ] **F8-6** "测试投递"`openForm`（规则 + 路径）→ `confirmDelete` 键入规则名 → `POST /triggers/test` 带 `confirm: true`，完成后打开该投递详情。
+- [ ] **F8-7** 未配置规则：exec、webhook 两个配置示例与 webhook 校验代码片段。
+- [ ] **F8-8** i18n 键 `triggers.*`；`ui_triggers_test.go`：无编辑规则的表单与 PUT 请求、argv 逐元素渲染、webhook secret 不出现在 DOM、测试投递带 `confirm: true`、重试调用 `/triggers/retry`。
+
+**F9 —— 发送给 Agent 浮层（检查器 + 搜索结果两入口）（T-42 · 二期，复制部分可提前）**
+
+- [ ] **F9-1** `send_to_agent.js`（`openPanel`）：`GET /agent/prompt?path=` 预填 `textarea`（按文本填充、可编辑）+ "复制"（始终可用，除读取提示词外不发请求）。
+- [ ] **F9-2** 检查器"发送给 Agent"按钮（图标 `bot`，文件与目录都有）；内容搜索结果行右侧同一入口，预填命中路径与标题。
+- [ ] **F9-3** `GET /agent/endpoints` 非空时才渲染 agent 下拉 + "运行"；运行前 `confirmDelete` 键入 agent 名称 → `POST /agent/invoke` 带 `confirm: true` → toast"已提交"附"查看投递"跳 `#/triggers?delivery=<id>`。
+- [ ] **F9-4** i18n 键 `send.*`；`ui_send_to_agent_test.go`：运行按钮条件渲染、运行前确认并带 `confirm: true`、提示词按文本插入、两个入口都存在。
+
+**F10 —— 诊断项与横幅联动（T-43 · 二期回滚之前）**
+
+- [ ] **F10-1** 诊断屏不改 JS：doctor 新检查"MCP stdio 进程与挂载并存"、agent.db、index.db、嵌入端点自动出现；确认 `diagnostics.js` 对新检查项的 detail 与命令文本正常换行。
+- [ ] **F10-2** 接入面板在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染黄色横幅"请改用 HTTP 传输"，链到 `#/diagnostics`。
+- [ ] **F10-3** `ui_agents_test.go` 补断言：横幅条件渲染并链到 `#/diagnostics`。
+- [ ] **F10-4** `test/e2e` 的 `CLOUDFS_BROWSER=1` 冒烟加 `#/agents`、`#/index`、`#/triggers` 可达；`browser_modules_test.go` 自动覆盖新增 `_tests/*.test.mjs`；`ui_icons_test.go` 覆盖 `bot/layers/bolt/undo`。
+
+**关键复用**：模态与确认用 `internal/control/web/ui.js` 的 `openForm`、`openPanel`、`showPanel`、
+`confirmDelete`；表格续页用 `ui.js` 的 `moreRow` 与 `paged.js` 的 `pageCursor`/`pageFailureMode`（续页失败保留
+已加载行）；复制用 `ui.js` 的 `copyBtn`；实时刷新扩展 `api.js` 的 `events()`，不另开 EventSource；
+新屏登记在 `router.js` 的 `routes` 与 `navItems`；服务端确认门用 `internal/control/shared.go` 的 `confirmed()`。

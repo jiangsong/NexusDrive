@@ -52,6 +52,10 @@ func main() {
 	w.SetTitle("CloudFS")
 	w.SetSize(1140, 760, webview.HintNone)
 	w.SetSize(760, 520, webview.HintMin)
+	// Expose one narrow native capability to the otherwise ordinary web UI.
+	// The function opens the OS folder chooser and returns only the directory
+	// the person explicitly selected; browser mode simply has no such binding.
+	_ = w.Bind("cloudfsChooseDirectory", chooseDirectory)
 	w.SetHtml(placeholderHTML(i18n.T(lang, "desktop.connecting"), ""))
 
 	// A second launch pings the focus socket; raise the window when it does.

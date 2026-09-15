@@ -97,6 +97,13 @@ func (p *Pool) memberQuota(ctx context.Context, m *member) provider.Quota {
 	if m == nil {
 		return provider.Quota{}
 	}
+	// A configured member capacity is the pool's allocation for this root.
+	// Provider quota is commonly account-wide and therefore identical for
+	// multiple roots in one account; treating it as independent capacity for
+	// each member double-counts the same bytes and produces bogus balance.
+	if m.capacity > 0 {
+		return provider.Quota{Total: m.capacity, Used: p.memberBytes(ctx, m.name)}
+	}
 	p.free(ctx, m)
 	m.space.mu.Lock()
 	q := m.space.quota
@@ -104,11 +111,6 @@ func (p *Pool) memberQuota(ctx context.Context, m *member) provider.Quota {
 	m.space.mu.Unlock()
 	if known && q.Total > 0 {
 		return q
-	}
-	if m.capacity > 0 {
-		var placed sql.NullInt64
-		_ = p.db.QueryRowContext(ctx, `SELECT SUM(size) FROM replicas WHERE member = ?`, m.name).Scan(&placed)
-		return provider.Quota{Total: m.capacity, Used: placed.Int64}
 	}
 	return provider.Quota{}
 }

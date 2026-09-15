@@ -489,6 +489,8 @@ command = "cloudfs"
 args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 ```
 
+**规划中（见 [Agent 工作底座路线图](agent-roadmap.md)，TODO.md T-34 ~ T-43）**：会话级 `Scope`（读写分离、过期、sandbox）取代进程全局 `--allow`，令牌 principal 取代单一 bearer token，持久审计进独立 `agent.db`；新增会话工具（`begin_session`/`finish_session`/`list_sessions`/`rollback_session`）、索引工具（`semantic_search` 等）与记忆工具。会话、审计与回滚只在 storage owner 进程可用，推荐 HTTP 传输；以上均未实现，工具表以本节与 `docs/mcp.md` 为准。
+
 ### 4.8 控制面与可观测性
 
 - CLI：`config add | auth | list`、`mount | umount`、`service install | uninstall | status`、`ui | open`、`pin | unpin`、`warm`、`uploads list | retry | drop`、`cache stats | gc`、`proxy test`、`status`、`doctor [--fix]`、`mcp --stdio | --http`。
@@ -533,6 +535,7 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 - 指标：块缓存命中率与占用、元数据命中率、负缓存命中、上传队列深度与最老待传时间、死信数、各 remote 请求延迟与错误分类、限流等待时间、熔断状态、代理出口健康、FUSE opcode 延迟直方图。
 - `doctor`：FUSE / 内核版本与 passthrough 可用性、`user_allow_other`、缓存目录文件系统类型与剩余空间、SQLite `integrity_check`、各账号 token 有效性、代理连通性、时钟偏差、待重试 / 死信；`--fix` 处理安全项（重新入队、清理孤儿 staging、vacuum）。
 - 密钥：token / cookie 存系统 keyring（macOS Keychain、Linux Secret Service），不可用时退化为 `0600` 文件并告警。
+- **规划中的控制面与界面（见 [Agent 工作底座路线图](agent-roadmap.md) §6）**：`/sessions`、`/audit`、`/mcp/connect`、`/mcp/tokens`、`/index/*`、`/memory/*`、`/triggers/*`、`/agent/*` 路由与 SSE `audit`/`session`/`index`/`trigger` 事件，全部登记进同一路由表并受同一守卫；控制台新增 `#/agents`、`#/index`、`#/triggers` 三屏。触发器命令、嵌入端点与记忆根只在配置文件定义，不开放写配置的路由。
 
 ### 4.9 WebDAV 输出
 
@@ -581,6 +584,18 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 控制面:`/pool/status|create|members|members/state|members/drain|members/remove|repair|scrub|rebuild|divergences|join`,`/fs/list` 与 `/fs/stat` 的条目带 `availability`、`replicas_live/target`、`degraded_reason`;`/status.remotes[].state` 对所有 remote 报告可达性。
 
 **v2（设计稿，未实现）**：带宽融合（请求合并、`Transfer` 令牌类、目录读序预取；副本块级扇出已实现，见 `docs/pool.md`）、`cloudfs export` 导出作业、CRUSH-lite 放置（按路径规则、成员 class、故障域、配额满换盘、rebalance/backfill、`min_replicas` 诚实化）见 `docs/pool-v2.md`，对应 `TODO.md` T-29 ~ T-33。
+
+### 4.12 内容索引与语义检索（规划中）
+
+`internal/textract`（txt/md/代码原样、docx/xlsx/pptx 经 `archive/zip`+`encoding/xml`、PDF 经纯 Go 库）抽取文本并按 rune 窗口、标题感知分块；`internal/index` 把文档、分块与 FTS5 trigram 索引写进独立的 `<cache.dir>/index.db`（派生数据，可整库重建，不进 meta 以免拖住 FLUSH 等待的写锁）。范围默认为空：`index.pinned` 只处理已完整缓存的文件（零额外下载），`index.rules` 才经 `vfs.ReadFileRange` 主动拉取并受限流、预算与风控熔断约束。二期 `internal/embed` 接 OpenAI 兼容/ollama 端点，int8 向量内存暴力 cosine，与 `bm25()` 做 RRF 融合；端点缺失或故障降级为关键词。MCP 工具 `semantic_search`/`index_status`/`index`/`unindex`/`read_extracted_text`。详见 [agent-roadmap.md](agent-roadmap.md) §3，对应 TODO.md T-37、T-39。
+
+### 4.13 Agent 记忆库（规划中）
+
+记忆是约定目录下的纯文件，不是 KV 表：`<memory.root>/memory/<agent>/{MEMORY.md, facts/<name>.md}` 与 `memory/shared/`。跨设备同步交给网盘本身，并发冲突沿用上传冲突副本机制；`memory_get` 把副本暴露为 `conflicts[]`，`memory_put` 带 `expected_version`。`memory_search` 是限定在记忆目录的 `semantic_search`。详见 [agent-roadmap.md](agent-roadmap.md) §3.11，对应 TODO.md T-40。
+
+### 4.14 会话、审计、回滚与触发器（规划中）
+
+`internal/agent` 在独立的 `<cache.dir>/agent/agent.db` 中保存 principal（令牌只存哈希）、会话、审计与 `session_ops`；mcpsrv 的 receiving middleware 解析会话、按 `Scope.Check(p, write)` 校验并同步写审计（写失败不阻塞工具）。回滚依靠写前捕获的前像（读缓存硬链接），经 VFS 发起新写入，按 version 比对报告冲突而不覆盖，不是远端历史版本恢复。二期 `vfs.Change` 增加 `Kind`/`Origin`，`internal/trigger` 在 owner 进程内去抖入队并以无 shell 的 exec 或 HMAC 签名 webhook 至少一次投递。以上只在 storage owner 进程运行。详见 [agent-roadmap.md](agent-roadmap.md) §2、§4、§5，对应 TODO.md T-34 ~ T-36、T-38、T-41 ~ T-43。
 
 ## 5. 可靠性场景矩阵
 
@@ -866,6 +881,9 @@ FUSE 相关测试在没有 `/dev/fuse` 或 macFUSE 的机器上自动跳过而�
 | SQLite 单写者 | 元数据与 journal 分库；写事务短小；WAL 模式读不阻塞 |
 | 存储池副本扇出对国内网盘的风控反应未知（`docs/pool-v2.md` §4.5） | 每成员保留自己的 `(remote, account, class)` 限流器；`Tier=unofficial` 默认同文件单流；`pools.<n>.read_fanout: off` 可关 |
 | `Transfer` 令牌类（CDN 字节流与 API 分桶）的默认值未经真实账号验证（`docs/pool-v2.md` §4.2） | 0 = 回退到 `Download` 桶即旧行为；默认值保守；并入 T-13 真实账号验证 |
+| 内容索引 `rules` 持续下载触发网盘风控（规划中，[agent-roadmap.md](agent-roadmap.md) §3.2） | 默认不索引，推荐只索引已 pin 内容；共用 remote 限流与熔断；`fetch_budget` 且 `Tier=unofficial` 减半；`ErrRiskControl` 时索引 worker 休眠 |
+| 嵌入把文件内容发往非本机端点（规划中，§3.5） | 默认 `provider: none`；非回环端点必须显式 `allow_remote: true`；全局 exclude 默认含密钥类文件；状态与控制台常驻 remote 提示；`api_key` 只走 keyring |
+| 触发器 exec 自激循环与本机执行面（规划中，§5.3–§5.4） | 去抖合并、`origins` 可排除 api 来源并在校验时告警；无 shell、占位符只替换独立 argv 元素、命令只能在配置文件定义、界面只读、进程组超时 |
 
 ---
 

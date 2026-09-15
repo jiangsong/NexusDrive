@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"cloudfs/internal/provider"
@@ -112,6 +113,7 @@ func (m *Manager) purge(ctx context.Context, j Job) error {
 	}
 	m.mu.Lock()
 	delete(m.rates, j.ID)
+	delete(m.members, j.ID)
 	delete(m.probes, j.ID)
 	m.mu.Unlock()
 	return m.store.DeleteJob(ctx, j.ID)
@@ -126,20 +128,65 @@ func (m *Manager) Progress(ctx context.Context, id string) (Progress, error) {
 	return m.progressOf(j), nil
 }
 
+func (m *Manager) ItemsPage(ctx context.Context, id, after string, limit int, state ItemState) ([]Item, string, error) {
+	if _, err := m.store.Job(ctx, id); err != nil {
+		return nil, "", err
+	}
+	return m.store.ItemsPage(ctx, id, after, limit, state)
+}
+
 func (m *Manager) progressOf(j Job) Progress {
 	p := Progress{BytesDone: j.BytesDone, BytesTotal: j.BytesTotal}
 	m.mu.Lock()
+	now := m.now()
 	r := m.rates[j.ID]
 	if r == nil {
 		r = &rateMeter{}
 		m.rates[j.ID] = r
 	}
-	p.Rate = r.observe(m.now(), j.BytesDone)
+	p.Rate = r.observe(now, j.BytesDone)
+	for remote, meter := range m.members[j.ID] {
+		p.Members = append(p.Members, MemberProgress{
+			Remote: remote, Inflight: meter.inflight, Bytes: meter.bytes,
+			Rate: meter.rate.observe(now, meter.bytes),
+		})
+	}
 	m.mu.Unlock()
+	sort.Slice(p.Members, func(i, k int) bool { return p.Members[i].Remote < p.Members[k].Remote })
 	if p.Rate > 0 && j.BytesTotal > j.BytesDone {
 		p.ETA = time.Duration(float64(j.BytesTotal-j.BytesDone) / p.Rate * float64(time.Second))
 	}
 	return p
+}
+
+type memberMeter struct {
+	inflight int
+	bytes    int64
+	rate     rateMeter
+}
+
+func (m *Manager) beginMemberRange(jobID, remote string) func(int64) {
+	m.mu.Lock()
+	byRemote := m.members[jobID]
+	if byRemote == nil {
+		byRemote = map[string]*memberMeter{}
+		m.members[jobID] = byRemote
+	}
+	meter := byRemote[remote]
+	if meter == nil {
+		meter = &memberMeter{}
+		byRemote[remote] = meter
+	}
+	meter.inflight++
+	m.mu.Unlock()
+	return func(bytes int64) {
+		m.mu.Lock()
+		meter.inflight--
+		if bytes > 0 {
+			meter.bytes += bytes
+		}
+		m.mu.Unlock()
+	}
 }
 
 // rateMeter is a 10 s exponentially weighted moving average of the transfer

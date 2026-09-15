@@ -21,14 +21,15 @@ import (
 // ever passing through it.
 //
 // Only the flows where the daemon can obtain the credential on the user's
-// behalf are here: every backend with an entry in OAuthProfileFor, plus
-// pan115's device/QR exchange. Naming them in prose instead went stale twice —
+// behalf are here: every backend with an entry in OAuthProfileFor, plus the
+// pan115 and Quark device/QR exchanges. Naming them in prose instead went stale twice —
 // gdrive, box and dropbox were each added to the table while this comment
 // still listed three backends — so the table below is the answer, and
 // SupportsDaemonAuth derives from it rather than repeating it. The providers
-// whose credential is a password, a cookie or an externally issued token have
-// no entry: there is nothing for the daemon to fetch, and those stay
-// `cloudfs config auth --stdin`.
+// whose credential cannot be fetched through one of those exchanges have no
+// entry: there is nothing for the daemon to fetch, and those stay
+// `cloudfs config auth --stdin`. Quark is intentionally the cookie-backed
+// exception because its QR service lets the daemon obtain the cookie itself.
 
 // OAuthPresentation is what a caller must show the user to complete an OAuth
 // login: the URL to open, and the callback the app must be registered with.
@@ -40,11 +41,53 @@ type OAuthPresentation struct {
 // SupportsDaemonAuth reports whether StartOAuthFlow or StartDevice115Flow can
 // drive this remote's authorization. Everything else is terminal-only import.
 func SupportsDaemonAuth(remoteType string) bool {
-	if remoteType == "pan115" {
+	if remoteType == "pan115" || remoteType == "quark" {
 		return true
 	}
 	_, ok := OAuthProfileFor(remoteType)
 	return ok
+}
+
+// StartDeviceQuarkFlow begins Quark's web QR login, exchanges the confirmed
+// service ticket and persists the resulting Cookie header. Neither the ticket
+// nor cookie crosses the daemon/control boundary.
+func StartDeviceQuarkFlow(ctx context.Context, cfg *config.Config, name string, present func(ctx context.Context, qrContent string) error) (func(context.Context) error, error) {
+	r, ok := cfg.Remotes[name]
+	if !ok {
+		return nil, fmt.Errorf("account: unknown remote %q", name)
+	}
+	if r.Type != "quark" {
+		return nil, fmt.Errorf("account: %q does not use the Quark device flow", r.Type)
+	}
+	client, closeHTTP, err := AuthorizationHTTP(cfg, name)
+	if err != nil {
+		return nil, err
+	}
+	opt := auth.QuarkDeviceOptions{
+		Client: client, Show: func(ctx context.Context, content string) error { return present(ctx, content) },
+		TokenURL: remoteField(r, "qr_token_url"), PollURL: remoteField(r, "qr_poll_url"),
+		LoginURL: remoteField(r, "qr_login_url"), AccountURL: remoteField(r, "qr_account_url"),
+	}
+	result := make(chan error, 1)
+	go func() {
+		cookie, err := auth.AuthorizeQuark(ctx, opt)
+		if err != nil {
+			result <- err
+			return
+		}
+		_, saveErr := config.SaveCredentialsForRemote(cfg.SourcePath, name, map[string]string{"cookie": cookie}, r)
+		result <- saveErr
+	}()
+	wait := func(waitCtx context.Context) error {
+		defer closeHTTP()
+		select {
+		case err := <-result:
+			return err
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		}
+	}
+	return wait, nil
 }
 
 // OAuthProfile is everything about a backend's authorization server that does
@@ -70,7 +113,7 @@ type OAuthProfile struct {
 }
 
 // OAuthProfileFor returns the profile for a remote type, if it has one. A
-// backend whose credential is a password, a cookie or a device code has none.
+// backend without an OAuth authorization-code exchange has none.
 func OAuthProfileFor(remoteType string) (OAuthProfile, bool) {
 	switch remoteType {
 	case "aliyun":

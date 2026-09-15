@@ -637,6 +637,7 @@ type prefetcher struct {
 	queue    chan prefetchJob
 	stopC    chan struct{}
 	once     sync.Once
+	workers  sync.WaitGroup
 	inflight atomic.Int64
 }
 
@@ -654,6 +655,7 @@ func newPrefetcher(fs *FS, depth int) *prefetcher {
 	p := &prefetcher{fs: fs, depth: depth, queue: make(chan prefetchJob, 256), stopC: make(chan struct{})}
 	if depth > 0 {
 		for i := 0; i < 2; i++ { // two workers keeps provider QPS low
+			p.workers.Add(1)
 			go p.run()
 		}
 	}
@@ -661,6 +663,7 @@ func newPrefetcher(fs *FS, depth int) *prefetcher {
 }
 
 func (p *prefetcher) run() {
+	defer p.workers.Done()
 	for {
 		select {
 		case <-p.stopC:
@@ -668,6 +671,13 @@ func (p *prefetcher) run() {
 		case job := <-p.queue:
 			p.waitIdle()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			go func() {
+				select {
+				case <-p.stopC:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
 			kids, err := p.fs.meta.Children(ctx, job.ino)
 			if err == nil {
 				// Sibling directories are listed side by side: a tree of 40
@@ -742,9 +752,16 @@ func (p *prefetcher) schedule(path string, ino uint64, depth int) {
 }
 
 func (p *prefetcher) enqueue(j prefetchJob) {
+	select {
+	case <-p.stopC:
+		return
+	default:
+	}
 	p.inflight.Add(1)
 	select {
 	case p.queue <- j:
+	case <-p.stopC:
+		p.inflight.Add(-1)
 	default:
 		p.inflight.Add(-1) // queue full: drop, the TTL path will catch up
 	}
@@ -764,6 +781,7 @@ func (p *prefetcher) drain(timeout time.Duration) {
 
 func (p *prefetcher) stop() {
 	p.once.Do(func() { close(p.stopC) })
+	p.workers.Wait()
 }
 
 // pathJoin joins a directory path and a child name inside the mount.

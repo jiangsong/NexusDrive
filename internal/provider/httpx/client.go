@@ -33,6 +33,13 @@ type Client struct {
 	UserAgent string
 }
 
+// SetCookieJar installs a cookie jar on this client's underlying HTTP client.
+// It is intended for one-owner authorization clients before their first
+// request; callers must not replace the jar while requests are in flight.
+func (c *Client) SetCookieJar(jar http.CookieJar) {
+	c.http.Jar = jar
+}
+
 // Options configures a Client.
 type Options struct {
 	// HTTP is the underlying client, normally proxy.Manager.Client(override).

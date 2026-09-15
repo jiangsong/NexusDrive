@@ -464,6 +464,48 @@ func (s *Store) Items(ctx context.Context, jobID string) ([]Item, error) {
 	return out, rows.Err()
 }
 
+// ItemsPage returns a bounded, stable page of a job's plan. The relative
+// path is both the sort key and cursor, so this does not require loading a
+// million-row export into memory merely to inspect its failures.
+func (s *Store) ItemsPage(ctx context.Context, jobID, after string, limit int, state ItemState) ([]Item, string, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	args := []any{jobID, after}
+	q := `SELECT ` + itemColumns + ` FROM export_items WHERE job_id = ? AND rel > ?`
+	if state != "" {
+		q += ` AND state = ?`
+		args = append(args, string(state))
+	}
+	q += ` ORDER BY rel LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("export: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Item, 0, limit+1)
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("export: %w", err)
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		next = out[limit-1].Rel
+		out = out[:limit]
+	}
+	return out, next, nil
+}
+
 // Item reads one planned entry.
 func (s *Store) Item(ctx context.Context, jobID, rel string) (Item, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+itemColumns+` FROM export_items WHERE job_id = ? AND rel = ?`, jobID, rel)
@@ -534,9 +576,21 @@ func (s *Store) Claim(ctx context.Context, jobID, rel string) (bool, error) {
 func (s *Store) Checkpoint(ctx context.Context, jobID, rel, ranges string, doneBytes int64) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE export_items SET ranges = ?, done_bytes = ? WHERE job_id = ? AND rel = ?`,
-		ranges, doneBytes, jobID, rel)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE export_items SET ranges = ?, done_bytes = ? WHERE job_id = ? AND rel = ?`,
+		ranges, doneBytes, jobID, rel); err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE export_jobs SET
+		bytes_done = (SELECT COALESCE(SUM(done_bytes),0) FROM export_items WHERE job_id = ? AND kind = 0),
+		updated_at = ? WHERE id = ?`, jobID, s.now().UnixNano(), jobID); err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
 	return nil

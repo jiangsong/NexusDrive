@@ -178,8 +178,17 @@ type Progress struct {
 	BytesDone  int64
 	BytesTotal int64
 	// Rate is a 10 s EWMA in bytes per second.
-	Rate float64
-	ETA  time.Duration
+	Rate    float64
+	ETA     time.Duration
+	Members []MemberProgress
+}
+
+// MemberProgress is the live contribution of one source remote to a job.
+type MemberProgress struct {
+	Remote   string
+	Inflight int
+	Bytes    int64
+	Rate     float64
 }
 
 // Request is what a caller asks for. Zero-valued tunables fall back to the

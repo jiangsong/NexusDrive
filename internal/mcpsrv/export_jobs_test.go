@@ -2,6 +2,7 @@ package mcpsrv
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +122,27 @@ func TestExportToolRefusesADestinationOutsideTheExportRoots(t *testing.T) {
 		if out.ID == "" || out.Dest != dest {
 			t.Fatalf("dest %q came back as %+v", dest, out)
 		}
+	}
+}
+
+func TestExportToolRefusesSymlinkEscapeFromExportRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	escape := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	fake := newFakeExportJobs()
+	e := newEnv(t, Options{Export: fake, ExportRoots: []string{root}})
+
+	res := e.call(t, "export", map[string]any{
+		"paths": []string{"/"}, "dest": filepath.Join(escape, "written-outside"),
+	}, nil)
+	if !res.IsError {
+		t.Fatal("a destination reached through an escaping symlink was accepted")
+	}
+	if len(fake.created) != 0 {
+		t.Fatalf("the escaped destination reached the manager: %+v", fake.created)
 	}
 }
 

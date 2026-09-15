@@ -3,6 +3,7 @@ package export
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -298,6 +299,9 @@ func TestExportResumesExactlyWhereItStopped(t *testing.T) {
 	dest := t.TempDir()
 	storeDir := t.TempDir()
 	m := newManagerAt(t, storeDir, s.FS, testConfig())
+	// Make every small test chunk a durable checkpoint. Production batches
+	// these at syncEvery bytes, but the ordering under test is the same.
+	m.syncEvery = chunk
 	// Stop after four chunks, the way a kill does: no state is written for
 	// the chunk in flight.
 	const stopAfter = 4
@@ -339,6 +343,65 @@ func TestExportResumesExactlyWhereItStopped(t *testing.T) {
 	}
 	if got, want := s.Fake.ReadBytes()-readBefore, int64(size)-it.DoneBytes; got != want {
 		t.Fatalf("the resume read %d bytes, want exactly the %d missing ones", got, want)
+	}
+}
+
+// TestExportDoesNotCheckpointUnsyncedChunks protects the ordering between
+// the part file and its bitmap. A crash may make us fetch bytes again, but it
+// must never leave the database claiming bytes that were only in the OS page
+// cache and can disappear in a power loss.
+func TestExportDoesNotCheckpointUnsyncedChunks(t *testing.T) {
+	ctx := context.Background()
+	s := newSolo(t, nil)
+	const size, chunk = 20 << 10, 4 << 10
+	s.Fake.Seed("/movie.bin", payload(4, size))
+	if _, err := s.FS.StatPath(ctx, "/movie.bin"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newManager(t, s.FS, testConfig())
+	m.syncEvery = 1 << 20 // no small test chunk reaches a periodic fsync
+	crashCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var writes atomic.Int64
+	m.writeFault = func(int64) error {
+		if writes.Add(1) > 1 {
+			cancel()
+			return context.Canceled
+		}
+		return nil
+	}
+	job, err := m.Create(ctx, Request{Sources: []string{"/movie.bin"}, Dest: t.TempDir(), RangeSize: chunk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = m.RunOnce(crashCtx)
+
+	it, err := m.store.Item(ctx, job.ID, "movie.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.DoneBytes != 0 || it.Ranges != "" {
+		t.Fatalf("unsynced data was checkpointed: done=%d ranges=%q", it.DoneBytes, it.Ranges)
+	}
+}
+
+func TestCopyPathHonorsCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source")
+	dst := filepath.Join(dir, "destination")
+	if err := os.WriteFile(src, payload(1, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := (&Manager{}).copyPath(ctx, src, dst)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copy with a cancelled context returned %v", err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("cancelled copy created a destination: %v", err)
 	}
 }
 

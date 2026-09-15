@@ -92,10 +92,14 @@ export function renderCopies(host) {
       rows: [[t('col.source'), from], [t('copies.target'), to]],
       note: el('div', { class: 'dim', style: 'font-size:11.5px' }, t('copies.new.note')),
       confirmLabel: t('copies.start'),
+      validate: () => {
+        if (from.value.trim() && to.value.trim()) return '';
+        (from.value.trim() ? to : from).focus();
+        return t('copies.new.needpaths');
+      },
     });
     if (!ok) return;
     const q = { from: from.value.trim(), to: to.value.trim() };
-    if (!q.from || !q.to) { toast(t('copies.new.needpaths'), 'bad'); return; }
     try {
       await api.post('/copy', q);
       toast(t('copies.started'));

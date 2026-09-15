@@ -40,10 +40,34 @@ func writeMarker(dest string, m marker) error {
 		return err
 	}
 	tmp := markerPath(dest) + partSuffix
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, markerPath(dest))
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, markerPath(dest)); err != nil {
+		return err
+	}
+	if err := syncParent(markerPath(dest)); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // sameSources compares two source sets regardless of the order they were

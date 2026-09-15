@@ -61,6 +61,9 @@ func (c *cliExports) Jobs(_ context.Context, limit int, after string) ([]export.
 }
 
 func (c *cliExports) Items(_ context.Context, id string) ([]export.Item, error) { return nil, nil }
+func (c *cliExports) ItemsPage(context.Context, string, string, int, export.ItemState) ([]export.Item, string, error) {
+	return nil, "", nil
+}
 
 func (c *cliExports) Progress(_ context.Context, id string) (export.Progress, error) {
 	j := c.jobs[id]

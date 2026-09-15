@@ -328,11 +328,32 @@ func (m *Manager) startCheckerLocked(g Group) {
 // Stop ends health checking.
 func (m *Manager) Stop() { m.stopOnce.Do(func() { close(m.stopC) }) }
 
-// CheckNow probes every group once and returns the results. `cloudfs proxy
-// test` and `doctor` use it.
+// CheckNow probes every configured outbound once and returns the results.
+// Group members use their group's target and timeout; standalone outbounds
+// use the defaults. `cloudfs proxy test`, doctor, and the control page use it.
 func (m *Manager) CheckNow(ctx context.Context) []Health {
-	for _, g := range m.routing.Load().groups {
+	st := m.routing.Load()
+	grouped := make(map[string]struct{})
+	for _, g := range st.groups {
+		for _, member := range g.Members {
+			grouped[member] = struct{}{}
+		}
 		m.checkGroup(ctx, g)
+	}
+	standalone := Group{
+		CheckURL: "https://www.gstatic.com/generate_204",
+		Timeout:  5 * time.Second,
+	}
+	for name := range st.outbounds {
+		if name == "direct" {
+			continue
+		}
+		if _, ok := grouped[name]; !ok {
+			standalone.Members = append(standalone.Members, name)
+		}
+	}
+	if len(standalone.Members) > 0 {
+		m.checkGroup(ctx, standalone)
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()

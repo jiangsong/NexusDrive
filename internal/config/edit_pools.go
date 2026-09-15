@@ -18,6 +18,17 @@ import (
 // CreatePool writes a new pool with the given members and exposes it as a
 // remote of type pool named exposeAs (the pool's own name when empty).
 func CreatePool(configPath, name string, members []PoolMember, replicas, minReplicas int, exposeAs string) error {
+	return createPool(configPath, name, members, replicas, minReplicas, exposeAs, nil)
+}
+
+// CreatePoolAdvanced creates a pool and writes its placement settings in the
+// same atomic configuration edit. The basic creator above remains the stable
+// API used by the CLI and older control clients.
+func CreatePoolAdvanced(configPath, name string, members []PoolMember, replicas, minReplicas int, exposeAs string, settings Pool) error {
+	return createPool(configPath, name, members, replicas, minReplicas, exposeAs, &settings)
+}
+
+func createPool(configPath, name string, members []PoolMember, replicas, minReplicas int, exposeAs string, settings *Pool) error {
 	if !validPoolName(name) {
 		return errors.New("config: pool name must be letters, digits, '-' or '_'")
 	}
@@ -63,6 +74,9 @@ func CreatePool(configPath, name string, members []PoolMember, replicas, minRepl
 		if minReplicas > 0 {
 			setNode(pn, "min_replicas", intNode(minReplicas))
 		}
+		if settings != nil {
+			applyPoolSettingsNode(pn, *settings)
+		}
 		setNode(pools, name, pn)
 		remotes := mappingValue(root, "remotes")
 		if remotes == nil || remotes.Kind != yaml.MappingNode {
@@ -75,6 +89,71 @@ func CreatePool(configPath, name string, members []PoolMember, replicas, minRepl
 		setNode(remotes, exposeAs, rn)
 		return nil
 	})
+}
+
+// UpdatePoolSettings replaces the editable placement policy in one validated,
+// atomic write. Membership identity, roots, weights and capacities are kept;
+// only class labels and policy fields are changed.
+func UpdatePoolSettings(configPath, name string, settings Pool) error {
+	return editConfig(configPath, false, func(root *yaml.Node, c *Config) error {
+		current, ok := c.Pools[name]
+		if !ok {
+			return fmt.Errorf("config: unknown pool %q", name)
+		}
+		if len(settings.Members) != len(current.Members) {
+			return errors.New("config: pool settings cannot add or remove members")
+		}
+		classes := make(map[string][]string, len(settings.Members))
+		for _, member := range settings.Members {
+			classes[member.Remote] = member.Class
+		}
+		for _, member := range current.Members {
+			if _, ok := classes[member.Remote]; !ok {
+				return fmt.Errorf("config: pool settings missing member %q", member.Remote)
+			}
+		}
+		pn := poolNode(root, name)
+		if pn == nil {
+			return fmt.Errorf("config: unknown pool %q", name)
+		}
+		ms := mappingValue(pn, "members")
+		for _, mn := range ms.Content {
+			remote := mappingValue(mn, "remote")
+			if remote == nil {
+				continue
+			}
+			if list := classes[remote.Value]; len(list) > 0 {
+				setNode(mn, "class", stringSeqNode(list))
+			} else {
+				removeNode(mn, "class")
+			}
+		}
+		applyPoolSettingsNode(pn, settings)
+		return nil
+	})
+}
+
+func applyPoolSettingsNode(pn *yaml.Node, p Pool) {
+	setNode(pn, "replicas", intNode(p.Replicas))
+	setNode(pn, "min_replicas", intNode(p.MinReplicas))
+	setNode(pn, "repair_concurrency", intNode(p.RepairConcurrency))
+	setNode(pn, "failure_domain", scalar(p.FailureDomain))
+	setNode(pn, "write_mode", scalar(p.WriteMode))
+	setNode(pn, "min_replicas_timeout", scalar(p.MinReplicasTimeout.String()))
+	setNode(pn, "out_after", scalar(p.OutAfter.String()))
+	rules := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, rule := range p.Rules {
+		rules.Content = append(rules.Content, ruleNode(rule))
+	}
+	setNode(pn, "rules", rules)
+	rebalance := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	setNode(rebalance, "target_skew", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: fmt.Sprint(p.Rebalance.TargetSkew)})
+	if p.Rebalance.AutoBackfill != nil {
+		setNode(rebalance, "auto_backfill", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: fmt.Sprint(*p.Rebalance.AutoBackfill)})
+	}
+	setNode(rebalance, "max_rate", scalar(fmt.Sprint(int64(p.Rebalance.MaxRate))))
+	setNode(rebalance, "pause_between", scalar(p.Rebalance.PauseBetween.String()))
+	setNode(pn, "rebalance", rebalance)
 }
 
 // AddPoolMember appends a member to an existing pool.

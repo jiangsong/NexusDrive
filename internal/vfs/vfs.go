@@ -195,6 +195,11 @@ type FS struct {
 	dirAhead       sync.Map
 	dirAheadFlight sync.Map
 	dirAheadSem    sync.Map
+	dirAheadMu     sync.Mutex
+	dirAheadCtx    context.Context
+	dirAheadCancel context.CancelFunc
+	dirAheadClosed bool
+	dirAheadWG     sync.WaitGroup
 	blockFlight    flight[blockKey, []byte]
 	subFlight      flight[subKey, []byte]
 	// readaheadDisabled remembers, per mount remote name, that a coalesced
@@ -275,6 +280,7 @@ func newFS(opt Options, cleanupOnly bool) (*FS, error) {
 		nextFH:  1,
 		pinWake: make(chan struct{}, 1),
 	}
+	f.dirAheadCtx, f.dirAheadCancel = context.WithCancel(context.Background())
 	f.paths.Store(&sync.Map{})
 	f.dirIDs.Store(&sync.Map{})
 	if opt.OnInvalidate != nil {
@@ -329,6 +335,22 @@ func normalisePrefix(p string) string {
 // Close stops background work.
 func (f *FS) Close() error {
 	f.closeChanges()
+	f.dirAheadMu.Lock()
+	f.dirAheadClosed = true
+	f.dirAheadCancel()
+	f.dirAheadMu.Unlock()
+	f.dirAhead.Range(func(_, value any) bool {
+		st, _ := value.(*dirAheadState)
+		if st != nil {
+			st.mu.Lock()
+			if st.cancel != nil {
+				st.cancel()
+			}
+			st.mu.Unlock()
+		}
+		return true
+	})
+	f.dirAheadWG.Wait()
 	f.StopCopies()
 	f.pinMu.Lock()
 	f.pinClosed = true

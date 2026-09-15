@@ -10,6 +10,7 @@ import (
 	"cloudfs/internal/config"
 	"cloudfs/internal/control"
 	"cloudfs/internal/daemon"
+	netproxy "cloudfs/internal/net/proxy"
 	"cloudfs/internal/provider"
 )
 
@@ -91,6 +92,15 @@ func setupRestartArgv(current []string, configPath string) []string {
 	return []string{executable, "mount", "--config", configPath}
 }
 
+func setupControlEndpoints(cfg *config.Config, listenOverride string) (socket, tcp string) {
+	if listenOverride != "" {
+		// An explicit recovery address runs beside the configured daemon, whose
+		// Unix socket may already be owned by the live process.
+		return "", listenOverride
+	}
+	return cfg.Control.Socket, cfg.Control.Metrics
+}
+
 func cmdSetup(ctx context.Context, args []string) error {
 	f := parseFlags(args)
 	path := f.str("config", defaultConfigPath())
@@ -102,15 +112,25 @@ func cmdSetup(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("wrote a starter configuration at %s\n", path)
 	case setupAlreadyUsable:
-		fmt.Printf("%s already describes a mountable filesystem; run cloudfs mount\n", path)
-		return nil
+		if !f.bools["force"] {
+			fmt.Printf("%s already describes a mountable filesystem; run cloudfs mount\n", path)
+			return nil
+		}
 	}
 
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
 	}
-	if cfg.Control.Metrics == "" {
+	proxyManager, err := netproxy.NewManager(control.ProxyManagerOptions(cfg.Proxy))
+	if err != nil {
+		return fmt.Errorf("setup: proxy configuration: %w", err)
+	}
+	proxyManager.StartHealthChecks(ctx)
+	defer proxyManager.Stop()
+
+	controlSocket, controlTCP := setupControlEndpoints(cfg, f.str("listen", ""))
+	if controlTCP == "" {
 		return errors.New("setup: the configuration names no control address; set control.metrics")
 	}
 
@@ -119,6 +139,10 @@ func cmdSetup(ctx context.Context, args []string) error {
 		Config:  cfg,
 		Version: version,
 		Started: time.Now(),
+		Proxy:   proxyManager,
+		ReloadProxy: func(p config.Proxy) error {
+			return proxyManager.Reload(control.ProxyManagerOptions(p))
+		},
 
 		Lifecycle: &control.Lifecycle{
 			Restart: func() {
@@ -145,13 +169,13 @@ func cmdSetup(ctx context.Context, args []string) error {
 	srv := control.NewServer(col)
 	srv.EnableUI()
 
-	running, err := srv.Start(ctx, cfg.Control.Socket, cfg.Control.Metrics)
+	running, err := srv.Start(ctx, controlSocket, controlTCP)
 	if err != nil {
 		return err
 	}
 	defer running.Close()
 
-	url := "http://" + cfg.Control.Metrics + "/"
+	url := "http://" + controlTCP + "/"
 	fmt.Printf("setup is open at %s\n", url)
 	fmt.Println("  add your drives there, then let it restart the daemon to mount them")
 	if !f.bools["no-open"] {

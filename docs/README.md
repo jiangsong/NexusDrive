@@ -24,6 +24,7 @@
 - [设计](DESIGN.md) — 完整设计文档；代码里的包注释大量引用它的小节号。
 - [实施记录](IMPLEMENTATION.md) — 逐条实现进展。
 - [界面计划](ui-plan.md) — 控制台的界面结构。
+- [Agent 工作底座路线图](agent-roadmap.md) — 规划中：会话与交付箱、内容索引与记忆库、作用域/令牌/回滚/审计、触发器，以及各自的控制台界面。
 - 子系统笔记：[复制准备](copy-preparation.md)、[目录刷新](directory-refresh.md)、
   [FUSE passthrough](fuse-passthrough.md)、[SFTP 目录流](sftp-directory-stream.md)、
   [上传清理](upload-cleanup.md)、[VFS 变更](vfs-changes.md)、[基准](bench.md)。

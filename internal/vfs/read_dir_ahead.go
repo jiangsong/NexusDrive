@@ -46,6 +46,10 @@ const (
 // reader has walked it in order, and how far prefetch has already claimed.
 type dirAheadState struct {
 	mu sync.Mutex
+	// generation and cancel own the current speculative window. A changed
+	// listing invalidates both the ordering evidence and its network work.
+	generation uint64
+	cancel     context.CancelFunc
 	// lastName is the name of the last file read in this directory and
 	// inOrder how many reads in a row have moved forward through the
 	// listing.
@@ -91,13 +95,39 @@ func (f *FS) noteDirRead(ctx context.Context, h *Handle) {
 	}
 	if armed {
 		st.claimedTo = after
+		if st.cancel != nil {
+			st.cancel()
+		}
+		st.generation++
 	}
+	gen := st.generation
 	st.mu.Unlock()
 	if !armed {
 		return
 	}
 	parent, mount, policy := node.ParentIno, h.Mount, h.Mount.Policy
-	go f.dirReadAhead(context.WithoutCancel(ctx), parent, after, mount, policy, limit)
+	f.dirAheadMu.Lock()
+	if f.dirAheadClosed {
+		f.dirAheadMu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(f.dirAheadCtx)
+	f.dirAheadWG.Add(1)
+	f.dirAheadMu.Unlock()
+	st.mu.Lock()
+	if st.generation != gen {
+		st.mu.Unlock()
+		cancel()
+		f.dirAheadWG.Done()
+		return
+	}
+	st.cancel = cancel
+	st.mu.Unlock()
+	go func() {
+		defer f.dirAheadWG.Done()
+		defer cancel()
+		f.dirReadAhead(runCtx, parent, after, mount, policy, limit)
+	}()
 }
 
 // dirReadAhead fetches the small files that follow `after` in one
@@ -218,6 +248,16 @@ func (f *FS) awaitDirReadAhead(ctx context.Context, ino uint64) {
 // from a listing that has moved under us is how a prefetcher spends
 // requests on files nobody will open.
 func (f *FS) forgetDirReadAhead(dir uint64) {
+	if v, ok := f.dirAhead.Load(dir); ok {
+		st := v.(*dirAheadState)
+		st.mu.Lock()
+		st.generation++
+		if st.cancel != nil {
+			st.cancel()
+			st.cancel = nil
+		}
+		st.mu.Unlock()
+	}
 	f.dirAhead.Delete(dir)
 }
 

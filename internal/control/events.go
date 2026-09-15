@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,7 +13,10 @@ import (
 // statusTick is how often /events repeats the status snapshot. The gauges it
 // carries — cache fill, queue depth, uptime — are cosmetic at this cadence;
 // the change events are what a client cannot get by polling without a storm.
-const statusTick = 2 * time.Second
+const (
+	statusTick = 2 * time.Second
+	exportTick = 1 * time.Second
+)
 
 // EventChange is one VFS change as the browser receives it: virtual paths,
 // and two hints. Subtree means descendants may have moved or gone; Rescan
@@ -24,8 +28,9 @@ type EventChange struct {
 }
 
 // GET /events is a server-sent event stream: "change" events from the VFS's
-// own change feed, and a "status" event every statusTick carrying the same
-// document /status serves. One subscription per open page; the VFS never
+// own change feed, a "status" event every statusTick, and an "export" event
+// every exportTick carrying the first page of live job progress. One
+// subscription per open page; the VFS never
 // blocks on a slow one — a full queue collapses into a rescan hint instead.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !privateRequest(w, r) {
@@ -65,8 +70,13 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !send("status", s.collector.Collect(r.Context(), lang)) {
 		return
 	}
-	ticker := time.NewTicker(statusTick)
-	defer ticker.Stop()
+	if snapshot, ok := s.exportEvent(r.Context()); ok && !send("export", snapshot) {
+		return
+	}
+	statusTicker := time.NewTicker(statusTick)
+	exportTicker := time.NewTicker(exportTick)
+	defer statusTicker.Stop()
+	defer exportTicker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -79,10 +89,37 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if !send("change", EventChange{Paths: c.Paths, Subtree: c.Subtree, Rescan: c.Rescan}) {
 				return
 			}
-		case <-ticker.C:
+		case <-statusTicker.C:
 			if !send("status", s.collector.Collect(r.Context(), lang)) {
+				return
+			}
+		case <-exportTicker.C:
+			if snapshot, ok := s.exportEvent(r.Context()); ok && !send("export", snapshot) {
 				return
 			}
 		}
 	}
+}
+
+func (s *Server) exportEvent(ctx context.Context) (ExportsResponse, bool) {
+	if s.collector.Export == nil {
+		return ExportsResponse{}, false
+	}
+	jobs, next, err := s.collector.Export.Jobs(ctx, defaultExportLimit, "")
+	if err != nil {
+		return ExportsResponse{}, false
+	}
+	out := ExportsResponse{Jobs: make([]ExportJobView, 0, len(jobs)), NextCursor: next}
+	for _, job := range jobs {
+		view := exportJobView(job)
+		if !job.State.Terminal() {
+			if progress, err := s.collector.Export.Progress(ctx, job.ID); err == nil {
+				live := exportProgressView(progress)
+				view.BytesDone, view.BytesTotal = live.BytesDone, live.BytesTotal
+				view.Rate, view.ETASeconds = live.Rate, live.ETASeconds
+			}
+		}
+		out.Jobs = append(out.Jobs, view)
+	}
+	return out, true
 }

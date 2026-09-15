@@ -2,6 +2,8 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
+> **规划中**：会话与交付箱（`begin_session`/`finish_session`）、按令牌授权的读写分离作用域、持久审计、会话回滚、内容索引与 `semantic_search`、Agent 记忆库，设计见 [Agent 工作底座路线图](agent-roadmap.md)（TODO.md T-34 ~ T-43）。这些工具**尚未实现**，下文工具表只列出已实现的工具。
+
 ## 注册
 
 ### Claude Code
@@ -270,3 +272,5 @@ SDK 仍然没有按会话投递的入口，所以定向是这样做到的：发�
 ## 与挂载并存
 
 MCP 与 FUSE 挂载共用同一个 VFS 实例，所以两边看到的是同一份文件系统：agent 写的文件，终端里 `cat` 立刻能读到；终端里改的文件，agent 下次 `read_text` 就看到新内容。端到端测试 `test/e2e` 专门验证这一点。
+
+这个"同一实例"只对 storage owner 进程内的 MCP（例如 `cloudfs mount` 同进程启用的 HTTP 传输）成立：挂载已在运行时再单独启动的 `cloudfs mcp --stdio` 不是 journal owner，拿到的是另一份 VFS 实例（写入进共享 journal 但不运行上传器，看不到内核写的变更事件），其与挂载并存时的一致性尚未核实，登记为 TODO.md T-43；与挂载并存时建议改用 HTTP 传输。

@@ -127,6 +127,39 @@ func TestRebalancePlansAboutAThirdOntoANewDrive(t *testing.T) {
 	}
 }
 
+func TestRebalancePlanReservesDestinationFreeSpace(t *testing.T) {
+	ctx := context.Background()
+	a, b := capFake("a"), capFake("b")
+	p := newRulePool(t, config.Pool{Replicas: 1, MinReplicas: 1},
+		Member{Name: "a", Provider: a, Adopt: true, Domain: "a", Capacity: 1024},
+		Member{Name: "b", Provider: b, Adopt: true, Domain: "b", Capacity: 1024})
+	docs, _ := p.Mkdir(ctx, rootID, "docs")
+	if err := p.SetMemberState("b", "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	upload(t, ctx, p, docs.ID, "large.bin", make([]byte, 80))
+	upload(t, ctx, p, docs.ID, "small.bin", make([]byte, 30))
+	if err := p.SetMemberState("b", "enabled"); err != nil {
+		t.Fatal(err)
+	}
+	// An overcommitted source can legitimately report Used > Total. Give the
+	// destination exactly 100 bytes free: each file fits by itself, but both
+	// do not.
+	a.SetQuota(100, 300)
+	b.SetQuota(100, 0)
+
+	plan, err := p.PlanRebalance(ctx, 0.10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Bytes > 100 {
+		t.Fatalf("planned %d bytes into 100 bytes of free space: %+v", plan.Bytes, plan.Moves)
+	}
+	if len(plan.Moves) != 1 || plan.Moves[0].Size != 80 {
+		t.Fatalf("moves = %+v, want only the largest file that fits", plan.Moves)
+	}
+}
+
 // TestRebalanceCopiesBeforeItDeletes: the file must exist on both members
 // in between, never on neither, so a crash mid-move costs a surplus copy
 // rather than a replica.

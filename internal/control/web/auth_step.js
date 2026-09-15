@@ -7,9 +7,10 @@
 // polling has to stop when the surface goes away. One implementation, two
 // callers.
 //
-// What crosses this boundary is what a person would see in a terminal: a URL to
-// open, or a QR string to render. The credential does not — the daemon runs the
-// callback listener, exchanges the code and saves the token itself.
+// OAuth hands this component a URL to open. Device flows hand it only a random
+// session id; the QR payload remains server-side and is rendered through a
+// same-origin PNG route. Credentials never cross this boundary — the daemon
+// completes the exchange and saves them itself.
 
 import { api, ApiError } from '/ui/api.js';
 import { el, fill, copyBtn, toast } from '/ui/ui.js';
@@ -28,6 +29,12 @@ export function codeBox(text) {
   return el('div', { style: 'display:flex;gap:9px;align-items:flex-start' },
     el('div', { style: 'flex-grow:1;font-family:ui-monospace,monospace;font-size:12px;background:#0a0f16;border:1px solid var(--hairline);border-radius:6px;padding:9px;word-break:break-all' }, text),
     copyBtn(text));
+}
+
+function qrBox(name, session) {
+  const src = '/accounts/' + encodeURIComponent(name) + '/auth/qr?session=' + encodeURIComponent(session);
+  return el('div', { style: 'display:flex;justify-content:center;padding:12px' },
+    el('img', { src, alt: t('add.auth.qr.alt'), width: '256', height: '256', style: 'background:#fff;border-radius:10px;padding:8px' }));
 }
 
 export function linkRow(url) {
@@ -77,7 +84,7 @@ export async function startAuthorization({ name, created, host, alive, onPending
 
   if (started && (started.kind === 'url' || started.kind === 'qr')) {
     parts.push(el('p', { class: 'detail' }, t(started.kind === 'url' ? 'add.auth.url' : 'add.auth.qr')));
-    parts.push(started.kind === 'url' ? linkRow(started.value) : codeBox(started.value));
+    parts.push(started.kind === 'url' ? linkRow(started.value) : qrBox(name, started.session));
     parts.push(status);
   } else if (refused) {
     // The daemon's own sentence, in the language this page asked for. It

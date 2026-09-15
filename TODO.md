@@ -1709,6 +1709,374 @@ op-log 幂等重放、drain、scrub、裁剪；命名规则与配额驱动放置
   UI 池页加了平衡度卡片与「Rebalance」按钮（先 `dry_run` 看计划再确认）。T-33 的代码面至此完成，
   剩下的是需要真实账号才能验证的驱动配额信号（各处 `UNVERIFIED:`）。
 
+## P4 — Agent 工作底座（2026-09-14 登记）
+
+对照 WorkBuddy / 库库AI / OpenClaw 核对出的缺口：P3 说"agent 可安全读写"是全品类空白，
+但今天 agent 能做的只是读写文件——没有会话、没有产物归宿、没有"谁动了什么"、没有撤销、
+没有语义检索、没有记忆、文件到了也不会叫醒谁。本节把 CloudFS 从"agent 能挂上的网盘"
+变成"agent 的工作底座"。完整设计见 `docs/agent-roadmap.md`，界面逐项清单见
+`docs/ui-plan.md` 阶段 F。
+
+**纪律**：每一条都是"后端 + 控制台界面"一起交付、一起验收。只有 MCP/CLI 没有界面的
+条目不算完成——个人用户看不到的审计与回滚等于没有。
+
+目标场景：个人桌面 Agent（Claude Code / Codex / OpenClaw），单用户单 daemon。
+权限模型按会话级 scope 设计，团队场景只需给 principal 加 owner 字段。
+
+分期：一期 = T-34 T-35 T-36 T-37（两条线并行）；二期 = T-38 T-39 T-40 T-41 T-42；
+T-43 是先于二期回滚的验证缺口。
+
+---
+
+### [ ] T-34 Agent 底座：agent.db、会话作用域、审计日志（一期）
+
+- **证据**：`internal/mcpsrv/server.go:149` 的 `checkPath` 不分读写，`Options.Allow`
+  进程全局；`internal/mcpsrv/http.go:65` 新版传输 `Stateless: true`，每个 POST 一个 SDK
+  session，SDK 会话不能当身份；`docs/vfs-changes.md` 明写 `vfs.Change` 不是审计。
+  全仓库无任何持久操作记录。
+- **做法（后端）**：
+  - 新包 `internal/agent`：`<cache.dir>/agent/agent.db`（独立 SQLite WAL，不动 meta v11 /
+    journal v13），表 `principals`、`sessions`、`audit`。审计行任何进程都可追加；`agent/owner.lock`
+    只守护 GC、保留期清理、回滚与触发 worker（见 `docs/agent-roadmap.md` §9.1）。
+  - `Scope{Read, Write, ReadOnly, ExpiresAt, Sandbox}`，`Check(p, write)` 取代
+    `checkPath + checkWrite`，`Narrow` 只能收窄。`Options.Allow/ReadOnly` 转 `defaultScope`，
+    `Options.Sessions == nil` 行为同今天。
+  - mcpsrv receiving middleware：解析会话（stdio 一进程一 principal，`InitializedHandler`
+    用 `ClientInfo` 建隐式会话；legacy HTTP 用 `Session.ID()`；无状态 HTTP 用 bearer
+    principal + 空闲 30 分钟轮转）→ `agent.WithSession(ctx)` → 全部工具（当前 33 个，36 处调用点）改
+    `checkPath(ctx, p, write)`（delete/move/copy 两端按写检查）；订阅注册同一 `Scope.Check`。
+  - 审计：拦 `tools/call`（+ initialize、订阅注册），`args` 脱敏（`content`/`new_text` →
+    `{bytes:n}`，≤ 4 KiB，不含直链/token/cookie），同步单条 INSERT，失败只记日志 +
+    `cloudfs_audit_write_failures_total`；保留 `mcp.audit.retain`（默认 90 天）。
+  - 控制面 `GET /audit`、`GET /sessions`、`GET /sessions/{id}`、`POST /sessions/{id}/finish`；
+    SSE `audit`、`session` 事件；CLI `cloudfs audit`、`cloudfs sessions list|show`（离线 ro）。
+- **界面**：
+  - 导航新增「Agent」`#/agents`（`screens/agents.js`，图标 `bot`），导航项徽标显示活动会话数。
+  - **会话标签**：顶部三张卡（活动会话、今日写操作、今日拒绝次数）；表格列 客户端 / 作用域摘要
+    （`scope_view.js`：读 `/work`、写 `/work/.agent/…`、只读、过期时间）/ 状态点+文字 / 开始时间 /
+    写操作数；分页 `moreRow`；SSE `session` 事件在未翻页时刷新。行点击打开会话详情浮层
+    （`session_panel.js`，一期内容：作用域、客户端、审计尾巴 50 条、"结束会话"按钮）。
+  - **审计标签**：过滤条（会话、工具、结果 ok/denied/error、时间 1h/24h/7d），表格列 时间 / 客户端 /
+    工具 / 路径（多路径折叠）/ 结果（denied 红底行，同诊断屏配色）/ 字节 / 耗时；`args`
+    点击展开为只读 JSON（已脱敏）；SSE `audit` 在未翻页、无过滤时插入顶部。
+  - `store.js` 不缓存审计行（大且无共享价值），每屏自己持有。
+- **验收**：
+  - `--allow /work` 且不启用 sessions 时，现有 `internal/mcpsrv` 测试零修改通过。
+  - `Scope.Narrow` 表驱动测试覆盖 父/子/兄弟/根/`..`/尾斜杠，放大必失败。
+  - 被拒绝的 `delete` 在 `GET /audit` 有 `result=denied`、`paths` 正确，`args` 不含 `content` 原文、不含 `http`。
+  - `write_file` 200 KiB 内容，审计 `args` ≤ 4 KiB，`bytes_in=204800`。
+  - agent.db 写失败注入点打开时工具照常成功，metrics +1。
+  - `security_all_routes_test` 覆盖新路由；`POST /sessions/{id}/finish` 无头 403。
+  - 界面：`ui_agents_test.go` 断言 `agents.js` 被嵌入、`#/agents` 在 `routes` 与 `navItems`、
+    会话表调用 `/sessions`、审计表调用 `/audit` 并跟随 `next_cursor`；denied 行有文字标签不只靠颜色；
+    `_tests/scope_view.test.mjs` 覆盖作用域摘要；i18n 两表键一致、screens 无汉字。
+  - e2e：MCP 调一次越界写 → 浏览器冒烟（`CLOUDFS_BROWSER=1`）打开 `#/agents` 审计标签可见 denied 行。
+
+### [ ] T-35 访问令牌与 HTTP 接入（一期）
+
+- **证据**：`requireBearer`（`internal/mcpsrv/http.go:165`）只认单一 env token，全权；
+  stdio 客户端在 `cloudfs mount` 运行时是非 owner 独立 VFS，看不到内核写、会话与审计不共享；
+  `cloudfs mcp install` 只输出 stdio 片段。
+- **做法（后端）**：
+  - `cloudfs mcp token create --name codex --read /work --write /work/.agent --ttl 720h | list | revoke`；
+    `principals` 存 `sha256(token)`，明文只打印一次；`requireBearer` 扩为"env token 全权（兼容）
+    或查表"，过期/吊销 401；吊销时关闭该 principal 的 legacy 会话。
+  - `cloudfs mcp install --client claude|codex --transport http`（`ClientConfig` 多一种输出）；
+    `cmdMCP` 非 owner 时打警告，会话/回滚类工具返回 `requires the storage owner; use the HTTP transport`。
+  - 控制面 `GET /mcp/connect`（HTTP 是否监听及地址、当前进程是否 owner、两种客户端片段，不含令牌）、
+    `GET /mcp/tokens`、`POST /mcp/tokens`、`POST /mcp/tokens/{id}/revoke`（confirm）。
+- **界面**：
+  - 「Agent」屏 **访问令牌标签**：表格列 名称 / 指纹（前 4 位）/ 可读 / 可写 / 过期 / 最后使用 / 状态
+    （有效、过期、已吊销，点+文字）；"新建令牌"`openForm`：名称、可读路径（多行，每行一个前缀）、
+    可写路径、有效期（1 天/7 天/30 天/永不）、只读开关；前端先用 `scope_view.js` 校验"可写必须在可读内"。
+  - **令牌揭示浮层**：令牌明文 + `copyBtn` + 醒目文字"关闭后无法再次查看" + Claude Code / Codex 两个
+    HTTP 注册片段（含该令牌）各带复制按钮；关闭即丢弃，不进 `store.js`、不进 localStorage。
+  - 吊销：`confirmDelete` 键入令牌名称 + `confirm: true`。
+  - **接入面板**（Agent 屏顶部可折叠）：HTTP 监听状态点、地址；owner 状态；未启用 HTTP 时给出配置说明；
+    stdio 与 mount 并存时黄色横幅"请改用 HTTP 传输"并链到 T-43 诊断项。
+  - 首次设置完成页（`screens/setup.js`）加"连接 Agent"卡片，跳 `#/agents` 并展开接入面板。
+- **验收**：
+  - 同一 HTTP 服务上 token A（`/work`）与 token B（`/gd`）并发：A 对 `/gd/x` 的 `stat` 与
+    `resources/subscribe` 都 denied，B 相反；表测试遍历 `tools/list`（当前 33 个工具）证明都过了 `checkPath`。
+  - 过期令牌 `initialize` 得 401；吊销后 5 s 内其 legacy 会话被关闭。
+  - `mcp install --transport http --client claude` 输出能被 `claude mcp add` 直接接受（快照测试）。
+  - `POST /mcp/tokens` 响应头 `Cache-Control: no-store`；`GET /mcp/tokens` 响应体不含任何完整令牌（形状扫描）。
+  - 界面：`ui_tokens_test.go` 断言揭示浮层模块不 import `store.js`、源码无 `localStorage`、
+    吊销带 `confirm: true`；接入面板调用 `/mcp/connect`；`setup.js` 完成页含 `#/agents` 链接；
+    全部嵌入字节无 `type="password"`。
+
+### [ ] T-36 交付箱：会话工作区、manifest、sandbox（一期）
+
+- **证据**：agent 产物散落在调用方自己选的路径，无约定、无清单、无分享；`--allow` 无法表达
+  "只能写自己的目录"。
+- **做法（后端）**：
+  - `config.MCP.Workspace`（默认第一个 allow 前缀 + `/.agent`；allow 为空且未配置时报配置错误）。
+  - 每会话目录 `<workspace>/<client>-<YYYYMMDD>-<sid[:8]>/`，永不复用；唯一受管文件 `manifest.json`
+    （`session_id, client, principal, started_at, finished_at, scope, summary, artifacts[{path, uri,
+    size, sha256?, state, download_url?, expires_at?}]`）。不做共享 index.json。
+  - MCP `begin_session{name?, sandbox?}`、`finish_session{session_id?, summary?, share?}`、
+    `list_sessions`。产物清单来自审计表的写路径；`share=true` 仅对已同步文件调 `FS.DownloadURL`，
+    `local` 记 pending 不等待。不加 `write_artifact`，产物用现有写工具。
+  - `sandbox=true`：`Scope.Sandbox` = 会话目录，写收窄，读不变。
+- **界面**：
+  - 会话详情浮层增加 **产物表**：路径 / 大小 / 状态（已同步、上传中，点+文字，SSE change 事件刷新）/
+    动作（"在文件中打开"跳主窗口并选中；"复制链接"按需调 `/fs/download-url`，不渲染进 DOM）；
+    摘要文本；sandbox 标记；"打开工作区目录"按钮。
+  - 主窗口：工作区根目录与会话目录在文件表名称旁显示 `bot` 小标记；检查器对会话目录内文件显示
+    "来自会话 <client>-<日期>"链接，点击打开会话详情浮层（`GET /sessions?path=` 反查）。
+  - 「Agent」屏会话表增加"产物数"列与"仅 sandbox"过滤。
+- **验收**：
+  - 两个并发会话各写同名文件，finish 后两份 manifest 完整、互不引用对方文件。
+  - sandbox 会话写 `/work/notes.md` denied 且审计 `result=denied`；会话目录内写成功；读 `/work/notes.md` 成功。
+  - `share=true` 且文件仍 local：manifest `state=local` 无 `download_url`，工具 ≤ 1 s 返回，fakeprovider `Calls("DownloadURL")` 为 0。
+  - allow 为空且未配 `workspace` 时 `begin_session` 报配置错误，不建目录。
+  - 界面：`ui_sessions_test.go` 断言产物表"复制链接"只在点击时请求 `/fs/download-url`、结果不写入表格
+    DOM；检查器"来自会话"链接调用 `/sessions?path=`；主窗口工作区标记用 `bot` 图标且带 `aria-label`。
+  - e2e：真实挂载 `begin_session` → 写两文件 → `finish_session`，终端 `cat manifest.json` 与 `ls` 一致，
+    浏览器冒烟会话详情产物表两行。
+
+### [ ] T-37 内容索引 phase 1：抽取 + FTS + semantic_search（一期）
+
+- **证据**：`internal/meta/schema.go` 只有文件名 trigram 索引；`search.content` 只扫完整缓存文件
+  前 `MaxBytes`；PDF/docx/xlsx 对 agent 不可读；全仓库无文档解析代码。
+- **做法（后端）**：
+  - 独立 `<cache.dir>/index.db`（不进 meta：meta 单写者，FLUSH 等它的锁）：`index_meta`、`rules`、
+    `documents`（键 `(remote, remote_id)` + `version`、`text`、`text_hash`、`extractor_ver`、`chunker_ver`、
+    `state`）、`chunks`、`chunks_fts`（trigram，external content）、`index_pending`。
+  - 范围：`index.enabled` 默认 false；`pinned: true` 只处理 `cache.Complete` 为真的文件（零 provider 调用）；
+    `rules[]` 经 `vfs.ReadFileRange` 拉取，受三维限流/熔断、`fetch_budget`（unofficial 减半）、
+    `ErrRiskControl` 休眠 15 min；全局 exclude 默认含 `.env`、`*.pem`、`id_rsa*`、`.git`、`node_modules`。
+  - `internal/textract`：文本类原样（保 CRLF，offset 即文件偏移）；docx/xlsx/pptx 用
+    `archive/zip + encoding/xml`（zip 条目/总量/条目数上限）；PDF 用 `github.com/ledongthuc/pdf` +
+    recover + 30 s 超时 + 乱码启发式，`UNVERIFIED: 中文 PDF 抽取质量`；不做 OCR。
+    分块 800 rune / 重叠 100，标题感知，记 `seq/start_off/end_off/heading`。
+  - `internal/index`：订阅 `FS.WatchChanges()`；启动 30 s 与每 10 min 本地对账（新增只读
+    `meta.WalkSubtree`）；提取 worker 轮询 `FS.Busy()` 让路；检索 FTS `bm25()` + 范围过滤 + `stale` +
+    字节预算，< 3 rune 查询 LIKE 预算扫描。
+  - MCP `semantic_search{query, path?, top_k?, mode?, max_snippet_bytes?}`（hybrid/vector 此期降级
+    keyword 并带 `degraded`）、`index_status`、`index`、`unindex`、`read_extracted_text`；每 hit 过 `checkPath`。
+  - 控制面 `/index/status|rules|add|remove|rebuild|retry|failed|search|text`；SSE `index`；
+    CLI `cloudfs index status|add|rm|rebuild|search`；metrics `cloudfs_index_*`；doctor 检查 index.db 与身份。
+- **界面**：
+  - 导航新增「索引」`#/index`（`screens/index.js`，图标 `layers`）。未启用时整屏显示说明与配置示例，
+    不渲染空表。
+  - **概况卡**（照缓存屏四卡）：文档（正常/待处理/失败）、分块数、文本占用 / `max_total_text`、
+    本小时下载 / `fetch_budget`；SSE `index` 事件驱动进度条"正在抽取 N / 待处理 M"，worker 让路或
+    风控休眠时显示原因与恢复时间。
+  - **规则表**：路径 / 包含 / 排除 / 单文件上限 / 来源（配置、界面）/ 已覆盖文档数 / 动作；配置来源只显示
+    "在配置文件中修改"（同缓存屏 pin 做法），界面来源可"移除"（`confirmDelete` 键入路径）。
+    "添加规则"`openForm`：路径、包含 glob（预设"文档"/"代码"/"全部文本"）、单文件上限；
+    表单下方常驻提示"会按限流下载该目录下匹配的文件；非官方接口网盘建议改用固定"。
+  - **失败文档表**：路径 / 类型 / 错误（如"PDF 无可抽取文本"）/ 时间 / "重试"；分页。
+  - "重建索引"按钮：`confirmDelete` 键入 `rebuild` + `confirm: true`。
+  - **主窗口搜索框**：左侧分段切换"文件名 / 内容"（仅 `status.index.enabled` 时出现，选择存 localStorage）；
+    内容模式调 `/index/search`，结果行：文件图标 / 路径 / 标题路径（"第二章 > 2.1"）/ 片段（`snippet.js`
+    高亮查询词，截断 240 字符）/ "可能已过期"标记（`stale`）；点击行打开"抽取文本"浮层并滚动到
+    命中段；`truncated` 与 `degraded` 为结果内常驻说明行（同 `search.truncated`）。
+  - **检查器**：新增"索引"信息行（已索引 · N 块 / 待处理 / 失败原因 / 未覆盖）；动作"加入索引"
+    （`POST /index/add` 单文件或目录）、"移出索引"（仅界面来源规则）、"查看抽取文本"（`showPanel`，
+    分页读 `/index/text`，PDF/docx 也可读，底部"加载更多"）。
+- **验收**：
+  - `index.enabled: false`：MCP `tools/list` 无 5 个索引工具，`index.db` 不存在，控制面 `/index/status`
+    返回 `enabled:false`。
+  - `pinned: true` 索引 500 个已 pin 文件，fakeprovider `Calls("ReadRange")` 增量为 0。
+  - `rules` 覆盖 100 文件：首轮对账 `Calls("ReadRange")` 覆盖 100 个文件，第二轮增量 0；改 1 个版本后第三轮只涉及该文件。
+  - docx `Heading1` 进 `chunks.heading`；`.md` hit 的 `start_off` 传 `read_text(offset)` 得同前缀。
+  - 目录改名后 hit 路径立即为新路径且 `documents.indexed_at` 不变。
+  - `--allow /work` 时 `/private` 下 chunk 永不出现在 hits。
+  - 2 字中文查询返回结果或 `truncated`，不会空着说"没有匹配"。
+  - 恶意 zip（条目 > 4096）→ `failed`，daemon 不 panic；索引中 `kill -9` 重启后 index.db 完整、pending 续跑。
+  - `FS.Busy()` 持续为真时提取 worker 5 s 内至少让路一次。
+  - 界面：`ui_index_test.go` 断言 `#/index` 路由与导航项、未启用时不请求 `/index/rules`、规则移除与重建
+    带 `confirm: true`、配置来源规则无移除按钮；`main.js` 搜索切换只在 `index.enabled` 时渲染、内容模式
+    调 `/index/search` 且渲染 `degraded`/`truncated` 行；检查器三动作分别调用对应路由；
+    `_tests/snippet.test.mjs` 覆盖高亮、CJK 截断不切半字、HTML 转义（片段来自文件内容，必须当文本插入）。
+  - e2e：真实挂载写 md → 3 s 内 `semantic_search` 命中；浏览器冒烟主窗口内容搜索命中同一文件。
+
+### [ ] T-38 会话快照与回滚（二期）
+
+- **证据**：`journal.Succeed`（`internal/journal/journal.go:864-893`）清空 `blob_path` 释放 blob，
+  旧版本只作为可被淘汰的读缓存存在；网盘普遍无"按版本取内容"接口，`Caps` 无此能力位。
+  agent 写错今天无法撤销。
+- **做法（后端）**：
+  - `session_ops` 表；mcpsrv 写工具调 VFS **之前**捕获前像：`StatPath` → 文件且 ≤ `max_preimage_bytes`
+    （32 MiB）时读满 → `cache.HydratedPath` → `os.Link` 到 `agent/preimages/<sha256>`（`ReserveDisk`
+    记账），链接成功才写行；留不住前像记 `pre_reason` 照常执行，**不因此拒绝写**；递归删目录只记 `dir`。
+  - `Rollback` 逆 seq 经 VFS 发起新写入；当前 version ≠ `post_version` 报 conflict 不覆盖；
+    回滚本身是新会话可再回滚；`dry_run` 只计算不执行。前像按 `mcp.session.retain`（7 天）GC。
+  - MCP `rollback_session{session_id, confirm, dry_run?}`；控制面 `POST /sessions/{id}/rollback`；
+    CLI `cloudfs sessions rollback <id> --confirm [--dry-run]`。
+  - 承诺写进 `docs/mcp.md`：不是远端历史版本恢复；只覆盖 MCP 发起的修改；本地立即可见、远端最终一致。
+- **界面**：
+  - 会话详情浮层增加 **操作表**：序号 / 操作（新建、覆盖、编辑、改名、删除、建目录）/ 路径（改名显示 旧 → 新）/
+    前像（可恢复、过大、未缓存、目录，点+文字）/ 回滚结果。
+  - "回滚此会话"按钮（图标 `undo`）→ 先调 `dry_run` → **预览浮层**（`rollback_plan.js` 分组）：
+    将恢复 N（列出）、将跳过 M（原因）、冲突 K（"会话之后此文件又被修改"）；底部说明回滚承诺三句话；
+    `confirmDelete` 键入会话短 ID + `confirm: true` 执行；结果浮层同样三组并提供"回滚这次回滚"。
+  - 主窗口检查器：文件在保留期内被某会话修改过时显示"被 Agent 修改 · <client> · <时间>"，点击打开会话详情。
+  - 「Agent」屏会话表状态新增"已回滚"，行内快捷"回滚"入口。
+- **验收**：
+  - 覆盖 1 MiB 已缓存文件后回滚，`read_text` 得原内容，fakeprovider 下载 +0；未缓存文件 +1 次且 ≤ 文件大小。
+  - 会话写 → 内核路径再改同文件 → 回滚：该文件 conflict 未被覆盖，其余 restored。
+  - `create → move → delete` 后回滚，路径树与会话前一致（conformance 风格逐项比对）。
+  - chaos：`os.Link` 后、`session_ops` 插入前 `kill -9`，重启无假前像、孤儿 blob 回收；回滚中途 `kill -9`
+    重跑幂等。
+  - `dry_run` 不产生任何 VFS 写（journal 行数不变）。
+  - 界面：`ui_rollback_test.go` 断言回滚按钮先请求 `dry_run: true` 再在确认后请求 `confirm: true`，
+    未经预览不能直接执行；`_tests/rollback_plan.test.mjs` 覆盖分组与空计划；检查器"被 Agent 修改"调用
+    `/sessions?path=`。
+  - e2e：MCP 写 → 终端 `cat` 新内容 → 浏览器冒烟点回滚 → 终端 `cat` 旧内容。
+
+### [ ] T-39 嵌入与 hybrid 检索（二期）
+
+- **证据**：T-37 只有 keyword；中文同义表达、跨语言检索 FTS 无能为力。
+- **做法（后端）**：
+  - `internal/embed`：`Embedder{Embed, Model, Dim}`；`openai`（`/embeddings`，`dimensions` 默认 512）、
+    `ollama`（`/api/embed` 批量）、`fake`。HTTP 走 `httpx.New`（proxy 规则生效），独立 `ratelimit` + breaker。
+  - `api_key` 加入 `config.IsSecretField`，只接受 `keyring:`/`secretfile:`，`cloudfs index auth` 写入。
+  - `allow_remote: false` 时非回环/RFC1918 端点配置校验失败。
+  - index.db v2：`vectors`（int8 默认，L2 归一）、`embed_pending`；启动载入内存暴力 cosine；
+    FTS `bm25` + cosine RRF（k=60）；`max_chunks` 硬上限；换模型清空 vectors 全量重嵌。
+  - 端点故障或 provider=none 静默降级 keyword，响应带 `degraded`。
+  - 控制面 `GET /index/embedding`、`POST /index/embedding/check`；doctor 端点可达与维度检查。
+- **界面**：
+  - 「索引」屏 **嵌入端点面板**：provider / 模型 / 维度 / 地址；**远端标识**——`remote=true` 时黄色横幅
+    "文件内容会发送到 <host>"常驻，不可关闭；健康点 + 最后错误 + 熔断恢复时间；已嵌入 / 待嵌入进度；
+    本月嵌入字符数与按公式的费用估算（明说是估算）。
+  - "测试端点"按钮：说明"会产生一次调用" → `POST /index/embedding/check`。
+  - 未配置 `api_key` 时显示 `cloudfs index auth` 命令与复制按钮，**不提供输入框**。
+  - 配置编辑不在界面做（provider/model 改动需全量重嵌，影响大）：面板底部"在配置文件中修改"。
+  - 主窗口内容搜索切换扩为"文件名 / 关键词 / 语义"；降级时语义按钮显示"已降级为关键词"说明行。
+  - 概况卡增加"向量 N / max_chunks"。
+- **验收**：
+  - provider=none 时 `mode: hybrid` 返回 `mode_used: keyword` 且 `degraded` 非空，不报错。
+  - 端点连续 5 次 5xx 后 60 s 内无新请求，`healthy=false`。
+  - `allow_remote: false` + `base_url: https://api.openai.com/v1` 的配置 `config.Parse` 报错。
+  - 构造向量使 BM25 与 cosine 结论相反，断言 RRF 顺序。
+  - 换 `embedding.model` 后 `vectors` 清空、`embed_pending` = chunks 数、`chunks_fts` 行数不变。
+  - `test/perf`：嵌入调用次数 = `ceil(chunks/batch)`，无变化重跑 0 次。
+  - 界面：`ui_embedding_test.go` 断言 remote 横幅在 `remote=true` 时渲染且无关闭按钮；嵌入模块无
+    `input` 用于 key、无秘密字段名；"测试端点"仅点击时请求；语义模式降级说明行渲染。
+
+### [ ] T-40 Agent 记忆库（二期）
+
+- **证据**：Claude Code / Codex / OpenClaw 的记忆都是本机文件，换设备即丢；CloudFS 已能跨设备同步文件，
+  但没有约定、没有工具、冲突副本对 agent 不可见。
+- **做法（后端）**：
+  - 约定目录（纯文件，不做 KV 表；跨设备同步交给网盘，冲突走既有 conflict-copy）：
+    `/<memory.root>/memory/<agent>/{MEMORY.md, facts/<name>.md}`、`memory/shared/`、`skills/<name>/SKILL.md`。
+  - `<agent>` 默认取 `clientInfo.name` 规范化为 `[a-z0-9-]`，`--agent` 覆盖；`name` 校验 `^[a-z0-9][a-z0-9-]{0,63}$`。
+  - `memory.max_fact_bytes`（64 KiB）、`memory.max_agent_bytes`（32 MiB）；`memory.root` 必须在 `--allow` 内。
+  - MCP `memory_list/get/put/delete/search`（`put` 带 `expected_version`；`get` 返回 `conflicts[]`；
+    `search` = 限定范围的 `semantic_search`，index 内置规则）。
+  - 控制面 `GET /memory/agents`、`GET /memory/{agent}`、`GET|PUT|DELETE /memory/{agent}/{name}`（写走同一实现与校验）。
+- **界面**：
+  - 「Agent」屏 **记忆标签**：左侧 agent 列表（claude-code、codex、openclaw、shared，显示条数与占用 / 上限）；
+    右侧表格 名称 / 描述 / 类型 / 更新时间 / 冲突标记（红点+"有冲突副本"）；顶部记忆搜索框（走 `memory_search`）。
+  - 行点击打开 **记忆编辑浮层**：frontmatter 字段（名称只读、描述、类型）+ 正文 `textarea` + 字节计数 /
+    上限；保存带 `expected_version`，版本冲突时提示"已在其他设备修改"并提供"重新载入"。
+  - **冲突合并浮层**（`memory_conflicts.js` 配对）：左右并排本体与冲突副本（只读），按钮"保留本体并删除副本"、
+    "用副本覆盖本体"、"手动合并"（打开编辑浮层预填两段）；删除走 `confirmDelete` 键入名称。
+  - "新建记忆"`openForm`：agent、名称（前端同规则校验）、描述、类型。
+  - 未配置 `memory.root` 或不在 allow 内：标签页显示说明与配置示例。
+- **验收**：
+  - `memory_put("style")` 后 `facts/style.md` 存在、`MEMORY.md` 恰一行指向它；重复 put 不增行。
+  - 过期 `expected_version` 被拒，内容不变。
+  - fakeprovider 注入版本冲突后 `memory_get.conflicts` 列出副本路径。
+  - 超过 `max_fact_bytes` / `max_agent_bytes` 被拒并给出当前用量。
+  - `memory.root` 不在 allow 内时五个工具返回同一说明错误。
+  - `--read-only` 下 get/list/search 可用，put/delete 拒绝。
+  - 写入记忆 3 s 内 `memory_search` 命中。
+  - 界面：`ui_memory_test.go` 断言保存带 `expected_version`、删除带 `confirm: true`、冲突浮层三个动作分别调用
+    对应路由；`_tests/memory_conflicts.test.mjs` 覆盖副本配对（不猜 provider 命名，只按前缀与同目录）；
+    编辑浮层正文作为文本插入不作为 HTML。
+
+### [ ] T-41 事件触发器：exec / webhook（二期）
+
+- **证据**：`vfs.Change` 只有 `Paths/Subtree/Rescan`，无种类与来源；9 个 emit 点
+  （`internal/vfs/write.go:417/617/708/788/801/1027/1060/1148/1212`）各知道操作；
+  `fromKernel(ctx)`（`vfs.go:1017`）可区分内核来源；无任何出站通知。
+- **做法（后端）**：
+  - `Change` 加 `Kind`（write/create/mkdir/remove/rename/remote/rescan）与 `Origin`（kernel/api/remote），
+    `WithOrigin(ctx)`；`Affects` 不变。
+  - 配置 `triggers[]{name, paths（自带 glob 匹配，不引入 doublestar 依赖）, events, origins, debounce, on_rescan, action: exec | webhook}`；
+    `Validate()` 对未排除 `api` 来源的 exec 规则给 warning（防自激）。
+  - `internal/trigger`（仅 owner）：消费 WatchChanges → `trigger_deliveries`（`(rule,path)` pending 唯一索引
+    = 去抖合并）→ 每规则串行 worker，退避 1 s→5 min，8 次 dead，重启 running→pending（at-least-once；
+    溢出只以 rescan 送达，文档明说）。
+  - exec 无 shell，占位符只替换独立 argv 元素，环境只留 PATH/HOME/LANG + `CLOUDFS_*`，`Setpgid` 杀进程组，
+    输出截 64 KiB。webhook `X-CloudFS-Signature: sha256=HMAC(secret, ts+"."+body)`，仅 https/回环，
+    secret 只接受 `keyring:`/`secretfile:`，出站走 `proxy.Manager`。
+  - 控制面 `GET /triggers`、`GET /triggers/deliveries`、`GET /triggers/deliveries/{id}`、`POST /triggers/test|retry`；
+    SSE `trigger`；CLI `cloudfs triggers list|deliveries|test|retry`。
+- **界面**：
+  - 导航新增「触发器」`#/triggers`（`screens/triggers.js`，图标 `bolt`），导航徽标显示 dead 投递数。
+  - **规则卡片列表（只读）**：名称 / 路径 glob / 事件 / 来源 / 动作类型；exec 显示 argv 逐元素（等宽，
+    不拼接成命令行，避免误读成 shell）；webhook 显示 URL 与"签名密钥已配置"；自激风险（`trigger_view.js`）
+    黄色标记"此规则可能被 Agent 自身写入触发"；卡片底部"在配置文件中修改"。
+  - **投递表**：时间 / 规则 / 路径 / 事件 / 来源 / 次数 / 状态（待处理、执行中、完成、失败，点+文字）/ 动作
+    （dead 行"重试"）；过滤规则与状态；分页；SSE 未翻页时刷新。行点击 `showPanel` 显示 stdout/stderr
+    （截断提示）或 webhook 响应码与错误。
+  - "测试投递"`openForm`：选择规则 + 输入路径 → `confirmDelete` 键入规则名（exec 会真实执行）→
+    `POST /triggers/test`，完成后自动打开该投递详情。
+  - 未配置任何规则：整屏显示两个配置示例（exec、webhook）与 webhook 校验代码片段。
+- **验收**：
+  - 同一路径 50 ms 内 20 次内核写，`debounce: 2s` 规则只产生 1 行 delivery，`kind=write`。
+  - exec `["echo", "{path}; rm -rf /"]` 收到的 argv[1] 字面等于 `"/work/a.txt; rm -rf /"`，无 shell 进程。
+  - webhook 错误 secret 校验失败、正确成功；ts 偏差 > 5 min 被示例校验器拒绝。
+  - 投递 running 时 `kill -9`，重启后同 `(rule,path)` 再投一次且 `attempts=2`。
+  - 1 万事件风暴下 deliveries 行数 ≤ 规则 × 路径数，内存有界；溢出 rescan 只投一行。
+  - `origins` 排除 api 时 MCP 写入不触发。
+  - 9 个 emit 点各断言 kind/origin。
+  - 界面：`ui_triggers_test.go` 断言屏幕无任何编辑规则的表单与 PUT 请求；argv 逐元素渲染；webhook secret
+    不出现在响应与 DOM；测试投递带 `confirm: true`；dead 行重试调用 `/triggers/retry`；
+    `_tests/trigger_view.test.mjs` 覆盖自激判断。
+
+### [ ] T-42 发送给 Agent（二期）
+
+- **证据**：控制台文件检查器（`internal/control/web/screens/main.js:238-243`）只有固定/预热/改名/预览/
+  链接/删除；用户选中文件后无法把任务交给本机 agent，只能自己拼路径与提示词。
+- **做法（后端）**：
+  - `GET /agent/prompt?path=`：返回 MCP-ready 提示词（虚拟路径、`cloudfs://` URI、`read_text` /
+    `read_extracted_text` / `edit_file` 用法、会话建议 `begin_session`），零依赖总是可用。
+  - 配置 `agents[]{name, exec{command argv, cwd, timeout}}`；`GET /agent/endpoints`（只返回名称）；
+    `POST /agent/invoke {agent, paths[], prompt?}` 复用 T-41 exec 执行器（同白名单、无 shell、输出截断），
+    投递进 `trigger_deliveries`（rule=`agent:<name>`），审计 `principal=console`。未配置 → 404 且不执行。
+- **界面**：
+  - 检查器新增"发送给 Agent"按钮（图标 `bot`，文件与目录都有）→ **发送浮层**（`send_to_agent.js`）：
+    预填提示词 `textarea`（可编辑）+ "复制"按钮（始终可用）；已配置 agents 时下方出现 agent 下拉 +
+    "运行"按钮 → `confirmDelete` 键入 agent 名称（会执行本机命令）→ toast"已提交"并附"查看投递"链接跳
+    `#/triggers?delivery=<id>`。
+  - 内容搜索结果行右侧同样有"发送给 Agent"（预填命中路径与标题）。
+  - 一期先交付"复制提示词"（无 exec 依赖），运行按钮随 T-41 一起上线。
+- **验收**：
+  - `POST /agent/invoke` 未配置 agents 时 404 且无子进程；配置后执行命令与配置 argv 逐元素相等，
+    `paths` 只作为独立 argv 元素。
+  - `GET /agent/prompt` 对 `--allow` 外路径（控制面无 allow，但对不存在路径）返回 404，不泄露内部路径。
+  - 审计有 `principal=console`、`tool=agent.invoke` 行。
+  - 界面：`ui_send_to_agent_test.go` 断言复制按钮不发网络请求以外的写操作、运行按钮仅在 `/agent/endpoints`
+    非空时渲染、运行前确认并带 `confirm: true`、提示词 `textarea` 内容按文本插入；检查器与搜索结果两个入口都存在。
+
+### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成）
+
+- **证据**：`cmd/cloudfs/main.go` 的 `cmdMCP`（当前约 613 行，`daemon.Open` 在 639 行）走 `daemon.Open`；mount 在跑时 stdio 进程非 owner，
+  `internal/daemon/daemon.go:314-321` 给它独立 VFS（写入落共享 journal，无 uploader）。
+  `docs/mcp.md` "MCP 与 FUSE 挂载共用同一个 VFS 实例"只对 owner 内 HTTP 成立；journal 行由 owner
+  uploader 领走但 `needs_publish` 在另一进程——行为未核实。
+- **做法**：先写 e2e 复现（mount + stdio MCP 同时写同一目录、读回、排空、重启），确认是否有丢失/复活/
+  延迟可见；据结果决定 stdio→HTTP 桥（SDK `StreamableClientTransport` + 原始 schema `AddTool`，约 300 行）
+  是否提前；修正 `docs/mcp.md` 表述。
+- **界面**：
+  - doctor 新检查"MCP stdio 进程与挂载并存"：检测到非 owner MCP 进程（journal flock 持有者 ≠ 自身且有
+    stdio 心跳文件）时 warn，detail 给出 `cloudfs mcp install --transport http` 命令；诊断屏自动显示。
+  - 「Agent」屏接入面板横幅（见 T-35）链到诊断屏该项。
+- **验收**：
+  - e2e 复现用例存在并记录结论（通过或失败都写进本条）。
+  - doctor 在"mount + stdio MCP"并存时报 warn，只有 mount 时 ok。
+  - 界面：`ui_agents_test.go` 断言横幅在 `/mcp/connect` 返回 `stdio_non_owner: true` 时渲染并链到 `#/diagnostics`。
+
+---
+
 ## 明确不在当前范围内
 
 以下是设计文档中标注为二期或预留的部分，列在这里是为了避免被误当作遗漏：
@@ -1871,6 +2239,15 @@ T-03（慢客户端隔离）、T-06（交互式向导）、T-17（Web 加账号�
 13. **T-03**（MCP Resources；"agent 可安全读写的云盘"是全品类空白，也是唯一不与
     CloudDrive2 正面拼价格的差异点）
 14. **T-21**（Windows / WinFsp：排期决策，取决于目标用户是 NAS 还是桌面）
+
+**阶段 4 — Agent 工作底座**（2026-09-14 登记，见 P4 节与 `docs/agent-roadmap.md`）
+
+15. **一期（并行两线）**：线 A T-34 → T-35 → T-36；线 B T-37。每条后端任务后紧跟界面任务，
+    界面不落地不关条目。
+16. **二期**：T-43（先核实拓扑）→ T-38；T-39 → T-40（记忆检索依赖嵌入可选，keyword 即可先上）；
+    T-41 → T-42（运行按钮依赖 exec 执行器，复制提示词可提前到一期末）。
+17. **三期**：stdio→HTTP 桥；递归删除逐文件前像；control/WebDAV 操作进审计；`pull_events`；
+    HNSW（仅实测 p95 > 200 ms）；团队 principal owner；多选文件发送给 Agent。
 
 **不建议做的事**：靠限制挂载数量收费（CloudDrive2 的 freemium 模式）。
 本项目的口碑点在可靠性——限流防封号、写日志不丢数据、背压不写满磁盘——

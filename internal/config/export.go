@@ -23,6 +23,9 @@ type Export struct {
 	// the block cache, so it is sized for throughput (QPS × request size)
 	// rather than for the cache's block granularity.
 	RangeSize Size `yaml:"range_size"`
+	// MemoryBudget bounds range buffers across every active export job. It is
+	// a process-wide ceiling; per-job streams may only divide this budget.
+	MemoryBudget Size `yaml:"memory_budget"`
 	// MultiRangeMin is the size from which a file is worth several streams.
 	MultiRangeMin Size `yaml:"multi_range_min"`
 	// YieldToForeground makes the runner stand aside while the kernel is
@@ -42,6 +45,7 @@ func DefaultExport() Export {
 		Transfers:         4,
 		Streams:           4,
 		RangeSize:         32 << 20,
+		MemoryBudget:      512 << 20,
 		MultiRangeMin:     64 << 20,
 		YieldToForeground: true,
 		DiskProbeInterval: 30 * time.Second,
@@ -74,6 +78,9 @@ func (e *Export) Validate() error {
 	if e.RangeSize == 0 {
 		e.RangeSize = DefaultExport().RangeSize
 	}
+	if e.MemoryBudget == 0 {
+		e.MemoryBudget = DefaultExport().MemoryBudget
+	}
 	if e.MultiRangeMin == 0 {
 		e.MultiRangeMin = DefaultExport().MultiRangeMin
 	}
@@ -94,6 +101,9 @@ func (e *Export) Validate() error {
 	}
 	if e.RangeSize > maxExportRangeSize {
 		return fmt.Errorf("config: export.range_size must be at most %s, got %s", maxExportRangeSize, e.RangeSize)
+	}
+	if e.MemoryBudget < e.RangeSize {
+		return fmt.Errorf("config: export.memory_budget must be at least range_size (%s), got %s", e.RangeSize, e.MemoryBudget)
 	}
 	if e.MultiRangeMin < 0 {
 		return fmt.Errorf("config: export.multi_range_min must not be negative, got %s", e.MultiRangeMin)

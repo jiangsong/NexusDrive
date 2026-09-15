@@ -179,7 +179,7 @@ func (m *Manager) copyLocal(ctx context.Context, it Item, part string) (bool, er
 		if u.Size != it.Size {
 			return false, fmt.Errorf("%w: the queued write changed size", provider.ErrConflict)
 		}
-		return true, m.copyPath(u.BlobPath, part)
+		return true, m.copyPath(ctx, u.BlobPath, part)
 	}
 	ca := m.fs.Cache()
 	if ca == nil {
@@ -194,14 +194,21 @@ func (m *Manager) copyLocal(ctx context.Context, it Item, part string) (bool, er
 	if err != nil || st.Size() != it.Size {
 		return false, nil
 	}
-	return true, m.copyPath(wf.Name(), part)
+	return true, m.copyPath(ctx, wf.Name(), part)
 }
 
 // copyPath duplicates a local file, preferring a copy-on-write clone. The
 // clone is a separate inode that happens to share blocks, so a later edit on
 // the destination is still copy-on-write away from the source.
-func (m *Manager) copyPath(src, part string) error {
+func (m *Manager) copyPath(ctx context.Context, src, part string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := cloneFile(src, part); err == nil {
+		if err := ctx.Err(); err != nil {
+			_ = os.Remove(part)
+			return err
+		}
 		return nil
 	}
 	in, err := os.Open(src)
@@ -214,7 +221,7 @@ func (m *Manager) copyPath(src, part string) error {
 		return asDisk(err)
 	}
 	buf := make([]byte, copyBuffer)
-	if _, err := io.CopyBuffer(out, in, buf); err != nil {
+	if _, err := io.CopyBuffer(out, &contextReader{ctx: ctx, r: in}, buf); err != nil {
 		out.Close()
 		return asDisk(err)
 	}
@@ -223,6 +230,20 @@ func (m *Manager) copyPath(src, part string) error {
 		return asDisk(err)
 	}
 	return asDisk(out.Close())
+}
+
+// contextReader makes the buffered cross-filesystem fallback interruptible.
+// Regular-file reads do not otherwise observe a cancelled export context.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 
 // publish turns a finished part file into the exported file.
@@ -239,6 +260,9 @@ func (m *Manager) publish(job Job, it Item, part, dest string) error {
 		return asDisk(err)
 	}
 	if err := os.Rename(part, dest); err != nil {
+		return asDisk(err)
+	}
+	if err := syncParent(dest); err != nil {
 		return asDisk(err)
 	}
 	if job.Options.PreserveMTime && !it.MTime.IsZero() {
@@ -335,14 +359,22 @@ func (w *fileWriter) writeAt(buf []byte, off int64) error {
 func (w *fileWriter) complete(ctx context.Context, c chunkWork) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.bits.set(c.index)
+	w.doneBytes += c.n
 	w.sinceSync += c.n
-	if w.sinceSync >= syncEvery {
+	if w.sinceSync >= w.m.syncEvery {
 		if err := w.f.Sync(); err != nil {
 			return asDisk(err)
 		}
 		w.sinceSync = 0
+		return w.m.store.Checkpoint(ctx, w.job.ID, w.it.Rel, w.bits.String(), w.doneBytes)
 	}
-	w.bits.set(c.index)
-	w.doneBytes += c.n
+	return nil
+}
+
+// checkpoint records all chunks after the caller has made their data durable.
+func (w *fileWriter) checkpoint(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.m.store.Checkpoint(ctx, w.job.ID, w.it.Rel, w.bits.String(), w.doneBytes)
 }

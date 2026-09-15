@@ -590,6 +590,9 @@ func (c *Config) validatePools() error {
 		if p.RepairConcurrency == 0 {
 			p.RepairConcurrency = 1
 		}
+		if p.RepairConcurrency < 1 || p.RepairConcurrency > 64 {
+			return fmt.Errorf("config: pool %q repair_concurrency must be between 1 and 64", name)
+		}
 		if p.ScrubInterval == 0 {
 			p.ScrubInterval = 24 * time.Hour
 		}

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cloudfs/internal/export"
 )
 
 // TestEventsStreamChangesAndStatus: a page holding /events open hears about a
@@ -91,4 +93,39 @@ func TestEventsRefuseCrossSite(t *testing.T) {
 	if w.Code != 403 {
 		t.Fatalf("cross-site events: %d", w.Code)
 	}
+}
+
+func TestEventsStreamExportProgress(t *testing.T) {
+	s, exports := exportFixture(t)
+	id := "4c0b32db-7d70-46e0-bcc3-6eb29c9e67ef"
+	exports.add(export.Job{ID: id, State: export.StateRunning, Sources: []string{"/photos"}, Dest: "/backup", BytesTotal: 4096, BytesDone: 1024})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events", nil)
+	req.Host = "127.0.0.1"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	var event string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimPrefix(line, "event: ")
+		}
+		if event == "export" && strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			for _, want := range []string{id, `"rate":1024`, `"eta_seconds":4`} {
+				if !strings.Contains(data, want) {
+					t.Fatalf("export event missing %s: %s", want, data)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("export event did not arrive")
 }

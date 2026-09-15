@@ -610,6 +610,14 @@ func AuthStarterFor(view func() *config.Config) *control.AuthStarter {
 			return p.RedirectURI, wait, nil
 		},
 		Device: func(ctx context.Context, name string, present func(qr string), scanned func()) (func(context.Context) error, error) {
+			if cfg := view(); cfg != nil {
+				if remote, ok := cfg.Remotes[name]; ok && remote.Type == "quark" {
+					return StartDeviceQuarkFlow(ctx, cfg, name, func(_ context.Context, qr string) error {
+						present(qr)
+						return nil
+					})
+				}
+			}
 			return StartDevice115Flow(ctx, view(), name, func(_ context.Context, qr string) error {
 				present(qr)
 				return nil

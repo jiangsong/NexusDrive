@@ -112,20 +112,35 @@ export function confirmDelete({ title, body, confirmToken, confirmLabel, danger 
 // here rather than in a screen so the focus trap, the Escape handling and the
 // focus restore have one implementation, not one per screen that wanted a
 // form.
-export function openForm({ title, rows, note, confirmLabel, width = 480 }) {
+let formControlID = 0;
+
+export function openForm({ title, rows, note, confirmLabel, width = 480, validate }) {
   return new Promise((resolve) => {
     const ok = el('button', { class: 'primary' }, confirmLabel || t('proxy.apply'));
     const cancel = el('button', {}, t('confirm.cancel'));
+    const error = el('div', { role: 'alert', class: 'detail', style: 'display:none;color:var(--bad)' });
     const content = el('div', { style: 'display:grid;gap:10px' },
-      ...rows.map(([label, control]) => el('div', {},
-        el('div', { style: 'font-size:12px;margin-bottom:4px' }, label), control)),
-      note || null);
+      ...rows.map(([label, control]) => {
+        const id = control.id || `form-control-${++formControlID}`;
+        control.id = id;
+        return el('div', {},
+          el('label', { for: id, style: 'display:block;font-size:12px;margin-bottom:4px' }, label), control);
+      }),
+      error, note || null);
     const close = openPanel({
       title, width, content,
       footer: el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, cancel, ok),
       onEscape: () => resolve(close(false)),
     });
-    ok.addEventListener('click', () => resolve(close(true)));
+    ok.addEventListener('click', () => {
+      const message = validate ? validate() : '';
+      if (message) {
+        error.textContent = String(message);
+        error.style.display = '';
+        return;
+      }
+      resolve(close(true));
+    });
     cancel.addEventListener('click', () => resolve(close(false)));
   });
 }
