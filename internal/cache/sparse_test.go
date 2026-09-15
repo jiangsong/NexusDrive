@@ -363,7 +363,13 @@ func TestSparseLayoutAdoptsABlockFilledInPieces(t *testing.T) {
 // TestSmallFilesKeepTheBlockLayout: below the threshold nothing changes —
 // block files, then one hydration copy once the mount goes quiet.
 func TestSmallFilesKeepTheBlockLayout(t *testing.T) {
-	c, err := newClosingCache(t, sparseOpts(t.TempDir()))
+	// A long HydrateAfter keeps the janitor out of the first half: with the
+	// millisecond default of sparseOpts it can merge the blocks between
+	// waitFlushed and the stat below, and the block files it then removes are
+	// exactly what this half asserts. The second half fires it by hand.
+	opt := sparseOpts(t.TempDir())
+	opt.HydrateAfter = time.Hour
+	c, err := newClosingCache(t, opt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,6 +387,7 @@ func TestSmallFilesKeepTheBlockLayout(t *testing.T) {
 	if _, err := os.Stat(c.partPath(small.hash())); err == nil {
 		t.Fatal("a small file must not get a sparse whole file")
 	}
+	c.hydrateDue() // what the janitor does once the mount has gone quiet
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := c.HydratedPath(small); ok {

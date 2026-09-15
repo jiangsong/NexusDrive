@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"cloudfs/internal/config"
+	"cloudfs/internal/i18n"
 	"cloudfs/internal/provider"
 )
 
@@ -54,10 +55,13 @@ func TestConfigAddAsksForWhatTheDriverDeclared(t *testing.T) {
 	if _, present := r.Extra["domain"]; present {
 		t.Fatal("a blank answer with no default was written as an empty value")
 	}
-	// The questions must be the driver's, not a copy kept in the CLI.
+	// The questions must be the driver's, not a copy kept in the CLI. They
+	// are printed in the CLI language, so compare against the rendered form:
+	// on a zh_CN box the English fallback never appears.
 	for _, field := range provider.Fields("smb") {
-		if !strings.Contains(out.String(), field.Prompt) {
-			t.Fatalf("the wizard never asked %q", field.Prompt)
+		prompt := i18n.FieldPrompt(cliLang, "smb", field.Name, field.Prompt)
+		if !strings.Contains(out.String(), prompt) {
+			t.Fatalf("the wizard never asked %q", prompt)
 		}
 	}
 	// And it must say what the credential step will want.
