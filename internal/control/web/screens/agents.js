@@ -3,6 +3,7 @@ import { t } from '/ui/i18n.js';
 import { renderSessionsTab } from '/ui/screens/agents_sessions.js';
 import { renderAuditTab } from '/ui/screens/agents_audit.js';
 import { renderTokensTab } from '/ui/screens/agents_tokens.js';
+import { renderMemoryTab } from '/ui/screens/agents_memory.js';
 import { renderConnectPanel } from '/ui/connect_panel.js';
 
 // The agents screen: what MCP clients are doing inside the mount. It is a
@@ -14,23 +15,16 @@ import { renderConnectPanel } from '/ui/connect_panel.js';
 // for a change that only concerns this screen.
 const TABS = ['sessions', 'audit', 'tokens', 'memory'];
 
-// Memory arrives with a later task; until then it is a short note, so the
-// tab strip already has its final shape.
-function renderPlaceholder(host) {
-  fill(host, el('div', { class: 'pad dim' }, t('agents.tab.placeholder')));
-  return () => {};
-}
-
 const RENDER = {
   sessions: renderSessionsTab,
   audit: renderAuditTab,
   tokens: renderTokensTab,
-  memory: renderPlaceholder,
+  memory: renderMemoryTab,
 };
 
 // hashParams reads the query part of the hash, which is where this screen
 // keeps its tab and any deep link (?session=<id>, ?connect=1 to open the
-// connect panel).
+// connect panel, ?agent=<name> for the memory tab's chosen agent).
 export function hashParams() {
   return new URLSearchParams((location.hash.split('?')[1]) || '');
 }

@@ -38,7 +38,7 @@ export const api = {
   post: (p, b) => request('POST', p, b),
   patch: (p, b) => request('PATCH', p, b),
   put: (p, b) => request('PUT', p, b),
-  del: (p) => request('DELETE', p),
+  del: (p, b) => request('DELETE', p, b),
 };
 
 // events subscribes to the /events SSE stream, with exponential backoff
