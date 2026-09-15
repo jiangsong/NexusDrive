@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -341,6 +342,157 @@ func (r Remote) PoolOf() string {
 	return name
 }
 
+// Index configures the content indexer (docs/DESIGN.md §9): which subtrees
+// are indexed, how much text one file may contribute, how much text the
+// whole index may hold, and how much remote traffic a rebuild may spend per
+// hour. Every limit has a working default that Validate fills in, so an
+// `index: {enabled: true}` block on its own indexes pinned files with the
+// built-in patterns and budgets.
+type Index struct {
+	Enabled bool `yaml:"enabled"`
+	// Pinned indexes every pinned file regardless of Rules.
+	Pinned bool        `yaml:"pinned"`
+	Rules  []IndexRule `yaml:"rules"`
+	// Exclude holds glob patterns that never index, whatever a rule says.
+	// Nil means DefaultIndexExclude; an explicit empty list excludes nothing.
+	Exclude []string `yaml:"exclude"`
+	// MaxTextBytes bounds the text extracted from one file.
+	MaxTextBytes Size `yaml:"max_text_bytes"`
+	// MaxTotalText bounds the text held by the whole index.
+	MaxTotalText Size `yaml:"max_total_text"`
+	// FetchBudget bounds the bytes the indexer downloads per hour, written
+	// as "<size>/h". FetchBudgetPerHour is its parsed value.
+	FetchBudget        string `yaml:"fetch_budget"`
+	FetchBudgetPerHour int64  `yaml:"-"`
+}
+
+// IndexRule indexes one virtual subtree.
+type IndexRule struct {
+	// Path is the canonical absolute virtual path of the subtree.
+	Path string `yaml:"path"`
+	// Include holds glob patterns relative to Path. Nil means
+	// DefaultIndexInclude.
+	Include []string `yaml:"include"`
+	Exclude []string `yaml:"exclude"`
+	// MaxFileSize is the largest file the rule fetches for extraction.
+	MaxFileSize Size `yaml:"max_file_size"`
+}
+
+// DefaultIndexInclude is the pattern list a rule gets when it names none:
+// the text, source and office formats the extractors understand.
+var DefaultIndexInclude = []string{"**/*.md", "**/*.txt", "**/*.rst", "**/*.csv", "**/*.json", "**/*.yaml", "**/*.yml", "**/*.toml",
+	"**/*.go", "**/*.py", "**/*.ts", "**/*.js", "**/*.rs", "**/*.java", "**/*.c", "**/*.h", "**/*.sh", "**/*.sql", "**/*.html",
+	"**/*.pdf", "**/*.docx", "**/*.xlsx", "**/*.pptx"}
+
+// DefaultIndexExclude keeps secrets and dependency trees out of the index
+// unless the configuration says otherwise.
+var DefaultIndexExclude = []string{"**/.env", "**/*.pem", "**/id_rsa*", "**/.git/**", "**/node_modules/**"}
+
+// Built-in index limits, applied by Index.Validate where the YAML is silent.
+const (
+	defaultIndexMaxTextBytes = Size(2 << 20)
+	defaultIndexMaxTotalText = Size(4 << 30)
+	defaultIndexMaxFileSize  = Size(20 << 20)
+	defaultIndexFetchBudget  = "2GiB/h"
+)
+
+// Validate fills the index defaults and rejects a block the indexer could
+// not act on: a budget it cannot parse, a rule path that is not canonical
+// or names the same subtree twice, or a glob that path.Match would refuse
+// at every file instead of once here.
+func (x *Index) Validate() error {
+	if x.Exclude == nil {
+		x.Exclude = append([]string(nil), DefaultIndexExclude...)
+	}
+	if x.MaxTextBytes == 0 {
+		x.MaxTextBytes = defaultIndexMaxTextBytes
+	}
+	if x.MaxTotalText == 0 {
+		x.MaxTotalText = defaultIndexMaxTotalText
+	}
+	if x.FetchBudget == "" {
+		x.FetchBudget = defaultIndexFetchBudget
+	}
+	if x.MaxTextBytes <= 0 {
+		return fmt.Errorf("config: index.max_text_bytes must be positive, got %s", x.MaxTextBytes)
+	}
+	if x.MaxTotalText < x.MaxTextBytes {
+		return fmt.Errorf("config: index.max_total_text must be at least max_text_bytes (%s), got %s", x.MaxTextBytes, x.MaxTotalText)
+	}
+	perHour, err := parseIndexBudget(x.FetchBudget)
+	if err != nil {
+		return err
+	}
+	x.FetchBudgetPerHour = int64(perHour)
+	if err := checkIndexGlobs("index.exclude", x.Exclude); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(x.Rules))
+	for i := range x.Rules {
+		r := &x.Rules[i]
+		if !strings.HasPrefix(r.Path, "/") || path.Clean(r.Path) != r.Path || strings.ContainsAny(r.Path, "\x00\\") {
+			return fmt.Errorf("config: index.rules[%d].path must be a canonical absolute virtual path, got %q", i, r.Path)
+		}
+		if seen[r.Path] {
+			return fmt.Errorf("config: index.rules[%d] repeats path %q", i, r.Path)
+		}
+		seen[r.Path] = true
+		if r.Include == nil {
+			r.Include = append([]string(nil), DefaultIndexInclude...)
+		}
+		if r.MaxFileSize == 0 {
+			r.MaxFileSize = defaultIndexMaxFileSize
+		}
+		if r.MaxFileSize < 0 {
+			return fmt.Errorf("config: index.rules[%d].max_file_size must not be negative, got %s", i, r.MaxFileSize)
+		}
+		if err := checkIndexGlobs(fmt.Sprintf("index.rules[%d].include", i), r.Include); err != nil {
+			return err
+		}
+		if err := checkIndexGlobs(fmt.Sprintf("index.rules[%d].exclude", i), r.Exclude); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parseIndexBudget reads "<size>/h" into bytes per hour.
+func parseIndexBudget(s string) (Size, error) {
+	size, ok := strings.CutSuffix(strings.TrimSpace(s), "/h")
+	if !ok {
+		return 0, fmt.Errorf("config: index.fetch_budget must look like \"2GiB/h\", got %q", s)
+	}
+	v, err := ParseSize(size)
+	if err != nil {
+		return 0, fmt.Errorf("config: index.fetch_budget: %w", err)
+	}
+	if v <= 0 {
+		return 0, fmt.Errorf("config: index.fetch_budget must be positive, got %q", s)
+	}
+	return v, nil
+}
+
+// checkIndexGlobs rejects a pattern path.Match cannot parse. Patterns are
+// matched one "/" segment at a time, so each segment is checked on its own
+// and "**" — which the matcher treats as any number of segments — is not a
+// path.Match pattern at all.
+func checkIndexGlobs(key string, patterns []string) error {
+	for _, pat := range patterns {
+		if pat == "" {
+			return fmt.Errorf("config: %s holds an empty pattern", key)
+		}
+		for _, seg := range strings.Split(pat, "/") {
+			if seg == "**" {
+				continue
+			}
+			if _, err := path.Match(seg, ""); errors.Is(err, path.ErrBadPattern) {
+				return fmt.Errorf("config: %s pattern %q: %w", key, pat, err)
+			}
+		}
+	}
+	return nil
+}
+
 type Config struct {
 	SourcePath string            `yaml:"-"`
 	Secrets    Secrets           `yaml:"secrets"`
@@ -354,6 +506,7 @@ type Config struct {
 	Control    Control           `yaml:"control"`
 	WebDAV     WebDAV            `yaml:"webdav"`
 	Export     Export            `yaml:"export"`
+	Index      Index             `yaml:"index"`
 }
 
 // Default returns the built-in defaults applied before the file is decoded.
@@ -451,6 +604,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MCP.validateAgent(); err != nil {
+		return err
+	}
+	if err := c.Index.Validate(); err != nil {
 		return err
 	}
 	// Validate the global cache policy on its own, so an unknown preset or a

@@ -250,3 +250,49 @@ func TestMCPAgentNegativeDurationsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexIsOffByDefaultWithSafeDefaults: a config that never mentions the
+// index block gets an indexer that is off, pins nothing, has no rules, and
+// still carries working limits so that turning it on later never runs with a
+// zero budget.
+func TestIndexIsOffByDefaultWithSafeDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := cfg.Index
+	if x.Enabled || x.Pinned || len(x.Rules) != 0 {
+		t.Fatalf("index should be off with no rules: %+v", x)
+	}
+	if x.MaxTextBytes != 2<<20 || x.MaxTotalText != 4<<30 || x.FetchBudgetPerHour != 2<<30 {
+		t.Fatalf("index limits did not default: %+v", x)
+	}
+	if len(x.Exclude) != len(DefaultIndexExclude) {
+		t.Fatalf("exclude = %v, want the default list", x.Exclude)
+	}
+}
+
+func TestIndexRulesAreValidated(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"relative":   "index:\n  rules:\n    - path: work\n",
+		"dotdot":     "index:\n  rules:\n    - path: /work/../x\n",
+		"duplicate":  "index:\n  rules:\n    - path: /work\n    - path: /work\n",
+		"bad budget": "index:\n  fetch_budget: lots\n",
+		"bad glob":   "index:\n  rules:\n    - path: /w\n      include: [\"[\"]\n",
+	} {
+		if _, err := Parse([]byte(example + "\n" + yaml)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func TestIndexRuleDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(example + "\nindex:\n  enabled: true\n  fetch_budget: 512MiB/h\n  rules:\n    - path: /work/notes\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Index.Rules[0]
+	if r.MaxFileSize != 20<<20 || len(r.Include) != len(DefaultIndexInclude) || cfg.Index.FetchBudgetPerHour != 512<<20 {
+		t.Fatalf("rule = %+v, fetch budget = %d", r, cfg.Index.FetchBudgetPerHour)
+	}
+}
