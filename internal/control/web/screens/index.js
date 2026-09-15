@@ -5,6 +5,7 @@ import { get, subscribe } from '/ui/store.js';
 import { pageCursor, pageFailureMode } from '/ui/paged.js';
 import { onIndexChange } from '/ui/app.js';
 import { includeFor, parseSize, PRESET_NAMES } from '/ui/index_presets.js';
+import { mountEmbeddingPanel } from '/ui/embedding_panel.js';
 
 // The index screen: what the content index holds, what it is doing, which
 // rules make it download files, and which files it could not read.
@@ -15,7 +16,9 @@ import { includeFor, parseSize, PRESET_NAMES } from '/ui/index_presets.js';
 // no empty tables, and no second request the daemon would refuse. With an
 // index, the four cards follow the status ticks the shell already
 // receives, the progress bar follows the index SSE event, and the two
-// tables load once and reload after the actions that change them.
+// tables load once and reload after the actions that change them. The
+// embedding endpoint panel between the progress bar and the rules is its
+// own module (embedding_panel.js); this screen only mounts it.
 //
 // Two actions are destructive and ask for a typed confirmation, for the
 // same reason the daemon demands confirm: true for them: removing a rule
@@ -47,6 +50,8 @@ function figures(st) {
     maxText: st.max_total_text || 0,
     fetched: nested ? (budget.used || 0) : (st.fetched_this_hour || 0),
     limit: nested ? (budget.limit || 0) : (budget || 0),
+    vectors: st.vectors || 0,
+    maxChunks: st.max_chunks || 0,
   };
 }
 
@@ -83,12 +88,16 @@ export function renderIndex(host) {
   const stops = [];
   const cards = el('div', { style: 'display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:0 20px' });
   const progress = el('div', { style: 'padding:14px 20px 0' });
+  const embedding = el('div', { class: 'panel pad', 'data-embedding-panel': '' });
   const rulesBody = el('tbody');
   const failedBody = el('tbody');
   // A reader who paged deeper into the failures keeps that view; a
   // progress frame reloads the first page only when it is all there is.
   let failedPaged = false;
   let lastFailed = null;
+  // The embedding panel loads itself; the screen refreshes it after the
+  // actions that change what it shows (a rebuild empties the vectors).
+  let panel = null;
 
   // The load order is the contract with the daemon: status first, and only
   // an enabled index goes on to ask for rules and failures. The functions
@@ -102,6 +111,8 @@ export function renderIndex(host) {
       return;
     }
     renderEnabled(st);
+    panel = mountEmbeddingPanel(embedding);
+    stops.push(() => panel.dispose());
     await loadRules();
     await loadFailed('');
     if (disposed) return;
@@ -120,7 +131,7 @@ export function renderIndex(host) {
     fill(cards,
       card(t('index.card.docs'), String((f.docs.ok || 0) + (f.docs.dirty || 0) + (f.docs.failed || 0)),
         t('index.card.docs.detail', f.docs.ok || 0, f.docs.dirty || 0, f.docs.failed || 0)),
-      card(t('index.card.chunks'), String(f.chunks), t('index.card.chunks.note')),
+      card(t('index.card.chunks'), String(f.chunks), t('index.card.vectors', f.vectors, f.maxChunks)),
       card(t('index.card.text'), bytes(f.text), f.maxText ? t('index.card.limit', bytes(f.maxText)) : t('index.card.nolimit')),
       card(t('index.card.fetch'), bytes(f.fetched), f.limit ? t('index.card.limit', bytes(f.limit)) : t('index.card.nolimit')));
   }
@@ -279,6 +290,7 @@ export function renderIndex(host) {
       toast(t('index.rebuild.started'));
       renderCards(st);
       renderProgress(st.progress);
+      if (panel) panel.refresh();
       loadRules();
       loadFailed('');
     } catch (e) { toast(e.message, 'bad'); }
@@ -292,7 +304,7 @@ export function renderIndex(host) {
           el('button', { onclick: addRule }, iconEl('plus'), t('index.rule.add')),
           el('button', { class: 'danger', onclick: rebuild }, t('index.rebuild')))),
       cards, progress,
-      el('div', { style: 'height:20px' }),
+      el('div', { style: 'padding:20px 20px 20px' }, embedding),
       section(t('index.rules'), el('table', {}, el('thead', {}, el('tr', {},
         el('th', {}, t('index.rule.col.path')), el('th', {}, t('index.rule.col.include')), el('th', {}, t('index.rule.col.exclude')),
         el('th', {}, t('index.rule.col.maxsize')), el('th', {}, t('index.rule.col.source')), el('th', {}, t('index.rule.col.documents')),

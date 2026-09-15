@@ -37,15 +37,15 @@ func TestContentSearchToggleOnlyWhenIndexEnabled(t *testing.T) {
 	}
 }
 
-// TestContentSearchCallsIndexSearchAndKeepsItsNotes: the content mode asks
-// /index/search and keeps degraded and truncated with the rows, marks a
-// stale hit, and shows the heading path.
+// TestContentSearchCallsIndexSearchAndKeepsItsNotes: the content modes ask
+// /index/search and keep degraded (with the daemon's reason) and truncated
+// with the rows, mark a stale hit, and show the heading path.
 func TestContentSearchCallsIndexSearchAndKeepsItsNotes(t *testing.T) {
 	src := webSource(t, "web/content_search.js")
 	for _, want := range []string{
 		"api.get('/index/search?q=' + encodeURIComponent(query)",
-		"r.degraded", "r.truncated",
-		"t('search.content.degraded')", "t('search.content.truncated')",
+		"degradedReason(r)", "r.truncated",
+		"t('search.degraded', ", "t('search.content.truncated')",
 		"hit.stale", "t('search.content.stale')", "hit.heading",
 	} {
 		if !strings.Contains(src, want) {
@@ -53,7 +53,7 @@ func TestContentSearchCallsIndexSearchAndKeepsItsNotes(t *testing.T) {
 		}
 	}
 	// The notes are rows of the result table, not toasts.
-	if strings.Contains(src, "toast(t('search.content.degraded')") || strings.Contains(src, "toast(t('search.content.truncated')") {
+	if strings.Contains(src, "toast(t('search.degraded'") || strings.Contains(src, "toast(t('search.content.truncated')") {
 		t.Error("degraded/truncated must stay with the rows, not fade out of a toast")
 	}
 	// A row opens the extracted text at the hit.
@@ -94,7 +94,7 @@ func TestSearchModeSurvivesUnavailableStorage(t *testing.T) {
 	if strings.Count(src, "try {") < 2 || !strings.Contains(src, "localStorage.getItem(SEARCH_MODE_KEY)") {
 		t.Error("search mode storage is not guarded")
 	}
-	if !strings.Contains(src, "=== 'content' ? 'content' : 'name'") {
+	if !strings.Contains(src, "SEARCH_MODES.includes(mode) ? mode : 'name'") {
 		t.Error("an unknown stored mode must fall back to the name search")
 	}
 }

@@ -434,27 +434,35 @@ export function renderMain(host) {
   // Scope, shortcuts, request, result rows and the coverage line live in
   // name_search.js; this screen only says what clear, render, open and
   // select do here. Opening goes to the folder and selects the row by data-path.
-  // The "content" segment is an extra mode of that control: offered only
-  // while the daemon reports index.enabled, remembered by content_search.js
-  // so a reload keeps it, and answered by /index/search with the extracted
-  // text panel behind each row.
+  // The "keyword" and "semantic" segments are extra modes of that control:
+  // offered only while the daemon reports index.enabled, remembered by
+  // content_search.js so a reload keeps it, and answered by /index/search
+  // (mode=keyword and mode=hybrid) with the extracted text panel behind
+  // each row. Deselecting one mode clears the stored choice only if it was
+  // that mode's, so selecting the other one is not undone a step later.
   const contentHeader = contentSearchHeader();
+  const indexMode = (id, label) => ({
+    id, label,
+    active: () => readSearchMode() === id,
+    select: (on) => { if (on) writeSearchMode(id); else if (readSearchMode() === id) writeSearchMode('name'); },
+    run: (q) => runContentSearch({
+      rows, query: q, mode: id,
+      onSearch: () => fill(thead, contentHeader),
+      onOpen: (hit) => openExtractedText(hit.path, hit.start_off, hit.end_off),
+    }),
+    // Offered only while the daemon has an index.
+    when: () => indexEnabled(),
+  });
   const search = mountNameSearch({
+    extraModes: [
+      indexMode('content', t('search.mode.content')),
+      indexMode('semantic', t('search.mode.semantic')),
+    ],
     searchBox, rows, getCwd: () => cwd,
     onClear: () => load(),
     onSearch: () => fill(thead, search.header),
     onOpen: (hit) => { cwd = hit.path.replace(/\/[^/]*$/, '') || '/'; load().then(() => selectPath(hit.path)); },
     onSelect: (hit, tr) => select({ name: hit.name, path: hit.path, size: hit.size, mtime: hit.mtime, is_dir: hit.kind === 'dir', cached: hit.cached ? 1 : 0 }, tr),
-    extraModes: [{
-      id: 'content', when: () => indexEnabled(), label: t('search.mode.content'),
-      active: () => readSearchMode() === 'content',
-      select: (on) => writeSearchMode(on ? 'content' : 'name'),
-      run: (q) => runContentSearch({
-        rows, query: q,
-        onSearch: () => fill(thead, contentHeader),
-        onOpen: (hit) => openExtractedText(hit.path, hit.start_off, hit.end_off),
-      }),
-    }],
   });
   function selectPath(p) { const tr = rows.querySelector('tr[data-path="' + CSS.escape(p) + '"]'); if (tr) tr.click(); }
 
@@ -477,10 +485,10 @@ export function renderMain(host) {
   loadAccounts();
   renderInspector();
   // A deep link (#/connections?q=plan) searches after the directory is in;
-  // &mode=content asks the content index, once the status tick that says
-  // there is one has arrived.
+  // &mode=content (keyword) or &mode=semantic asks the content index, once
+  // the status tick that says there is one has arrived.
   searchBox.value = link.get('q') || '';
-  if (link.get('mode') === 'content') { writeSearchMode('content'); search.refresh(); }
+  if (link.get('mode') === 'content' || link.get('mode') === 'semantic') { writeSearchMode(link.get('mode')); search.refresh(); }
   load().then(() => searchBox.value && search.run());
   return () => { off(); unsubscribeHealth(); search.dispose(); };
 }
