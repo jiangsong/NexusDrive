@@ -40,7 +40,7 @@ export function renderAuditTab(host) {
   const tool = el('input', { type: 'text', placeholder: t('audit.filter.tool'), 'aria-label': t('audit.filter.tool'), autocomplete: 'off', spellcheck: 'false', style: 'width:160px' });
   const result = el('select', { 'aria-label': t('audit.filter.result'), style: 'width:auto' },
     el('option', { value: '' }, t('audit.filter.result')),
-    ...['ok', 'denied', 'error'].map((v) => el('option', { value: v }, t('audit.result.' + v))));
+    ...['ok', 'denied', 'error', 'forwarded', 'oversize'].map((v) => el('option', { value: v }, t('audit.result.' + v))));
   const since = el('select', { 'aria-label': t('audit.filter.since'), style: 'width:auto' },
     el('option', { value: '' }, t('audit.filter.since')),
     ...Object.keys(SINCE_MS).map((v) => el('option', { value: v }, t('audit.since.' + v))));

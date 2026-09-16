@@ -60,6 +60,50 @@ func (s *Server) beforeWrite(ctx context.Context, op, p, to, reason string) *opR
 	return &opRecord{s: s, seq: seq, pre: captured}
 }
 
+// recordPre records an op whose preimage the caller already decided on
+// (a file under a recursive delete that is not cached gets a not_cached
+// row without a capture that would download it). nil without a store or
+// a session, like beforeWrite.
+func (s *Server) recordPre(ctx context.Context, op, p string, pre agent.Pre) *opRecord {
+	if s.opt.Preimages == nil {
+		return nil
+	}
+	sess, ok := agent.FromContext(ctx)
+	if !ok {
+		return nil
+	}
+	seq, err := s.opt.Preimages.Record(ctx, sess.ID, agent.Op{Op: op, Path: p}.WithPre(pre))
+	if err != nil {
+		slog.Warn("mcp: session op not recorded", "tool", op, "path", p, "err", err)
+		return nil
+	}
+	return &opRecord{s: s, seq: seq, pre: pre}
+}
+
+// Preimage reasons a write reports (docs/agent-first-design.md §5.4). ok
+// means rollback_session can undo the write; the others say why not.
+const (
+	preimageOK          = "ok"
+	preimageNotRecorded = "not_recorded"
+	preimageTooMany     = "too_many"
+	preimagePartial     = "partial"
+)
+
+// reversibility is what a write tells the agent about its undo: whether
+// rollback_session can restore what was there, and the reason when not.
+// A nil record means nothing was recorded (no preimage store, no session,
+// or agent.db refused the row), which is the case an agent most needs
+// to hear about: the write went through and cannot be taken back here.
+func (r *opRecord) reversibility() (bool, string) {
+	if r == nil {
+		return false, preimageNotRecorded
+	}
+	if r.pre.Reason != "" {
+		return false, r.pre.Reason
+	}
+	return true, preimageOK
+}
+
 // done records what the write left behind: the ContentVersion of the
 // bytes written for content ops, a version for a copy, "" otherwise.
 func (r *opRecord) done(ctx context.Context, postVersion string) {

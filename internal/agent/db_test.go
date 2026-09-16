@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -52,8 +53,8 @@ func TestSchemaV2HasSessionOpsAndDeliveries(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 2 {
-		t.Fatalf("user_version = %d, want 2", v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
 	}
 	for _, table := range []string{"session_ops", "trigger_deliveries"} {
 		var n int
@@ -127,7 +128,7 @@ func TestOlderDatabaseMigratesToV2(t *testing.T) {
 		t.Fatalf("user_version = %d after migration, want %d", v, schemaVersion)
 	}
 	var stored string
-	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&stored); err != nil || stored != "2" {
+	if err := s.db.QueryRow(`SELECT v FROM meta WHERE k = 'schema_version'`).Scan(&stored); err != nil || stored != fmt.Sprint(schemaVersion) {
 		t.Fatalf("meta schema_version = %q, %v", stored, err)
 	}
 	var n int
@@ -264,4 +265,68 @@ func TestWatchDeliversTheNewestEventsAndStopUnsubscribes(t *testing.T) {
 	}
 	// A publish after stop must not panic on the closed channel.
 	s.publish(Event{Kind: "session"})
+}
+
+// TestSchemaV3IsAdditiveAndRepeatable: a v2 file gains the agent-first
+// columns and tables in place, keeps its rows, and a crash between a step
+// and the version write (simulated by re-running the step list on a file
+// already carrying it) does not trip over ADD COLUMN.
+func TestSchemaV3IsAdditiveAndRepeatable(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDB(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range [][]string{schemaV1, schemaV2} {
+		for _, q := range step {
+			if _, err := db.Exec(q); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_ops(session_id, audit_id, op, path, pre_state) VALUES ('s1', 1, 'create', '/a.txt', 'absent')`); err != nil {
+		t.Fatal(err)
+	}
+	// Half of v3 already applied, as a crash mid-migration leaves it.
+	if _, err := db.Exec(schemaV3[0]); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("a half-migrated v2 database must open: %v", err)
+	}
+	defer s.Close()
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 3 {
+		t.Fatalf("user_version = %d, %v", v, err)
+	}
+	for _, table := range []string{"changes", "read_heat"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+	for _, col := range []struct{ table, name string }{{"audit", "tokens_out"}, {"session_ops", "ts"}, {"sessions", "last_change_seen"}} {
+		var n int
+		if err := s.db.QueryRow(fmt.Sprintf(`SELECT count(*) FROM pragma_table_info('%s') WHERE name = ?`, col.table), col.name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("column %s.%s missing: %v", col.table, col.name, err)
+		}
+	}
+	var ts int64
+	if err := s.db.QueryRow(`SELECT ts FROM session_ops WHERE session_id = 's1'`).Scan(&ts); err != nil || ts != 0 {
+		t.Fatalf("the v2 row did not survive with a default ts: %d %v", ts, err)
+	}
+	id, err := s.AppendAudit(context.Background(), AuditRow{Tool: "read_text", TokensOut: 1234, Result: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := s.Audit(context.Background(), AuditQuery{})
+	if err != nil || len(rows) != 1 || rows[0].ID != id || rows[0].TokensOut != 1234 {
+		t.Fatalf("tokens_out did not round-trip: %+v %v", rows, err)
+	}
 }

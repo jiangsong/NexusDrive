@@ -254,7 +254,15 @@ type Collector struct {
 	// tools use. nil in a process without one; /memory/agents then
 	// answers {"enabled":false} and the other memory routes 404.
 	Memory MemoryControl
-	Now    func() time.Time
+	// HookStore and ReadHeat serve the agent-client hooks
+	// (docs/agent-first-design.md §7): the change record the turn-start
+	// hook reads and the heat table the read hook reports to. nil on a
+	// daemon without agent.db; the hook routes then answer empty.
+	HookStore HookStore
+	ReadHeat  HookReadHeat
+	// HeatStore serves GET /agent/heat; nil answers {"enabled": false}.
+	HeatStore HeatStore
+	Now       func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value

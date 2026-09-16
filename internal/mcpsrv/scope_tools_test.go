@@ -138,6 +138,10 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 	e.fake.Seed("work/nope.txt", []byte("here"))
 	outside := map[string]map[string]any{
 		"list_directory":   {"path": "/gd"},
+		"directory_tree":   {"path": "/gd"},
+		"history":          {"path": "/gd/x.txt"},
+		"pull_events":      {"path": "/gd"},
+		"hot_paths":        {"path": "/gd"},
 		"stat":             {"path": "/gd/x.txt"},
 		"stat_many":        {"paths": []string{"/gd/x.txt"}},
 		"read_text":        {"path": "/gd/x.txt"},

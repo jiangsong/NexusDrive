@@ -60,6 +60,9 @@ func TestMCPConnectCarriesNoToken(t *testing.T) {
 	if !c.HTTPListening || c.HTTPAddr != "127.0.0.1:8765" || c.URL != "http://127.0.0.1:8765/" || !c.Owner || c.StdioNonOwner {
 		t.Fatalf("%+v", c)
 	}
+	if c.InstallTransport != "http" {
+		t.Fatalf("install_transport = %q with a listener up", c.InstallTransport)
+	}
 	if !c.AuthRequired {
 		t.Fatal("a live token makes the listener demand a bearer")
 	}
@@ -109,7 +112,7 @@ func TestMCPConnectWithoutAListener(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &c); w.Code != 200 || err != nil {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	if c.HTTPListening || c.URL != "" || c.AuthRequired || len(c.Snippets) != 0 || len(c.AddCommands) != 0 {
+	if c.HTTPListening || c.URL != "" || c.AuthRequired || len(c.Snippets) != 0 || len(c.AddCommands) != 0 || c.InstallTransport != "stdio" {
 		t.Fatalf("%+v", c)
 	}
 	if !strings.Contains(w.Body.String(), `"snippets":{}`) {

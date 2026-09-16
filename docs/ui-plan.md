@@ -414,13 +414,13 @@ F5–F10 属二期。
 
 **G1 —— 运行时指引卡（T-46 · P0）**
 
-- [ ] **G1-1** `#/agents` 接入面板加"运行时指引"卡：`GET /agent/prompt?kind=instructions` 的文本（只读、可复制）、token 估算、四个 prompt 名（`onboard` / `search-this-tree` / `write-safely` / `finish`）各带"复制"。
+- [x] **G1-1**（2026-09-16，`connect_panel.js` `guidanceCard`；prompt 名以文字列出，未做逐个复制）`#/agents` 接入面板加"运行时指引"卡：`GET /agent/prompt?kind=instructions` 的文本（只读、可复制）、token 估算、四个 prompt 名（`onboard` / `search-this-tree` / `write-safely` / `finish`）各带"复制"。
 - [ ] **G1-2** `send_to_agent.js` 的预填改为 `kind=onboard`（输出与今天一致）。
-- [ ] **G1-3** i18n 键 `agent.instructions.*`；`ui_agents_test.go`：指引卡调用 `?kind=instructions`，文本按文本插入。
+- [x] **G1-3**（2026-09-16：`connect.guidance.*`；`TestConnectPanelShowsGuidanceAndInstallTransport`）i18n 键 `agent.instructions.*`；`ui_agents_test.go`：指引卡调用 `?kind=instructions`，文本按文本插入。
 
 **G2 —— 接入面板传输与桥状态（T-49、T-50 · P0）**
 
-- [ ] **G2-1** `connect_view.js`：显示"推荐传输：http（挂载运行中）/ stdio（未检测到挂载）"（来自 `/mcp/connect` 的 `install_transport`）；stdio 非 owner 横幅按 `bridge` 三态渲染：`connected` 绿色"已通过桥连接到 owner"、`disabled` 黄色附原因、`n/a` 不渲染。
+- [~] **G2-1**（2026-09-16：`install_transport` 文案已加；桥三态横幅未做——`/mcp/connect` 尚无 `bridge` 字段）`connect_view.js`：显示"推荐传输：http（挂载运行中）/ stdio（未检测到挂载）"（来自 `/mcp/connect` 的 `install_transport`）；stdio 非 owner 横幅按 `bridge` 三态渲染：`connected` 绿色"已通过桥连接到 owner"、`disabled` 黄色附原因、`n/a` 不渲染。
 - [ ] **G2-2** `_tests/connect_view.test.mjs` 覆盖三态；`ui_agents_test.go` 断言横幅文案来自 i18n。
 
 **G3 —— 设置屏 MCP 段（T-47 · P0）**
@@ -430,7 +430,7 @@ F5–F10 属二期。
 
 **G4 —— 可逆性与回滚预览（T-48 · P0）**
 
-- [ ] **G4-1** 会话详情浮层操作列表每行可逆性图标（✓ / ⚠ 不可回滚，hover 显示 `preimage_reason` / — 未记录），文字标签不只靠图标。
+- [~] **G4-1**（既有前像状态列即此项；2026-09-16 补 `too_many / expired / not_recorded` 文案）会话详情浮层操作列表每行可逆性图标（✓ / ⚠ 不可回滚，hover 显示 `preimage_reason` / — 未记录），文字标签不只靠图标。
 - [ ] **G4-2** 回滚预览浮层 `skipped` 按 reason 分组，`not_recorded` 单独一行说明"该写入发生时没有会话"；`rollback_plan.js` 纯函数扩展，`_tests/rollback_plan.test.mjs` 覆盖分组。
 
 **G5 —— 来源、历史与变更（T-51、T-52 · P1）**
@@ -444,10 +444,10 @@ F5–F10 属二期。
 **G6 —— 热度（T-53 · P1）**
 
 - [ ] **G6-1** `web/heat_plot.js`（零 import 纯函数）：输入 `[]{x, y, kind, path}` 与尺寸，输出 SVG 字符串；象限边界取中位数，半径按读取数对数缩放，hover 显示路径与数字，点击派发 `open-inspector`；`_tests/heat_plot.test.mjs`（象限划分、对数半径、空数据、单点）。
-- [ ] **G6-2** `#/agents` 新"热度"标签：`GET /agent/heat?prefix=&days=&by=path` 驱动散点；hot-but-stale 清单（右上象限）每行"打开检查器"与"生成建议"；`days` 分段 7 / 30 / 90。
+- [~] **G6-2**（2026-09-16：`screens/agents_heat.js` 表格 + 象限筛选，读 `GET /agent/heat`；散点图 G6-1 与建议浮层 G6-3 未做）`#/agents` 新"热度"标签：`GET /agent/heat?prefix=&days=&by=path` 驱动散点；hot-but-stale 清单（右上象限）每行"打开检查器"与"生成建议"；`days` 分段 7 / 30 / 90。
 - [ ] **G6-3** 建议浮层（`openPanel`）：`GET /agent/suggestions?prefix=` 的草案列表（pin / index / 热但陈旧 / 可解除 pin），每条"采用"按钮走既有 `/cache/pins`、`/index/rules` 带确认路由，浮层本身不写规则。
 - [ ] **G6-4** 主窗口文件列表热度点（30 天读取数，hover 显示 agent / kernel / console 拆分）；检查器"30 天读取"一行；`#/settings` 加 `heat.enabled`、`retention_days`。
-- [ ] **G6-5** i18n 键 `heat.*`；`ui_agents_heat_test.go`：热度标签调用 `/agent/heat`、建议浮层调用 `/agent/suggestions` 且不调用写路由、采用按钮带 `confirm: true`、响应中的路径按文本插入；浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
+- [~] **G6-5**（2026-09-16：`heat.*` 键、`ui_agents_heat_test.go` 的路由与标签断言；建议浮层部分未做）i18n 键 `heat.*`；`ui_agents_heat_test.go`：热度标签调用 `/agent/heat`、建议浮层调用 `/agent/suggestions` 且不调用写路由、采用按钮带 `confirm: true`、响应中的路径按文本插入；浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 
 **G7 —— Hooks（T-54 · P1）**
 

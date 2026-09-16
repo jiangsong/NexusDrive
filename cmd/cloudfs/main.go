@@ -30,6 +30,7 @@ import (
 	"cloudfs/internal/control"
 	"cloudfs/internal/daemon"
 	"cloudfs/internal/fusefs"
+	"cloudfs/internal/hooks"
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/mcpsrv"
@@ -119,6 +120,10 @@ func main() {
 		err = cmdSTRM(ctx, os.Args[2:])
 	case "mcp":
 		err = cmdMCP(ctx, os.Args[2:])
+	case "hooks":
+		err = cmdHooks(ctx, os.Args[2:], os.Stdout)
+	case "agent-hook":
+		err = cmdAgentHook(ctx, os.Args[2:], os.Stdin, os.Stdout)
 	case "status":
 		err = cmdStatus(ctx, os.Args[2:])
 	case "uploads":
@@ -191,7 +196,8 @@ Mounting
 Agents
   mcp --stdio [--agent ID]  serve MCP over stdin/stdout (for Claude Code, Codex); --agent names the memory directory
   mcp --http [addr]         serve MCP over Streamable HTTP on a loopback address
-  mcp install --client claude|codex [--write <file>]
+  mcp install --client claude|codex [--transport auto|stdio|http] [--with-agents-md] [--with-hooks] [--write <file>]
+  hooks install|uninstall|status [--client claude,codex,gemini]
                             print or write the client registration snippet
   mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h]
                             issue a scoped HTTP access token; the token is printed once
@@ -537,6 +543,13 @@ func cmdMount(ctx context.Context, args []string) error {
 	if err := os.MkdirAll(mountPath, 0o755); err != nil {
 		return fmt.Errorf("cannot create the mount point %s: %w", mountPath, err)
 	}
+	// The agent-client hooks' guard reads a registry of mount paths; a
+	// mount that cannot record itself still mounts.
+	if home, err := os.UserHomeDir(); err == nil {
+		if err := writeMountsRegistry(home, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "cloudfs: mounts registry not written: %v\n", err)
+		}
+	}
 	// The heap of a mounted daemon is small next to the bytes moving
 	// through it; a lazier collector spends less of a cold read's CPU on
 	// collections and adds less latency to a cache miss.
@@ -682,7 +695,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	// http is an optional-value flag: `--http` selects the configured/default
 	// address, while `--http 0.0.0.0:8765` overrides it. Leaving it in the
 	// boolean-only set silently turned the address into a positional argument.
-	f := parseFlags(args, "stdio", "read-only")
+	f := parseFlags(args, "stdio", "read-only", "with-agents-md", "with-hooks")
 	cfg, _, err := loadConfig(f)
 	if err != nil {
 		// Installing the client registration does not need a working config.
@@ -757,11 +770,22 @@ func cmdMCP(ctx context.Context, args []string) error {
 			defer stdioHeartbeat(ctx, d.Agent.Dir())()
 		}
 	}
+	// Beside an owner, fenced calls are forwarded to its HTTP transport
+	// with the secret it left in the agent directory (T-50); without the
+	// secret (an owner not serving HTTP) they refuse as before.
+	var bridge *mcpsrv.BridgeOptions
+	if nonOwner && d.Agent != nil {
+		if tok := mcpsrv.ReadBridgeToken(d.Agent.Dir()); tok != "" {
+			bridge = &mcpsrv.BridgeOptions{URL: mcpHTTPURL(f, cfg), Token: tok}
+		}
+	}
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory, Agent: f.str("agent", ""),
+		Limits: mcpLimits(cfg), PreimageFiles: cfg.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d),
+		Bridge: bridge,
 	})
 	if err != nil {
 		return err
@@ -835,12 +859,31 @@ func indexOf(d *daemon.Daemon) mcpsrv.IndexService {
 	return d.Index
 }
 
+// readObserverOf is the daemon's read-heat observer as an interface, or
+// nil: a typed nil pointer in an interface would be non-nil.
+func readObserverOf(d *daemon.Daemon) mcpsrv.ReadObserver {
+	if d.ReadHeat == nil {
+		return nil
+	}
+	return d.ReadHeat
+}
+
+// mcpLimits carries the configured token budget into the server; the
+// byte limits stay the server's defaults.
+func mcpLimits(cfg *config.Config) mcpsrv.Limits {
+	if cfg == nil {
+		return mcpsrv.Limits{}
+	}
+	return mcpsrv.Limits{MaxTokens: cfg.MCP.Limits.MaxTokens}
+}
+
 func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, readOnly bool, addr string, exportRoots []string) error {
 	srv, err := mcpsrv.New(mcpsrv.Options{
 		FS: d.FS, Allow: allow, ReadOnly: readOnly, Version: version,
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory,
+		Limits: mcpLimits(d.Config), PreimageFiles: d.Config.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d),
 	})
 	if err != nil {
 		return err
@@ -860,6 +903,13 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 	auth := mcpsrv.HTTPAuth{Token: mcpHTTPToken()}
 	if d.Agent != nil {
 		auth.Verify = d.Agent.VerifyToken
+		// The bridge secret lets a stdio server beside this owner forward
+		// its writes here (T-50); it is only ever accepted from loopback.
+		if tok, err := mcpsrv.WriteBridgeToken(d.Agent.Dir()); err == nil {
+			auth.Bridge = tok
+		} else {
+			fmt.Fprintf(os.Stderr, "cloudfs: bridge secret not written: %v\n", err)
+		}
 		env := auth.Token
 		auth.Open = func(ctx context.Context) bool {
 			live, err := d.Agent.HasLiveTokens(ctx)
@@ -995,6 +1045,29 @@ func strmStartURL(cfg *config.Config, source, override string) (string, error) {
 	return u.String(), nil
 }
 
+// hookClientFor maps an MCP client name to the hooks client name.
+func hookClientFor(client string) string {
+	switch strings.ToLower(client) {
+	case "claude", "claude-code":
+		return "claude"
+	case "codex":
+		return "codex"
+	case "gemini":
+		return "gemini"
+	}
+	return strings.ToLower(client)
+}
+
+// mcpOwnerOnline reports whether the daemon that owns this configuration's
+// cache answers on its control plane, which only the owner process opens.
+// A variable so the install tests can stand in for a running daemon.
+var mcpOwnerOnline = func(cfg *config.Config) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, online, err := control.FetchStatusInLanguage(ctx, cfg.Control.Socket, cfg.Control.Metrics, cliLang)
+	return err == nil && online
+}
+
 // mcpInstall prints (or writes) the registration snippet for an agent client,
 // so the user does not have to hand-assemble JSON or TOML. --transport http
 // registers the daemon's HTTP listener instead of a stdio launch; the token
@@ -1017,7 +1090,25 @@ func mcpInstallTo(out, errOut io.Writer, f *flags, allow []string, readOnly bool
 	if err != nil || binary == "" {
 		binary = "cloudfs"
 	}
-	o := mcpsrv.ClientOptions{Client: client, Binary: binary, Allow: allow, ReadOnly: readOnly, Transport: strings.ToLower(f.str("transport", "stdio"))}
+	transport := strings.ToLower(f.str("transport", ""))
+	if transport == "" {
+		transport = "auto"
+		if cfg != nil && cfg.MCP.Install.Transport != "" {
+			transport = cfg.MCP.Install.Transport
+		}
+	}
+	if transport == "auto" {
+		// A stdio server beside a running mount cannot write (T-43); when
+		// the owner's control plane answers, the HTTP transport is the one
+		// that works. Without a configuration there is nothing to ask.
+		transport = "stdio"
+		reason := "no daemon is running (or no configuration was found), so the agent will start its own"
+		if cfg != nil && mcpOwnerOnline(cfg) {
+			transport, reason = "http", "cloudfs is running on this machine, so the agent should talk to it rather than start a second copy"
+		}
+		fmt.Fprintf(errOut, "transport: %s (%s; pass --transport to override)\n", transport, reason)
+	}
+	o := mcpsrv.ClientOptions{Client: client, Binary: binary, Allow: allow, ReadOnly: readOnly, Transport: transport}
 	switch o.Transport {
 	case "stdio":
 	case "http":
@@ -1028,6 +1119,35 @@ func mcpInstallTo(out, errOut io.Writer, f *flags, allow []string, readOnly bool
 	snippet, err := mcpsrv.ClientConfigFor(o)
 	if err != nil {
 		return err
+	}
+	if f.bool("with-agents-md") {
+		dir, _ := os.Getwd()
+		md := agentsMdTarget(dir, f.str("agents-md", ""))
+		changed, err := writeAgentsMd(md, agentsMdBlock(cfg, allow, readOnly, o.Transport))
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Fprintf(errOut, "wrote the CloudFS section of %s\n", md)
+		} else {
+			fmt.Fprintf(errOut, "%s already carries the CloudFS section\n", md)
+		}
+	}
+	if f.bool("with-hooks") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		if err := writeMountsRegistry(home, cfg); err != nil {
+			return err
+		}
+		results, err := hooks.Install(home, []string{hookClientFor(client)})
+		if err != nil {
+			return err
+		}
+		if err := printHookResults(errOut, results, false, "installed"); err != nil {
+			return err
+		}
 	}
 	target := f.str("write", "")
 	if target == "" {

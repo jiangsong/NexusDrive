@@ -44,6 +44,10 @@ function body(c) {
     parts.push(el('div', { class: 'row', style: 'margin-top:6px' }, copyBtn(CONFIG_HINT)));
     return parts;
   }
+  // What `cloudfs mcp install` will pick with no --transport: http while
+  // the listener is up, stdio otherwise (which beside a running mount
+  // cannot write without the bridge).
+  parts.push(el('div', { class: 'detail', style: 'margin-top:8px' }, t('connect.install.' + (c.install_transport === 'http' ? 'http' : 'stdio'))));
   const add = (c.add_commands || {}).claude;
   if (add) {
     parts.push(el('div', { class: 'eyebrow', style: 'margin:14px 0 6px' }, t('connect.add.claude')));
@@ -54,16 +58,31 @@ function body(c) {
   return parts;
 }
 
+// guidanceCard shows what the MCP server tells every agent at initialize
+// (GET /agent/prompt?kind=instructions): the text, its token estimate, and
+// the prompts an MCP client can list. It is the one place a person sees
+// what their agent was told without being the agent.
+function guidanceCard(g) {
+  const names = (g.prompts || []).filter((n) => n !== 'instructions');
+  return el('div', { class: 'guidance', 'data-guidance': '', style: 'margin-top:14px' },
+    el('div', { class: 'eyebrow', style: 'margin:0 0 6px' }, t('connect.guidance.title', g.tokens || 0)),
+    el('pre', { class: 'detail snippet', style: 'white-space:pre-wrap' }, g.prompt || ''),
+    el('div', { class: 'row', style: 'margin-top:6px;gap:8px;flex-wrap:wrap' },
+      copyBtn(g.prompt || ''),
+      el('span', { class: 'dim' }, t('connect.guidance.prompts', names.join(', ')))));
+}
+
 // renderConnectPanel fills host and loads once; it returns a dispose that
 // stops a late reply from landing on a screen that has moved on.
 export function renderConnectPanel(host, { open = false } = {}) {
   let disposed = false;
   const inner = el('div', { class: 'dim' }, t('connect.loading'));
+  const guidance = el('div', {});
   const state = el('span', {});
   const details = el('details', { class: 'connect', open },
     el('summary', {},
       el('span', { class: 'connect-title' }, t('connect.title')), state),
-    el('div', { class: 'connect-body' }, inner));
+    el('div', { class: 'connect-body' }, inner, guidance));
   fill(host, details);
 
   async function load() {
@@ -77,6 +96,16 @@ export function renderConnectPanel(host, { open = false } = {}) {
       if (disposed) return;
       fill(state);
       fill(inner, el('span', { class: 'detail' }, e.message));
+    }
+    try {
+      const g = await api.get('/agent/prompt?kind=instructions');
+      if (disposed) return;
+      fill(guidance, guidanceCard(g));
+    } catch (e) {
+      // A daemon without a filesystem has no guidance to show; the
+      // connect state above still stands on its own.
+      if (disposed) return;
+      fill(guidance);
     }
   }
   load();

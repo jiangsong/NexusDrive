@@ -2,9 +2,11 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
 	"cloudfs/internal/index"
 
@@ -95,14 +97,32 @@ func (s *Server) registerIndexTools() {
 	}, s.readExtractedText)
 }
 
-func (s *Server) semanticSearch(ctx context.Context, _ *mcp.CallToolRequest, in semanticSearchInput) (*mcp.CallToolResult, index.SearchResult, error) {
+// semanticSearchOutput is index.SearchResult plus the fields the agent
+// layer adds; the index package keeps its own result type.
+type semanticSearchOutput struct {
+	index.SearchResult
+	// Next names the call to make when this result should not be taken
+	// as the whole answer (index_status when degraded).
+	Next string `json:"next,omitempty"`
+	// TruncatedBy is "tokens" when the token budget cut the hit list.
+	TruncatedBy string `json:"truncated_by,omitempty"`
+}
+
+// extractedTextOutput is index.TextPage plus truncated_by; next_offset
+// continues either way.
+type extractedTextOutput struct {
+	index.TextPage
+	TruncatedBy string `json:"truncated_by,omitempty"`
+}
+
+func (s *Server) semanticSearch(ctx context.Context, _ *mcp.CallToolRequest, in semanticSearchInput) (*mcp.CallToolResult, semanticSearchOutput, error) {
 	root := "/"
 	if in.Path != "" {
 		var err error
 		root, err = s.checkPath(ctx, in.Path, false)
 		if err != nil {
 			r, _ := fail(err)
-			return r, index.SearchResult{}, nil
+			return r, semanticSearchOutput{}, nil
 		}
 	}
 	topK := in.TopK
@@ -125,7 +145,7 @@ func (s *Server) semanticSearch(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	if err != nil {
 		r, _ := fail(err)
-		return r, index.SearchResult{}, nil
+		return r, semanticSearchOutput{}, nil
 	}
 	hits := res.Hits[:0]
 	for _, h := range res.Hits {
@@ -144,7 +164,28 @@ func (s *Server) semanticSearch(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if res.Pending > 0 {
 		msg += fmt.Sprintf("; %d files still wait for extraction", res.Pending)
 	}
-	return text("%s", msg), res, nil
+	out := semanticSearchOutput{SearchResult: res}
+	if keep, cut := cutItems(len(out.Hits), s.tokenBudget(), func(i int) int {
+		b, _ := json.Marshal(out.Hits[i])
+		return agent.EstimateTokensBytes(b)
+	}); cut {
+		out.Hits, out.Truncated, out.TruncatedBy = out.Hits[:keep], true, truncatedByTokens
+		msg += "; truncated to the token budget"
+	}
+	switch {
+	case res.Degraded != "":
+		out.Next = nextFor(len(res.Hits), res.Truncated, searchCoverage{}, res.Degraded, 0, root)
+	case len(res.Hits) == 0 && res.Pending > 0:
+		out.Next = fmt.Sprintf("no hits while %d files still wait for extraction: call index_status, or search names with search", res.Pending)
+	case len(res.Hits) == 0:
+		out.Next = fmt.Sprintf("no chunk matched: call index_status on %s to check it is indexed (add a rule with index if not), or search names with search", root)
+	case res.Truncated:
+		out.Next = "more chunks exist: narrow the query or the path, or lower max_snippet_bytes"
+	}
+	if out.Next != "" {
+		msg += ". Next: " + out.Next
+	}
+	return text("%s", msg), out, nil
 }
 
 func (s *Server) indexStatus(ctx context.Context, _ *mcp.CallToolRequest, in indexStatusInput) (*mcp.CallToolResult, index.Status, error) {
@@ -240,11 +281,11 @@ func (s *Server) unindexRule(ctx context.Context, _ *mcp.CallToolRequest, in uni
 	return text("removed the index rule at %s", p), indexRuleOutput{Path: p, OK: true, Pending: st.Pending}, nil
 }
 
-func (s *Server) readExtractedText(ctx context.Context, _ *mcp.CallToolRequest, in readExtractedTextInput) (*mcp.CallToolResult, index.TextPage, error) {
+func (s *Server) readExtractedText(ctx context.Context, _ *mcp.CallToolRequest, in readExtractedTextInput) (*mcp.CallToolResult, extractedTextOutput, error) {
 	p, err := s.checkPath(ctx, in.Path, false)
 	if err != nil {
 		r, _ := fail(err)
-		return r, index.TextPage{}, nil
+		return r, extractedTextOutput{}, nil
 	}
 	max := in.MaxBytes
 	if max <= 0 || max > s.opt.Limits.MaxBytes {
@@ -256,11 +297,16 @@ func (s *Server) readExtractedText(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	if err != nil {
 		r, _ := fail(err)
-		return r, index.TextPage{}, nil
+		return r, extractedTextOutput{}, nil
 	}
-	msg := fmt.Sprintf("%s: %d bytes of %s text from offset %d", p, len(page.Text), page.Kind, page.Offset)
-	if !page.EOF {
-		msg += fmt.Sprintf("; continue at offset %d", page.NextOffset)
+	s.observeRead(p)
+	out := extractedTextOutput{TextPage: page}
+	if kept, cut := cutHead(page.Text, s.tokenBudget()); cut {
+		out.Text, out.NextOffset, out.EOF, out.TruncatedBy = kept, page.Offset+int64(len(kept)), false, truncatedByTokens
 	}
-	return text("%s", msg), page, nil
+	msg := fmt.Sprintf("%s: %d bytes of %s text from offset %d", p, len(out.Text), out.Kind, out.Offset)
+	if !out.EOF {
+		msg += fmt.Sprintf("; continue at offset %d", out.NextOffset)
+	}
+	return text("%s", msg), out, nil
 }

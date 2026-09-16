@@ -2459,7 +2459,7 @@ T-43 是先于二期回滚的验证缺口。T-44 于 2026-09-15 追加。
   - 界面：`ui_send_to_agent_test.go` 断言复制按钮不发网络请求以外的写操作、运行按钮仅在 `/agent/endpoints`
     非空时渲染、运行前确认并带 `confirm: true`、提示词 `textarea` 内容按文本插入；检查器与搜索结果两个入口都存在。
 
-### [ ] T-43 验证缺口：stdio MCP 与 mount 并存（二期回滚之前完成；验证与栅栏已交付，桥待三期提前）
+### [x] T-43 验证缺口：stdio MCP 与 mount 并存（验证与栅栏 2026-09-15 交付；桥 2026-09-16 由 T-50 落地，关闭）
 
 - **状态（2026-09-15 线 C 收口，提交 ab59d2f、19fef9f 与本条收口提交）**：本条的验证目标已达成——
   e2e 复现存在并给出结论（下文 C0 观察），写栅栏落地（C0.5：`internal/mcpsrv/owner_fence.go` + `internal/vfs`
@@ -2654,7 +2654,20 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
 
 ---
 
-### [ ] T-46 运行时指引：server instructions、prompts、错误分层、`next`（P0）
+### [~] T-46 运行时指引：server instructions、prompts、错误分层、`next`（P0，2026-09-16 后端与界面完成）
+
+- **2026-09-16 完成**：`internal/agent/prompttext`（`Caps` 门控的 `Instructions(caps, lang)` 与四个 prompt 的
+  `Render`，句子在 `internal/i18n` `agent.instructions.*` / `agent.prompt.*`，中英各一套；
+  `TestInstructionsStayUnderTheTokenBudget` 锁 ≤600 token）；`mcpsrv.New` 在 `mcp.NewServer` 前算好
+  `ServerOptions.Instructions`，`registerPrompts` 注册四个 prompt；`codedError` + `classify` 覆盖六类
+  （`mapErr` 的 `no_space` / `read_only` 直接构造），`fail` 保持第一段文本不变、追加 JSON 段并写 `_meta`
+  （SDK 会用工具零值覆盖 `StructuredContent`，所以不能放那里——与设计 §5.1.3 的差异）；`searchOutput.next`、
+  `semanticSearchOutput{index.SearchResult; next}`；`GET /agent/prompt?kind=instructions|<prompt>` 与控制台接入
+  面板"运行时指引"卡（G1）。测试：`TestInitializeCarriesInstructions`、`TestPromptsListHasFour`、
+  `TestFailKeepsFirstTextForAudit`、`TestClassifyCoversTheSixCodesOnly`、`TestSearchEmptyWithGapSuggestsWarm`、
+  `TestSemanticSearchDegradedSuggestsIndexStatus`、`TestAgentPromptKindRendersTheServerGuidance`、
+  `TestConnectPanelShowsGuidanceAndInstallTransport`。**未做**：`prompts/get onboard` 与 `GET /agent/prompt`
+  逐字相同的断言（两边同源同函数，未单独写）。
 
 - **证据**：`internal/mcpsrv/server.go` `New` 构造的 `mcp.ServerOptions` 只填 `PageSize / SubscribeHandler /
   UnsubscribeHandler / InitializedHandler`，无 `Instructions`；全仓库无 `AddPrompt`。go-sdk v1.7.0（`go.mod`）的
@@ -2685,7 +2698,18 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 界面 `ui_agents_test.go` 断言指引卡调用 `/agent/prompt?kind=instructions`；i18n 两表键一致；screens 无汉字。
 - **依赖**：无。估算 S + M。
 
-### [ ] T-47 token 预算 `MaxTokens`、`list_directory fields`、`directory_tree`（P0）
+### [~] T-47 token 预算 `MaxTokens`、`list_directory fields`、`directory_tree`（P0，2026-09-16 后端完成，G3 待做）
+
+- **2026-09-16 完成**：`agent.EstimateTokens`（CJK 每字 1、其余每 4 字节 1、+10%）；`Limits.MaxTokens`（默认
+  20,000，负数关闭；配置 `mcp.limits.max_tokens`）；审计中间件只计量（`tokens_out` 列，超限 `result: oversize`）；
+  截断在 `read_text`（含 tail 保尾、多字节边界修正）、`read_extracted_text`、`list_directory`（游标续到最后保留项）、
+  `search`、`semantic_search`、`stat_many`、`edit_file` diff、`directory_tree`、`history`、`pull_events`、`hot_paths`；
+  `list_directory.fields = minimal | full`（`entry` 的 `cached/state/last_writer` `omitempty`）；`directory_tree`
+  只走 `meta.WalkSubtree` + `DirState`，`listed` / `unlisted` / `max_entries`。测试：`TestReadTextCJKTruncatesByTokens`
+  （256 KiB 中文按 token 切页、续读拼接相同；英文同样超 20k，按字节的 256 KiB 从来不曾符合客户端预算）、
+  `TestAuditRecordsTokensOut`、`TestOversizeIsObservedNotTruncatedByMiddleware`、`TestListDirectoryMinimalOmitsCacheFields`、
+  `TestDirectoryTreeCostsNoRemoteCalls`、`TestDirectoryTreeMarksUnlistedDirs`、`TestCutHeadAndTailKeepRuneBoundaries`；
+  `test/perf` 基线不变。**未做**：G3 设置屏的 `max_tokens` 编辑。
 
 - **证据**：`Limits` 四个字段全是字节（`server.go` `Limits` / `withDefaults`）；`docs/DESIGN.md` §2 引用了"Claude Code
   默认拒绝 >25k tokens 的工具结果"却未兑现。`listInput` 只有 `path / cursor / limit`；`entry` 的 `cached` / `state`
@@ -2711,7 +2735,17 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `docs/mcp.md` 工具表加 `directory_tree` 与 `fields`。
 - **依赖**：无。估算 M。
 
-### [ ] T-48 写入响应 `reversible` / `preimage_reason`、递归删除 `plan` 与逐文件前像（P0）
+### [~] T-48 写入响应 `reversible` / `preimage_reason`、递归删除 `plan` 与逐文件前像（P0，2026-09-16 后端完成）
+
+- **2026-09-16 完成**：`opRecord.reversibility()`（nil → `not_recorded`）；`writeOutput / editOutput / okOutput`
+  的 `reversible` + `preimage_reason`（pin/unpin `not_applicable`）；`internal/mcpsrv/delete_plan.go`：`walkForDelete`
+  （meta + `cache.Present`，统计未列举目录）、`confirm=false` 只回 `plan`、`recordSubtree` 按"文件 → 子目录（深者
+  先）→ 目录本身"记行，只对完整缓存文件 `Capture`（硬链接），未缓存记 `not_cached`，超 `mcp.session.preimage_files`
+  （默认 500）记 `too_many`，目录行不再带 `dir` 理由所以回滚会重建目录；整体 `ok | partial | not_recorded`。测试：
+  `TestWriteWithoutPreimagesReportsNotRecorded`、`TestWriteOverLimitReportsTooLarge`、`TestDeletePlanWithoutConfirmDoesNotDelete`
+  （零远端、journal 无新行）、`TestRecursiveDeleteCapturesCachedFilesOnly`（3 cached + 2 未缓存：`ReadRange` 零次、
+  回滚恢复 5 项跳过 2 项 `not_cached`）、`TestRecursiveDeleteHonoursPreimageFileBudget`。界面：会话详情已有前像
+  状态列，新增 `too_many / expired / not_recorded` 文案（G4 的分组说明未做）。
 
 - **证据**：`internal/agent/preimage.go` `Pre.Reason` 有 `"" | too_large | not_cached | dir`，`Capture` 注释
   "never refuses the write it precedes"；`mcpsrv/preimage.go` `beforeWrite` 返回的 `*opRecord` 私有且写工具不带进
@@ -2734,7 +2768,15 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestRecursiveDeleteHonoursPreimageFileBudget`。
 - **依赖**：无。估算 S + M。
 
-### [ ] T-49 `mcp install` 默认传输按 owner 在线判定、`--with-agents-md`（P0）
+### [~] T-49 `mcp install` 默认传输按 owner 在线判定、`--with-agents-md`（P0，2026-09-16 完成）
+
+- **2026-09-16 完成**：`--transport` 默认 `auto`（配置 `mcp.install.transport`），`mcpOwnerOnline` 经
+  `control.FetchStatusInLanguage` 判定，stderr 打印一行原因；`cmd/cloudfs/agents_md.go`（目标选择、标记块、幂等
+  写入，0644）；`--with-hooks` 调 `hooks.Install`；`GET /mcp/connect.install_transport` 与接入面板文案（G2）。
+  测试：`TestMCPInstallPicksHTTPWhenOwnerOnline`（真实控制面 socket）、`TestMCPInstallPicksStdioWhenOffline`、
+  `TestWithAgentsMdIsIdempotent`（两次字节相同、标记块外不动、无文件则建、缺配对标记拒绝、`--with-hooks` 写到
+  临时 `$HOME`），`TestMCPInstallDefaultsAndRefusals` 保留。**注意**：测试里凡触发 `--with-hooks` 必须
+  `t.Setenv("HOME", t.TempDir())`——它写用户级配置。
 
 - **证据**：`cmd/cloudfs/main.go` `mcpInstallTo` 用 `f.str("transport", "stdio")`，不看运行时状态，`install` 分支在
   `loadConfig` 失败时也能跑（`cfg == nil`）；`internal/mcpsrv/http.go` `ClientOptions` 把空与 `stdio` 同等处理；
@@ -2757,7 +2799,26 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `docs/mcp.md`「注册」一节更新。
 - **依赖**：无。估算 S–M。
 
-### [ ] T-50 stdio→HTTP 桥（P0，吸收 T-43，落地后关闭 T-43）
+### [~] T-50 stdio→HTTP 桥（P0，吸收 T-43；2026-09-16 完成，T-43 可关闭）
+
+- **2026-09-16 完成**：`internal/mcpsrv/bridge.go`——持有者 `serveMCPHTTPWith` 写 `<cache.dir>/agent/bridge.token`
+  （`WriteBridgeToken`，0600），`HTTPAuth.Bridge` 只从回环 `RemoteAddr` 接受该密钥，`resolveSession` 映射为默认
+  principal、传输 `http-bridge`；非 owner `cmdMCP` 读到密钥即配 `Options.Bridge{URL, Token}`，`bridgeMiddleware`
+  （在审计中间件之内）把 `bridgedTools`（= `requireOwner` 覆盖的 26 个工具）原样转发到持有者，stdio 侧审计
+  `result: forwarded`；持有者不可达时退回 `errBridgeDown`（含 `errRequiresOwner`，`code: not_owner`）。测试：
+  `TestBridgeForwardsWritesToTheOwner`、`TestBridgeAuditSaysForwarded`、`TestBridgeDownFallsBackToTheFence`、
+  `TestBridgeSecretIsLoopbackOnly`、`TestBridgeForwardsEveryFencedTool`；e2e `TestStdioBesideMountWritesThroughTheBridge`
+  （真实挂载：文件出现在挂载点、只上传一次、两侧审计行）；`TestStdioBesideMountRefusesWritesCleanly` 保留为
+  无密钥时的契约。**决定**：桥 principal = 持有者默认 principal，但会话收窄到 stdio 进程自己的作用域（见下）。
+- **2026-09-16 审核修订**（代码审核发现两处高危）：(1) 转发绕过了 stdio 侧的 `--read-only` / `--allow`——
+  `bridgeMiddleware` 在 handler 之前转发，本地 `checkPath` 从不运行，持有者又按自己更宽的 `mcp.allow` 执行。
+  修法：stdio 进程的 HTTP 传输层给每个请求带 `X-Cloudfs-Bridge-Scope`（自身 `defaultScope` 的 JSON，agent 经
+  stdio 碰不到请求头），持有者 `resolveSession` 用 `ConnInfo.Narrow` 把桥会话 `Scope.Narrow` 到它并持久化；
+  stdio 侧转发前先过 `checkWrite`（`list_sessions` 除外）。(2) 所有 stdio 进程共用 `bridge:<principal>` 一个
+  永不过期的持有者会话——A 的 `rollback_session` 回滚 B 的写。修法：每个进程随机连接 id 经 `X-Cloudfs-Bridge-Conn`
+  成为连接键 `bridge:<id>`，桥客户端以 agent 的客户端名自报，`http-bridge` 加入 `rotates`（按 `mcp.session.idle`
+  过期）；缺任一头的请求被拒。测试：`TestBridgeKeepsTheStdioServersScope`、
+  `TestBridgeGivesEachStdioProcessItsOwnOwnerSession`、`TestBridgeRefusesARequestWithoutItsHeaders`。
 
 - **证据**：T-43 的结论——并存拓扑下 stdio 进程是独立 VFS，写一律被 `requireOwner` 拒绝，桥是根治方案，排在三期
   首位。`session_mw.go` 的 loopback 分支给回环免认证调用 `loopback:<默认 principal>` 身份；`mcp.http` 绑回环时
@@ -2783,7 +2844,19 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 关闭 T-43。
 - **依赖**：T-51 的 schemaV3（`audit.result = forwarded` 只是值，不需 schema；但 `tokens_out` 列应同时到位）。估算 L。
 
-### [ ] T-51 来源：agent.db schemaV3、`changes` 表、control / WebDAV 写审计、`last_writer`、`history`、保留期拆分（P1）
+### [~] T-51 来源：agent.db schemaV3、`changes` 表、`last_writer`、`history`、保留期拆分（P1，2026-09-16 后端完成）
+
+- **2026-09-16 完成**：schemaV3（`audit.tokens_out`、`session_ops.ts`、`sessions.last_change_seen`、`changes`、
+  `read_heat`；`applyStep` 让 `ADD COLUMN` 可重跑，`TestSchemaV3IsAdditiveAndRepeatable`）；`vfs.Change` 加
+  `OriginName` / `Actor{SessionID, Principal}`（`WithActor` 由 `sessionMiddleware` 设）；`internal/agent/changes.go`：
+  `ChangesOf`、`RecordChanges`、`Changes`、`LastWriter`、`History`、`PruneChanges`、`RunChangeRecorder`（第五个
+  `WatchChanges` 消费者，200 ms / 128 条批量，只在 owner 跑）；`Preimages.GC(retain, retainBlobs)` 拆分，内容先释放的
+  行标 `expired`；配置 `mcp.session.retain` 默认 7 → 30 天、新增 `retain_blobs` 默认 7 天。MCP：`stat` / `stat_many` /
+  `list_directory(full)` 的 `last_writer`，`history` 工具。测试：`TestChangesOfMapsFeedEventsToRows`、
+  `TestChangesRecordQueryLastWriterAndHistory`、`TestChangeRecorderBatchesTheFeedIntoRows`、`TestChangeRecorderRunsInTheOwnerOnly`、
+  `TestGCReleasesBlobsBeforeRows`、`TestStatCarriesLastWriter`、`TestHistoryListsChangesNewestFirst`、
+  `TestChangeRowsCarryTheAdapterName`。**改动**：控制台 / WebDAV 的写不再需要单独审计包装——它们经 `WithOrigin`
+  的变更流已落进 `changes`（`origin: control | webdav`）。**未做**：xattr `user.cloudfs.writer`；界面 G5。
 
 - **证据**：`internal/agent/db.go` `session_ops` 无 `ts` 列（只有 `seq` + `audit_id`）；`internal/vfs/changes.go`
   `Origin{Kernel, API, Remote}` 与 `WithOrigin(ctx, name)` 已在 mcp（"mcp"）、控制面（`control/metrics.go`
@@ -2820,7 +2893,16 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `security_all_routes_test` 覆盖 `/changes`；`docs/vfs-changes.md` 加 `changes` 表一节。
 - **依赖**：无（P1 公共前提）。估算 L。
 
-### [ ] T-52 `pull_events` 与订阅投递重校验（P1）
+### [~] T-52 `pull_events` 与订阅投递重校验（P1，2026-09-16 后端完成）
+
+- **2026-09-16 完成**：`pull_events` 读 `changes` 表（不复用 `trigger_deliveries`——变更表本身就是"记录一切"，
+  设计 §6.4 的内建规则不再需要），游标 = 行 id，省略时取会话的 `last_change_seen`、首次取会话开始前的 id，
+  默认排除本会话；`rescan` 标志与说明；`subscriptions.deliver` 投递前重跑 `visible()`。测试：
+  `TestPullEventsReturnsOthersChangesWithoutTriggerRules`、`TestPullEventsFlagsARescan`。
+- **2026-09-16 审核修订**：`pull_events` 与 `history` 只校验了 rename 的目的地，源路径 `from` 原样返回，会泄露读
+  作用域之外的路径；现经 `visibleFrom` 过滤（作用域外置空）。控制面 `/agent/audit` 的 `result` 白名单补上
+  `forwarded` / `oversize`（审计屏下拉已提供却返回 400）。测试：`TestPullEventsAndHistoryHideARenameSourceOutsideTheScope`、
+  `TestAuditRouteFollowsCursorAndFilters`（扩展 `result=forwarded|oversize`）。
 
 - **证据**：`docs/agent-roadmap.md` §5.6 决定不做推送、三期加 `pull_events`；`trigger_deliveries` 只在配置了 trigger
   规则时才有行（`engine.handle` 按规则匹配），无规则用户永远为空，所以 `pull_events` 的数据源应是 T-51 的 `changes`。
@@ -2839,7 +2921,17 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestSubscriptionDeliveryRechecksScope`（人为改会话 scope 后不再投递）。
 - **依赖**：T-51。估算 S–M。
 
-### [ ] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏、pin / index 建议（P1）
+### [~] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏（P1，2026-09-16 完成）
+
+- **2026-09-16 完成**：`internal/agent/readheat.go`（`BumpReadHeat` upsert、`HotPaths`、`PruneReadHeat`、
+  `ReadObserver` 10 分钟按 `(path, kind)` 去抖 + 30 秒批量落库，只在 owner 跑）；`vfs.SetReadObserver`（`Read`
+  路径纯内存按 `(ino, 读取者)` 去抖，`readSeenPrune` 防无限增长），daemon 注入的回调解析路径并按 `IsFromKernel` /
+  `OriginName` 分类，后台读不计；`read_extracted_text` 在 mcpsrv 直接上报；MCP `hot_paths`（`mtime` / `stale` /
+  只建议的 `suggestions`）；控制面 `GET /agent/heat`（四象限）与「Agent → 读热度」标签（G6）。测试：
+  `TestReadHeatBumpsAggregateByPathAndKind`、`TestReadObserverDebouncesAndFlushes`、
+  `TestReadObserverReportsOncePerInodeAndReaderKind`（vfs）、`TestReadHeatCountsAgentAndKernelReadsWithoutRemoteCalls`、
+  `TestHotPathsMarksStaleAndSuggestsPins`、`TestHeatTabIsRoutedAndReadsTheHeatRoute`、`TestAgentHeatRouteQuadrantsFromMetaMTimes`。
+  **未做**：treemap 与 agent 覆盖矩阵，pin/index 建议的一键动作（设计上就只建议）。
 
 - **证据**：全仓库无 heat / hotness；审计 `paths` 只含 `checkPath` 通过的入参路径，`search` / `semantic_search` 命中
   不进审计（`session_mw.go` 注释 "leaves nothing on the audit row"）；`cache/blockcache.go` 2Q `hot` 位按块、只用于
@@ -2871,7 +2963,30 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 - **依赖**：T-51（schemaV3）。估算 L。
 
-### [ ] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 三事件、注入与 spool、`Stop` 经控制面结束会话（P1）
+### [~] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 三事件、注入、`SessionEnd` 经控制面结束会话（P1，2026-09-16 后端完成）
+
+- **2026-09-16 完成**：`internal/hooks`（三平台表，`ConfigPath`、纯 shell `Guard()`、`Command`、`Install` /
+  `Uninstall` / `Statuses` / `Detect`、`MountsPath` / `WriteMounts` / `ReadMounts`；运行时 `Client`（控制面 socket）、
+  `RunPrompt` / `RunRead` / `RunStop`、`ReadPaths` 挖工具输入）；控制面 `POST /agent/hook-context`（挂载定位、
+  按 `<client>:<session>` 游标读 `changes`、相对路径渲染、`hooks.context: off|minimal|full`）、`/agent/hook-read`、
+  `/agent/hook-stop`；`cloudfs hooks …`、`cloudfs agent-hook …`；`cloudfs mount` 与 `hooks install` 写挂载登记表。
+  测试：`TestInstallIsIdempotentAndPreservesOtherHooks`、`TestInstallCreatesTheFileAndDetectsClients`、
+  `TestGuardExitsBeforeSpawningOutsideAMount`（真 sh 跑 guard）、`TestReadPathsMinesToolInputs`、
+  `TestHookContextNamesTheMountAndWhatChanged`、`TestHookReadCountsAgentReadsInsideMounts`、
+  `TestHookStopFinishesTheClientsActiveSession`、`TestHookRuntimeOverTheSocket`、`TestHooksCommandInstallsStatusAndUninstalls`、
+  `TestAgentHookNeverFailsTheTurn`。**未做**：真实 `claude` 会话验证注入（`UNVERIFIED`：Codex / Gemini 事件名）；
+  内核写不列入"自上一轮"（无法区分是 agent 自己还是别的程序）；界面 G7。
+- **2026-09-16 审核修订**：(1) 结束会话的事件由每轮都触发的 `Stop` 改为 `SessionEnd`（Claude Code 的 `Stop`
+  在每次回答后触发，多轮 MCP 会话会在第一轮后被关掉；Gemini 的 `AfterAgent` 同理改 `SessionEnd`，Codex 是否有
+  该事件 UNVERIFIED——不存在的事件零成本），`install` 会把旧形态留在 `Stop` / `AfterAgent` 下的我们的组移走；
+  `/agent/hook-stop` 只结束**恰好一个**候选（客户端名匹配且非 stdio 传输），两个实例并行时一个都不动，
+  响应带 `candidates`。(2) 同一客户端 MCP 会话写的文件不再被下一轮报成"别人改了"（按 `changes.session_id`
+  查会话客户端名归为自己的）。(3) `hooks.context: full` 改读 MCP 服务器实际使用的记忆目录（`memory/claude-code/`，
+  由最近同名客户端会话的 `NormalizeAgent(ClientName)` 推断，退回短名）。(4) hook 游标值带写入时间，
+  `PruneHookCursors` 随 `RunChangeRetention` 清理 `mcp.session.retain` 内没再出现的游标。测试：
+  `TestHookStopFinishesTheClientsActiveSession`（扩展：stdio 不算候选、两候选不动）、
+  `TestHookContextLeavesOutTheClientsOwnMCPWrites`、`TestHookMemoryHeadUsesTheAgentsMemoryDirectory`、
+  `TestHookCursorsAreKeptPerSessionAndPrunedWithChanges`、`TestInstallIsIdempotentAndPreservesOtherHooks`（扩展）。
 
 - **证据**：全仓库零 hook 相关代码（grep 只命中 `upload.Hooks`、vfs invalidate hook、webhook）；`cmd/cloudfs/main.go`
   无 `hooks` / `agent-hook` 子命令；`mcp install` 不写任何 agent 配置。`begin / finish_session` 靠 `agent.prompt.session`

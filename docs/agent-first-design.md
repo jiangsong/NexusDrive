@@ -1,6 +1,6 @@
 # CloudFS Agent-first 设计
 
-2026-09-15 登记 · 状态：**规划中（全部未开始）** · 对应 [TODO.md](../TODO.md) P5（T-46 ~ T-57）与
+2026-09-15 登记 · 状态：**P0 + P1 后端与单测已于 2026-09-16 落地（T-46 ~ T-54）**，见 TODO.md 各条的「完成」段；实现与本文的差异：错误分层放在第二段 `TextContent` 与 `_meta` 而非 `StructuredContent`（SDK 会用工具零值覆盖后者），`pull_events` 直接读 `changes` 表（不复用 `trigger_deliveries`），控制台 / WebDAV 的来源经变更流的 `OriginName` 落库而非审计包装；P2（T-55 ~ T-57）、xattr 来源与界面 G3 / G4（分组说明）/ G5 / G7 未动 · 对应 [TODO.md](../TODO.md) P5（T-46 ~ T-57）与
 [界面计划](ui-plan.md) 阶段 G · 前置文档：[Agent 工作底座路线图](agent-roadmap.md)（P4，T-34 ~ T-44 已实现）。
 
 本文是设计文档：说明 CloudFS 从"agent 能安全读写的网盘"升级为"以 agent 为一等用户的文件系统"要补什么、
@@ -1227,9 +1227,9 @@ MCP 的边界是"agent 调用工具时"。会话何时开始、这一轮开始�
 
 | 平台 | 配置文件（user 级） | 开始 / 读后 / 结束事件 |
 |---|---|---|
-| Claude Code | `~/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse(Read\|Grep\|Bash)` / `Stop` |
-| Codex | `~/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse(read_file\|shell)` / `Stop`（Codex hooks 实验性，需用户开 `config.toml`，与 BearDrive 相同的限制，UNVERIFIED） |
-| Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` / `AfterTool(read tools)` / `AfterAgent`（UNVERIFIED） |
+| Claude Code | `~/.claude/settings.json` | `UserPromptSubmit` / `PostToolUse(Read\|Grep\|Bash)` / `SessionEnd`（不用每轮触发的 `Stop`，见 2026-09-16 审核修订） |
+| Codex | `~/.codex/hooks.json` | `UserPromptSubmit` / `PostToolUse(read_file\|shell)` / `SessionEnd`（Codex hooks 实验性，需用户开 `config.toml`，与 BearDrive 相同的限制；Codex 是否有 `SessionEnd` UNVERIFIED——不存在的事件零成本，每轮触发的会中途关会话，所以选前者） |
+| Gemini CLI | `~/.gemini/settings.json` | `BeforeAgent` / `AfterTool(read tools)` / `SessionEnd`（`AfterAgent` 是每轮事件，不用；UNVERIFIED） |
 | Hermes | `~/.hermes/config.yaml` | `pre_llm_call` / `post_tool_call` / `on_session_end`（UNVERIFIED） |
 
 一期只验证 Claude Code；其余三个平台的配置格式照 BearDrive `internal/agenthooks` 的表写入，标 UNVERIFIED，
@@ -1280,11 +1280,14 @@ sh -c 'd=$PWD; m="$HOME/.config/cloudfs/mounts"; [ -r "$m" ] || exit 0;
 2. 追加到本地 spool `~/.config/cloudfs/read-spool/<session_id>`（O_APPEND 单行，零网络）。
 3. 下一次 `prompt` 或 `stop` 时把 spool 随请求一起 `POST`，控制面记入 `read_heat`（`actor_kind = agent`）。
 
-**`stop`**（`Stop` / `SessionEnd`）：
+**`stop`**（`SessionEnd`；**不是** `Stop`——Claude Code 的 `Stop` 在每次回答后都触发，用它结束 MCP 会话会把多轮
+会话在第一轮后切断。2026-09-16 审核修订）：
 1. 排空 read spool。
 2. `POST /sessions/<id>/finish`——控制面已有此路由；**不能走 MCP `finish_session`**，它要求同 principal
    （`errSessionNotYours`），hook 进程不是那个 MCP 会话。summary 由平台事件里的 `last_assistant_message`
-   前 200 字填（若有）。
+   前 200 字填（若有）。落地形态是 `POST /agent/hook-stop`：候选 = 客户端名匹配且非 stdio 的活动会话（stdio
+   会话随进程结束）；**恰好一个**才结束，多于一个（同一客户端两个实例）一个都不动，让它们按 `mcp.session.idle`
+   过期——猜错会把另一个实例正在进行的运行中途关掉，比多活一会儿糟。
 
 ### 7.5 安装与卸载
 

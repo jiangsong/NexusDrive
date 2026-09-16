@@ -55,11 +55,15 @@ type SessionOptions struct {
 // on. Key identifies the connection across calls; the transport decides how
 // long a session on it may live.
 type ConnInfo struct {
-	Key           string // "stdio:%p" | "legacy:<sdk id>" | "token:<principal id>" | "loopback:<principal id>"
-	Transport     string // stdio | http-legacy | http-token | http-loopback
+	Key           string // "stdio:%p" | "legacy:<sdk id>" | "token:<principal id>" | "loopback:<principal id>" | "bridge:<conn id>"
+	Transport     string // stdio | http-legacy | http-token | http-loopback | http-bridge
 	PrincipalID   string
 	ClientName    string
 	ClientVersion string
+	// Narrow, when set, is composed with the principal's scope when the
+	// connection's session is started: a bridged stdio server runs on the
+	// owner under its own scope, never the owner's wider one.
+	Narrow *Scope
 }
 
 // ListQuery filters and pages a session listing.
@@ -233,14 +237,18 @@ func (m *Sessions) Resolve(ctx context.Context, c ConnInfo) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	scope, err := json.Marshal(p.Scope)
+	sc := p.Scope
+	if c.Narrow != nil {
+		sc = sc.Narrow(*c.Narrow)
+	}
+	scope, err := json.Marshal(sc)
 	if err != nil {
 		return Session{}, fmt.Errorf("agent: %w", err)
 	}
 	s = Session{
 		ID: uuid.NewString(), PrincipalID: p.ID, ConnKey: c.Key,
 		ClientName: c.ClientName, ClientVersion: c.ClientVersion, Transport: c.Transport,
-		Scope: p.Scope, State: "active", StartedAt: now, LastSeenAt: now,
+		Scope: sc, State: "active", StartedAt: now, LastSeenAt: now,
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id, principal_id, conn_key, client_name, client_version, transport, scope, state, started_at, last_seen_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
@@ -259,9 +267,11 @@ func (m *Sessions) Resolve(ctx context.Context, c ConnInfo) (Session, error) {
 
 // rotates reports whether sessions on this transport end by idling out. A
 // stdio session ends with its process and a legacy HTTP session with the
-// SDK session, so neither rotates.
+// SDK session, so neither rotates. A bridged session stands for a stdio
+// process on another side of HTTP, whose end the owner never sees, so it
+// rotates like a token's.
 func (m *Sessions) rotates(transport string) bool {
-	return m.opt.Idle > 0 && (transport == "http-token" || transport == "http-loopback")
+	return m.opt.Idle > 0 && (transport == "http-token" || transport == "http-loopback" || transport == "http-bridge")
 }
 
 // Get returns one session by id.

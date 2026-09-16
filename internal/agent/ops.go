@@ -19,6 +19,8 @@ import (
 type Op struct {
 	Seq       int64  `json:"seq"`
 	SessionID string `json:"session_id"`
+	// TS is when the row was recorded, which is when the write began.
+	TS time.Time `json:"ts"`
 	// AuditID links the row to the audit row of the tool call that made
 	// it; 0 until the audit middleware, which only knows the id after the
 	// call, links them.
@@ -89,9 +91,13 @@ func (s *Store) RecordOp(ctx context.Context, sessionID string, op Op) (int64, e
 	default:
 		return 0, fmt.Errorf("agent: unknown pre_state %q", op.PreState)
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO session_ops(session_id, audit_id, op, path, to_path, pre_state, pre_remote, pre_remote_id, pre_version, pre_size, pre_hash, pre_blob, pre_reason, post_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, op.AuditID, op.Op, Normalise(op.Path), normaliseOrEmpty(op.ToPath), op.PreState, op.PreRemote, op.PreRemoteID, op.PreVersion,
+	ts := op.TS
+	if ts.IsZero() {
+		ts = s.now()
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO session_ops(session_id, ts, audit_id, op, path, to_path, pre_state, pre_remote, pre_remote_id, pre_version, pre_size, pre_hash, pre_blob, pre_reason, post_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, ts.UnixNano(), op.AuditID, op.Op, Normalise(op.Path), normaliseOrEmpty(op.ToPath), op.PreState, op.PreRemote, op.PreRemoteID, op.PreVersion,
 		op.PreSize, op.PreHash, op.PreBlob, op.PreReason, op.PostVersion)
 	if err != nil {
 		return 0, fmt.Errorf("agent: %w", err)
@@ -150,7 +156,7 @@ func (s *Store) LinkOpsToAudit(ctx context.Context, seqs []int64, auditID int64)
 	return nil
 }
 
-const opColumns = `SELECT seq, session_id, audit_id, op, path, to_path, pre_state, pre_remote, pre_remote_id, pre_version, pre_size, pre_hash, pre_blob, pre_reason, post_version, rolled_back, rollback_result FROM session_ops`
+const opColumns = `SELECT seq, session_id, ts, audit_id, op, path, to_path, pre_state, pre_remote, pre_remote_id, pre_version, pre_size, pre_hash, pre_blob, pre_reason, post_version, rolled_back, rollback_result FROM session_ops`
 
 // OpsOf returns the rows of one session in the order they happened.
 func (s *Store) OpsOf(ctx context.Context, sessionID string) ([]Op, error) {
@@ -163,11 +169,15 @@ func (s *Store) OpsOf(ctx context.Context, sessionID string) ([]Op, error) {
 	for rows.Next() {
 		var o Op
 		var rolledBack int
-		if err := rows.Scan(&o.Seq, &o.SessionID, &o.AuditID, &o.Op, &o.Path, &o.ToPath, &o.PreState, &o.PreRemote, &o.PreRemoteID,
+		var ts int64
+		if err := rows.Scan(&o.Seq, &o.SessionID, &ts, &o.AuditID, &o.Op, &o.Path, &o.ToPath, &o.PreState, &o.PreRemote, &o.PreRemoteID,
 			&o.PreVersion, &o.PreSize, &o.PreHash, &o.PreBlob, &o.PreReason, &o.PostVersion, &rolledBack, &o.RollbackResult); err != nil {
 			return nil, fmt.Errorf("agent: %w", err)
 		}
 		o.RolledBack = rolledBack != 0
+		if ts != 0 {
+			o.TS = time.Unix(0, ts)
+		}
 		out = append(out, o)
 	}
 	if err := rows.Err(); err != nil {

@@ -195,6 +195,30 @@ type MCP struct {
 	// default, because the mount root is a synthesised layout directory,
 	// and begin_session reports a configuration error.
 	Workspace string `yaml:"workspace"`
+	// Limits bounds what one tool result may cost the agent's context.
+	Limits MCPLimits `yaml:"limits"`
+	// Install shapes `cloudfs mcp install` (docs/agent-first-design.md §5.2).
+	Install MCPInstall `yaml:"install"`
+}
+
+// MCPLimits bounds one tool result (docs/agent-first-design.md §5.3). The
+// byte limits stay the server's own defaults; what the configuration
+// chooses is the token budget, because a client such as Claude Code
+// refuses a result past about 25k tokens whatever its byte size.
+type MCPLimits struct {
+	// MaxTokens is the estimated-token budget of one result; zero means
+	// the default of 20,000 and a negative value disables the budget.
+	MaxTokens int `yaml:"max_tokens"`
+}
+
+// DefaultMCPLimits is the limits configuration used when the file sets none.
+func DefaultMCPLimits() MCPLimits { return MCPLimits{MaxTokens: 20000} }
+
+// MCPInstall shapes the client registration `cloudfs mcp install` prints.
+type MCPInstall struct {
+	// Transport is auto (default: http when the owner daemon is online,
+	// else stdio), stdio or http. --transport on the command line wins.
+	Transport string `yaml:"transport"`
 }
 
 // MCPAudit controls the audit trail agent.db keeps of every tool call.
@@ -210,15 +234,24 @@ type MCPSession struct {
 	// a token connection starts a new one; zero means the default of 30
 	// minutes.
 	Idle time.Duration `yaml:"idle"`
-	// Retain is how long the operation log and preimages of a finished
-	// session are kept, so that it can still be rolled back; zero means the
-	// default of 7 days.
+	// Retain is how long the operation log of a finished session is kept,
+	// which is how long history and last_writer can name the session;
+	// zero means the default of 30 days.
 	Retain time.Duration `yaml:"retain"`
+	// RetainBlobs is how long the content kept before each write (what a
+	// rollback restores from) is held; zero means the default of 7 days.
+	// Past it a session's rows stay but say expired, and rollback skips
+	// them. It is never longer than Retain.
+	RetainBlobs time.Duration `yaml:"retain_blobs"`
 	// MaxPreimageBytes bounds the size of a file whose content is kept
 	// before a tool overwrites or deletes it. A larger file gets no
 	// preimage and its change cannot be rolled back; zero means the
 	// default of 32 MiB.
 	MaxPreimageBytes Size `yaml:"max_preimage_bytes"`
+	// PreimageFiles bounds how many files under one recursive delete are
+	// kept for rollback; the rest are recorded as too_many. Zero means the
+	// default of 500.
+	PreimageFiles int `yaml:"preimage_files"`
 }
 
 // DefaultMCPAudit is the audit configuration used when the file sets none.
@@ -227,7 +260,7 @@ func DefaultMCPAudit() MCPAudit { return MCPAudit{Retain: 90 * 24 * time.Hour} }
 // DefaultMCPSession is the session configuration used when the file sets
 // none.
 func DefaultMCPSession() MCPSession {
-	return MCPSession{Idle: 30 * time.Minute, Retain: 7 * 24 * time.Hour, MaxPreimageBytes: 32 << 20}
+	return MCPSession{Idle: 30 * time.Minute, Retain: 30 * 24 * time.Hour, RetainBlobs: 7 * 24 * time.Hour, MaxPreimageBytes: 32 << 20, PreimageFiles: 500}
 }
 
 // validateAgent fills in the audit and session defaults and rejects
@@ -244,6 +277,32 @@ func (m *MCP) validateAgent() error {
 	}
 	if m.Session.MaxPreimageBytes == 0 {
 		m.Session.MaxPreimageBytes = DefaultMCPSession().MaxPreimageBytes
+	}
+	if m.Session.RetainBlobs == 0 {
+		m.Session.RetainBlobs = DefaultMCPSession().RetainBlobs
+	}
+	if m.Session.RetainBlobs < 0 {
+		return fmt.Errorf("config: mcp.session.retain_blobs must not be negative, got %s", m.Session.RetainBlobs)
+	}
+	if m.Session.Retain > 0 && m.Session.RetainBlobs > m.Session.Retain {
+		m.Session.RetainBlobs = m.Session.Retain
+	}
+	if m.Session.PreimageFiles == 0 {
+		m.Session.PreimageFiles = DefaultMCPSession().PreimageFiles
+	}
+	if m.Session.PreimageFiles < 0 {
+		return fmt.Errorf("config: mcp.session.preimage_files must not be negative, got %d", m.Session.PreimageFiles)
+	}
+	if m.Limits.MaxTokens == 0 {
+		m.Limits.MaxTokens = DefaultMCPLimits().MaxTokens
+	}
+	if m.Install.Transport == "" {
+		m.Install.Transport = "auto"
+	}
+	switch m.Install.Transport {
+	case "auto", "stdio", "http":
+	default:
+		return fmt.Errorf("config: mcp.install.transport must be auto, stdio or http, got %q", m.Install.Transport)
 	}
 	if m.Audit.Retain < 0 {
 		return fmt.Errorf("config: mcp.audit.retain must not be negative, got %s", m.Audit.Retain)
@@ -550,10 +609,32 @@ type Config struct {
 	Memory     Memory            `yaml:"memory"`
 	Triggers   []Trigger         `yaml:"triggers"`
 	Agents     []Agent           `yaml:"agents"`
+	Hooks      Hooks             `yaml:"hooks"`
 	// Warnings collects what Validate accepted but would rather not have:
 	// settings that work and are probably not what was meant. It is reset on
 	// every Validate; mount and doctor print it.
 	Warnings []string `yaml:"-"`
+}
+
+// Hooks shapes what the agent-client hooks inject at every turn
+// (docs/agent-first-design.md §7).
+type Hooks struct {
+	// Context is off (inject nothing), minimal (the mount, the scope and
+	// what changed since the last turn; the default) or full (minimal plus
+	// the head of the agent's MEMORY.md).
+	Context string `yaml:"context"`
+}
+
+// validate fills the default and refuses an unknown mode.
+func (h *Hooks) validate() error {
+	if h.Context == "" {
+		h.Context = "minimal"
+	}
+	switch h.Context {
+	case "off", "minimal", "full":
+		return nil
+	}
+	return fmt.Errorf("config: hooks.context must be off, minimal or full, got %q", h.Context)
 }
 
 // Default returns the built-in defaults applied before the file is decoded.
@@ -652,6 +733,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MCP.validateAgent(); err != nil {
+		return err
+	}
+	if err := c.Hooks.validate(); err != nil {
 		return err
 	}
 	if err := c.Memory.validate(c.MCP.Workspace, c.MCP.Allow); err != nil {

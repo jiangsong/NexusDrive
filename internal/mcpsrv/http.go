@@ -45,10 +45,14 @@ type HTTPAuth struct {
 	// Open reports whether a request with no Authorization header may pass as
 	// the local default principal. Only consulted on loopback listeners.
 	Open func(ctx context.Context) bool
+	// Bridge is the secret a stdio server beside this owner presents
+	// (WriteBridgeToken); accepted from loopback addresses only, as the
+	// default principal under transport http-bridge.
+	Bridge string
 }
 
 // enabled reports whether any bearer token can be accepted at all.
-func (a HTTPAuth) enabled() bool { return a.Token != "" || a.Verify != nil }
+func (a HTTPAuth) enabled() bool { return a.Token != "" || a.Verify != nil || a.Bridge != "" }
 
 // envPrincipalID is the TokenInfo.UserID a request authenticated with the
 // legacy environment token carries. Issued tokens carry their principal's
@@ -212,10 +216,16 @@ func acceptRedundantHTTPCancellation(w http.ResponseWriter, r *http.Request) boo
 // Authorization header at all may still pass when Open says the listener is
 // open.
 func requireAuth(next http.Handler, a HTTPAuth) http.Handler {
-	verifier := func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+	verifier := func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
 		far := time.Now().Add(100 * 365 * 24 * time.Hour)
 		if a.Token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) == 1 {
 			return &auth.TokenInfo{UserID: envPrincipalID, Expiration: far}, nil
+		}
+		if a.Bridge != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.Bridge)) == 1 {
+			if r == nil || !remoteIsLoopback(r) {
+				return nil, fmt.Errorf("%w: the bridge secret is accepted from this machine only", auth.ErrInvalidToken)
+			}
+			return &auth.TokenInfo{UserID: bridgePrincipalID, Expiration: far}, nil
 		}
 		if a.Verify == nil {
 			return nil, auth.ErrInvalidToken
@@ -268,6 +278,16 @@ func requireBearer(next http.Handler, token string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// remoteIsLoopback reports whether the request came from this machine.
+func remoteIsLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func isLoopback(addr string) (bool, error) {

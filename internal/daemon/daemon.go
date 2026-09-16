@@ -61,6 +61,10 @@ type Daemon struct {
 	// rolled back; the owner recovers orphan blobs at start and collects
 	// expired sessions hourly.
 	Preimages *agent.Preimages
+	// ReadHeat counts reads per path and kind of reader
+	// (docs/agent-first-design.md §6.3); the VFS reports inodes to it at
+	// most once per ten minutes each, and the owner flushes it to agent.db.
+	ReadHeat *agent.ReadObserver
 	// Trigger runs the triggers[] and agents[] rules over the change
 	// stream. Only the owner of agent.db with background work enabled
 	// builds one, and only when the config has a rule or an agent; every
@@ -114,6 +118,23 @@ type Options struct {
 }
 
 // Open builds the daemon. The caller must Close it.
+// readerKind classifies the request behind a read for the heat table: a
+// program using the mount, an agent tool, the console or WebDAV. The
+// daemon's own background work has no kind and is not counted.
+func readerKind(ctx context.Context) string {
+	switch {
+	case vfs.IsFromKernel(ctx):
+		return agent.ReadByKernel
+	case vfs.OriginName(ctx) == "mcp":
+		return agent.ReadByAgent
+	case vfs.OriginName(ctx) == "control":
+		return agent.ReadByConsole
+	case vfs.OriginName(ctx) == "webdav":
+		return agent.ReadByWebDAV
+	}
+	return ""
+}
+
 func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	cfg := opt.Config
 	if cfg == nil {
@@ -401,7 +422,29 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		// retention.
 		retentionCtx, stopRetention := context.WithCancel(ctx)
 		go agentStore.RunAuditRetention(retentionCtx, cfg.MCP.Audit.Retain, 24*time.Hour)
-		go preimages.RunGC(retentionCtx, cfg.MCP.Session.Retain, time.Hour)
+		go preimages.RunGC(retentionCtx, cfg.MCP.Session.Retain, cfg.MCP.Session.RetainBlobs, time.Hour)
+		// The changes table (docs/agent-first-design.md §6.1) is fed by
+		// the fifth consumer of the change feed and pruned with the
+		// session rows, since both answer "who changed this, when".
+		go agentStore.RunChangeRecorder(retentionCtx, fsys)
+		go agentStore.RunChangeRetention(retentionCtx, cfg.MCP.Session.Retain, 24*time.Hour)
+		// Read heat: the VFS says which inode was read and under what
+		// request; the path and the kind of reader are resolved here, so
+		// the VFS never queries meta on a read's account more than once
+		// per window. Background reads (index extraction, warming) are
+		// nobody's interest and are not counted.
+		heat := agent.NewReadObserver(agentStore)
+		d.ReadHeat = heat
+		fsys.SetReadObserver(func(ctx context.Context, ino uint64) {
+			kind := readerKind(ctx)
+			if kind == "" {
+				return
+			}
+			if p, err := fsys.Meta().Path(ctx, ino); err == nil {
+				heat.Observe(p, kind)
+			}
+		})
+		go heat.Run(retentionCtx, 0)
 		d.closers = append(d.closers, func() error { stopRetention(); return nil })
 	}
 
@@ -585,6 +628,15 @@ func (d *Daemon) Collector() *control.Collector {
 	// *Store has to stay a nil interface for /memory/agents to say so.
 	if d.Memory != nil {
 		col.Memory = d.Memory
+	}
+	// The agent-client hooks read the change record and report reads;
+	// both nil interfaces stay nil without a store or an owner.
+	if d.Agent != nil {
+		col.HookStore = d.Agent
+		col.HeatStore = d.Agent
+	}
+	if d.ReadHeat != nil {
+		col.ReadHeat = d.ReadHeat
 	}
 	// Everything that reads the configuration reads it through the collector's
 	// published view, never through the pointer this function was called with.

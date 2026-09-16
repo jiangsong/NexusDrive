@@ -145,7 +145,7 @@ func (s *Server) createSessionDir(ctx context.Context, sess agent.Session) error
 	} else if !errors.Is(err, vfs.ErrNotFound) {
 		return err
 	}
-	if err := s.mkdirAll(ctx, sess.Workspace, false); err != nil {
+	if _, err := s.mkdirAll(ctx, sess.Workspace, false); err != nil {
 		return err
 	}
 	return s.writeManifest(ctx, sess)

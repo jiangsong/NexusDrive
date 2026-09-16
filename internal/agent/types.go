@@ -83,9 +83,12 @@ type AuditRow struct {
 	Args        json.RawMessage `json:"args"`
 	BytesIn     int64           `json:"bytes_in"`
 	BytesOut    int64           `json:"bytes_out"`
-	Result      string          `json:"result"` // ok | denied | error
-	Error       string          `json:"error,omitempty"`
-	DurationMS  int64           `json:"duration_ms"`
+	// TokensOut is the estimated tokens of the result (EstimateTokens),
+	// what the agent's context actually paid.
+	TokensOut  int64  `json:"tokens_out"`
+	Result     string `json:"result"` // ok | denied | error | oversize
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
 // Event is what Watch delivers: a new audit row, a session that changed,

@@ -32,6 +32,9 @@ type callNote struct {
 	mu     sync.Mutex
 	paths  []string
 	denied bool
+	// forwarded says the bridge ran the call on the owner: the row here
+	// says so, and the owner's own row has the paths and the outcome.
+	forwarded bool
 }
 
 type callNoteKey struct{}
@@ -103,10 +106,15 @@ func (s *Server) auditMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		note.mu.Lock()
 		row.Paths, row.Result = append([]string{}, note.paths...), "ok"
-		denied := note.denied
+		denied, forwarded := note.denied, note.forwarded
 		note.mu.Unlock()
 		call, _ := res.(*mcp.CallToolResult)
 		switch {
+		case forwarded:
+			row.Result = resultForwarded
+			if call != nil && call.IsError {
+				row.Error = truncateError(firstText(call))
+			}
 		case denied:
 			row.Result = "denied"
 			row.Error = auditError(err, call)
@@ -117,6 +125,12 @@ func (s *Server) auditMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		if call != nil {
 			row.BytesOut = contentBytes(call)
+			row.TokensOut = resultTokens(call)
+			// Observed, never cut here: a tool that let a result past the
+			// budget is a bug the audit row makes visible.
+			if max := s.opt.Limits.MaxTokens; max > 0 && row.TokensOut > int64(max) && row.Result == "ok" {
+				row.Result = "oversize"
+			}
 		}
 		if id, werr := s.audit.AppendAudit(context.WithoutCancel(ctx), row); werr != nil {
 			slog.Warn("mcp audit write failed", "tool", row.Tool, "err", werr)
@@ -215,9 +229,19 @@ func contentBytes(r *mcp.CallToolResult) int64 {
 		}
 	}
 	if r.StructuredContent != nil {
-		if b, err := json.Marshal(r.StructuredContent); err == nil {
+		if b, err := marshalStructured(r.StructuredContent); err == nil {
 			n += int64(len(b))
 		}
 	}
 	return n
+}
+
+// marshalStructured is the bytes of a structured output as they go over
+// the wire; the SDK already holds a json.RawMessage there after a typed
+// tool returns.
+func marshalStructured(v any) ([]byte, error) {
+	if raw, ok := v.(json.RawMessage); ok {
+		return raw, nil
+	}
+	return json.Marshal(v)
 }

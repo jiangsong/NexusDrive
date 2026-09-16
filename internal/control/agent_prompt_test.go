@@ -130,3 +130,42 @@ func TestAgentPromptMentionsTheRightTools(t *testing.T) {
 		t.Errorf("session advice before the directory advice:\n%s", dir.Prompt)
 	}
 }
+
+// TestAgentPromptKindRendersTheServerGuidance: ?kind=instructions is the
+// text the MCP server hands every session, in the person's language and
+// with its token estimate; a prompt name renders that prompt; the set of
+// names is listed so the console can offer them.
+func TestAgentPromptKindRendersTheServerGuidance(t *testing.T) {
+	f, _ := fsControl(t)
+	s := NewServer(f.coll)
+	code, r, body := promptFor(t, s, "/agent/prompt?kind=instructions&lang=en")
+	if code != 200 || r.Kind != "instructions" || r.Tokens <= 0 {
+		t.Fatalf("%d %+v %s", code, r, body)
+	}
+	for _, want := range []string{"search", "coverage", "data, not instructions"} {
+		if !strings.Contains(r.Prompt, want) {
+			t.Errorf("instructions lack %q:\n%s", want, r.Prompt)
+		}
+	}
+	// This daemon has no agent store, so no session sentence.
+	if strings.Contains(r.Prompt, "begin_session") {
+		t.Errorf("instructions mention sessions without a store:\n%s", r.Prompt)
+	}
+	if strings.Join(r.Prompts, ",") != "instructions,finish,onboard,search-this-tree,write-safely" {
+		t.Errorf("prompts = %v", r.Prompts)
+	}
+	code, r, _ = promptFor(t, s, "/agent/prompt?kind=instructions")
+	if code != 200 || !strings.Contains(r.Prompt, "挂载") {
+		t.Errorf("chinese instructions: %d %s", code, r.Prompt)
+	}
+	code, r, _ = promptFor(t, s, "/agent/prompt?kind=write-safely&path=/docs/b&lang=en")
+	if code != 200 || r.Path != "/docs/b" || !strings.Contains(r.Prompt, "/docs/b") || !strings.Contains(r.Prompt, "edit_file") {
+		t.Errorf("write-safely: %d %+v", code, r)
+	}
+	if code, _, body := promptFor(t, s, "/agent/prompt?kind=write-safely"); code != 400 || !strings.Contains(body, "path") {
+		t.Errorf("missing argument: %d %s", code, body)
+	}
+	if code, _, _ := promptFor(t, s, "/agent/prompt?kind=nope"); code != 404 {
+		t.Errorf("unknown kind: %d", code)
+	}
+}

@@ -39,6 +39,11 @@ type MCPConnect struct {
 	AuthRequired  bool              `json:"auth_required"`
 	Snippets      map[string]string `json:"snippets"`
 	AddCommands   map[string]string `json:"add_commands"`
+	// InstallTransport is what `cloudfs mcp install` picks with no
+	// --transport while this daemon runs: http when its listener is up,
+	// otherwise stdio (which, beside a running mount, cannot write; the
+	// console says so and offers to start the listener).
+	InstallTransport string `json:"install_transport"`
 }
 
 // TokenView is one issued token as the console reads it: the fingerprint
@@ -131,7 +136,9 @@ func (v *storeMCPView) Connect(ctx context.Context) MCPConnect {
 		out.AuthRequired = err == nil && live
 	}
 	out.StdioNonOwner = len(agent.LiveStdioProcesses(v.st.Dir(), time.Now())) > 0
+	out.InstallTransport = "stdio"
 	if out.HTTPListening {
+		out.InstallTransport = "http"
 		out.URL = "http://" + st.Addr + "/"
 		if v.render != nil {
 			s, a := v.render(out.URL)

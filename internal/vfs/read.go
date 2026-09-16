@@ -198,6 +198,7 @@ func (f *FS) Read(ctx context.Context, h *Handle, buf []byte, off int64) (int, e
 	if f.readStartedFault != nil {
 		f.readStartedFault()
 	}
+	f.noteRead(ctx, h.Ino)
 	if w != nil && w.staging != nil {
 		// A write handle reads through its staging file so the reader sees
 		// its own writes. Once committed and not written since, the data is

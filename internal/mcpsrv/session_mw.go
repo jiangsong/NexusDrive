@@ -2,7 +2,10 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"time"
 
@@ -28,6 +31,9 @@ func (s *Server) sessionMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if err != nil {
 			return nil, err
 		}
+		// Changes this call makes are attributed to the session, so the
+		// record of who changed a file needs no join with the audit trail.
+		ctx = vfs.WithActor(ctx, sess.ID, sess.PrincipalID)
 		return next(agent.WithSession(ctx, sess), method, req)
 	}
 }
@@ -56,6 +62,26 @@ func (s *Server) resolveSession(ctx context.Context, req mcp.Request) (agent.Ses
 		// A bearer token verified upstream names its principal; every request
 		// with that token is one connection, whatever SDK session carried it.
 		pid := extra.TokenInfo.UserID
+		if pid == bridgePrincipalID {
+			// A stdio server beside this owner, forwarding for its agent:
+			// the default principal, under a transport name of its own so
+			// the console can tell a bridged call from a token's. The
+			// connection is the stdio process (its header names it), so two
+			// agents beside one mount never share a session; the scope is the
+			// stdio server's own, so the owner grants nothing that server
+			// would have refused.
+			conn, narrow, err := bridgeConnOf(extra.Header)
+			if err != nil {
+				return agent.Session{}, err
+			}
+			c.Key, c.Transport, c.PrincipalID, c.Narrow = "bridge:"+conn, "http-bridge", s.defaultPrincipal.ID, &narrow
+			sess, err := s.opt.Sessions.Resolve(ctx, c)
+			if err != nil {
+				return agent.Session{}, err
+			}
+			sess.Scope = sess.Scope.Narrow(narrow)
+			return sess, nil
+		}
 		if pid == envPrincipalID {
 			// The legacy environment token has no row of its own until it is
 			// first used; it runs under the process-wide scope like stdio.
@@ -87,6 +113,28 @@ func (s *Server) resolveSession(ctx context.Context, req mcp.Request) (agent.Ses
 		s.rememberStdioKey(c.Key)
 	}
 	return s.opt.Sessions.Resolve(ctx, c)
+}
+
+// bridgeConnOf reads the stdio process's connection id and scope from a
+// bridged request's headers. Both are required: a bridge that names no
+// connection would fold every stdio process into one session, and one
+// that sends no scope would run under the owner's full scope.
+func bridgeConnOf(h http.Header) (conn string, narrow agent.Scope, err error) {
+	if h == nil {
+		return "", agent.Scope{}, errors.New("bridge: request carries no headers")
+	}
+	conn = h.Get(bridgeConnHeader)
+	if conn == "" || len(conn) > 64 {
+		return "", agent.Scope{}, errors.New("bridge: " + bridgeConnHeader + " header is required")
+	}
+	raw := h.Get(bridgeScopeHeader)
+	if raw == "" {
+		return "", agent.Scope{}, errors.New("bridge: " + bridgeScopeHeader + " header is required")
+	}
+	if err := json.Unmarshal([]byte(raw), &narrow); err != nil {
+		return "", agent.Scope{}, fmt.Errorf("bridge: %s: %w", bridgeScopeHeader, err)
+	}
+	return conn, narrow, nil
 }
 
 func (s *Server) rememberStdioKey(key string) {
@@ -290,6 +338,16 @@ func (s *Server) checkWrite(ctx context.Context) error {
 func (s *Server) visible(ctx context.Context, p string) bool {
 	_, err := s.scopeOf(ctx).Check(p, false)
 	return err == nil
+}
+
+// visibleFrom is the source path of a rename as the caller may see it:
+// itself when readable, "" when it lies outside the caller's scope, so a
+// change feed shows that a file arrived without naming where from.
+func (s *Server) visibleFrom(ctx context.Context, from string) string {
+	if from == "" || !s.visible(ctx, from) {
+		return ""
+	}
+	return from
 }
 
 // unrestricted reports whether the caller may read the whole mount, which

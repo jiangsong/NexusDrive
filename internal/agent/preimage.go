@@ -325,35 +325,30 @@ type GCResult struct {
 	Sessions int
 	Ops      int64
 	Blobs    int
+	// Expired counts rows whose blob was released while the row stayed.
+	Expired int64
 }
 
+// PreimageExpired is the pre_reason of a row whose blob the GC released
+// before the row itself: history still names the write, rollback skips it.
+const PreimageExpired = "expired"
+
 // GC drops the ops of sessions that finished, expired or were rolled back
-// before now-retain, then removes the blobs nothing names any more. It
-// unlinks only its own name: a blob that is also the cache's hydrated file
-// stays in the cache. An active session is never collected.
-func (p *Preimages) GC(ctx context.Context, retain time.Duration) (GCResult, error) {
+// before now-retain, releases the blobs of sessions older than retainBlobs
+// (their rows stay, marked expired, so history outlives undo), then
+// removes the blobs nothing names any more. It unlinks only its own
+// name: a blob that is also the cache's hydrated file stays in the cache.
+// An active session is never collected. retainBlobs <= 0 means blobs
+// live as long as rows.
+func (p *Preimages) GC(ctx context.Context, retain, retainBlobs time.Duration) (GCResult, error) {
 	var res GCResult
 	if retain < 0 {
 		return res, nil
 	}
-	cutoff := p.store.now().Add(-retain).UnixNano()
-	rows, err := p.store.db.QueryContext(ctx, `SELECT DISTINCT o.session_id FROM session_ops o JOIN sessions s ON s.id = o.session_id
-		WHERE s.state IN ('finished', 'expired', 'rolled_back') AND s.finished_at > 0 AND s.finished_at < ?`, cutoff)
+	now := p.store.now()
+	ids, err := p.sessionsFinishedBefore(ctx, now.Add(-retain).UnixNano())
 	if err != nil {
-		return res, fmt.Errorf("agent: %w", err)
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return res, fmt.Errorf("agent: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return res, fmt.Errorf("agent: %w", err)
+		return res, err
 	}
 	for _, id := range ids {
 		r, err := p.store.db.ExecContext(ctx, `DELETE FROM session_ops WHERE session_id = ?`, id)
@@ -364,12 +359,51 @@ func (p *Preimages) GC(ctx context.Context, retain time.Duration) (GCResult, err
 		res.Sessions++
 		res.Ops += n
 	}
-	if res.Sessions == 0 {
+	expired := int64(0)
+	if retainBlobs > 0 && retainBlobs < retain {
+		ids, err := p.sessionsFinishedBefore(ctx, now.Add(-retainBlobs).UnixNano())
+		if err != nil {
+			return res, err
+		}
+		for _, id := range ids {
+			r, err := p.store.db.ExecContext(ctx, `UPDATE session_ops SET pre_blob = '', pre_reason = ? WHERE session_id = ? AND pre_blob != ''`, PreimageExpired, id)
+			if err != nil {
+				return res, fmt.Errorf("agent: %w", err)
+			}
+			n, _ := r.RowsAffected()
+			expired += n
+		}
+	}
+	res.Expired = expired
+	if res.Sessions == 0 && expired == 0 {
 		return res, nil
 	}
 	blobs, err := p.sweep(ctx)
 	res.Blobs = blobs
 	return res, err
+}
+
+// sessionsFinishedBefore lists the sessions with ops that ended before
+// cutoff.
+func (p *Preimages) sessionsFinishedBefore(ctx context.Context, cutoff int64) ([]string, error) {
+	rows, err := p.store.db.QueryContext(ctx, `SELECT DISTINCT o.session_id FROM session_ops o JOIN sessions s ON s.id = o.session_id
+		WHERE s.state IN ('finished', 'expired', 'rolled_back') AND s.finished_at > 0 AND s.finished_at < ?`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("agent: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	return ids, nil
 }
 
 // sweep removes every blob no row names and is not in flight, plus the
@@ -422,7 +456,7 @@ func (p *Preimages) sweep(ctx context.Context) (int, error) {
 
 // RunGC runs GC now and then every interval until ctx ends, in the owner
 // only, the way RunAuditRetention does for audit rows.
-func (p *Preimages) RunGC(ctx context.Context, retain, every time.Duration) {
+func (p *Preimages) RunGC(ctx context.Context, retain, retainBlobs, every time.Duration) {
 	if !p.store.owner || retain <= 0 {
 		return
 	}
@@ -432,7 +466,7 @@ func (p *Preimages) RunGC(ctx context.Context, retain, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
-		if res, err := p.GC(ctx, retain); err != nil {
+		if res, err := p.GC(ctx, retain, retainBlobs); err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("agent: preimage gc failed", "err", err)
 			}

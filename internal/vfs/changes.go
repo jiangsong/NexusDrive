@@ -90,6 +90,43 @@ func OriginName(ctx context.Context) string {
 	return v
 }
 
+const actorKey ctxKey = 3
+
+// Actor is who, within an API adapter, made a change: the agent session
+// and the principal it belongs to. The MCP server sets it once it has
+// resolved the session; the control plane and WebDAV have no session and
+// leave it empty. Changes carry it so the record of who changed a file
+// (docs/agent-first-design.md §6.1) needs no join with the audit trail.
+type Actor struct {
+	SessionID string
+	Principal string
+}
+
+// WithActor marks a context with the session behind its requests. Empty
+// fields mark nothing.
+func WithActor(ctx context.Context, sessionID, principal string) context.Context {
+	if sessionID == "" && principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, actorKey, Actor{SessionID: sessionID, Principal: principal})
+}
+
+// ActorOf returns the actor WithActor stored, or the zero Actor.
+func ActorOf(ctx context.Context) Actor {
+	a, _ := ctx.Value(actorKey).(Actor)
+	return a
+}
+
+// stamped fills the attribution of a change from its request context: the
+// adapter's name and the actor, for changes an adapter made. A remote
+// change was discovered, not made, and stays unattributed.
+func stamped(ctx context.Context, c Change) Change {
+	if c.Origin == OriginAPI {
+		c.OriginName, c.Actor = OriginName(ctx), ActorOf(ctx)
+	}
+	return c
+}
+
 // originOf classifies the request behind ctx. Anything neither the kernel
 // nor an API adapter tagged is the daemon's own background work (refresh,
 // uploads, recovery), whose changes come from the remote's point of view.
@@ -130,6 +167,11 @@ type Change struct {
 	Rescan  bool // bounded queue overflow or an unavailable metadata path
 	Kind    ChangeKind
 	Origin  Origin
+	// OriginName is the adapter WithOrigin named ("mcp", "control",
+	// "webdav") for an OriginAPI change; Actor the session behind it, when
+	// the adapter set one.
+	OriginName string
+	Actor      Actor
 }
 
 // Affects reports whether a resource or its immediate directory listing may
@@ -226,7 +268,7 @@ func (f *FS) changedNode(ctx context.Context, ino uint64, subtree bool, kind Cha
 		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{p}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)})
+	f.emitChange(stamped(ctx, Change{Paths: []string{p}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)}))
 }
 
 // changedEntry announces kind happening to the name under parent, which may
@@ -241,7 +283,7 @@ func (f *FS) changedEntry(ctx context.Context, parent uint64, name string, subtr
 		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{path.Join(p, name)}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)})
+	f.emitChange(stamped(ctx, Change{Paths: []string{path.Join(p, name)}, Subtree: subtree, Kind: kind, Origin: originFor(ctx, kind)}))
 }
 
 // changedRename announces a move: Paths[0] is the old name, Paths[1] the new.
@@ -259,8 +301,8 @@ func (f *FS) changedRename(ctx context.Context, oldParent uint64, oldName string
 		f.emitChange(rescanChange())
 		return
 	}
-	f.emitChange(Change{Paths: []string{path.Join(oldDir, oldName), path.Join(newDir, newName)}, Subtree: true,
-		Kind: KindRename, Origin: originFor(ctx, KindRename)})
+	f.emitChange(stamped(ctx, Change{Paths: []string{path.Join(oldDir, oldName), path.Join(newDir, newName)}, Subtree: true,
+		Kind: KindRename, Origin: originFor(ctx, KindRename)}))
 }
 
 // changedListing announces what a directory listing found different from

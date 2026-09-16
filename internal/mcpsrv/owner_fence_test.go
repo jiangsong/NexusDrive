@@ -79,6 +79,10 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 	// Read tools that must succeed outright on the warmed tree.
 	readOK := map[string]map[string]any{
 		"list_directory":   {"path": "/work"},
+		"directory_tree":   {"path": "/work"},
+		"history":          {"path": "/work/a.txt"},
+		"pull_events":      {"path": "/work"},
+		"hot_paths":        {"path": "/work"},
 		"stat":             {"path": "/work/a.txt"},
 		"stat_many":        {"paths": []string{"/work/a.txt", "/work/b.txt"}},
 		"read_text":        {"path": "/work/a.txt"},

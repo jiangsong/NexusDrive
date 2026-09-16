@@ -7,6 +7,7 @@ package mcpsrv
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -38,7 +39,18 @@ type Limits struct {
 	MaxEntries int
 	// MaxResults caps search hits (default 100).
 	MaxResults int
+	// MaxTokens caps the estimated tokens of one result (default 20,000;
+	// negative disables). Bytes bound what a tool reads; tokens bound what
+	// the model pays, and 256 KiB of Chinese is four times the tokens of
+	// 256 KiB of English (agent.EstimateTokens). Each tool cuts its own
+	// output and says truncated_by: tokens; the audit row keeps the
+	// estimate either way.
+	MaxTokens int
 }
+
+// DefaultMaxTokens is the per-result token budget when none is set: under
+// the 25k tokens Claude Code refuses, with room for the framing.
+const DefaultMaxTokens = 20000
 
 func (l Limits) withDefaults() Limits {
 	if l.MaxBytes <= 0 {
@@ -52,6 +64,12 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxResults <= 0 {
 		l.MaxResults = 100
+	}
+	switch {
+	case l.MaxTokens == 0:
+		l.MaxTokens = DefaultMaxTokens
+	case l.MaxTokens < 0:
+		l.MaxTokens = 0
 	}
 	return l
 }
@@ -102,12 +120,34 @@ type Options struct {
 	// state of its path before the write in session_ops and registers
 	// rollback_session. nil records nothing and leaves rollback out.
 	Preimages *agent.Preimages
+	// PreimageFiles bounds how many files under one recursive delete get
+	// a preimage (config mcp.session.preimage_files); 0 means
+	// DefaultPreimageFiles.
+	PreimageFiles int
 	// Memory, when set, exposes the memory_* tools over the agent memory
 	// store (docs/agent-roadmap.md §3.11). nil leaves them unregistered.
 	Memory *memory.Store
 	// Agent overrides the memory agent name derived from the client
 	// (`cloudfs mcp --agent`); empty derives it per session.
 	Agent string
+	// Provenance answers last_writer and history. nil derives it from
+	// Sessions' store; with neither the fields are absent and history is
+	// not registered.
+	Provenance Provenance
+	// Events is what pull_events reads. nil derives it from Sessions'
+	// store; with neither the tool is not registered.
+	Events EventSource
+	// Heat is what hot_paths reads. nil derives it from Sessions' store;
+	// with neither the tool is not registered.
+	Heat ReadHeat
+	// ReadObserver counts the reads that bypass the VFS
+	// (read_extracted_text); nil counts nothing. VFS reads are counted by
+	// the daemon's own hook on the VFS.
+	ReadObserver ReadObserver
+	// Bridge, on a NonOwner server, forwards the tools the owner fence
+	// covers to the owner's HTTP transport instead of refusing them
+	// (T-50). Ignored on an owner.
+	Bridge *BridgeOptions
 }
 
 // IndexService is what the index tools need from the daemon's indexer.
@@ -137,6 +177,14 @@ type Server struct {
 	defaultPrincipal agent.Principal
 	// audit is where auditMiddleware writes; nil means no audit trail.
 	audit AuditWriter
+	// provenance is where last_writer and history read; nil means neither.
+	provenance Provenance
+	// events is where pull_events reads; nil leaves it unregistered.
+	events EventSource
+	// heat is where hot_paths reads; nil leaves it unregistered.
+	heat ReadHeat
+	// bridge forwards fenced calls to the owner; nil refuses them.
+	bridge *bridge
 
 	// principalsMu guards envPrincipalCached, legacyByPrincipal and
 	// stdioKeys.
@@ -196,6 +244,18 @@ func New(opt Options) (*Server, error) {
 	if s.audit == nil && opt.Sessions != nil {
 		s.audit = opt.Sessions.Store()
 	}
+	s.provenance = opt.Provenance
+	if s.provenance == nil && opt.Sessions != nil {
+		s.provenance = opt.Sessions.Store()
+	}
+	s.events = opt.Events
+	if s.events == nil && opt.Sessions != nil {
+		s.events = opt.Sessions.Store()
+	}
+	s.heat = opt.Heat
+	if s.heat == nil && opt.Sessions != nil {
+		s.heat = opt.Sessions.Store()
+	}
 	if err := s.copyTools.init(); err != nil {
 		return nil, fmt.Errorf("mcpsrv: initialize copy cursor: %w", err)
 	}
@@ -205,11 +265,24 @@ func New(opt Options) (*Server, error) {
 		Title:   "CloudFS mounted cloud storage",
 		Version: opt.Version,
 	}, &mcp.ServerOptions{PageSize: opt.Limits.MaxEntries,
+		// Computed before the server exists: the SDK copies the options.
+		Instructions:       s.Instructions(),
 		SubscribeHandler:   s.subscriptions.subscribeHook,
 		UnsubscribeHandler: s.subscriptions.unsubscribeHook,
 		InitializedHandler: s.onInitialized})
+	if opt.NonOwner && opt.Bridge != nil && opt.Bridge.URL != "" {
+		b, err := newBridge(*opt.Bridge, s.defaultScope)
+		if err != nil {
+			return nil, fmt.Errorf("mcpsrv: bridge: %w", err)
+		}
+		s.bridge = b
+	}
 	s.mcp.AddReceivingMiddleware(privateResourceResponses)
 	s.mcp.AddReceivingMiddleware(s.subscriptions.receive)
+	// The bridge sits inside the audit middleware (added before it, so it
+	// runs after) and forwards fenced calls before their local handler
+	// would refuse them.
+	s.mcp.AddReceivingMiddleware(s.bridgeMiddleware)
 	// Each AddReceivingMiddleware wraps the handler built so far, so the last
 	// one added runs first. The session must be in the context before the
 	// audit row is built and before the subscription reservation checks
@@ -219,6 +292,10 @@ func New(opt Options) (*Server, error) {
 	s.mcp.AddReceivingMiddleware(s.sessionMiddleware)
 	s.mcp.AddSendingMiddleware(s.subscriptions.send)
 	s.register()
+	s.registerTreeTool()
+	s.registerHistoryTool()
+	s.registerPullEvents()
+	s.registerHotPaths()
 	s.registerCopyTools()
 	s.registerUploadTools()
 	s.registerExportTools()
@@ -227,6 +304,7 @@ func New(opt Options) (*Server, error) {
 	s.registerIndexTools()
 	s.registerMemoryTools()
 	s.registerResources()
+	s.registerPrompts()
 	if opt.Sessions != nil {
 		s.revokeStop = make(chan struct{})
 		s.revokeWG.Add(1)
@@ -246,6 +324,9 @@ func (s *Server) Close() error {
 		s.revokeWG.Wait()
 	}
 	s.subscriptions.stop()
+	if s.bridge != nil {
+		s.bridge.close()
+	}
 	for session := range s.mcp.Sessions() {
 		_ = session.Close()
 	}
@@ -272,10 +353,22 @@ type entry struct {
 	Size  int64  `json:"size"`
 	MTime string `json:"mtime,omitempty"`
 	// Cached is the fraction of the file present locally, 0..1. A value of 1
-	// means reads are served from disk.
-	Cached float64 `json:"cached"`
-	// State is "synced" or "local" (written here, not uploaded yet).
-	State string `json:"state"`
+	// means reads are served from disk; absent means 0, or that the caller
+	// asked for fields: minimal.
+	Cached float64 `json:"cached,omitempty"`
+	// State is "synced" or "local" (written here, not uploaded yet); absent
+	// with fields: minimal.
+	State string `json:"state,omitempty"`
+	// LastWriter is who last changed the path as this daemon saw it;
+	// absent when unknown or with fields: minimal.
+	LastWriter *lastWriter `json:"last_writer,omitempty"`
+}
+
+// minimal strips the cache fields an agent listing a tree to orient
+// itself does not need, which is most of an entry's tokens.
+func (e entry) minimal() entry {
+	e.Cached, e.State, e.LastWriter = 0, "", nil
+	return e
 }
 
 func toEntry(dir string, a vfs.Attr) entry {
@@ -306,6 +399,7 @@ type listInput struct {
 	Path   string `json:"path" jsonschema:"Mount-relative directory path, for example /work/src"`
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor from a previous truncated listing"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum entries to return; the server caps this"`
+	Fields string `json:"fields,omitempty" jsonschema:"full (default) or minimal: minimal omits cached and state, which halves the tokens of a large listing"`
 }
 
 type listOutput struct {
@@ -314,6 +408,26 @@ type listOutput struct {
 	Truncated  bool    `json:"truncated"`
 	NextCursor string  `json:"next_cursor,omitempty"`
 	Total      int     `json:"total"`
+	// TruncatedBy is "tokens" when the token budget, not limit, ended
+	// the page; next_cursor continues either way.
+	TruncatedBy string `json:"truncated_by,omitempty"`
+}
+
+// fieldsMode validates the fields argument shared by the listing tools.
+func fieldsMode(v string) (minimal bool, err error) {
+	switch v {
+	case "", "full":
+		return false, nil
+	case "minimal":
+		return true, nil
+	}
+	return false, fmt.Errorf("fields must be full or minimal, not %q", v)
+}
+
+// entryTokens estimates one entry's share of a listing.
+func entryTokens(e entry) int {
+	b, _ := json.Marshal(e)
+	return agent.EstimateTokensBytes(b)
 }
 
 type statInput struct {
@@ -334,6 +448,10 @@ type statOutput struct {
 
 type statManyOutput struct {
 	Results []statOutput `json:"results"`
+	// Truncated says the token budget cut the results; the paths after
+	// the last one returned were not checked, so call again with them.
+	Truncated   bool   `json:"truncated,omitempty"`
+	TruncatedBy string `json:"truncated_by,omitempty"`
 }
 
 type readTextInput struct {
@@ -353,6 +471,9 @@ type readTextOutput struct {
 	Truncated bool   `json:"truncated"`
 	// NextOffset is where a follow-up read should start when truncated.
 	NextOffset int64 `json:"next_offset,omitempty"`
+	// TruncatedBy is "tokens" when the token budget, not max_bytes, cut
+	// the content; next_offset continues either way.
+	TruncatedBy string `json:"truncated_by,omitempty"`
 }
 
 type readRangeInput struct {
@@ -382,6 +503,11 @@ type writeOutput struct {
 	Size  int64  `json:"size"`
 	// State is "local" until the upload queue drains, then "synced".
 	State string `json:"state"`
+	// Reversible says rollback_session can restore what the path held
+	// before this write; PreimageReason is ok, or why not: too_large,
+	// not_cached, dir, not_recorded (no session or preimage store).
+	Reversible     bool   `json:"reversible"`
+	PreimageReason string `json:"preimage_reason,omitempty"`
 }
 
 type editSpec struct {
@@ -401,6 +527,13 @@ type editOutput struct {
 	DryRun  bool   `json:"dry_run"`
 	Diff    string `json:"diff"`
 	Size    int64  `json:"size"`
+	// DiffTruncated says the diff was cut to the token budget; the edits
+	// all applied regardless.
+	DiffTruncated bool `json:"diff_truncated,omitempty"`
+	// Reversible and PreimageReason are as on write_file; a dry run
+	// records nothing and says so.
+	Reversible     bool   `json:"reversible"`
+	PreimageReason string `json:"preimage_reason,omitempty"`
 }
 
 type mkdirInput struct {
@@ -421,7 +554,40 @@ type deleteInput struct {
 type okOutput struct {
 	Path string `json:"path"`
 	OK   bool   `json:"ok"`
+	// Reversible and PreimageReason are as on write_file. A recursive
+	// delete is reversible when every file under it was cached and kept
+	// (partial otherwise, with the counts in plan); pin and unpin are
+	// their own inverse and say not_applicable.
+	Reversible     bool   `json:"reversible"`
+	PreimageReason string `json:"preimage_reason,omitempty"`
+	// Plan, on a recursive delete, is what the subtree held; with
+	// confirm=false it is all the call does (ok stays false).
+	Plan *deletePlan `json:"plan,omitempty"`
 }
+
+// deletePlan is what a recursive delete covers, computed from meta
+// without a provider call, so an agent can show the person what goes
+// before confirming. Kept counts the files whose content was captured
+// for rollback (cached ones, within the budget); Unkept the rest.
+type deletePlan struct {
+	Files  int      `json:"files"`
+	Dirs   int      `json:"dirs"`
+	Bytes  int64    `json:"bytes"`
+	Cached int      `json:"cached_files"`
+	Kept   int      `json:"preimages_kept"`
+	Unkept int      `json:"preimages_unkept"`
+	Sample []string `json:"sample"`
+	// More says sample was cut at planSampleMax entries.
+	More bool `json:"more,omitempty"`
+	// Unlisted counts directories under the path (the path included)
+	// meta never listed: their contents are unknown to the plan and
+	// cannot be kept for rollback.
+	Unlisted int `json:"unlisted_dirs,omitempty"`
+}
+
+// preimageNotApplicable is the preimage_reason of pin and unpin, which
+// undo each other and record nothing.
+const preimageNotApplicable = "not_applicable"
 
 type searchInput struct {
 	Path          string `json:"path,omitempty" jsonschema:"Subtree to search; default the whole mount"`
@@ -464,6 +630,13 @@ type searchOutput struct {
 	// skipping files that are not cached locally.
 	Note     string         `json:"note,omitempty"`
 	Coverage searchCoverage `json:"coverage"`
+	// Next names the call to make when this result is not the whole
+	// answer: warm the index, pin for content, narrow the query. Empty
+	// when the result stands on its own.
+	Next string `json:"next,omitempty"`
+	// TruncatedBy is "tokens" when the token budget, not max_results,
+	// cut the hit list.
+	TruncatedBy string `json:"truncated_by,omitempty"`
 }
 
 type pinInput struct {
@@ -502,13 +675,6 @@ func text(format string, args ...any) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(format, args...)}},
 	}
-}
-
-func fail(err error) (*mcp.CallToolResult, error) {
-	return &mcp.CallToolResult{
-		IsError: true,
-		Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
-	}, nil
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -603,8 +769,10 @@ func (s *Server) register() {
 	}, s.move)
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "delete",
-		Description: "Delete a file or directory. Requires confirm=true because the deletion also happens on the remote and cannot be undone.",
+		Name: "delete",
+		Description: "Delete a file or directory. Requires confirm=true because the deletion also happens on the remote. " +
+			"With recursive=true and confirm=false the call only returns a plan (files, directories, bytes, a sample) without deleting; " +
+			"with confirm=true, cached files under the directory are kept for rollback_session and the response says how many were.",
 		Annotations: destructive,
 	}, s.deletePath)
 
@@ -628,6 +796,11 @@ func (s *Server) listDirectory(ctx context.Context, _ *mcp.CallToolRequest, in l
 		r, _ := fail(err)
 		return r, listOutput{}, nil
 	}
+	minimal, err := fieldsMode(in.Fields)
+	if err != nil {
+		r, _ := fail(err)
+		return r, listOutput{}, nil
+	}
 	limit := in.Limit
 	if limit <= 0 || limit > s.opt.Limits.MaxEntries {
 		limit = s.opt.Limits.MaxEntries
@@ -644,7 +817,19 @@ func (s *Server) listDirectory(ctx context.Context, _ *mcp.CallToolRequest, in l
 	}
 	out := listOutput{Path: p, Total: page.Total, Entries: []entry{}}
 	for _, a := range page.Entries {
-		out.Entries = append(out.Entries, toEntry(p, a))
+		e := toEntry(p, a)
+		if minimal {
+			e = e.minimal()
+		} else {
+			e.LastWriter = s.lastWriterOf(ctx, e.Path)
+		}
+		out.Entries = append(out.Entries, e)
+	}
+	if keep, cut := cutItems(len(out.Entries), s.tokenBudget(), func(i int) int { return entryTokens(out.Entries[i]) }); cut {
+		// The page ends early; the cursor names the last entry kept, so
+		// the next call resumes exactly after it.
+		out.Entries, page.Entries, page.HasMore = out.Entries[:keep], page.Entries[:keep], true
+		out.TruncatedBy = truncatedByTokens
 	}
 	if page.HasMore {
 		out.Truncated = true
@@ -671,7 +856,12 @@ func (s *Server) stat(ctx context.Context, _ *mcp.CallToolRequest, in statInput)
 	out := statOutput{entry: toEntry(path.Dir(p), a), Remote: a.Remote, Version: a.Version, Exists: true}
 	out.Path = p
 	out.Name = path.Base(p)
-	return text("%s: %s, %d bytes, %s", p, out.Kind, out.Size, out.State), out, nil
+	out.LastWriter = s.lastWriterOf(ctx, p)
+	msg := fmt.Sprintf("%s: %s, %d bytes, %s", p, out.Kind, out.Size, out.State)
+	if out.LastWriter != nil {
+		msg += "; last changed by " + out.LastWriter.String()
+	}
+	return text("%s", msg), out, nil
 }
 
 func (s *Server) statMany(ctx context.Context, _ *mcp.CallToolRequest, in statManyInput) (*mcp.CallToolResult, statManyOutput, error) {
@@ -694,9 +884,17 @@ func (s *Server) statMany(ctx context.Context, _ *mcp.CallToolRequest, in statMa
 		e := statOutput{entry: toEntry(path.Dir(p), a), Remote: a.Remote, Version: a.Version, Exists: true}
 		e.Path = p
 		e.Name = path.Base(p)
+		e.LastWriter = s.lastWriterOf(ctx, p)
 		out.Results = append(out.Results, e)
 	}
-	return text("checked %d paths", len(out.Results)), out, nil
+	if keep, cut := cutItems(len(out.Results), s.tokenBudget(), func(i int) int { return entryTokens(out.Results[i].entry) + 8 }); cut {
+		out.Results, out.Truncated, out.TruncatedBy = out.Results[:keep], true, truncatedByTokens
+	}
+	msg := fmt.Sprintf("checked %d paths", len(out.Results))
+	if out.Truncated {
+		msg += fmt.Sprintf(" (token budget; %d paths left unchecked, call again with them)", len(in.Paths)-len(out.Results))
+	}
+	return text("%s", msg), out, nil
 }
 
 func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTextInput) (*mcp.CallToolResult, readTextOutput, error) {
@@ -732,6 +930,13 @@ func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTe
 	if truncated {
 		data = data[:max]
 	}
+	// A tail read starts wherever size - max landed, which in multi-byte
+	// text is usually inside a character; step forward to the next rune.
+	if offset != in.Offset {
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data, offset = data[1:], offset+1
+		}
+	}
 	if !utf8.Valid(data) {
 		r, _ := fail(fmt.Errorf("%s is not valid UTF-8 text; use read_range for binary data", p))
 		return r, readTextOutput{}, nil
@@ -749,9 +954,34 @@ func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTe
 	if truncated {
 		out.NextOffset = offset + int64(len(data))
 	}
+	// The token budget cuts what the bytes let through: 256 KiB of
+	// Chinese is four times the tokens of 256 KiB of English. A tail read
+	// keeps its end and moves offset up; every other read keeps its start
+	// and points next_offset at the first byte not returned.
+	if budget := s.tokenBudget(); budget > 0 {
+		var cut bool
+		if in.Tail > 0 {
+			var kept string
+			kept, cut = cutTail(content, budget)
+			if cut {
+				out.Offset += int64(len(content) - len(kept))
+			}
+			content = kept
+		} else {
+			content, cut = cutHead(content, budget)
+			if cut {
+				out.NextOffset = offset + int64(len(content))
+			}
+		}
+		if cut {
+			out.Content, out.Bytes, out.Truncated, out.TruncatedBy = content, len(content), true, truncatedByTokens
+		}
+	}
 	msg := fmt.Sprintf("%s: %d of %d bytes", p, len(content), a.Size)
-	if truncated {
+	if out.Truncated && out.NextOffset > 0 {
 		msg += fmt.Sprintf(" (truncated; continue at offset %d)", out.NextOffset)
+	} else if out.Truncated {
+		msg += " (truncated to the token budget)"
 	}
 	return text("%s", msg), out, nil
 }
@@ -845,7 +1075,8 @@ func (s *Server) writeFile(ctx context.Context, _ *mcp.CallToolRequest, in write
 		state = "local"
 	}
 	out := writeOutput{Path: p, Bytes: len(in.Content), Size: a.Size, State: state}
-	return text("wrote %d bytes to %s (%s, now %d bytes)", len(in.Content), p, state, a.Size), out, nil
+	out.Reversible, out.PreimageReason = rec.reversibility()
+	return text("wrote %d bytes to %s (%s, now %d bytes; %s)", len(in.Content), p, state, a.Size, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editInput) (*mcp.CallToolResult, editOutput, error) {
@@ -893,7 +1124,15 @@ func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editIn
 		fmt.Fprintf(&diff, "- %s\n+ %s\n", truncateLine(e.OldText), truncateLine(e.NewText))
 	}
 	out := editOutput{Path: p, Applied: len(in.Edits), DryRun: in.DryRun, Diff: diff.String(), Size: int64(len(content))}
+	if d, cut := cutHead(out.Diff, s.tokenBudget()); cut {
+		// Whole lines only: a half line of diff is worse than a count.
+		if i := strings.LastIndex(d, "\n"); i >= 0 {
+			d = d[:i+1]
+		}
+		out.Diff, out.DiffTruncated = d+fmt.Sprintf("... (diff cut to the token budget; all %d edits apply)\n", len(in.Edits)), true
+	}
 	if in.DryRun {
+		out.PreimageReason = preimageNotRecorded
 		return text("dry run: %d edits would apply to %s", len(in.Edits), p), out, nil
 	}
 	rec := s.beforeWrite(ctx, "edit", p, "", "")
@@ -905,7 +1144,8 @@ func (s *Server) editFile(ctx context.Context, _ *mcp.CallToolRequest, in editIn
 	}
 	rec.done(ctx, agent.ContentVersion([]byte(content)))
 	out.Size = a.Size
-	return text("applied %d edits to %s", len(in.Edits), p), out, nil
+	out.Reversible, out.PreimageReason = rec.reversibility()
+	return text("applied %d edits to %s (%s)", len(in.Edits), p, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 func truncateLine(s string) string {
@@ -925,31 +1165,43 @@ func (s *Server) mkdir(ctx context.Context, _ *mcp.CallToolRequest, in mkdirInpu
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	if err := s.mkdirAll(ctx, p, true); err != nil {
+	recs, err := s.mkdirAll(ctx, p, true)
+	if err != nil {
 		r, _ := fail(mapErr(err, p))
 		return r, okOutput{}, nil
 	}
-	return text("created %s", p), okOutput{Path: p, OK: true}, nil
+	out := okOutput{Path: p, OK: true}
+	// Every directory made got its own row (or none did); the first one
+	// speaks for all. A directory that already existed made no row and
+	// there is nothing to undo.
+	if len(recs) == 0 {
+		out.Reversible, out.PreimageReason = true, preimageOK
+	} else {
+		out.Reversible, out.PreimageReason = recs[0].reversibility()
+	}
+	return text("created %s (%s)", p, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 // mkdirAll creates every missing component of p, shallowest first. With
 // record, each directory it makes is a mkdir row of the session, so a
 // rollback removes them deepest first; begin_session makes its own
 // directory without a row.
-func (s *Server) mkdirAll(ctx context.Context, p string, record bool) error {
+func (s *Server) mkdirAll(ctx context.Context, p string, record bool) ([]*opRecord, error) {
 	missing, err := s.missingDirs(ctx, p)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var recs []*opRecord
 	for i := len(missing) - 1; i >= 0; i-- {
 		dir := missing[i]
 		parentAttr, err := s.opt.FS.StatPath(ctx, path.Dir(dir))
 		if err != nil {
-			return err
+			return recs, err
 		}
 		var rec *opRecord
 		if record {
 			rec = s.beforeWrite(ctx, "mkdir", dir, "", "")
+			recs = append(recs, rec)
 		}
 		_, err = s.opt.FS.Mkdir(ctx, parentAttr.Ino, path.Base(dir))
 		if errors.Is(err, vfs.ErrExists) {
@@ -957,11 +1209,19 @@ func (s *Server) mkdirAll(ctx context.Context, p string, record bool) error {
 		}
 		if err != nil {
 			rec.failed(ctx)
-			return err
+			return recs, err
 		}
 		rec.done(ctx, "")
 	}
-	return nil
+	return recs, nil
+}
+
+// reversibleText is the summary line's word for a write's undo.
+func reversibleText(ok bool, reason string) string {
+	if ok {
+		return "reversible"
+	}
+	return "not reversible: " + reason
 }
 
 // missingDirs lists the components of p that do not exist yet, deepest
@@ -1016,7 +1276,9 @@ func (s *Server) move(ctx context.Context, _ *mcp.CallToolRequest, in moveInput)
 		return r, okOutput{}, nil
 	}
 	rec.done(ctx, "")
-	return text("moved %s to %s", from, to), okOutput{Path: to, OK: true}, nil
+	out := okOutput{Path: to, OK: true}
+	out.Reversible, out.PreimageReason = rec.reversibility()
+	return text("moved %s to %s (%s)", from, to, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1045,7 +1307,9 @@ func (s *Server) copyFile(ctx context.Context, _ *mcp.CallToolRequest, in moveIn
 	// queue re-versions a cross-remote copy, rollback reports it as a
 	// conflict rather than guess.
 	rec.done(ctx, a.Version)
-	return text("copied %s to %s", from, to), okOutput{Path: to, OK: true}, nil
+	out := okOutput{Path: to, OK: true}
+	out.Reversible, out.PreimageReason = rec.reversibility()
+	return text("copied %s to %s (%s)", from, to, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in deleteInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1054,12 +1318,15 @@ func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in dele
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	if !in.Confirm {
-		r, _ := fail(fmt.Errorf("refusing to delete %s without confirm=true; this also deletes it on the remote", p))
-		return r, okOutput{}, nil
-	}
 	if p == "/" {
 		r, _ := fail(errors.New("refusing to delete the mount root"))
+		return r, okOutput{}, nil
+	}
+	if in.Recursive {
+		return s.deleteRecursive(ctx, p, in.Confirm)
+	}
+	if !in.Confirm {
+		r, _ := fail(fmt.Errorf("refusing to delete %s without confirm=true; this also deletes it on the remote", p))
 		return r, okOutput{}, nil
 	}
 	if err := s.requireOwner(ctx); err != nil {
@@ -1071,20 +1338,16 @@ func (s *Server) deletePath(ctx context.Context, _ *mcp.CallToolRequest, in dele
 		r, _ := fail(mapErr(err, path.Dir(p)))
 		return r, okOutput{}, nil
 	}
-	reason := ""
-	if in.Recursive {
-		// The contents of a directory deleted recursively are not kept
-		// (phase one); the row says so and rollback skips it.
-		reason = "dir"
-	}
-	rec := s.beforeWrite(ctx, "delete", p, "", reason)
-	if err := s.opt.FS.Remove(ctx, parent.Ino, path.Base(p), in.Recursive); err != nil {
+	rec := s.beforeWrite(ctx, "delete", p, "", "")
+	if err := s.opt.FS.Remove(ctx, parent.Ino, path.Base(p), false); err != nil {
 		rec.failed(ctx)
 		r, _ := fail(mapErr(err, p))
 		return r, okOutput{}, nil
 	}
 	rec.done(ctx, "")
-	return text("deleted %s", p), okOutput{Path: p, OK: true}, nil
+	out := okOutput{Path: p, OK: true}
+	out.Reversible, out.PreimageReason = rec.reversibility()
+	return text("deleted %s (%s)", p, reversibleText(out.Reversible, out.PreimageReason)), out, nil
 }
 
 func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
@@ -1178,9 +1441,19 @@ func (s *Server) search(ctx context.Context, _ *mcp.CallToolRequest, in searchIn
 		}
 		out.Note += fmt.Sprintf("the index holds %d of %d known directories; entries under the rest are invisible until warm lists them", out.Coverage.Listed, out.Coverage.Known)
 	}
+	if keep, cut := cutItems(len(out.Hits), s.tokenBudget(), func(i int) int {
+		b, _ := json.Marshal(out.Hits[i])
+		return agent.EstimateTokensBytes(b)
+	}); cut {
+		out.Hits, out.Truncated, out.TruncatedBy = out.Hits[:keep], true, truncatedByTokens
+	}
+	out.Next = nextFor(len(out.Hits), out.Truncated, out.Coverage, "", skippedUncached, root)
 	msg := fmt.Sprintf("%d matches for %q", len(out.Hits), searchDescription(in))
 	if out.Note != "" {
 		msg += ". " + out.Note
+	}
+	if out.Next != "" {
+		msg += ". Next: " + out.Next
 	}
 	return text("%s", msg), out, nil
 }
@@ -1274,7 +1547,7 @@ func (s *Server) pin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (
 		r, _ := fail(mapErr(err, p))
 		return r, okOutput{}, nil
 	}
-	return text("cached %s locally and pinned it", p), okOutput{Path: p, OK: true}, nil
+	return text("cached %s locally and pinned it", p), okOutput{Path: p, OK: true, PreimageReason: preimageNotApplicable}, nil
 }
 
 func (s *Server) unpin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput) (*mcp.CallToolResult, okOutput, error) {
@@ -1289,7 +1562,7 @@ func (s *Server) unpin(ctx context.Context, _ *mcp.CallToolRequest, in pinInput)
 		r, _ := fail(err)
 		return r, okOutput{}, nil
 	}
-	return text("removed pin rule %s; overlapping rules still apply", p), okOutput{Path: p, OK: true}, nil
+	return text("removed pin rule %s; overlapping rules still apply", p), okOutput{Path: p, OK: true, PreimageReason: preimageNotApplicable}, nil
 }
 
 func (s *Server) cacheStatus(ctx context.Context, _ *mcp.CallToolRequest, in statInput) (*mcp.CallToolResult, cacheStatusOutput, error) {
@@ -1363,7 +1636,9 @@ func mapErr(err error, p string) error {
 	case errors.Is(err, vfs.ErrNotEmpty):
 		return fmt.Errorf("%s is not empty; pass recursive=true to delete it and its contents", p)
 	case errors.Is(err, vfs.ErrReadOnly):
-		return fmt.Errorf("%s is on a read-only mount", p)
+		return &codedError{Code: codeReadOnly, Err: fmt.Errorf("%s is on a read-only mount", p),
+			Hint:        "this mount refuses every change; report what you would change instead",
+			HumanAction: "set the mount's mode to writeback or strict in the configuration"}
 	case errors.Is(err, vfs.ErrNotOwner):
 		// The VFS's own fence; requireOwner normally answers first.
 		return errNonOwnerWrite
@@ -1372,7 +1647,9 @@ func mapErr(err error, p string) error {
 	case errors.Is(err, vfs.ErrUploadPurging):
 		return errors.New("local upload cleanup is pending; do not retry the upload or infer remote completion")
 	case errors.Is(err, vfs.ErrNoSpace), errors.Is(err, syscall.ENOSPC):
-		return errors.New("local storage has insufficient space; free disk space or review cache.max_size and cache.min_free")
+		return &codedError{Code: codeNoSpace, Err: errors.New("local storage has insufficient space; free disk space or review cache.max_size and cache.min_free"),
+			Hint:        "the local disk is full; do not retry until the person frees space",
+			HumanAction: "free disk space or raise cache.max_size / lower cache.min_free"}
 	case errors.Is(err, vfs.ErrCrossMount):
 		return errors.New("cannot move between different remotes; copy the file instead")
 	default:

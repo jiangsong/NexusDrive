@@ -221,6 +221,13 @@ type FS struct {
 	invalidateFn      atomic.Pointer[func(ino uint64)]
 	invalidateEntryFn atomic.Pointer[func(parent uint64, name string)]
 	invalidateAllFn   atomic.Pointer[func()]
+	// readObserverFn is the read-heat hook the daemon installs
+	// (SetReadObserver); readSeen debounces it per inode so a sequential
+	// read of a large file reports once, not once per block. Memory only:
+	// a read never costs a query or a provider call on its account.
+	readObserverFn atomic.Pointer[func(ctx context.Context, ino uint64)]
+	readSeen       sync.Map
+	readSeenCount  atomic.Int64
 	// paths caches ino -> path for MountForIno; see pathOf. dirIDs caches
 	// ino -> provider id for directories.
 	paths  atomic.Pointer[sync.Map]
@@ -1033,6 +1040,11 @@ func fromKernel(ctx context.Context) bool {
 	return v
 }
 
+// IsFromKernel reports whether ctx carries a kernel request (FromKernel).
+// The read observer uses it to tell a program reading through the mount
+// from the daemon's own background reads, which are nobody's interest.
+func IsFromKernel(ctx context.Context) bool { return fromKernel(ctx) }
+
 // invalidateFrom is invalidate for a change made by the request in ctx.
 func (f *FS) invalidateFrom(ctx context.Context, ino uint64) {
 	if fromKernel(ctx) {
@@ -1135,6 +1147,64 @@ func (f *FS) invalidateListing(dir uint64, c meta.DirChange) {
 // SetInvalidateEntry installs the hook that drops one kernel dentry.
 func (f *FS) SetInvalidateEntry(fn func(parent uint64, name string)) {
 	f.invalidateEntryFn.Store(&fn)
+}
+
+// readObserveWindow is how long one inode's reads are folded into one
+// report; readSeenPrune is how many inodes the debounce map holds before
+// its stale entries are dropped.
+const (
+	readObserveWindow = 10 * time.Minute
+	readSeenPrune     = 8192
+)
+
+// SetReadObserver installs the hook Read calls at most once per inode per
+// readObserveWindow, with the request context (whose origin says whether
+// the kernel or an adapter read). The daemon resolves the path and counts
+// the read (docs/agent-first-design.md §6.3); the VFS itself only knows
+// an inode was read. nil removes the hook.
+func (f *FS) SetReadObserver(fn func(ctx context.Context, ino uint64)) {
+	if fn == nil {
+		f.readObserverFn.Store(nil)
+		return
+	}
+	f.readObserverFn.Store(&fn)
+}
+
+// readSeenKey debounces per inode and per kind of reader, so an agent's
+// read and a program's read of the same file in one window both report.
+type readSeenKey struct {
+	ino    uint64
+	kernel bool
+	origin string
+}
+
+// noteRead reports a read of ino to the observer, debounced.
+func (f *FS) noteRead(ctx context.Context, ino uint64) {
+	fn := f.readObserverFn.Load()
+	if fn == nil || *fn == nil {
+		return
+	}
+	key := readSeenKey{ino: ino, kernel: fromKernel(ctx), origin: OriginName(ctx)}
+	now := time.Now().Unix()
+	if v, ok := f.readSeen.Load(key); ok && now-v.(int64) < int64(readObserveWindow/time.Second) {
+		return
+	}
+	if _, loaded := f.readSeen.LoadOrStore(key, now); !loaded {
+		if f.readSeenCount.Add(1) >= readSeenPrune {
+			f.readSeenCount.Store(0)
+			f.readSeen.Range(func(k, v any) bool {
+				if now-v.(int64) >= int64(readObserveWindow/time.Second) {
+					f.readSeen.Delete(k)
+				} else {
+					f.readSeenCount.Add(1)
+				}
+				return true
+			})
+		}
+	} else {
+		f.readSeen.Store(key, now)
+	}
+	(*fn)(ctx, ino)
 }
 
 // Refresh forces a re-listing of a directory (used by delta events and

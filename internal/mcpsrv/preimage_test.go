@@ -83,7 +83,10 @@ func TestWriteToolsRecordOpsWithPreimages(t *testing.T) {
 		{"rename", "/work/b.txt", "/work/d1/b.txt", "file", "", ""},
 		{"create", "/work/copy.txt", "", "absent", "", ""},
 		{"delete", "/work/gone.txt", "", "file", "", sha("doomed")},
-		{"delete", "/work/old", "", "dir", "dir", ""},
+		// T-48: the directory row itself carries no reason any more, so a
+		// rollback recreates it; what was under it is a row each (see
+		// TestRecursiveDeleteCapturesCachedFilesOnly).
+		{"delete", "/work/old", "", "dir", "", ""},
 	}
 	if len(ops) != len(wants) {
 		t.Fatalf("%d ops, want %d: %+v", len(ops), len(wants), ops)

@@ -722,7 +722,7 @@ func TestGCKeepsBlobsInsideRetention(t *testing.T) {
 	// Eight days after the first session finished, five after the second:
 	// only the first is past a 7-day retention.
 	e.now = e.now.Add(5 * 24 * time.Hour)
-	res, err := e.pre.GC(ctx, 7*24*time.Hour)
+	res, err := e.pre.GC(ctx, 7*24*time.Hour, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +740,7 @@ func TestGCKeepsBlobsInsideRetention(t *testing.T) {
 	}
 	// Once the second session ages out too, both blobs go.
 	e.now = e.now.Add(3 * 24 * time.Hour)
-	res, err = e.pre.GC(ctx, 7*24*time.Hour)
+	res, err = e.pre.GC(ctx, 7*24*time.Hour, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +754,7 @@ func TestGCKeepsBlobsInsideRetention(t *testing.T) {
 	if _, err := e.m.Resolve(ctx, ConnInfo{Key: "stdio:3", Transport: "stdio", PrincipalID: p.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := e.pre.GC(ctx, 0); err != nil || res.Sessions != 0 {
+	if res, err := e.pre.GC(ctx, 0, 0); err != nil || res.Sessions != 0 {
 		t.Fatalf("gc with retain 0 collected an active session: %+v %v", res, err)
 	}
 }
@@ -930,5 +930,43 @@ func TestSweepLeavesAnInFlightCopyAlone(t *testing.T) {
 	e.pre.Discard(pre)
 	if removed, err := e.pre.Recover(ctx); err != nil || removed != 2 {
 		t.Fatalf("sweep after discard removed %d (%v), want the blob and its temporary file", removed, err)
+	}
+}
+
+// TestGCReleasesBlobsBeforeRows: with rows kept 30 days and blobs 7, a
+// session eight days old keeps its rows (history still names the write)
+// but loses the content; rollback then skips the row as expired instead
+// of restoring, and the row goes with the rest at 30 days.
+func TestGCReleasesBlobsBeforeRows(t *testing.T) {
+	e := newRollbackEnv(t)
+	ctx := context.Background()
+	e.fs.put("/work/old.txt", []byte("old"))
+	e.write(t, "overwrite", "/work/old.txt", []byte("old2"))
+	sess := e.sess
+	if _, err := e.m.Finish(ctx, sess.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	e.now = e.now.Add(8 * 24 * time.Hour)
+	res, err := e.pre.GC(ctx, 30*24*time.Hour, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sessions != 0 || res.Expired != 1 || res.Blobs != 1 {
+		t.Fatalf("gc: %+v", res)
+	}
+	ops, _ := e.st.OpsOf(ctx, sess.ID)
+	if len(ops) != 1 || ops[0].PreBlob != "" || ops[0].PreReason != PreimageExpired || ops[0].PreHash == "" {
+		t.Fatalf("row after blob release: %+v", ops)
+	}
+	if got := e.blobs(t); len(got) != 0 {
+		t.Fatalf("blob survived: %v", got)
+	}
+	plan, _, err := e.m.Rollback(ctx, e.fs, e.pre, sess.ID, true)
+	if err != nil || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != PreimageExpired {
+		t.Fatalf("rollback: %+v %v", plan, err)
+	}
+	e.now = e.now.Add(23 * 24 * time.Hour)
+	if res, err := e.pre.GC(ctx, 30*24*time.Hour, 7*24*time.Hour); err != nil || res.Sessions != 1 || res.Ops != 1 {
+		t.Fatalf("row retention: %+v %v", res, err)
 	}
 }

@@ -21,7 +21,7 @@ const OPS_COLUMNS = 5;
 // The reasons a plan item can carry (docs/agent-roadmap.md §4.8) that have
 // a phrase of their own; anything else — the text of a write error — is
 // shown as the daemon sent it.
-const REASONS = new Set(['already', 'too_large', 'not_cached', 'dir', 'not_empty', 'missing', 'incomplete', 'exists', 'from_exists']);
+const REASONS = new Set(['already', 'too_large', 'not_cached', 'dir', 'not_empty', 'missing', 'incomplete', 'exists', 'from_exists', 'too_many', 'expired']);
 
 // showInFiles sends the main window to a path: it lands on the parent
 // directory with that entry selected (see the deep link in screens/main.js).

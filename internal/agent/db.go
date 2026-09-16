@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,7 +22,7 @@ import (
 )
 
 // schemaVersion is the agent.db layout this build understands.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // dbName is the database file inside the store directory.
 const dbName = "agent.db"
@@ -93,10 +95,70 @@ var schemaV2 = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS trigger_pending ON trigger_deliveries(rule, path) WHERE state='pending'`,
 }
 
+// schemaV3 is the agent-first layout (docs/agent-first-design.md §4.3).
+// audit.tokens_out keeps the token estimate of every result beside its
+// bytes; session_ops.ts lets a row be placed in time without joining
+// audit; changes is the durable record of every change the VFS reported,
+// whatever its origin (kernel, MCP, control plane, WebDAV, remote), which
+// pull_events and last_writer read; read_heat counts reads per path and
+// day by actor kind, never by identity; sessions.last_change_seen is the
+// cursor a session's pull_events resumes from. All additive.
+var schemaV3 = []string{
+	`ALTER TABLE audit ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE session_ops ADD COLUMN ts INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sessions ADD COLUMN last_change_seen INTEGER NOT NULL DEFAULT 0`,
+	`CREATE TABLE IF NOT EXISTS changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+  path TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '', principal TEXT NOT NULL DEFAULT '',
+  reliable INTEGER NOT NULL DEFAULT 1, from_path TEXT NOT NULL DEFAULT '')`,
+	`CREATE INDEX IF NOT EXISTS changes_path ON changes(path, id)`,
+	`CREATE INDEX IF NOT EXISTS changes_ts ON changes(ts)`,
+	`CREATE TABLE IF NOT EXISTS read_heat (
+  path TEXT NOT NULL, day INTEGER NOT NULL, actor_kind TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0, last_ts INTEGER NOT NULL,
+  PRIMARY KEY (path, day, actor_kind))`,
+	`CREATE INDEX IF NOT EXISTS read_heat_day ON read_heat(day)`,
+}
+
 // migrations lists every layout in order; migrate applies the ones above the
-// file's current version. Each step is idempotent (IF NOT EXISTS), so a
+// file's current version. Each step is idempotent (IF NOT EXISTS, and an
+// ALTER TABLE ... ADD COLUMN is skipped when the column is there), so a
 // crash between a step and the version write is repaired by the next open.
-var migrations = [][]string{schemaV1, schemaV2}
+var migrations = [][]string{schemaV1, schemaV2, schemaV3}
+
+// addColumnRE matches the one DDL form SQLite cannot make idempotent by
+// itself.
+var addColumnRE = regexp.MustCompile(`(?i)^ALTER TABLE (\w+) ADD COLUMN (\w+) `)
+
+// applyStep runs one schema statement, skipping an ADD COLUMN whose column
+// already exists.
+func applyStep(tx *sql.Tx, q string) error {
+	if m := addColumnRE.FindStringSubmatch(q); m != nil {
+		rows, err := tx.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, m[1]))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notnull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				return err
+			}
+			if strings.EqualFold(name, m[2]) {
+				return nil
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(q)
+	return err
+}
 
 // Store is the open agent.db.
 type Store struct {
@@ -265,7 +327,7 @@ func (s *Store) migrate() error {
 	}
 	for _, step := range migrations[version:] {
 		for _, q := range step {
-			if _, err := tx.Exec(q); err != nil {
+			if err := applyStep(tx, q); err != nil {
 				return fmt.Errorf("agent: %w", err)
 			}
 		}

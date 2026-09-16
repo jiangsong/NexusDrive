@@ -24,13 +24,20 @@ func newAgentEnv(t *testing.T, opt Options, sc agent.Scope) (*env, *agent.Store)
 // newPreimageEnv is newAgentEnv returning the preimage store as well.
 func newPreimageEnv(t *testing.T, opt Options, sc agent.Scope) (*env, *agent.Store, *agent.Preimages) {
 	t.Helper()
+	return newPreimageEnvWithMax(t, opt, sc, 32<<20)
+}
+
+// newPreimageEnvWithMax is newPreimageEnv with the largest file a preimage
+// is kept for.
+func newPreimageEnvWithMax(t *testing.T, opt Options, sc agent.Scope, max int64) (*env, *agent.Store, *agent.Preimages) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := agent.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	pre, err := agent.NewPreimages(st, filepath.Join(dir, "preimages"), nil, 32<<20)
+	pre, err := agent.NewPreimages(st, filepath.Join(dir, "preimages"), nil, max)
 	if err != nil {
 		t.Fatal(err)
 	}

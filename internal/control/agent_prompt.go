@@ -8,6 +8,9 @@ import (
 	"strings"
 	"unicode"
 
+	"cloudfs/internal/agent"
+	"cloudfs/internal/agent/prompttext"
+	"cloudfs/internal/config"
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/vfs"
 )
@@ -25,6 +28,75 @@ type AgentPromptResponse struct {
 	Path   string `json:"path"`
 	URI    string `json:"uri"`
 	Prompt string `json:"prompt"`
+	// Kind is "" for the per-path prompt, "instructions" for the text the
+	// MCP server hands every session, or one of the prompt names.
+	Kind string `json:"kind,omitempty"`
+	// Tokens is the estimate of Prompt, so the console can show what a
+	// session pays for the instructions.
+	Tokens int `json:"tokens,omitempty"`
+	// Prompts lists the prompt names the MCP server registers, with the
+	// instructions kind, so the console can offer them.
+	Prompts []string `json:"prompts,omitempty"`
+}
+
+// promptCaps derives what the run-time guidance may mention from the
+// collector, the way mcpsrv derives it from its options: the two must
+// agree, or the console shows a sentence the agent never gets.
+func (s *Server) promptCaps() prompttext.Caps {
+	c := prompttext.Caps{
+		Index:    s.collector.Index != nil,
+		Memory:   s.collector.Memory != nil,
+		Sessions: s.collector.Agent != nil,
+		// Preimages exist wherever sessions do in the owner process, and
+		// the console only runs there.
+		Preimages:    s.collector.Agent != nil,
+		Export:       s.collector.Export != nil,
+		MaxReadBytes: 256 << 10,
+	}
+	if cfg := s.collector.ConfigView(); cfg != nil {
+		c.Allow = append([]string(nil), cfg.MCP.Allow...)
+		c.ReadOnly = cfg.MCP.ReadOnly
+		c.MemoryRoot = cfg.Memory.Root
+		c.MaxTokens = cfg.MCP.Limits.MaxTokens
+		if c.MaxTokens == 0 {
+			c.MaxTokens = config.DefaultMCPLimits().MaxTokens
+		}
+		if c.MaxTokens < 0 {
+			c.MaxTokens = 0
+		}
+	}
+	return c
+}
+
+// agentGuidance is GET /agent/prompt?kind=instructions|<prompt name>: the
+// same text the MCP server hands the agent, rendered here in the person's
+// language so the console can show what the agent was told. Prompt
+// arguments come from the query (path, what).
+func (s *Server) agentGuidance(w http.ResponseWriter, r *http.Request, kind string) {
+	lang := LangFrom(r)
+	caps := s.promptCaps()
+	resp := AgentPromptResponse{Kind: kind, Prompts: append([]string{"instructions"}, prompttext.Names()...)}
+	if kind == "instructions" {
+		resp.Prompt = prompttext.Instructions(caps, lang)
+	} else {
+		q := r.URL.Query()
+		args := map[string]string{"path": q.Get("path"), "what": q.Get("what")}
+		text, err := prompttext.Render(kind, args, caps, lang)
+		switch {
+		case errors.Is(err, prompttext.ErrUnknownPrompt):
+			httpErrorT(w, r, http.StatusNotFound, "err.prompt_kind")
+			return
+		case errors.Is(err, prompttext.ErrMissingArgument):
+			httpErrorT(w, r, http.StatusBadRequest, "err.prompt_argument")
+			return
+		case err != nil:
+			httpErrorT(w, r, http.StatusInternalServerError, "err.prompt_kind")
+			return
+		}
+		resp.Prompt, resp.Path = text, args["path"]
+	}
+	resp.Tokens = agent.EstimateTokens(resp.Prompt)
+	writeJSON(w, resp)
 }
 
 // promptHeadingMax bounds the heading a search hit passes along. A heading
@@ -36,6 +108,10 @@ func (s *Server) agentPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if kind := q.Get("kind"); kind != "" {
+		s.agentGuidance(w, r, kind)
+		return
+	}
 	p, ok := s.fsPath(w, q.Get("path"))
 	if !ok {
 		return

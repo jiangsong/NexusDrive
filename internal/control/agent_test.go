@@ -90,6 +90,14 @@ func TestAuditRouteFollowsCursorAndFilters(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Rows) != 3 {
 		t.Fatalf("denied filter: %d %s", w.Code, w.Body)
 	}
+	// The two results the agent-first middleware added are filters the
+	// console offers, so the route accepts them (rows or not).
+	for _, result := range []string{"forwarded", "oversize"} {
+		w = uiCallControl(t, h, "GET", "/audit?result="+result, "")
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 {
+			t.Fatalf("%s filter: %d %s", result, w.Code, w.Body)
+		}
+	}
 	w = uiCallControl(t, h, "GET", "/audit?tool=nothing", "")
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Rows) != 0 || !strings.Contains(w.Body.String(), `"rows":[]`) {
 		t.Fatalf("tool filter: %d %s", w.Code, w.Body)

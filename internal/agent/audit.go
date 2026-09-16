@@ -18,7 +18,7 @@ type AuditQuery struct {
 	Limit   int // default 200, max 1000
 	Session string
 	Tool    string
-	Result  string // ok | denied | error
+	Result  string // ok | denied | error | forwarded | oversize
 	Since   time.Time
 }
 
@@ -59,10 +59,10 @@ func (s *Store) appendAudit(ctx context.Context, row *AuditRow) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("agent: %w", err)
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO audit(ts, principal_id, session_id, transport, tool, paths, args, bytes_in, bytes_out, result, error, duration_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := s.db.ExecContext(ctx, `INSERT INTO audit(ts, principal_id, session_id, transport, tool, paths, args, bytes_in, bytes_out, tokens_out, result, error, duration_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TS.UnixNano(), row.PrincipalID, row.SessionID, row.Transport, row.Tool, string(paths), string(row.Args),
-		row.BytesIn, row.BytesOut, row.Result, row.Error, row.DurationMS)
+		row.BytesIn, row.BytesOut, row.TokensOut, row.Result, row.Error, row.DurationMS)
 	if err != nil {
 		return 0, fmt.Errorf("agent: %w", err)
 	}
@@ -79,7 +79,7 @@ func (s *Store) appendAudit(ctx context.Context, row *AuditRow) (int64, error) {
 // that silently stopped is worse than none.
 func (s *Store) AuditWriteFailures() int64 { return s.auditFailures.Load() }
 
-const auditColumns = `SELECT id, ts, principal_id, session_id, transport, tool, paths, args, bytes_in, bytes_out, result, error, duration_ms FROM audit`
+const auditColumns = `SELECT id, ts, principal_id, session_id, transport, tool, paths, args, bytes_in, bytes_out, tokens_out, result, error, duration_ms FROM audit`
 
 // Audit returns rows newest first and, when more remain, the cursor for the
 // next page.
@@ -151,7 +151,7 @@ func (s *Store) queryAudit(ctx context.Context, query string, args ...any) ([]Au
 		var ts int64
 		var paths, args string
 		if err := rows.Scan(&r.ID, &ts, &r.PrincipalID, &r.SessionID, &r.Transport, &r.Tool, &paths, &args,
-			&r.BytesIn, &r.BytesOut, &r.Result, &r.Error, &r.DurationMS); err != nil {
+			&r.BytesIn, &r.BytesOut, &r.TokensOut, &r.Result, &r.Error, &r.DurationMS); err != nil {
 			return nil, fmt.Errorf("agent: %w", err)
 		}
 		r.TS = time.Unix(0, ts)

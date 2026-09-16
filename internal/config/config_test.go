@@ -211,8 +211,8 @@ func TestMCPAgentDefaults(t *testing.T) {
 	if cfg.MCP.Session.Idle != 30*time.Minute {
 		t.Fatalf("idle = %v", cfg.MCP.Session.Idle)
 	}
-	if cfg.MCP.Session.Retain != 7*24*time.Hour {
-		t.Fatalf("session retain = %v", cfg.MCP.Session.Retain)
+	if cfg.MCP.Session.Retain != 30*24*time.Hour || cfg.MCP.Session.RetainBlobs != 7*24*time.Hour {
+		t.Fatalf("session retain = %v / %v", cfg.MCP.Session.Retain, cfg.MCP.Session.RetainBlobs)
 	}
 	if cfg.MCP.Session.MaxPreimageBytes != 32<<20 {
 		t.Fatalf("max_preimage_bytes = %v", cfg.MCP.Session.MaxPreimageBytes)

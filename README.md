@@ -147,8 +147,17 @@ mcp:
     retain: 2160h       # 工具调用审计（agent.db）的保留期，默认 90 天
   session:
     idle: 30m           # HTTP 令牌会话空闲多久自动结束并轮转，默认 30 分钟
-    retain: 168h        # 会话操作记录与回滚用前像的保留期，默认 7 天
+    retain: 720h        # 会话操作记录与变更记录（history / last_writer）的保留期，默认 30 天
+    retain_blobs: 168h  # 回滚用前像内容的保留期，默认 7 天；过期后记录仍在，回滚跳过
     max_preimage_bytes: 32MiB   # 超过此大小的文件写前不留前像，无法回滚，默认 32 MiB
+    preimage_files: 500 # 一次递归删除最多为多少个已缓存文件保留前像，默认 500
+  limits:
+    max_tokens: 20000   # 单个工具结果的 token 预算（估算），默认 20000；负数关闭
+  install:
+    transport: auto     # cloudfs mcp install 的默认传输：auto（守护进程在线选 http）/ stdio / http
+
+hooks:
+  context: minimal      # agent 客户端 hook 每轮注入：off / minimal / full（加 MEMORY.md 前 30 行）
 
 control:
   metrics: 127.0.0.1:9101

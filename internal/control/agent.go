@@ -384,7 +384,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		Tool: params.Get("tool"), Result: params.Get("result"),
 	}
 	switch q.Result {
-	case "", "ok", "denied", "error":
+	case "", "ok", "denied", "error", "forwarded", "oversize":
 	default:
 		httpErrorT(w, r, http.StatusBadRequest, "err.invalid_query_param")
 		return
