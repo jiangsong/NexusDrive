@@ -77,15 +77,18 @@ export function sections(v) {
       id: 'hooks',
       rows: [
         { key: 'settings.hooks.context', value: hooks.context || 'minimal' },
-        { key: 'settings.hooks.changed_max', value: hooks.changed_max || 0, builtin: true },
-        { key: 'settings.hooks.memory_head_lines', value: hooks.memory_head_lines || 0, builtin: true },
+        { key: 'settings.hooks.changed_max', value: hooks.changed_max || 0 },
+        { key: 'settings.hooks.memory_head_lines', value: hooks.memory_head_lines || 0 },
       ],
-      yaml: yamlBlock('hooks', { context: hooks.context || 'minimal' }),
+      yaml: yamlBlock('hooks', { context: hooks.context || 'minimal', changed_max: hooks.changed_max || 20, memory_head_lines: hooks.memory_head_lines || 30 }),
     },
     {
       id: 'heat',
-      rows: [{ key: 'settings.heat.enabled', value: !!heat.enabled }],
-      yaml: '',
+      rows: [
+        { key: 'settings.heat.enabled', value: !!heat.enabled },
+        { key: 'settings.heat.retention_days', value: heat.retention_days || 0 },
+      ],
+      yaml: yamlBlock('mcp', { heat: { enabled: !!heat.enabled, retention_days: heat.retention_days || 400 } }),
     },
     {
       id: 'memory',

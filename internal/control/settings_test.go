@@ -34,7 +34,7 @@ func TestSettingsViewIsReadOnlyAndCarriesNoSecret(t *testing.T) {
 	if v.MCP.Session.Idle != "30m" || v.MCP.Session.Retain != "720h" || v.MCP.Session.RetainBlobs != "168h" || v.MCP.Session.PreimageFiles != 500 || v.MCP.AuditRetain != "2160h" {
 		t.Fatalf("session: %+v audit=%s", v.MCP.Session, v.MCP.AuditRetain)
 	}
-	if v.Hooks.Context != "full" || v.Hooks.ChangedMax != hookChangedMax || v.Hooks.MemoryHeadLines != hookMemoryLines || !v.Index.Enabled || v.Heat.Enabled {
+	if v.Hooks.Context != "full" || v.Hooks.ChangedMax != config.DefaultHookChangedMax || v.Hooks.MemoryHeadLines != config.DefaultHookMemoryHeadLines || !v.Index.Enabled || v.Heat.Enabled || v.Heat.RetentionDays != config.DefaultHeatRetentionDays {
 		t.Fatalf("hooks/index/heat: %+v %+v %+v", v.Hooks, v.Index, v.Heat)
 	}
 	body := w.Body.String()

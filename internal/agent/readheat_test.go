@@ -103,3 +103,56 @@ func TestReadObserverDebouncesAndFlushes(t *testing.T) {
 		t.Fatal("Run did not flush on cancel")
 	}
 }
+
+// TestPruneReadHeatFoldsOldBucketsIntoAllTime: buckets older than the
+// retention fold into the path's all-time bucket (day 0) by kind and are
+// dropped; buckets inside the window and the all-time bucket itself are
+// left alone; a windowed HotPaths never counts the all-time bucket; and
+// a second prune changes nothing.
+func TestPruneReadHeatFoldsOldBucketsIntoAllTime(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.BumpReadHeat(ctx, []ReadSample{
+		{Path: "/a", ActorKind: ReadByAgent, TS: now.Add(-500 * 24 * time.Hour), Count: 3},
+		{Path: "/a", ActorKind: ReadByAgent, TS: now.Add(-450 * 24 * time.Hour), Count: 4},
+		{Path: "/a", ActorKind: ReadByKernel, TS: now.Add(-450 * 24 * time.Hour), Count: 1},
+		{Path: "/a", ActorKind: ReadByAgent, TS: now, Count: 2},
+		{Path: "/b", ActorKind: ReadByAgent, TS: now.Add(-10 * 24 * time.Hour), Count: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.PruneReadHeat(ctx, 400)
+	if err != nil || n != 3 {
+		t.Fatalf("pruned %d %v", n, err)
+	}
+	var count int64
+	if err := s.db.QueryRow(`SELECT count FROM read_heat WHERE path = '/a' AND day = ? AND actor_kind = ?`, AllTimeDay, ReadByAgent).Scan(&count); err != nil || count != 7 {
+		t.Fatalf("all-time agent bucket: %d %v", count, err)
+	}
+	if err := s.db.QueryRow(`SELECT count FROM read_heat WHERE path = '/a' AND day = ? AND actor_kind = ?`, AllTimeDay, ReadByKernel).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("all-time kernel bucket: %d %v", count, err)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM read_heat`).Scan(&rows); err != nil || rows != 4 {
+		t.Fatalf("rows after prune: %d %v", rows, err)
+	}
+	hot, err := s.HotPaths(ctx, "/", 30, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]int64{}
+	for _, h := range hot {
+		by[h.Path] = h.Reads
+	}
+	if by["/a"] != 2 || by["/b"] != 5 {
+		t.Fatalf("windowed hot paths count the all-time bucket: %+v", hot)
+	}
+	if n, err := s.PruneReadHeat(ctx, 400); err != nil || n != 0 {
+		t.Fatalf("second prune: %d %v", n, err)
+	}
+}

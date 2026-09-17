@@ -794,7 +794,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		Export: exportJobsOf(d), ExportRoots: cfg.MCP.ExportRoots,
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory, Agent: f.str("agent", ""),
-		Limits: mcpLimits(cfg), PreimageFiles: cfg.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d),
+		Limits: mcpLimits(cfg), PreimageFiles: cfg.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d), HeatOff: !cfg.MCP.Heat.On(),
 		Bridge: bridge,
 	})
 	if err != nil {
@@ -893,7 +893,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 		Export: exportJobsOf(d), ExportRoots: exportRoots,
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory,
-		Limits: mcpLimits(d.Config), PreimageFiles: d.Config.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d),
+		Limits: mcpLimits(d.Config), PreimageFiles: d.Config.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d), HeatOff: !d.Config.MCP.Heat.On(),
 	})
 	if err != nil {
 		return err

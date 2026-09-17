@@ -138,8 +138,10 @@ type Options struct {
 	// store; with neither the tool is not registered.
 	Events EventSource
 	// Heat is what hot_paths reads. nil derives it from Sessions' store;
-	// with neither the tool is not registered.
-	Heat ReadHeat
+	// with neither the tool is not registered. HeatOff leaves it
+	// unregistered whatever the store: mcp.heat.enabled false.
+	Heat    ReadHeat
+	HeatOff bool
 	// ReadObserver counts the reads that bypass the VFS
 	// (read_extracted_text); nil counts nothing. VFS reads are counted by
 	// the daemon's own hook on the VFS.
@@ -253,8 +255,11 @@ func New(opt Options) (*Server, error) {
 		s.events = opt.Sessions.Store()
 	}
 	s.heat = opt.Heat
-	if s.heat == nil && opt.Sessions != nil {
+	if s.heat == nil && opt.Sessions != nil && !opt.HeatOff {
 		s.heat = opt.Sessions.Store()
+	}
+	if opt.HeatOff {
+		s.heat = nil
 	}
 	if err := s.copyTools.init(); err != nil {
 		return nil, fmt.Errorf("mcpsrv: initialize copy cursor: %w", err)

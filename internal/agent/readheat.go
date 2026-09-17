@@ -147,17 +147,66 @@ func (s *Store) HotPaths(ctx context.Context, prefix string, days, limit int) ([
 	return out, nil
 }
 
-// PruneReadHeat drops day buckets older than days (default 90).
+// AllTimeDay is the day of the bucket old buckets fold into: the
+// all-time count of a path by kind, kept after the per-day detail has
+// gone (docs/agent-first-design.md §6.2, borrowed from BearDrive).
+const AllTimeDay = 0
+
+// PruneReadHeat folds day buckets older than days (default 400) into
+// the path's all-time bucket and drops them, reporting how many went.
 func (s *Store) PruneReadHeat(ctx context.Context, days int) (int64, error) {
 	if days <= 0 {
-		days = 90
+		days = 400
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM read_heat WHERE day < ?`, dayOf(s.now())-int64(days))
+	if s.readOnly {
+		return 0, errors.New("agent: the store is read-only")
+	}
+	cutoff := dayOf(s.now()) - int64(days)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return 0, fmt.Errorf("agent: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO read_heat(path, day, actor_kind, count, last_ts)
+		SELECT path, ?, actor_kind, sum(count), max(last_ts) FROM read_heat WHERE day < ? AND day > ? GROUP BY path, actor_kind
+		ON CONFLICT(path, day, actor_kind) DO UPDATE SET count = read_heat.count + excluded.count, last_ts = max(read_heat.last_ts, excluded.last_ts)`,
+		AllTimeDay, cutoff, AllTimeDay); err != nil {
+		return 0, fmt.Errorf("agent: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM read_heat WHERE day < ? AND day > ?`, cutoff, AllTimeDay)
+	if err != nil {
+		return 0, fmt.Errorf("agent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("agent: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// RunReadHeatRetention folds old buckets now and then every interval
+// until ctx ends, in the owner only.
+func (s *Store) RunReadHeatRetention(ctx context.Context, days int, every time.Duration) {
+	if !s.owner {
+		return
+	}
+	if every <= 0 {
+		every = 24 * time.Hour
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		if n, err := s.PruneReadHeat(ctx, days); err != nil && ctx.Err() == nil {
+			slog.Warn("agent: read heat not pruned", "err", err)
+		} else if n > 0 {
+			slog.Info("agent: read heat folded", "buckets", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // readDebounce is how long one (path, kind) pair's reads fold into one

@@ -45,11 +45,20 @@ type HookStore interface {
 	ClearHookWrites(ctx context.Context, client, sessionID string) error
 }
 
-// hookChangedMax caps the changed-file list a turn pays for.
-const hookChangedMax = 20
-
-// hookMemoryLines is how many lines of MEMORY.md a full context carries.
-const hookMemoryLines = 30
+// hookBudgets are hooks.changed_max and hooks.memory_head_lines as
+// configured, with the defaults for a daemon without a file.
+func (s *Server) hookBudgets() (changedMax, memoryLines int) {
+	changedMax, memoryLines = config.DefaultHookChangedMax, config.DefaultHookMemoryHeadLines
+	if cfg := s.collector.ConfigView(); cfg != nil {
+		if cfg.Hooks.ChangedMax > 0 {
+			changedMax = cfg.Hooks.ChangedMax
+		}
+		if cfg.Hooks.MemoryHeadLines != 0 {
+			memoryLines = cfg.Hooks.MemoryHeadLines
+		}
+	}
+	return changedMax, memoryLines
+}
 
 // mountFor finds the configured mount containing abs (longest match) and
 // abs's virtual path inside it.
@@ -181,6 +190,7 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 	if !known {
 		return nil, 0, false, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
 	}
+	changedMax, _ := s.hookBudgets()
 	seen := map[string]bool{}
 	// Kernel rows are every program's writes, the client's own tools
 	// included; the post-write hook told us which paths were its own.
@@ -233,7 +243,7 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 				continue
 			}
 			seen[p] = true
-			if len(changed) >= hookChangedMax {
+			if len(changed) >= changedMax {
 				more++
 				continue
 			}
@@ -273,9 +283,13 @@ func (s *Server) hookMemoryHead(ctx context.Context, client string) string {
 	if data == nil {
 		return ""
 	}
+	_, memoryLines := s.hookBudgets()
+	if memoryLines < 0 {
+		return ""
+	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) > hookMemoryLines {
-		lines = append(lines[:hookMemoryLines], fmt.Sprintf("... (%d more lines)", len(lines)-hookMemoryLines))
+	if len(lines) > memoryLines {
+		lines = append(lines[:memoryLines], fmt.Sprintf("... (%d more lines)", len(lines)-memoryLines))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -396,6 +396,7 @@ export const zh = {
   'settings.mcp.http': 'HTTP 监听', 'settings.mcp.allow': '允许的前缀', 'settings.mcp.read_only': '只读', 'settings.mcp.workspace': '工作区', 'settings.mcp.max_tokens': '单次结果 token 预算', 'settings.mcp.max_tokens.hint': '一次 read_text 最多约 %s token', 'settings.mcp.max_tokens.off': '预算已关：结果只按字节截断', 'settings.mcp.install_transport': '注册传输',
   'settings.session.idle': '空闲超时', 'settings.session.retain': '写入日志保留', 'settings.session.retain_blobs': '写前副本保留', 'settings.session.max_preimage_bytes': '可回滚的最大文件', 'settings.session.preimage_files': '每次递归删除保留的文件数', 'settings.audit.retain': '审计行保留',
   'settings.hooks.context': '注入档位', 'settings.hooks.changed_max': '每轮列出的变更文件数', 'settings.hooks.memory_head_lines': '注入的 MEMORY.md 行数（完整档）',
+  'settings.heat.retention_days': '按日桶保留天数',
   'settings.heat.enabled': '记录读热度', 'settings.memory.root': '记忆根目录', 'settings.memory.max_fact_bytes': '单条记忆上限', 'settings.index.enabled': '索引已开启', 'settings.index.pinned': '索引已 pin 的文件', 'settings.index.rules': '规则数',
   'inspector.lastwriter': '最近修改', 'inspector.history': '历史', 'inspector.reads': '读取（%s 天）',
   'origin.kernel': '终端', 'origin.mcp': 'agent', 'origin.control': '控制台', 'origin.webdav': 'WebDAV', 'origin.remote': '远端',

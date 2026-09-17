@@ -51,3 +51,34 @@ func TestOpenWiresTheAgentStoreForOwnerAndNonOwner(t *testing.T) {
 		t.Fatalf("shared trail: %+v %v", rows, err)
 	}
 }
+
+// TestHeatOffRecordsNothing: with mcp.heat.enabled false the owner
+// installs no read observer, starts no observer loop, and hands the
+// console no heat store — the routes say disabled — while the change
+// record and the hooks keep working as before.
+func TestHeatOffRecordsNothing(t *testing.T) {
+	cfg, _ := writeConfig(t, baseConfig)
+	off := false
+	cfg.MCP.Heat.Enabled = &off
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	d, err := Open(ctx, Options{Config: cfg, Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.ReadHeat != nil {
+		t.Fatal("a read observer was started with heat off")
+	}
+	col := d.Collector()
+	if col.HeatStore != nil || col.ReadHeat != nil {
+		t.Fatal("the collector serves heat with heat off")
+	}
+	if col.HookStore == nil || col.Changes == nil {
+		t.Fatal("the change record went away with heat")
+	}
+	on, _ := writeConfig(t, baseConfig)
+	if !on.MCP.Heat.On() || on.MCP.Heat.Retention() != 400 {
+		t.Fatalf("defaults: on=%v retention=%d", on.MCP.Heat.On(), on.MCP.Heat.Retention())
+	}
+}

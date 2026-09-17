@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -315,5 +317,37 @@ func TestIndexRuleDefaults(t *testing.T) {
 	r := cfg.Index.Rules[0]
 	if r.MaxFileSize != 20<<20 || len(r.Include) != len(DefaultIndexInclude) || cfg.Index.FetchBudgetPerHour != 512<<20 {
 		t.Fatalf("rule = %+v, fetch budget = %d", r, cfg.Index.FetchBudgetPerHour)
+	}
+}
+
+// TestAgentFirstKeysHaveDefaultsAndRoundTrip: the heat and hooks keys
+// added for the agent-first console default the way the docs say —
+// heat on with 400 days, hooks minimal with 20 changed files and 30
+// memory lines — and take the file's values.
+func TestAgentFirstKeysHaveDefaultsAndRoundTrip(t *testing.T) {
+	c := Default()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.MCP.Heat.On() || c.MCP.Heat.Retention() != DefaultHeatRetentionDays {
+		t.Fatalf("heat defaults: %+v", c.MCP.Heat)
+	}
+	if c.Hooks.Context != "minimal" || c.Hooks.ChangedMax != DefaultHookChangedMax || c.Hooks.MemoryHeadLines != DefaultHookMemoryHeadLines {
+		t.Fatalf("hooks defaults: %+v", c.Hooks)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("remotes:\n  a: {type: fake}\nmounts:\n  - path: "+filepath.Join(dir, "m")+"\n    layout:\n      /: {remote: a}\nmcp:\n  heat:\n    enabled: false\n    retention_days: 30\nhooks:\n  context: full\n  changed_max: 5\n  memory_head_lines: -1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MCP.Heat.On() || loaded.MCP.Heat.Retention() != 30 {
+		t.Fatalf("heat: %+v", loaded.MCP.Heat)
+	}
+	if loaded.Hooks.Context != "full" || loaded.Hooks.ChangedMax != 5 || loaded.Hooks.MemoryHeadLines != -1 {
+		t.Fatalf("hooks: %+v", loaded.Hooks)
 	}
 }

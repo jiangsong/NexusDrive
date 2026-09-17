@@ -44,8 +44,7 @@ type SettingsMCP struct {
 	} `json:"session"`
 }
 
-// SettingsHooks is the hooks section. ChangedMax and MemoryHeadLines are
-// the built-in constants until they become configuration keys (T-54).
+// SettingsHooks is the hooks section.
 type SettingsHooks struct {
 	Context         string `json:"context"`
 	ChangedMax      int    `json:"changed_max"`
@@ -67,10 +66,11 @@ type SettingsIndex struct {
 	Rules   int  `json:"rules"`
 }
 
-// SettingsHeat is the read-heat section. There is no configuration key
-// yet; the daemon records heat whenever it has agent.db.
+// SettingsHeat is the read-heat section: whether reads are counted and
+// how many days of buckets are kept before folding into the all-time row.
 type SettingsHeat struct {
-	Enabled bool `json:"enabled"`
+	Enabled       bool `json:"enabled"`
+	RetentionDays int  `json:"retention_days"`
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -107,14 +107,21 @@ func settingsViewOf(cfg *config.Config, heat bool) SettingsView {
 	if v.Hooks.Context == "" {
 		v.Hooks.Context = "minimal"
 	}
-	v.Hooks.ChangedMax = hookChangedMax
-	v.Hooks.MemoryHeadLines = hookMemoryLines
+	v.Hooks.ChangedMax = cfg.Hooks.ChangedMax
+	if v.Hooks.ChangedMax <= 0 {
+		v.Hooks.ChangedMax = config.DefaultHookChangedMax
+	}
+	v.Hooks.MemoryHeadLines = cfg.Hooks.MemoryHeadLines
+	if v.Hooks.MemoryHeadLines == 0 {
+		v.Hooks.MemoryHeadLines = config.DefaultHookMemoryHeadLines
+	}
 	v.Memory.Root = cfg.Memory.Root
 	v.Memory.MaxFactBytes = int64(cfg.Memory.MaxFactBytes)
 	v.Index.Enabled = cfg.Index.Enabled
 	v.Index.Pinned = cfg.Index.Pinned
 	v.Index.Rules = len(cfg.Index.Rules)
-	v.Heat.Enabled = heat
+	v.Heat.Enabled = heat && cfg.MCP.Heat.On()
+	v.Heat.RetentionDays = cfg.MCP.Heat.Retention()
 	return v
 }
 

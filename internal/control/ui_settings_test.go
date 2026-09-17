@@ -41,7 +41,7 @@ func TestSettingsScreenIsReadOnly(t *testing.T) {
 	if strings.Contains(view, "import ") {
 		t.Error("settings_view.js imports; it must run under node with no DOM")
 	}
-	for _, want := range []string{"export function sections(v)", "export function yamlBlock(root, obj)", "export function readTextTokens(maxTokens)", "'settings.mcp.max_tokens.hint'", "builtin: true"} {
+	for _, want := range []string{"export function sections(v)", "export function yamlBlock(root, obj)", "export function readTextTokens(maxTokens)", "'settings.mcp.max_tokens.hint'"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("settings_view.js lacks %s", want)
 		}

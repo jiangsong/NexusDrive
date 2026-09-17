@@ -199,6 +199,34 @@ type MCP struct {
 	Limits MCPLimits `yaml:"limits"`
 	// Install shapes `cloudfs mcp install` (docs/agent-first-design.md §5.2).
 	Install MCPInstall `yaml:"install"`
+	// Heat controls the read-heat record (docs/agent-first-design.md §6.2).
+	Heat MCPHeat `yaml:"heat"`
+}
+
+// MCPHeat controls the read-heat record: whether reads are counted at
+// all, and how long the day buckets are kept before they fold into the
+// all-time row.
+type MCPHeat struct {
+	// Enabled is nil (count reads; the default) or false to record
+	// nothing: hot_paths and the heat screen then answer disabled.
+	Enabled *bool `yaml:"enabled"`
+	// RetentionDays is how many days of per-day buckets are kept; older
+	// ones fold into the all-time bucket. Zero means the default of 400.
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// On says whether reads are counted.
+func (h MCPHeat) On() bool { return h.Enabled == nil || *h.Enabled }
+
+// DefaultHeatRetentionDays is the retention used when the file sets none.
+const DefaultHeatRetentionDays = 400
+
+// Retention is the retention in force.
+func (h MCPHeat) Retention() int {
+	if h.RetentionDays <= 0 {
+		return DefaultHeatRetentionDays
+	}
+	return h.RetentionDays
 }
 
 // MCPLimits bounds one tool result (docs/agent-first-design.md §5.3). The
@@ -623,12 +651,30 @@ type Hooks struct {
 	// what changed since the last turn; the default) or full (minimal plus
 	// the head of the agent's MEMORY.md).
 	Context string `yaml:"context"`
+	// ChangedMax caps the changed-file list one turn is handed; zero
+	// means the default of 20.
+	ChangedMax int `yaml:"changed_max"`
+	// MemoryHeadLines is how many lines of MEMORY.md a full context
+	// carries; zero means the default of 30, a negative value none.
+	MemoryHeadLines int `yaml:"memory_head_lines"`
 }
 
-// validate fills the default and refuses an unknown mode.
+// Default hook budgets.
+const (
+	DefaultHookChangedMax      = 20
+	DefaultHookMemoryHeadLines = 30
+)
+
+// validate fills the defaults and refuses an unknown mode.
 func (h *Hooks) validate() error {
 	if h.Context == "" {
 		h.Context = "minimal"
+	}
+	if h.ChangedMax <= 0 {
+		h.ChangedMax = DefaultHookChangedMax
+	}
+	if h.MemoryHeadLines == 0 {
+		h.MemoryHeadLines = DefaultHookMemoryHeadLines
 	}
 	switch h.Context {
 	case "off", "minimal", "full":

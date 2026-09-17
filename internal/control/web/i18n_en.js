@@ -395,6 +395,7 @@ export const en = {
   'settings.mcp.http': 'HTTP listener', 'settings.mcp.allow': 'Allowed prefixes', 'settings.mcp.read_only': 'Read only', 'settings.mcp.workspace': 'Workspace', 'settings.mcp.max_tokens': 'Token budget per result', 'settings.mcp.max_tokens.hint': 'one read_text answer carries at most about %s tokens', 'settings.mcp.max_tokens.off': 'budget off: results are cut by bytes only', 'settings.mcp.install_transport': 'Install transport',
   'settings.session.idle': 'Idle timeout', 'settings.session.retain': 'Keep the write log', 'settings.session.retain_blobs': 'Keep the pre-write copies', 'settings.session.max_preimage_bytes': 'Largest file kept for rollback', 'settings.session.preimage_files': 'Files kept per recursive delete', 'settings.audit.retain': 'Keep audit rows',
   'settings.hooks.context': 'Injected context', 'settings.hooks.changed_max': 'Changed files listed per turn', 'settings.hooks.memory_head_lines': 'MEMORY.md lines injected (full)',
+  'settings.heat.retention_days': 'Days of per-day buckets kept',
   'settings.heat.enabled': 'Read heat recorded', 'settings.memory.root': 'Memory root', 'settings.memory.max_fact_bytes': 'Largest fact', 'settings.index.enabled': 'Index enabled', 'settings.index.pinned': 'Index pinned files', 'settings.index.rules': 'Rules',
   'inspector.lastwriter': 'Last modified', 'inspector.history': 'History', 'inspector.reads': 'Reads (%s days)',
   'origin.kernel': 'terminal', 'origin.mcp': 'agent', 'origin.control': 'console', 'origin.webdav': 'WebDAV', 'origin.remote': 'remote',

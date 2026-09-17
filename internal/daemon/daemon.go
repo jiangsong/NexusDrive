@@ -433,18 +433,21 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		// the VFS never queries meta on a read's account more than once
 		// per window. Background reads (index extraction, warming) are
 		// nobody's interest and are not counted.
-		heat := agent.NewReadObserver(agentStore)
-		d.ReadHeat = heat
-		fsys.SetReadObserver(func(ctx context.Context, ino uint64) {
-			kind := readerKind(ctx)
-			if kind == "" {
-				return
-			}
-			if p, err := fsys.Meta().Path(ctx, ino); err == nil {
-				heat.Observe(p, kind)
-			}
-		})
-		go heat.Run(retentionCtx, 0)
+		if cfg.MCP.Heat.On() {
+			heat := agent.NewReadObserver(agentStore)
+			d.ReadHeat = heat
+			fsys.SetReadObserver(func(ctx context.Context, ino uint64) {
+				kind := readerKind(ctx)
+				if kind == "" {
+					return
+				}
+				if p, err := fsys.Meta().Path(ctx, ino); err == nil {
+					heat.Observe(p, kind)
+				}
+			})
+			go heat.Run(retentionCtx, 0)
+			go agentStore.RunReadHeatRetention(retentionCtx, cfg.MCP.Heat.Retention(), 24*time.Hour)
+		}
 		d.closers = append(d.closers, func() error { stopRetention(); return nil })
 	}
 
@@ -633,8 +636,12 @@ func (d *Daemon) Collector() *control.Collector {
 	// both nil interfaces stay nil without a store or an owner.
 	if d.Agent != nil {
 		col.HookStore = d.Agent
-		col.HeatStore = d.Agent
 		col.Changes = d.Agent
+		// With mcp.heat.enabled false nothing is recorded, and the heat
+		// routes say disabled rather than show an empty table.
+		if d.Config.MCP.Heat.On() {
+			col.HeatStore = d.Agent
+		}
 	}
 	if d.ReadHeat != nil {
 		col.ReadHeat = d.ReadHeat
