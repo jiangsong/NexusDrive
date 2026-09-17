@@ -531,3 +531,11 @@ func wrap(p Provider, s *Stats, maxConns int) Provider {
 	}
 	return wrapped
 }
+
+// SharerOf is the Sharer behind p, through any instrumentation, or false.
+// Sharing is a rare, person-confirmed call, so it is not counted the way
+// the data path is; the driver is reached directly.
+func SharerOf(p Provider) (Sharer, bool) {
+	s, ok := Unwrap(p).(Sharer)
+	return s, ok && p.Capabilities().Share
+}

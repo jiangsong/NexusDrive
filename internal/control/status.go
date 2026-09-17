@@ -264,7 +264,12 @@ type Collector struct {
 	HeatStore HeatStore
 	// Changes serves GET /changes; nil answers {"enabled": false}.
 	Changes ChangeStore
-	Now     func() time.Time
+	// RenderLinks and RenderBase serve POST /share/render-link: the token
+	// table of the LAN render service and its base URL; nil / "" when
+	// share.render is off, and the route says so.
+	RenderLinks *RenderLinks
+	RenderBase  string
+	Now         func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value

@@ -65,6 +65,10 @@ type Daemon struct {
 	// (docs/agent-first-design.md §6.3); the VFS reports inodes to it at
 	// most once per ten minutes each, and the owner flushes it to agent.db.
 	ReadHeat *agent.ReadObserver
+	// RenderLinks is the LAN render page's token table (share.render);
+	// RenderBase its base URL. Both empty when the service is off.
+	RenderLinks *control.RenderLinks
+	RenderBase  string
 	// Trigger runs the triggers[] and agents[] rules over the change
 	// stream. Only the owner of agent.db with background work enabled
 	// builds one, and only when the config has a rule or an agent; every
@@ -649,6 +653,9 @@ func (d *Daemon) Collector() *control.Collector {
 	}
 	// The agent-client hooks read the change record and report reads;
 	// both nil interfaces stay nil without a store or an owner.
+	if d.RenderLinks != nil {
+		col.RenderLinks, col.RenderBase = d.RenderLinks, d.RenderBase
+	}
 	if d.Agent != nil {
 		col.HookStore = d.Agent
 		col.Changes = d.Agent

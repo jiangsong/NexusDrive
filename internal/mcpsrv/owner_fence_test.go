@@ -108,6 +108,9 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"memory_get":          {"name": "style"},
 		"memory_search":       {"query": "style"},
 		"memory_merge":        {"name": "style"},
+		// share is a remote call from the caller's own provider client,
+		// not a write to the mount; it is not fenced.
+		"share": {"path": "/work/a.txt"},
 	}
 
 	tools, err := e.session.ListTools(ctx, nil)

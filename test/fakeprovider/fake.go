@@ -76,6 +76,7 @@ type upload struct {
 
 // Fake is the in-memory provider.
 type Fake struct {
+	shares map[string]string
 	name string
 	caps provider.Caps
 
@@ -143,6 +144,7 @@ func New(name string) *Fake {
 			Delta:           true,
 			LinkTTL:         15 * time.Minute,
 			LinkShareable:   true,
+			Share:           true,
 			QPS:             provider.QPS{Meta: 10, Download: 10, Upload: 5},
 			MaxConnsPerHost: 8,
 			Tier:            provider.TierOfficial,
@@ -1010,4 +1012,51 @@ func (f *Fake) IDOf(path string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lookupLocked(path)
+}
+
+// CreateShare hands out a public link for id (provider.Sharer): the
+// share tool's one remote call, counted under "CreateShare".
+func (f *Fake) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	if err := f.enter(ctx, "CreateShare"); err != nil {
+		return provider.Share{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.nodes[id]; !ok {
+		return provider.Share{}, provider.ErrNotFound
+	}
+	sh := provider.Share{ID: "share-" + id, URL: "https://fake.example/s/" + id, Code: opt.Code}
+	if opt.Expires > 0 {
+		sh.ExpiresAt = time.Now().Add(opt.Expires)
+	}
+	if f.shares == nil {
+		f.shares = map[string]string{}
+	}
+	f.shares[sh.ID] = id
+	return sh, nil
+}
+
+// RevokeShare forgets a link.
+func (f *Fake) RevokeShare(ctx context.Context, shareID string) error {
+	if err := f.enter(ctx, "RevokeShare"); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.shares[shareID]; !ok {
+		return provider.ErrNotFound
+	}
+	delete(f.shares, shareID)
+	return nil
+}
+
+// Shares lists the live share ids, for tests.
+func (f *Fake) Shares() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.shares))
+	for id := range f.shares {
+		out = append(out, id)
+	}
+	return out
 }

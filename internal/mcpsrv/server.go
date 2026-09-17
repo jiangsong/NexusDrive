@@ -86,6 +86,13 @@ type Options struct {
 	// unregistered: a server with no export queue behind it should not
 	// advertise a tool it cannot run.
 	Export ExportJobs
+	// ConsoleURL is the control plane's HTTP address ("http://127.0.0.1:9101")
+	// when console links are on: artifacts carry console_url and the share
+	// tool names the render page. "" leaves them out.
+	ConsoleURL string
+	// ShareExpiry is the public link lifetime the share tool uses when the
+	// caller names none; zero means share.DefaultExpiry.
+	ShareExpiry time.Duration
 	// ExportRoots bounds where an export may write on this machine. An empty
 	// list refuses every destination, which is the safe default for a server
 	// whose configuration says nothing about it.
@@ -301,6 +308,7 @@ func New(opt Options) (*Server, error) {
 	s.registerHistoryTool()
 	s.registerPullEvents()
 	s.registerHotPaths()
+	s.registerShareTool()
 	s.registerCopyTools()
 	s.registerUploadTools()
 	s.registerExportTools()

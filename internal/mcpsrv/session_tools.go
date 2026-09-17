@@ -247,7 +247,7 @@ func (s *Server) collectArtifacts(ctx context.Context, paths []string, share boo
 		if err != nil || attr.IsDir {
 			continue
 		}
-		a := agent.Artifact{Path: p, URI: s.uriOf(p), Size: attr.Size, State: "synced"}
+		a := agent.Artifact{Path: p, URI: s.uriOf(p), Size: attr.Size, State: "synced", ConsoleURL: agent.ConsoleURL(s.opt.ConsoleURL, p)}
 		if attr.LocalOnly {
 			a.State = "local"
 		}

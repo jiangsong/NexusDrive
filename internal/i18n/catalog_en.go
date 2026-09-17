@@ -177,6 +177,7 @@ var en = map[string]string{
 	"err.member_holds_copies":           "the member still holds copies; let the drain finish first",
 	"err.method_not_allowed":            "method not allowed",
 	"err.move_into_self":                "cannot move a directory into itself",
+	"err.render_disabled":               "the LAN render page is off; set share.render.enabled: true",
 	"err.no_config":                     "this daemon has no configuration file",
 	"err.no_config_for_remote":          "this daemon has no configuration file to add a remote to",
 	"err.no_config_to_write":            "this daemon has no config file to write to",
@@ -220,6 +221,7 @@ var en = map[string]string{
 	// Confirmation prompts: what the caller is about to allow.
 	"confirm.remove_account": "removes the account from the configuration",
 	"confirm.doctor_fix":     "runs journal recovery, purges completed uploads and evicts from the cache",
+	"confirm.share":          "creates a public link to %s that anyone with the link can open and that cannot be taken back from here",
 	"confirm.delete_path":    "deletes %s on the remote as well",
 	"confirm.restart_daemon": "detaches the mount and restarts the daemon",
 	"confirm.export_mirror":  "lets the export delete everything in the destination directory that it did not put there",
@@ -287,17 +289,17 @@ var en = map[string]string{
 
 	// Agent memory routes (T-40). The store's own sentences carry the
 	// specifics; these wrap them.
-	"err.memory_disabled":   "the agent memory store is not available in this process",
-	"err.memory_no_root":    "memory.root is not configured; set memory.root (or mcp.workspace) to a directory inside mcp.allow",
-	"err.memory_bad_name":   "%v",
-	"err.memory_not_found":  "%v",
-	"err.memory_too_large":  "%v",
-	"err.memory_bad_mode":   "mode must be replace or append",
-	"err.memory_no_index":   "memory search needs the content index, but index.enabled: false; enable it in the configuration",
-	"err.memory_failed":     "the memory store could not answer: %v",
-	"confirm.memory.migrate":          "moves every agent memory directory under owner %s (memory layout v2), on the drive; every device sees the new layout",
-	"err.memory.no_conflict":         "this memory has no conflict copy to merge",
-	"confirm.memory.delete": "deletes memory %s/%s and its MEMORY.md line, on the remote too",
+	"err.memory_disabled":    "the agent memory store is not available in this process",
+	"err.memory_no_root":     "memory.root is not configured; set memory.root (or mcp.workspace) to a directory inside mcp.allow",
+	"err.memory_bad_name":    "%v",
+	"err.memory_not_found":   "%v",
+	"err.memory_too_large":   "%v",
+	"err.memory_bad_mode":    "mode must be replace or append",
+	"err.memory_no_index":    "memory search needs the content index, but index.enabled: false; enable it in the configuration",
+	"err.memory_failed":      "the memory store could not answer: %v",
+	"confirm.memory.migrate": "moves every agent memory directory under owner %s (memory layout v2), on the drive; every device sees the new layout",
+	"err.memory.no_conflict": "this memory has no conflict copy to merge",
+	"confirm.memory.delete":  "deletes memory %s/%s and its MEMORY.md line, on the remote too",
 
 	// Send to agent: the console hands this prompt to the person to paste
 	// into their own MCP client. Each sentence names a tool the daemon

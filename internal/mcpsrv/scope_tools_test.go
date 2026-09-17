@@ -142,6 +142,7 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"history":          {"path": "/gd/x.txt"},
 		"pull_events":      {"path": "/gd"},
 		"hot_paths":        {"path": "/gd"},
+		"share":            {"path": "/gd/x.txt", "confirm": true},
 		"stat":             {"path": "/gd/x.txt"},
 		"stat_many":        {"paths": []string{"/gd/x.txt"}},
 		"read_text":        {"path": "/gd/x.txt"},

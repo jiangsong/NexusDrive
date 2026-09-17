@@ -740,6 +740,17 @@ func cmdMCP(ctx context.Context, args []string) error {
 	defer d.Close()
 	// An MCP-only owner needs the same native management surface as a
 	// mounted owner. Do not emit control status on the MCP stdio transport.
+	// The LAN render page (share.render): started before the control
+	// plane so its base URL is in the collector the console reads.
+	if cfg.Share.Render.Enabled && d.Journal != nil && d.Journal.Owner() {
+		links := control.NewRenderLinks(cfg.Share.Render.TokenTTL)
+		addr, err := control.NewRenderService(links, d.FS).Start(ctx, cfg.Share.Render.Listen)
+		if err != nil {
+			return fmt.Errorf("share.render: %w", err)
+		}
+		d.RenderLinks, d.RenderBase = links, "http://"+lanAddr(addr)
+		fmt.Fprintf(os.Stderr, "  render page on %s (links are one-time, %s)\n", d.RenderBase, cfg.Share.Render.TokenTTL)
+	}
 	if d.Journal != nil && d.Journal.Owner() && (cfg.Control.Socket != "" || cfg.Control.Metrics != "") {
 		srv := control.NewServer(d.Collector())
 		if cfg.Control.UI {
@@ -805,6 +816,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		Sessions: d.Sessions, NonOwner: nonOwner, Workspace: cfg.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory, Agent: f.str("agent", ""),
 		Limits: mcpLimits(cfg), PreimageFiles: cfg.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d), HeatOff: !cfg.MCP.Heat.On(),
+		ConsoleURL: consoleURLOf(cfg), ShareExpiry: cfg.Share.DefaultExpiry,
 		Bridge: bridge,
 	})
 	if err != nil {
@@ -904,6 +916,7 @@ func serveMCPHTTPWith(ctx context.Context, d *daemon.Daemon, allow []string, rea
 		Sessions: d.Sessions, Workspace: d.Config.MCP.Workspace,
 		Index: indexOf(d), Preimages: d.Preimages, Memory: d.Memory,
 		Limits: mcpLimits(d.Config), PreimageFiles: d.Config.MCP.Session.PreimageFiles, ReadObserver: readObserverOf(d), HeatOff: !d.Config.MCP.Heat.On(),
+		ConsoleURL: consoleURLOf(d.Config), ShareExpiry: d.Config.Share.DefaultExpiry,
 	})
 	if err != nil {
 		return err
@@ -1400,4 +1413,36 @@ func cmdBench(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+// consoleURLOf is the console's HTTP address for links (control.metrics
+// with the UI on), "" when there is no console or share.console_links is
+// off. A wildcard bind is rendered as loopback: the link is for this
+// machine's browser.
+func consoleURLOf(cfg *config.Config) string {
+	if cfg == nil || !cfg.Share.ConsoleLinksOn() || cfg.Control.Metrics == "" || !cfg.Control.UI {
+		return ""
+	}
+	addr := cfg.Control.Metrics
+	if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
+		addr = net.JoinHostPort("127.0.0.1", port)
+	}
+	return "http://" + addr
+}
+
+// lanAddr renders a listen address for a link another machine follows:
+// a wildcard bind becomes this machine's first non-loopback IPv4.
+func lanAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || (host != "" && host != "0.0.0.0" && host != "::") {
+		return addr
+	}
+	if ifaces, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range ifaces {
+			if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && ipn.IP.To4() != nil {
+				return net.JoinHostPort(ipn.IP.String(), port)
+			}
+		}
+	}
+	return net.JoinHostPort("127.0.0.1", port)
 }

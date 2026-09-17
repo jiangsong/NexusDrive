@@ -796,3 +796,53 @@ func (f *FS) OpenLocal(h *Handle) (*cache.WholeFile, error) {
 	}
 	return f.cache.OpenWhole(h.fileKey())
 }
+
+// ShareTarget is what the share tool needs to know about a file before
+// it asks the provider for a public link (docs/agent-first-design.md
+// §8.2): whether it is on the drive at all, how much of it the cache
+// holds (the credential scan reads only what is cached), and the
+// provider's Sharer with the remote id. Zero provider calls.
+type ShareTarget struct {
+	Path     string
+	Remote   string
+	RemoteID string
+	Size     int64
+	// Synced is false while the file exists only locally.
+	Synced bool
+	// Cached is the fraction of the file the block cache holds.
+	Cached float64
+	Sharer provider.Sharer
+}
+
+// ErrNoShare says the mount's provider cannot create public links.
+var ErrNoShare = errors.New("vfs: this remote cannot create public links")
+
+// ShareTargetOf resolves p for sharing.
+func (f *FS) ShareTargetOf(ctx context.Context, p string) (ShareTarget, error) {
+	n, err := f.resolve(ctx, p)
+	if err != nil {
+		return ShareTarget{}, err
+	}
+	if n.IsDir() {
+		return ShareTarget{}, ErrIsDir
+	}
+	m, _, err := f.MountForIno(ctx, n.Ino)
+	if err != nil {
+		return ShareTarget{}, err
+	}
+	t := ShareTarget{Path: path.Clean("/" + p), Remote: m.Remote, RemoteID: n.RemoteID, Size: n.Size, Synced: !IsLocalOnly(n.RemoteID)}
+	if t.Synced && n.Size > 0 {
+		have, total := f.cache.Present(cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version})
+		if total > 0 {
+			t.Cached = float64(have) / float64(total)
+		}
+	} else if n.Size == 0 {
+		t.Cached = 1
+	}
+	sh, ok := provider.SharerOf(m.Provider)
+	if !ok {
+		return t, ErrNoShare
+	}
+	t.Sharer = sh
+	return t, nil
+}

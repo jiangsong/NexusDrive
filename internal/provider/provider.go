@@ -152,6 +152,9 @@ type Caps struct {
 	LinkTTL       time.Duration
 	LinkHeaders   map[string]string
 	LinkShareable bool
+	// Share is true when the backend implements Sharer: it can hand out a
+	// public link to a file that outlives any signed download URL.
+	Share bool
 
 	QPS             QPS
 	MaxConnsPerHost int
@@ -216,6 +219,32 @@ type SinglePutter interface {
 // ServerCopier is implemented by backends that can copy server-side.
 type ServerCopier interface {
 	Copy(ctx context.Context, id, newParentID, newName string) (Entry, error)
+}
+
+// ShareOptions tunes CreateShare.
+type ShareOptions struct {
+	// Expires is how long the link lives; zero is the backend's default,
+	// and a backend that cannot expire a link says so in Share.ExpiresAt.
+	Expires time.Duration
+	// Code, when set, is the extraction code a viewer must type (国内网盘
+	// 提取码); a backend without codes ignores it.
+	Code string
+}
+
+// Share is a public link a backend created.
+type Share struct {
+	ID        string
+	URL       string
+	Code      string
+	ExpiresAt time.Time
+}
+
+// Sharer is implemented by backends that can create public links
+// (docs/agent-first-design.md §8.2, T-55). Every implementation is
+// UNVERIFIED until a real account exercised it; Caps.Share advertises it.
+type Sharer interface {
+	CreateShare(ctx context.Context, id string, opt ShareOptions) (Share, error)
+	RevokeShare(ctx context.Context, shareID string) error
 }
 
 // Sentinel errors. Backends wrap these so internal/net/retry can classify

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"net/url"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -733,4 +734,18 @@ func WithSession(ctx context.Context, s Session) context.Context {
 func FromContext(ctx context.Context) (Session, bool) {
 	s, ok := ctx.Value(sessionContextKey{}).(Session)
 	return s, ok
+}
+
+// ConsoleURL is the console's render page for a mount path under base
+// (the control plane's HTTP address, "http://127.0.0.1:9101"); "" when
+// there is no console.
+func ConsoleURL(base, p string) string {
+	if base == "" {
+		return ""
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return strings.TrimRight(base, "/") + "/#/fs/" + strings.Join(segs, "/")
 }

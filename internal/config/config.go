@@ -638,6 +638,7 @@ type Config struct {
 	Triggers   []Trigger         `yaml:"triggers"`
 	Agents     []Agent           `yaml:"agents"`
 	Hooks      Hooks             `yaml:"hooks"`
+	Share      Share             `yaml:"share"`
 	// Warnings collects what Validate accepted but would rather not have:
 	// settings that work and are probably not what was meant. It is reset on
 	// every Validate; mount and doctor print it.
@@ -779,6 +780,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MCP.validateAgent(); err != nil {
+		return err
+	}
+	if err := c.Share.validate(); err != nil {
 		return err
 	}
 	if err := c.Hooks.validate(); err != nil {
@@ -1025,4 +1029,60 @@ func ExpandHome(p string) string {
 		}
 	}
 	return p
+}
+
+// Share shapes the sharing surface (docs/agent-first-design.md §8, T-55):
+// console links in artifacts and hook context, and the LAN render page.
+type Share struct {
+	// ConsoleLinks is nil or true to put http://<control.metrics>/#/fs/<path>
+	// links into finish_session artifacts and the full hook context; false
+	// leaves them out.
+	ConsoleLinks *bool `yaml:"console_links"`
+	// Render is the read-only render service for people on the LAN
+	// without CloudFS.
+	Render ShareRender `yaml:"render"`
+	// DefaultExpiry is the public link lifetime the share tool uses when
+	// the caller names none; zero means 168h.
+	DefaultExpiry time.Duration `yaml:"default_expiry"`
+}
+
+// ShareRender is share.render.
+type ShareRender struct {
+	Enabled bool `yaml:"enabled"`
+	// Listen is the address of the render service; empty means
+	// 0.0.0.0:9102 when enabled.
+	Listen string `yaml:"listen"`
+	// TokenTTL is how long a render link is valid; zero means 1h. A link
+	// is one file, read-only, and carries a token that is not any
+	// provider credential.
+	TokenTTL time.Duration `yaml:"token_ttl"`
+}
+
+// ConsoleLinksOn says console links are on.
+func (s Share) ConsoleLinksOn() bool { return s.ConsoleLinks == nil || *s.ConsoleLinks }
+
+// Default lifetimes.
+const (
+	DefaultShareExpiry    = 168 * time.Hour
+	DefaultRenderTokenTTL = time.Hour
+	DefaultRenderListen   = "0.0.0.0:9102"
+)
+
+func (s *Share) validate() error {
+	if s.DefaultExpiry < 0 {
+		return fmt.Errorf("config: share.default_expiry must not be negative")
+	}
+	if s.DefaultExpiry == 0 {
+		s.DefaultExpiry = DefaultShareExpiry
+	}
+	if s.Render.TokenTTL < 0 {
+		return fmt.Errorf("config: share.render.token_ttl must not be negative")
+	}
+	if s.Render.TokenTTL == 0 {
+		s.Render.TokenTTL = DefaultRenderTokenTTL
+	}
+	if s.Render.Enabled && s.Render.Listen == "" {
+		s.Render.Listen = DefaultRenderListen
+	}
+	return nil
 }

@@ -176,6 +176,7 @@ var zh = map[string]string{
 	"err.member_holds_copies":           "这个成员还有副本；先等迁出完成",
 	"err.method_not_allowed":            "不支持这个方法",
 	"err.move_into_self":                "不能把目录移动到它自己里面",
+	"err.render_disabled":               "局域网渲染页未开启；设置 share.render.enabled: true",
 	"err.no_config":                     "这个守护进程没有配置文件",
 	"err.no_config_for_remote":          "这个守护进程没有可以添加网盘的配置文件",
 	"err.no_config_to_write":            "这个守护进程没有可写入的配置文件",
@@ -219,6 +220,7 @@ var zh = map[string]string{
 	// Confirmation prompts: what the caller is about to allow.
 	"confirm.remove_account": "把这个账号从配置里移除",
 	"confirm.doctor_fix":     "跑日志恢复、清理已完成的上传、回收缓存",
+	"confirm.share":          "为 %s 创建公开链接，任何拿到链接的人都能打开，且无法从这里撤回",
 	"confirm.delete_path":    "连远端上的 %s 一起删除",
 	"confirm.restart_daemon": "卸下挂载点并重启守护进程",
 	"confirm.export_mirror":  "让导出删掉目标目录里不是它放进去的东西",
@@ -284,17 +286,17 @@ var zh = map[string]string{
 	"doctor.embedding.remote.fix":       "若非有意，把 index.embedding.provider 设为 none，或把 base_url 指向本机端点",
 
 	// Agent 记忆库路由（T-40）。具体信息由存储自己的句子给出，这里只做包装。
-	"err.memory_disabled":   "本进程没有 Agent 记忆库",
-	"err.memory_no_root":    "未配置 memory.root；把 memory.root（或 mcp.workspace）设为 mcp.allow 内的一个目录",
-	"err.memory_bad_name":   "%v",
-	"err.memory_not_found":  "%v",
-	"err.memory_too_large":  "%v",
-	"err.memory_bad_mode":   "mode 只能是 replace 或 append",
-	"err.memory_no_index":   "记忆检索需要内容索引，但 index.enabled: false；请在配置里启用",
-	"err.memory_failed":     "记忆库无法应答：%v",
-	"confirm.memory.migrate":          "把每个 agent 的记忆目录移到所有者 %s 之下（记忆布局 v2），发生在网盘上，所有设备都会看到新布局",
-	"err.memory.no_conflict":         "这条记忆没有可合并的冲突副本",
-	"confirm.memory.delete": "删除记忆 %s/%s 及其 MEMORY.md 行，远端也一并删除",
+	"err.memory_disabled":    "本进程没有 Agent 记忆库",
+	"err.memory_no_root":     "未配置 memory.root；把 memory.root（或 mcp.workspace）设为 mcp.allow 内的一个目录",
+	"err.memory_bad_name":    "%v",
+	"err.memory_not_found":   "%v",
+	"err.memory_too_large":   "%v",
+	"err.memory_bad_mode":    "mode 只能是 replace 或 append",
+	"err.memory_no_index":    "记忆检索需要内容索引，但 index.enabled: false；请在配置里启用",
+	"err.memory_failed":      "记忆库无法应答：%v",
+	"confirm.memory.migrate": "把每个 agent 的记忆目录移到所有者 %s 之下（记忆布局 v2），发生在网盘上，所有设备都会看到新布局",
+	"err.memory.no_conflict": "这条记忆没有可合并的冲突副本",
+	"confirm.memory.delete":  "删除记忆 %s/%s 及其 MEMORY.md 行，远端也一并删除",
 
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。
 	// 每一句对应守护进程真的提供的一个工具；没有的功能不提。
