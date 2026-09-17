@@ -1,9 +1,10 @@
 import { api } from '/ui/api.js';
-import { el, fill, toast, bytes, openForm, moreRow } from '/ui/ui.js';
+import { el, fill, toast, bytes, openForm, moreRow, confirmDelete } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
 import { pageCursor, pageFailureMode } from '/ui/paged.js';
 import { isValidName, copiesOf } from '/ui/memory_conflicts.js';
 import { openMemoryEditor, openConflictOverlay, factURL } from '/ui/memory_panel.js';
+import { groupByOwner } from '/ui/memory_layout_view.js';
 
 // The memory tab (docs/ui-plan.md F7, TODO.md T-40): what each agent has
 // written under memory.root, one agent at a time. The left column is GET
@@ -44,8 +45,11 @@ export function renderMemoryTab(host, params) {
   let selected = (params && params.get('agent')) || '';
   let searching = false;
   let wanted = (params && params.get('memory')) || '';
+  let layout = 'v1';
+  let owner = '';
 
   const agentList = el('div', { style: 'display:grid;gap:4px' });
+  const layoutRow = el('div', { class: 'row', style: 'gap:8px;align-items:center;margin-top:8px', 'data-layout': '' });
   const rows = el('tbody');
   const table = el('div', { class: 'panel', style: 'overflow:auto' },
     el('table', {}, el('thead', {}, el('tr', {},
@@ -95,8 +99,34 @@ export function renderMemoryTab(host, params) {
       t('memory.facts.count', String(a.facts || 0)) + ' · ' + t('memory.usage', bytes(a.bytes || 0), bytes(a.max_bytes || 0))));
   }
 
+  // In layout v2 the list groups by owner (me first, shared last); in v1
+  // there is one group and a button that moves the tree to v2 — a typed
+  // confirmation, then POST /memory/migrate, done by the daemon on the
+  // drive (ui-plan G9-1).
   function fillAgents() {
-    fill(agentList, agents.length ? agents.map(agentItem) : el('div', { class: 'dim', style: 'font-size:12.5px;padding:6px 2px' }, t('memory.agents.empty')));
+    const groups = groupByOwner(agents, layout, owner);
+    const items = [];
+    for (const g of groups) {
+      if (layout === 'v2') items.push(el('div', { class: 'eyebrow', 'data-owner-group': g.owner, style: 'margin:6px 0 2px' }, g.owner ? (g.owner === owner ? t('memory.owner.me', g.owner) : g.owner) : t('memory.owner.shared')));
+      items.push(...g.agents.map(agentItem));
+    }
+    fill(agentList, items.length ? items : el('div', { class: 'dim', style: 'font-size:12.5px;padding:6px 2px' }, t('memory.agents.empty')));
+    fill(layoutRow,
+      el('span', { class: 'dim', style: 'font-size:12px' }, t('memory.layout', layout)),
+      layout === 'v1' ? el('button', { style: 'font-size:12px', 'data-migrate': '', onclick: migrate }, t('memory.migrate')) : null);
+  }
+
+  async function migrate() {
+    const ok = await confirmDelete({
+      title: t('memory.migrate.title'), body: t('memory.migrate.body', owner),
+      confirmToken: 'migrate', confirmLabel: t('memory.migrate'), danger: false,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.post('/memory/migrate', { confirm: true });
+      toast(t('memory.migrate.done', String((r.moved || []).length), r.owner || owner));
+    } catch (err) { toast(err.message, 'bad'); return; }
+    loadAgents();
   }
 
   function select(name) {
@@ -123,6 +153,8 @@ export function renderMemoryTab(host, params) {
     }
     agents = r.agents || [];
     maxFactBytes = Number(r.max_fact_bytes) || 0;
+    layout = r.layout === 'v2' ? 'v2' : 'v1';
+    owner = r.owner || '';
     if (!agents.some((a) => a.name === selected)) selected = agents.length ? agents[0].name : '';
     fillAgents();
     if (!searching) loadFacts();
@@ -270,7 +302,8 @@ export function renderMemoryTab(host, params) {
     el('div', { style: 'display:grid;grid-template-columns:220px minmax(0,1fr);gap:16px;padding:0 20px 20px;align-items:start' },
       el('div', {},
         el('div', { class: 'eyebrow', style: 'margin-bottom:8px' }, t('memory.agents')),
-        agentList),
+        agentList,
+        layoutRow),
       el('div', {}, table, results)));
 
   loadAgents();

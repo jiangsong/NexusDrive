@@ -1,6 +1,8 @@
 package control
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -30,8 +32,10 @@ func TestMemorySaveCarriesExpectedVersion(t *testing.T) {
 			t.Errorf("the editor's save lacks %s", want)
 		}
 	}
-	if !strings.Contains(src, "export function factURL(") || !strings.Contains(src, "'/memory/' + encodeURIComponent(agent) + '/' + encodeURIComponent(name)") {
-		t.Error("memory_panel.js does not build the fact URL from the encoded agent and name")
+	// The agent key may be owner/agent (layout v2): each segment is
+	// encoded on its own, so the slash stays a path separator.
+	if !strings.Contains(src, "export function factURL(") || !strings.Contains(src, "String(agent).split('/').map(encodeURIComponent).join('/') + '/' + encodeURIComponent(name)") {
+		t.Error("memory_panel.js does not build the fact URL from the encoded agent segments and name")
 	}
 	// A 409 is answered with a reload of the fact, not a second put.
 	reload := funcBody(t, src, "reload")
@@ -194,6 +198,57 @@ func TestMemoryModulesStayShort(t *testing.T) {
 	for _, name := range []string{"web/memory_conflicts.js", "web/memory_panel.js", "web/screens/agents_memory.js", "web/screens/agents.js"} {
 		if n := strings.Count(webSource(t, name), "\n"); n >= 800 {
 			t.Errorf("%s is %d lines; split it", name, n)
+		}
+	}
+}
+
+// TestMemoryTabGroupsByOwnerAndMigrates (ui-plan G9): in layout v2 the
+// agent list groups by owner through groupByOwner (a module with no DOM,
+// under node), the v1 list carries the "move to v2" button whose typed
+// confirmation is the word migrate and whose only write is POST
+// /memory/migrate with confirm; the conflict overlay asks GET
+// /memory/merge for a proposal, draws it through mergeRows, and adopts it
+// with a put carrying both versions before deleting the copy.
+func TestMemoryTabGroupsByOwnerAndMigrates(t *testing.T) {
+	view := webSource(t, "web/memory_layout_view.js")
+	if strings.Contains(view, "import ") {
+		t.Error("memory_layout_view.js imports; it must run under node with no DOM")
+	}
+	for _, want := range []string{"export function groupByOwner(agents, layout, me)", "export function mergeRows(merged)", "export function adoptable(res)", "line.startsWith('<<<<<<<')", "line === '======='"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("memory_layout_view.js lacks %s", want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join("web", "_tests", "memory_layout_view.test.mjs")); err != nil {
+		t.Fatalf("the node suite for memory_layout_view.js is missing: %v", err)
+	}
+	tab := webSource(t, "web/screens/agents_memory.js")
+	for _, want := range []string{"import { groupByOwner } from '/ui/memory_layout_view.js'", "groupByOwner(agents, layout, owner)", "'data-owner-group': g.owner", "t('memory.owner.me', g.owner)", "t('memory.layout', layout)", "'data-migrate': ''", "confirmToken: 'migrate'", "api.post('/memory/migrate', { confirm: true })", "layout = r.layout === 'v2' ? 'v2' : 'v1'"} {
+		if !strings.Contains(tab, want) {
+			t.Errorf("agents_memory.js lacks %s", want)
+		}
+	}
+	migrate := funcBody(t, tab, "migrate")
+	if !strings.Contains(migrate, "confirmDelete({") || strings.Count(migrate, "api.post(") != 1 {
+		t.Errorf("migrate must confirm once and post once:\n%s", migrate)
+	}
+	panel := webSource(t, "web/memory_panel.js")
+	for _, want := range []string{"import { mergeRows, adoptable } from '/ui/memory_layout_view.js'", "api.get('/memory/merge?agent=' + encodeURIComponent(agent)", "mergeRows(res.merged).map(", "'data-conflict-block'", "adoptBtn.disabled = !adoptable(res)", "expected_remote_version: proposed.remote_version || ''", "expected_version: proposed.version || ''", "'data-adopt-merge'", "'data-propose'"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("memory_panel.js lacks %s", want)
+		}
+	}
+	adopt := funcBody(t, panel, "adopt")
+	if !strings.Contains(adopt, "if (!adoptable(proposed)) return") || !strings.Contains(adopt, "confirmDelete({") || strings.Index(adopt, "api.put(") > strings.Index(adopt, "api.post('/fs/delete'") {
+		t.Errorf("adopt must refuse an unclean proposal, confirm, put, then delete the copy:\n%s", adopt)
+	}
+	src := webI18nSource(t)
+	for _, lang := range []string{"zh", "en"} {
+		keys := tableKeys(t, src, lang)
+		for _, k := range []string{"memory.layout", "memory.migrate", "memory.migrate.title", "memory.migrate.body", "memory.migrate.done", "memory.owner.me", "memory.owner.shared", "memory.propose", "memory.adopt", "memory.adopt.title", "memory.adopt.body", "memory.proposal.clean", "memory.proposal.conflicts"} {
+			if !keys[k] {
+				t.Errorf("%s lacks %s", lang, k)
+			}
 		}
 	}
 }

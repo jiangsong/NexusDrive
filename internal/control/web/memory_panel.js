@@ -2,6 +2,7 @@ import { api } from '/ui/api.js';
 import { el, fill, toast, openPanel, confirmDelete } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { copiesOf, byteCount, splitFrontmatter, mergeDraft } from '/ui/memory_conflicts.js';
+import { mergeRows, adoptable } from '/ui/memory_layout_view.js';
 
 // The two overlays of the memory tab (docs/ui-plan.md F7-2 and F7-4,
 // TODO.md T-40): the editor for one fact, and the side-by-side view of a
@@ -32,7 +33,8 @@ const PRE_STYLE = 'margin:0;max-height:45vh;overflow:auto;white-space:pre-wrap;w
 // factURL is GET|PUT|DELETE /memory/{agent}/{name}, with both segments
 // encoded even though the grammar allows nothing that needs it.
 export function factURL(agent, name) {
-  return '/memory/' + encodeURIComponent(agent) + '/' + encodeURIComponent(name);
+  // An agent key is owner/agent in memory layout v2: two path segments.
+  return '/memory/' + String(agent).split('/').map(encodeURIComponent).join('/') + '/' + encodeURIComponent(name);
 }
 
 function labelled(label, control) {
@@ -206,6 +208,63 @@ export async function openConflictOverlay({ agent, name, fact, maxBytes = 0, onC
   const copyPath = el('code', { class: 'detail', style: 'font-size:12px;word-break:break-all' });
   const useBtn = el('button', { disabled: true, onclick: () => useCopy() }, t('memory.use_copy'));
   const mergeBtn = el('button', { disabled: true, onclick: () => mergeByHand() }, t('memory.merge'));
+  // The daemon's proposal (GET /memory/merge, the memory_merge tool): the
+  // lines both sides agree on and the blocks they do not, drawn from
+  // mergeRows; adopting it is a put with the versions the proposal names,
+  // then the copy goes.
+  const proposeBtn = el('button', { disabled: true, 'data-propose': '', onclick: () => propose() }, t('memory.propose'));
+  const adoptBtn = el('button', { class: 'primary', disabled: true, 'data-adopt-merge': '', onclick: () => adopt() }, t('memory.adopt'));
+  const proposal = el('div', { 'data-proposal': '', style: 'display:none' });
+  let proposed = null;
+
+  async function propose() {
+    proposeBtn.disabled = true;
+    let res;
+    try {
+      res = await api.get('/memory/merge?agent=' + encodeURIComponent(agent) + '&name=' + encodeURIComponent(name) + '&conflict=' + encodeURIComponent(copy));
+    } catch (err) {
+      toast(err.message, 'bad');
+      proposeBtn.disabled = false;
+      return;
+    }
+    proposed = res;
+    proposal.style.display = '';
+    fill(proposal,
+      el('div', { class: 'eyebrow', style: 'margin:6px 0' }, t(res.clean ? 'memory.proposal.clean' : 'memory.proposal.conflicts', String(res.conflicts || 0))),
+      el('div', { style: PRE_STYLE }, ...mergeRows(res.merged).map((r) => r.kind === 'line'
+        ? el('div', {}, r.text)
+        : el('div', { class: 'banner warn', 'data-conflict-block': '', style: 'margin:4px 0' },
+          el('div', { class: 'dim', style: 'font-size:11px' }, t('memory.mine')), ...r.ours.map((l) => el('div', {}, l)),
+          el('div', { class: 'dim', style: 'font-size:11px;margin-top:4px' }, t('memory.copy')), ...r.theirs.map((l) => el('div', {}, l))))));
+    adoptBtn.disabled = !adoptable(res);
+    proposeBtn.disabled = false;
+  }
+
+  async function adopt() {
+    if (!adoptable(proposed)) return;
+    const ok = await confirmDelete({
+      title: t('memory.adopt.title'), body: t('memory.adopt.body', copy),
+      confirmToken: name, confirmLabel: t('memory.adopt'), danger: false,
+    });
+    if (!ok) return;
+    try {
+      await api.put(factURL(agent, name), {
+        content: proposed.merged.endsWith('\n') ? proposed.merged : proposed.merged + '\n',
+        expected_version: proposed.version || '', expected_remote_version: proposed.remote_version || '',
+      });
+    } catch (err) {
+      toast(err.status === 409 ? t('memory.changed_elsewhere') : err.message, 'bad');
+      return;
+    }
+    try {
+      await api.post('/fs/delete', { path: copy, confirm: true });
+    } catch (err) {
+      toast(err.message, 'bad');
+    }
+    toast(t('memory.copy.used'));
+    if (close) close();
+    if (onChanged) onChanged();
+  }
 
   // readCopy fetches the copy's bytes through the file preview. Its
   // frontmatter, when it has one, is split off so the right pane and the
@@ -228,7 +287,10 @@ export async function openConflictOverlay({ agent, name, fact, maxBytes = 0, onC
     }
     copyText = text;
     fill(theirs, splitFrontmatter(text).body);
-    useBtn.disabled = mergeBtn.disabled = false;
+    useBtn.disabled = mergeBtn.disabled = proposeBtn.disabled = false;
+    proposed = null;
+    proposal.style.display = 'none';
+    adoptBtn.disabled = true;
   }
 
   async function keepMine() {
@@ -305,14 +367,15 @@ export async function openConflictOverlay({ agent, name, fact, maxBytes = 0, onC
       el('div', {},
         el('div', { class: 'eyebrow', style: 'margin-bottom:6px' }, t('memory.copy')),
         el('div', { style: 'display:block;margin-bottom:6px' }, copyPath),
-        theirs)));
+        theirs)),
+    proposal);
   const closePanel = openPanel({
     title: t('memory.resolve.title', name),
     content,
     width: 960,
     footer: el('div', { class: 'row', style: 'margin-top:16px;align-items:center;flex-wrap:wrap' },
       el('button', { class: 'danger', onclick: keepMine }, t('memory.keep_mine')),
-      useBtn, mergeBtn,
+      useBtn, mergeBtn, proposeBtn, adoptBtn,
       el('div', { class: 'grow' }),
       done),
     onEscape: () => close(),

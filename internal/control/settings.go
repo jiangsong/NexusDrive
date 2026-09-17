@@ -55,6 +55,9 @@ type SettingsHooks struct {
 type SettingsMemory struct {
 	Root         string `json:"root,omitempty"`
 	MaxFactBytes int64  `json:"max_fact_bytes"`
+	// Layout is v1 or v2 as the drive is in (the marker, or the
+	// configuration's override); "" without a memory store.
+	Layout string `json:"layout,omitempty"`
 }
 
 // SettingsIndex is the index section: only whether it runs and what it
@@ -82,7 +85,11 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		httpErrorT(w, r, http.StatusServiceUnavailable, "err.no_config")
 		return
 	}
-	writeJSON(w, settingsViewOf(cfg, s.collector.HeatStore != nil))
+	v := settingsViewOf(cfg, s.collector.HeatStore != nil)
+	if s.collector.Memory != nil {
+		v.Memory.Layout = s.collector.Memory.Layout(r.Context())
+	}
+	writeJSON(w, v)
 }
 
 // settingsViewOf projects the configuration onto the whitelist.

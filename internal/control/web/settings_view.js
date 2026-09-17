@@ -94,9 +94,10 @@ export function sections(v) {
       id: 'memory',
       rows: [
         { key: 'settings.memory.root', value: memory.root || '' },
+        { key: 'settings.memory.layout', value: memory.layout || 'v1' },
         { key: 'settings.memory.max_fact_bytes', value: memory.max_fact_bytes || 0, bytes: true },
       ],
-      yaml: yamlBlock('memory', { root: memory.root || '' }),
+      yaml: yamlBlock('memory', { root: memory.root || '', layout: memory.layout || 'v1' }),
     },
     {
       id: 'index',
