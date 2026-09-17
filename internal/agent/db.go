@@ -22,7 +22,7 @@ import (
 )
 
 // schemaVersion is the agent.db layout this build understands.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // dbName is the database file inside the store directory.
 const dbName = "agent.db"
@@ -129,7 +129,15 @@ var schemaV3 = []string{
 // file's current version. Each step is idempotent (IF NOT EXISTS, and an
 // ALTER TABLE ... ADD COLUMN is skipped when the column is there), so a
 // crash between a step and the version write is repaired by the next open.
-var migrations = [][]string{schemaV1, schemaV2, schemaV3}
+// schemaV4 adds the owner of a principal (docs/agent-first-design.md
+// §8.3, T-56): the person a token or a local client acts for, which the
+// memory layout v2 keys agent memories by. Empty means this machine's
+// user (DefaultOwner).
+var schemaV4 = []string{
+	`ALTER TABLE principals ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
+}
+
+var migrations = [][]string{schemaV1, schemaV2, schemaV3, schemaV4}
 
 // addColumnRE matches the one DDL form SQLite cannot make idempotent by
 // itself.

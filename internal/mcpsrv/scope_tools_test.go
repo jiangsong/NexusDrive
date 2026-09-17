@@ -171,6 +171,7 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"memory_put":    {"name": "x", "content": "x"},
 		"memory_delete": {"name": "x", "confirm": true},
 		"memory_search": {"query": "x"},
+		"memory_merge":  {"name": "x"},
 	}
 	// Path-less tools: they take ids or nothing, and filter their results by
 	// scope internally (list_roots, upload/copy/export job listings).

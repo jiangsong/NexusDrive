@@ -20,9 +20,12 @@ type Scope struct {
 // spawned, an environment token, a loopback caller, a named access token, or
 // the console. Only tokens carry a hash; it is never part of the JSON view.
 type Principal struct {
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"` // stdio | env | loopback | token | console
-	Name        string    `json:"name"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"` // stdio | env | loopback | token | console | hook
+	Name string `json:"name"`
+	// Owner is the person this principal acts for — the memory layout v2
+	// keys memories by it; "" means this machine's user (DefaultOwner).
+	Owner       string    `json:"owner,omitempty"`
 	Scope       Scope     `json:"scope"`
 	TokenPrefix string    `json:"fingerprint,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`

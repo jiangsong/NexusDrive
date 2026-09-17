@@ -1,6 +1,7 @@
 package mcpsrv
 
 import (
+	"path"
 	"context"
 	"errors"
 	"fmt"
@@ -44,20 +45,29 @@ type memoryGetInput struct {
 }
 
 type memoryPutInput struct {
-	Name            string `json:"name" jsonschema:"Fact name: lower-case letters, digits and dashes, at most 64 characters"`
-	Content         string `json:"content" jsonschema:"The fact's Markdown body; the frontmatter is written for you"`
-	Agent           string `json:"agent,omitempty" jsonschema:"Agent whose memory to write; default your own"`
-	Mode            string `json:"mode,omitempty" jsonschema:"replace (default) or append"`
-	ExpectedVersion string `json:"expected_version,omitempty" jsonschema:"Version from memory_get; the put is refused when the fact changed since"`
+	Name                  string `json:"name" jsonschema:"Fact name: lower-case letters, digits and dashes, at most 64 characters"`
+	Content               string `json:"content" jsonschema:"The fact's Markdown body; the frontmatter is written for you"`
+	Agent                 string `json:"agent,omitempty" jsonschema:"Agent whose memory to write; default your own. In memory layout v2 owner/agent names another person's agent"`
+	Mode                  string `json:"mode,omitempty" jsonschema:"replace (default) or append"`
+	ExpectedVersion       string `json:"expected_version,omitempty" jsonschema:"Version from memory_get; the put is refused when the fact changed since"`
+	ExpectedRemoteVersion string `json:"expected_remote_version,omitempty" jsonschema:"remote_version from memory_get; the put is refused when another device's write landed on the drive since, and not when only your own write is still uploading"`
 	Description     string `json:"description,omitempty" jsonschema:"One line for MEMORY.md and the frontmatter; kept from the file when omitted"`
 	Type            string `json:"type,omitempty" jsonschema:"Free-form kind such as preference, project or person; kept from the file when omitted"`
 }
 
 type memoryPutOutput struct {
 	memory.FactMeta
-	Version string `json:"version"`
+	Version       string `json:"version"`
+	RemoteVersion string `json:"remote_version,omitempty"`
 	// State is "local" until the upload queue drains, then "synced".
 	State string `json:"state"`
+}
+
+type memoryMergeInput struct {
+	Name     string `json:"name" jsonschema:"Fact with a conflict copy beside it"`
+	Agent    string `json:"agent,omitempty" jsonschema:"Agent whose memory; default your own"`
+	Conflict string `json:"conflict,omitempty" jsonschema:"Which conflict copy (path or file name) when there are several; default the first"`
+	Ancestor string `json:"ancestor,omitempty" jsonschema:"The body both sides started from, when you have it (the content you read before your own memory_put); with it the merge is three-way"`
 }
 
 type memoryDeleteInput struct {
@@ -113,6 +123,11 @@ func (s *Server) registerMemoryTools() {
 		Annotations: destructive,
 	}, s.memoryDelete)
 	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "memory_merge",
+		Description: "Propose a merge of a fact with one of its conflict copies (another device wrote it at the same time): lines only one side changed are taken, lines both changed become conflict blocks for you to resolve. Writes nothing; store the result with memory_put using the version and remote_version returned, then delete the copy.",
+		Annotations: ro,
+	}, s.memoryMerge)
+	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "memory_search",
 		Description: "Search the facts of an agent's memory (default your own) and the shared area through the content index; every hit names the agent and fact it belongs to. Needs index.enabled.",
 		Annotations: ro,
@@ -124,30 +139,66 @@ func (s *Server) registerMemoryTools() {
 // identity: over HTTP with a token the token's name, over stdio the
 // client's name from initialize; normalised to a directory name.
 func (s *Server) memoryAgent(ctx context.Context, req *mcp.CallToolRequest, explicit string) (string, error) {
-	if explicit != "" {
-		if !memory.ValidName(explicit) {
-			return "", fmt.Errorf("agent %q: %w", explicit, memory.ErrBadName)
+	// The layout may be read from the drive (the marker under the root),
+	// which a caller whose scope excludes the root must not cause: the
+	// root is checked first, with the message every memory tool gives.
+	root := s.opt.Memory.Root()
+	if root == "" {
+		return "", memory.ErrNoRoot
+	}
+	if _, err := s.scopeOf(ctx).Check(path.Join(root, "memory"), false); err != nil {
+		if errors.Is(err, agent.ErrDenied) {
+			return "", fmt.Errorf(memoryRootMessage, root)
 		}
-		return explicit, nil
+		return "", err
 	}
-	if s.opt.Agent != "" {
-		return s.opt.Agent, nil
+	layout := s.opt.Memory.Layout(ctx)
+	owner := s.memoryOwner(ctx)
+	if explicit != "" {
+		k, err := memory.ParseKey(layout, explicit, owner)
+		if err != nil {
+			return "", err
+		}
+		return k.String(), nil
 	}
-	if sess, ok := agent.FromContext(ctx); ok {
-		if sess.Transport == "http-token" && s.opt.Sessions != nil {
-			if p, err := s.opt.Sessions.Principal(ctx, sess.PrincipalID); err == nil && p.Kind == "token" {
-				return memory.NormalizeAgent(p.Name), nil
+	name := memory.NormalizeAgent("")
+	switch {
+	case s.opt.Agent != "":
+		name = s.opt.Agent
+	default:
+		if sess, ok := agent.FromContext(ctx); ok {
+			if sess.Transport == "http-token" && s.opt.Sessions != nil {
+				if p, err := s.opt.Sessions.Principal(ctx, sess.PrincipalID); err == nil && p.Kind == "token" {
+					name = memory.NormalizeAgent(p.Name)
+					break
+				}
+			}
+			if sess.ClientName != "" {
+				name = memory.NormalizeAgent(sess.ClientName)
+				break
 			}
 		}
-		if sess.ClientName != "" {
-			return memory.NormalizeAgent(sess.ClientName), nil
+		ss, _ := req.GetSession().(*mcp.ServerSession)
+		if info := clientInfoOf(req, ss); info != nil {
+			name = memory.NormalizeAgent(info.Name)
 		}
 	}
-	ss, _ := req.GetSession().(*mcp.ServerSession)
-	if info := clientInfoOf(req, ss); info != nil {
-		return memory.NormalizeAgent(info.Name), nil
+	k, err := memory.ParseKey(layout, name, owner)
+	if err != nil {
+		return "", err
 	}
-	return memory.NormalizeAgent(""), nil
+	return k.String(), nil
+}
+
+// memoryOwner is the person the caller acts for (memory layout v2): the
+// session's principal's owner, else this machine's user.
+func (s *Server) memoryOwner(ctx context.Context) string {
+	if sess, ok := agent.FromContext(ctx); ok && s.opt.Sessions != nil {
+		if p, err := s.opt.Sessions.Principal(ctx, sess.PrincipalID); err == nil {
+			return agent.OwnerOf(p)
+		}
+	}
+	return agent.DefaultOwner()
 }
 
 // memoryDir resolves the agent's memory directory and checks it against
@@ -257,13 +308,13 @@ func (s *Server) memoryPut(ctx context.Context, req *mcp.CallToolRequest, in mem
 		}
 	}
 	f, err := s.opt.Memory.Put(ctx, ag, in.Name, in.Content, memory.PutOptions{
-		Mode: in.Mode, ExpectedVersion: in.ExpectedVersion, Description: in.Description, Type: in.Type,
+		Mode: in.Mode, ExpectedVersion: in.ExpectedVersion, ExpectedRemoteVersion: in.ExpectedRemoteVersion, Description: in.Description, Type: in.Type,
 	})
 	if err != nil {
 		r, _ := fail(memoryErr(err, p))
 		return r, memoryPutOutput{}, nil
 	}
-	out := memoryPutOutput{FactMeta: f.FactMeta, Version: f.Version, State: "local"}
+	out := memoryPutOutput{FactMeta: f.FactMeta, Version: f.Version, RemoteVersion: f.RemoteVersion, State: "local"}
 	if a, err := s.opt.FS.StatPath(ctx, f.Path); err == nil && !a.LocalOnly {
 		out.State = "synced"
 	}
@@ -308,6 +359,36 @@ func (s *Server) memoryDelete(ctx context.Context, req *mcp.CallToolRequest, in 
 		return r, memoryDeleteOutput{}, nil
 	}
 	return text("deleted %s and its MEMORY.md line", p), memoryDeleteOutput{Name: in.Name, Agent: ag, Path: p, OK: true}, nil
+}
+
+func (s *Server) memoryMerge(ctx context.Context, req *mcp.CallToolRequest, in memoryMergeInput) (*mcp.CallToolResult, memory.MergeResult, error) {
+	ag, err := s.memoryAgent(ctx, req, in.Agent)
+	if err != nil {
+		r, _ := fail(err)
+		return r, memory.MergeResult{}, nil
+	}
+	if _, err := s.memoryDir(ctx, ag, false); err != nil {
+		r, _ := fail(err)
+		return r, memory.MergeResult{}, nil
+	}
+	if !memory.ValidName(in.Name) {
+		r, _ := fail(fmt.Errorf("name %q: %w", in.Name, memory.ErrBadName))
+		return r, memory.MergeResult{}, nil
+	}
+	res, err := s.opt.Memory.Merge(ctx, ag, in.Name, in.Conflict, in.Ancestor)
+	if err != nil {
+		if errors.Is(err, memory.ErrNoConflict) {
+			r, _ := fail(err)
+			return r, memory.MergeResult{}, nil
+		}
+		r, _ := fail(memoryErr(err, s.opt.Memory.FactPath(ag, in.Name)))
+		return r, memory.MergeResult{}, nil
+	}
+	msg := fmt.Sprintf("merge of %s with %s: %d conflict block(s)", res.Base, res.Theirs, res.Conflicts)
+	if res.Clean {
+		msg = fmt.Sprintf("clean merge of %s with %s; store it with memory_put (expected_version %s) and delete the copy", res.Base, res.Theirs, res.Version)
+	}
+	return text("%s", msg), res, nil
 }
 
 func (s *Server) memorySearch(ctx context.Context, req *mcp.CallToolRequest, in memorySearchInput) (*mcp.CallToolResult, memory.SearchResult, error) {

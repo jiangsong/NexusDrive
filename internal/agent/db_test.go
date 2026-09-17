@@ -302,7 +302,7 @@ func TestSchemaV3IsAdditiveAndRepeatable(t *testing.T) {
 	}
 	defer s.Close()
 	var v int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 3 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
 		t.Fatalf("user_version = %d, %v", v, err)
 	}
 	for _, table := range []string{"changes", "read_heat"} {

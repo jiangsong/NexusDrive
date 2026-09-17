@@ -24,6 +24,11 @@ type Memory struct {
 	// MaxAgentBytes bounds the facts/ subtree of one agent (default
 	// 32 MiB); a put that would exceed it is refused with the current usage.
 	MaxAgentBytes Size `yaml:"max_agent_bytes"`
+	// Layout is v1 (memory/<agent>/, one person per drive), v2
+	// (memory/<owner>/<agent>/, several people sharing a drive) or ""
+	// (follow the marker file memory/.layout the migration writes, else
+	// v1). docs/agent-first-design.md §8.3, T-56.
+	Layout string `yaml:"layout"`
 }
 
 // Built-in memory limits, applied where the YAML is silent.
@@ -50,6 +55,11 @@ func (m *Memory) validate(workspace string, allow []string) error {
 	}
 	if m.MaxFactBytes > m.MaxAgentBytes {
 		return fmt.Errorf("config: memory.max_fact_bytes (%d) must not exceed memory.max_agent_bytes (%d)", m.MaxFactBytes, m.MaxAgentBytes)
+	}
+	switch m.Layout {
+	case "", "v1", "v2":
+	default:
+		return fmt.Errorf("config: memory.layout must be v1 or v2, got %q", m.Layout)
 	}
 	if m.Root == "" {
 		m.Root = defaultMemoryRoot(workspace, allow)

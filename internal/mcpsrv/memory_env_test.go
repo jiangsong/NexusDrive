@@ -105,3 +105,11 @@ func newMemoryEnv(t *testing.T, opt Options, sc *agent.Scope, cfg config.Memory,
 	}
 	return e, store, x
 }
+
+func (l *lateFS) Rename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) error {
+	return l.fs.Rename(ctx, oldParent, oldName, newParent, newName)
+}
+
+func (l *lateFS) RemoteVersionOf(ctx context.Context, p string) (string, error) {
+	return l.fs.RemoteVersionOf(ctx, p)
+}

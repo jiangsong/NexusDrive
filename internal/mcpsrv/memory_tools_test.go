@@ -308,12 +308,16 @@ func TestAgentNameIsNormalised(t *testing.T) {
 	if put.Agent != "claude-code" || put.Path != "/work/.agent/memory/claude-code/facts/style.md" {
 		t.Fatalf("%+v", put)
 	}
-	// An explicit agent is validated like a fact name.
-	for _, bad := range []string{"Codex", "a/b", "..", "a b"} {
+	// An explicit agent is validated like a fact name; an owner-qualified
+	// one is refused in layout v1 with a pointer at the migration.
+	for _, bad := range []string{"Codex", "..", "a b"} {
 		res := cc.call(t, "memory_get", map[string]any{"name": "style", "agent": bad}, nil)
 		if !res.IsError || !strings.Contains(errText(res), "lower-case") {
 			t.Errorf("agent %q: IsError=%v %q", bad, res.IsError, errText(res))
 		}
+	}
+	if res := cc.call(t, "memory_get", map[string]any{"name": "style", "agent": "a/b"}, nil); !res.IsError || !strings.Contains(errText(res), "memory migrate") {
+		t.Errorf("agent a/b in v1: IsError=%v %q", res.IsError, errText(res))
 	}
 	res := cc.call(t, "memory_put", map[string]any{"name": "Bad Name", "content": "x"}, nil)
 	if !res.IsError || !strings.Contains(errText(res), "lower-case") {
@@ -369,4 +373,119 @@ func readText(t *testing.T, e *memEnv, p string) string {
 		t.Fatalf("read_text %s: %s", p, errText(res))
 	}
 	return out.Content
+}
+
+// TestMemoryToolsInLayoutV2KeyByOwner (T-56): in layout v2 the default
+// agent is <owner>/<client>, an explicit owner/agent reads another
+// person's memory, shared stays unowned, memory_get carries the drive's
+// version once the fact is uploaded, and memory_put's
+// expected_remote_version refuses a put after another device's write
+// landed while accepting one behind this device's own pending upload.
+func TestMemoryToolsInLayoutV2KeyByOwner(t *testing.T) {
+	cfg := memoryConfig("/work/.agent")
+	cfg.Layout = memory.LayoutV2
+	e, _, _ := newMemoryEnv(t, Options{}, nil, cfg, nil)
+	owner := agent.DefaultOwner()
+	var put memoryPutOutput
+	if res := e.call(t, "memory_put", map[string]any{"name": "style", "content": "mine\n"}, &put); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if put.Agent != owner+"/test" || put.Path != "/work/.agent/memory/"+owner+"/test/facts/style.md" || put.RemoteVersion != "" {
+		t.Fatalf("v2 default agent: %+v", put)
+	}
+	if res := e.call(t, "memory_put", map[string]any{"name": "team", "content": "ours\n", "agent": "shared"}, &put); res.IsError || put.Path != "/work/.agent/memory/shared/facts/team.md" {
+		t.Fatalf("shared in v2: %+v %s", put, errText(res))
+	}
+	if res := e.call(t, "memory_put", map[string]any{"name": "style", "content": "bob's\n", "agent": "bob/codex"}, &put); res.IsError || put.Agent != "bob/codex" {
+		t.Fatalf("another owner's agent: %+v %s", put, errText(res))
+	}
+	e.drain(t)
+	var got memory.Fact
+	if res := e.call(t, "memory_get", map[string]any{"name": "style"}, &got); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if got.Agent != owner+"/test" || got.Content != "mine\n" || got.RemoteVersion == "" {
+		t.Fatalf("memory_get after upload: %+v", got)
+	}
+	var list memoryListOutput
+	if res := e.call(t, "memory_list", map[string]any{"agent": "bob/codex"}, &list); res.IsError || len(list.Facts) != 1 || list.Agent != "bob/codex" {
+		t.Fatalf("list another owner: %+v %s", list, errText(res))
+	}
+	// Own pending write: remote version unchanged, accepted.
+	e.up.Stop()
+	if res := e.call(t, "memory_put", map[string]any{"name": "style", "content": "mine again\n", "expected_remote_version": got.RemoteVersion}, &put); res.IsError {
+		t.Fatalf("own pending write refused: %s", errText(res))
+	}
+	// Another device's write lands: refused.
+	e.fake.Seed(strings.TrimPrefix(got.Path, "/"), []byte("theirs\n"))
+	dir, _ := e.fs.StatPath(context.Background(), "/work/.agent/memory/"+owner+"/test/facts")
+	if err := e.fs.Refresh(context.Background(), dir.Ino); err != nil {
+		t.Fatal(err)
+	}
+	res := e.call(t, "memory_put", map[string]any{"name": "style", "content": "third\n", "expected_remote_version": got.RemoteVersion}, nil)
+	if !res.IsError || !strings.Contains(errText(res), "on the drive") {
+		t.Fatalf("moved remote version accepted: %v %s", res.IsError, errText(res))
+	}
+}
+
+// TestMemoryMergeNeverWritesWithoutConfirm: memory_merge proposes a
+// merge of a fact with its conflict copy — three-way with the ancestor
+// the agent passes, two-way without — and writes nothing: the fact, the
+// copy and the provider are untouched until a memory_put adopts it.
+func TestMemoryMergeNeverWritesWithoutConfirm(t *testing.T) {
+	e, _, _ := newMemoryEnv(t, Options{}, nil, memoryConfig("/work/.agent"), nil)
+	base := "a\nb\nc\n"
+	var put memoryPutOutput
+	if res := e.call(t, "memory_put", map[string]any{"name": "notes", "content": base}, &put); res.IsError {
+		t.Fatal(errText(res))
+	}
+	e.drain(t)
+	// Another device changes c while this device changes a: the drive
+	// keeps this device's upload as a conflict copy beside theirs.
+	e.fake.Seed(strings.TrimPrefix(put.Path, "/"), []byte("---\nname: notes\n---\na\nb\nC\n"))
+	if res := e.call(t, "memory_put", map[string]any{"name": "notes", "content": "A\nb\nc\n"}, &put); res.IsError {
+		t.Fatal(errText(res))
+	}
+	e.drain(t)
+	dir, _ := e.fs.StatPath(context.Background(), "/work/.agent/memory/test/facts")
+	if err := e.fs.Refresh(context.Background(), dir.Ino); err != nil {
+		t.Fatal(err)
+	}
+	var got memory.Fact
+	if res := e.call(t, "memory_get", map[string]any{"name": "notes"}, &got); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if len(got.Conflicts) != 1 {
+		t.Fatalf("no conflict copy to merge: %+v", got)
+	}
+	// Reading the copy may download it once; nothing may be written.
+	writes := func() int { return e.fake.Calls("Upload") + e.fake.Calls("UploadPart") + e.fake.Calls("Create") + e.fake.Calls("Delete") + e.fake.Calls("Rename") }
+	before := writes()
+	var res memory.MergeResult
+	if r := e.call(t, "memory_merge", map[string]any{"name": "notes", "ancestor": base}, &res); r.IsError {
+		t.Fatal(errText(r))
+	}
+	if !res.ThreeWay || !res.Clean || res.Merged != "A\nb\nC" || res.Version != got.Version {
+		t.Fatalf("three-way merge: %+v", res)
+	}
+	var two memory.MergeResult
+	if r := e.call(t, "memory_merge", map[string]any{"name": "notes"}, &two); r.IsError {
+		t.Fatal(errText(r))
+	}
+	if two.ThreeWay || two.Clean || two.Conflicts != 2 || !strings.Contains(two.Merged, "<<<<<<<") {
+		t.Fatalf("two-way merge: %+v", two)
+	}
+	if writes() != before {
+		t.Fatalf("memory_merge wrote to the provider: %d calls", writes()-before)
+	}
+	again := memory.Fact{}
+	if r := e.call(t, "memory_get", map[string]any{"name": "notes"}, &again); r.IsError || again.Version != got.Version || len(again.Conflicts) != 1 {
+		t.Fatalf("memory_merge wrote something: %+v", again)
+	}
+	if r := e.call(t, "memory_merge", map[string]any{"name": "nothing-here"}, nil); !r.IsError {
+		t.Fatal("merge of a missing fact succeeded")
+	}
+	if r := e.call(t, "memory_merge", map[string]any{"name": "notes", "conflict": "no-such-copy.md"}, nil); !r.IsError {
+		t.Fatal("merge with an unknown copy succeeded")
+	}
 }

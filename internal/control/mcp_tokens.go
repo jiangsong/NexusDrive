@@ -69,6 +69,7 @@ type MCPBridge struct {
 type TokenView struct {
 	ID          string     `json:"id"`
 	Name        string     `json:"name"`
+	Owner       string     `json:"owner,omitempty"`
 	Fingerprint string     `json:"fingerprint"`
 	Read        []string   `json:"read"`
 	Write       []string   `json:"write"`
@@ -91,6 +92,8 @@ type TokenCreateRequest struct {
 	Write      []string `json:"write"`
 	ReadOnly   bool     `json:"read_only"`
 	TTLSeconds int64    `json:"ttl_seconds"`
+	// Owner is the person the token acts for (memory layout v2).
+	Owner string `json:"owner,omitempty"`
 }
 
 // TokenCreateResponse carries the plain token the one time it exists in
@@ -209,7 +212,7 @@ func (v *storeMCPView) RevokeToken(ctx context.Context, id string) (agent.Princi
 // TokenViewOf is one token as the console reads it.
 func TokenViewOf(p agent.Principal, now time.Time) TokenView {
 	v := TokenView{
-		ID: p.ID, Name: p.Name, Fingerprint: p.TokenPrefix,
+		ID: p.ID, Name: p.Name, Owner: p.Owner, Fingerprint: p.TokenPrefix,
 		Read: append([]string{}, p.Scope.EffectiveRead()...), Write: append([]string{}, p.Scope.EffectiveWrite()...),
 		ReadOnly: p.Scope.ReadOnly, State: agent.TokenState(p, now),
 	}
@@ -298,7 +301,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, v MCPView) 
 		httpErrorT(w, r, http.StatusBadRequest, "err.token_invalid", "ttl_seconds must not be negative")
 		return
 	}
-	spec := agent.TokenSpec{Name: q.Name, Read: q.Read, Write: q.Write, ReadOnly: q.ReadOnly, TTL: time.Duration(q.TTLSeconds) * time.Second}
+	spec := agent.TokenSpec{Name: q.Name, Read: q.Read, Write: q.Write, ReadOnly: q.ReadOnly, TTL: time.Duration(q.TTLSeconds) * time.Second, Owner: q.Owner}
 	plain, p, err := v.CreateToken(r.Context(), spec)
 	if errors.Is(err, agent.ErrTokenName) || errors.Is(err, agent.ErrTokenScope) {
 		httpErrorT(w, r, http.StatusBadRequest, "err.token_invalid", err.Error())

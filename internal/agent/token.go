@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os/user"
+	"os"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,6 +27,9 @@ type TokenSpec struct {
 	Write    []string // nil = same as Read
 	ReadOnly bool
 	TTL      time.Duration // 0 = never expires
+	// Owner is the person the token acts for (memory layout v2); "" is
+	// this machine's user.
+	Owner string
 }
 
 // The refusals token handling can hand back. VerifyToken wraps the three
@@ -132,9 +137,9 @@ func (s *Store) CreateToken(ctx context.Context, spec TokenSpec) (string, Princi
 	if n > 0 {
 		return "", Principal{}, ErrTokenName
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id, kind, name, token_hash, token_prefix, scope, created_at, expires_at)
-		VALUES (?, 'token', ?, ?, ?, ?, ?, ?)`,
-		id, spec.Name, hashToken(plain), fingerprintOf(plain), string(scope), now.UnixNano(), toNanos(expires)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO principals(id, kind, name, token_hash, token_prefix, scope, created_at, expires_at, owner)
+		VALUES (?, 'token', ?, ?, ?, ?, ?, ?, ?)`,
+		id, spec.Name, hashToken(plain), fingerprintOf(plain), string(scope), now.UnixNano(), toNanos(expires), spec.Owner); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return "", Principal{}, ErrTokenName
 		}
@@ -329,4 +334,29 @@ func toNanos(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixNano()
+}
+
+// DefaultOwner is the owner of a principal that names none: this
+// machine's user, so a single-person setup needs no configuration and a
+// shared drive tells two machines' memories apart by whoever runs each.
+func DefaultOwner() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		name := u.Username
+		if i := strings.LastIndexAny(name, "\\/"); i >= 0 {
+			name = name[i+1:]
+		}
+		return strings.ToLower(name)
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return strings.ToLower(h)
+	}
+	return "local"
+}
+
+// OwnerOf is the principal's owner, defaulting to this machine's user.
+func OwnerOf(p Principal) string {
+	if p.Owner != "" {
+		return p.Owner
+	}
+	return DefaultOwner()
 }

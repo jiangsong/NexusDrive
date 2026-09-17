@@ -600,6 +600,21 @@ func (f *FS) StatPath(ctx context.Context, p string) (Attr, error) {
 	return f.attrAt(ctx, n, path.Clean("/"+p)), nil
 }
 
+// RemoteVersionOf is the version the provider last reported for a path
+// (meta.Node.RemoteVersion), "" for a file that exists only locally. It
+// is the value a conflict check compares — never Version, which a local
+// write moves before the upload lands (CLAUDE.md).
+func (f *FS) RemoteVersionOf(ctx context.Context, p string) (string, error) {
+	n, err := f.resolve(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(n.RemoteID, localIDPrefix) {
+		return "", nil
+	}
+	return n.RemoteVersion, nil
+}
+
 // resolve walks a path, filling directories from the provider on the way.
 func (f *FS) resolve(ctx context.Context, p string) (meta.Node, error) {
 	cur, err := f.meta.Get(ctx, meta.RootIno)

@@ -40,6 +40,12 @@ type FS interface {
 	ReadDirPagePath(ctx context.Context, p string, opt vfs.DirectoryPageOptions) (vfs.DirectoryPage, error)
 	Mkdir(ctx context.Context, parent uint64, name string) (vfs.Attr, error)
 	Remove(ctx context.Context, parent uint64, name string, recursive bool) error
+	Rename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) error
+	// RemoteVersionOf is the version of a path as the provider last
+	// reported it, "" when the file is local-only or unknown: what a
+	// put may compare so that a change from another device is noticed
+	// even while this device's own upload is in flight.
+	RemoteVersionOf(ctx context.Context, p string) (string, error)
 }
 
 // Searcher is the content index; nil means memory_search cannot run.
@@ -66,6 +72,10 @@ type Store struct {
 	// are not interleaved with another put in this process. Across
 	// processes and devices the drive's conflict copies are the safety net.
 	mu sync.Mutex
+	// layout caches the marker read (Layout).
+	layoutMu sync.Mutex
+	layout   string
+	layoutAt time.Time
 }
 
 // The store's errors. Callers match on them to choose a status code or a
@@ -160,7 +170,10 @@ func NormalizeAgent(clientName string) string {
 
 // AgentSummary is one agent directory as Agents reports it.
 type AgentSummary struct {
+	// Name is the key: "agent" in v1 and for shared, "owner/agent" in v2.
 	Name string `json:"name"`
+	// Owner is the person the agent acts for (v2); "" in v1 and for shared.
+	Owner string `json:"owner,omitempty"`
 	// Facts is the number of well-formed fact files under facts/.
 	Facts int `json:"facts"`
 	// Bytes is the size of everything under facts/, conflict copies
@@ -193,6 +206,11 @@ type Fact struct {
 	// drive's version, so it stays the same while an upload is in flight
 	// and changes exactly when the file does.
 	Version string `json:"version"`
+	// RemoteVersion is the drive's version of the file as last seen,
+	// "" while the file exists only locally. Put's ExpectedRemoteVersion
+	// compares against it: it moves when another device's write lands,
+	// and not when this device's own write is still uploading.
+	RemoteVersion string `json:"remote_version,omitempty"`
 }
 
 // PutOptions tunes Put.
@@ -202,6 +220,12 @@ type PutOptions struct {
 	// ExpectedVersion, when set, must equal the fact's current Version or
 	// the put is refused with ErrVersionChanged.
 	ExpectedVersion string
+	// ExpectedRemoteVersion, when set, must equal the fact's current
+	// RemoteVersion: a change that landed from another device refuses the
+	// put even when the content happens to hash the same, and this
+	// device's own pending upload does not. With both set, a moved remote
+	// version refuses first; an unchanged one falls back to the content.
+	ExpectedRemoteVersion string
 	// Description and Type go into the frontmatter; an empty one keeps
 	// what the file already says.
 	Description string
@@ -242,13 +266,24 @@ func (s *Store) check(agent, name string, needName bool) error {
 	if s.cfg.Root == "" {
 		return ErrNoRoot
 	}
-	if !ValidName(agent) {
+	if !validKey(agent) {
 		return fmt.Errorf("agent %q: %w", agent, ErrBadName)
 	}
 	if needName && !ValidName(name) {
 		return fmt.Errorf("name %q: %w", name, ErrBadName)
 	}
 	return nil
+}
+
+// validKey accepts a v1 agent name or a v2 "owner/agent" key; whether the
+// layout allows a qualified key is ParseKey's decision, made by the
+// caller with the layout in hand.
+func validKey(agent string) bool {
+	owner, name, qualified := strings.Cut(agent, "/")
+	if !qualified {
+		return ValidName(agent)
+	}
+	return ValidName(owner) && ValidName(name) && name != SharedAgent && owner != SharedAgent
 }
 
 // Version is the version string of a fact file's bytes.
@@ -271,14 +306,12 @@ func (s *Store) Agents(ctx context.Context) ([]AgentSummary, error) {
 		return nil, err
 	}
 	out := []AgentSummary{}
-	for _, d := range dirs {
-		if !d.IsDir || !ValidName(d.Name) {
-			continue
-		}
-		sum := AgentSummary{Name: d.Name, MaxBytes: int64(s.cfg.MaxAgentBytes)}
-		files, err := s.factFiles(ctx, d.Name)
+	v2 := s.Layout(ctx) == LayoutV2
+	summarise := func(key, owner string) error {
+		sum := AgentSummary{Name: key, Owner: owner, MaxBytes: int64(s.cfg.MaxAgentBytes)}
+		files, err := s.factFiles(ctx, key)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		names := make([]string, 0, len(files))
 		for _, f := range files {
@@ -290,6 +323,39 @@ func (s *Store) Agents(ctx context.Context) ([]AgentSummary, error) {
 		}
 		sum.Conflicts = countConflicts(names)
 		out = append(out, sum)
+		return nil
+	}
+	for _, d := range dirs {
+		if !d.IsDir || !ValidName(d.Name) {
+			continue
+		}
+		if !v2 || d.Name == SharedAgent {
+			if err := summarise(d.Name, ""); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		// v2: memory/<owner>/<agent>/. A v1 directory not yet migrated
+		// (facts/ directly under it) is reported as it is, so a person
+		// sees it and Migrate can be asked to finish.
+		sub, err := s.fs.ReadDirPath(ctx, path.Join(s.cfg.Root, "memory", d.Name))
+		if err != nil && !errors.Is(err, vfs.ErrNotFound) {
+			return nil, err
+		}
+		nested := false
+		for _, a := range sub {
+			if a.IsDir && ValidName(a.Name) && a.Name != "facts" {
+				nested = true
+				if err := summarise(d.Name+"/"+a.Name, d.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if !nested {
+			if err := summarise(d.Name, ""); err != nil {
+				return nil, err
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -401,6 +467,7 @@ func (s *Store) Get(ctx context.Context, agent, name string) (Fact, error) {
 		return Fact{}, fmt.Errorf("%w: %s/%s", ErrNotFound, agent, name)
 	}
 	f := s.factOf(agent, name, file)
+	f.RemoteVersion = s.remoteVersion(ctx, agent, name)
 	files, err := s.factFiles(ctx, agent)
 	if err != nil {
 		return Fact{}, err
@@ -422,6 +489,16 @@ func (s *Store) factOf(agent, name string, file []byte) Fact {
 		FactMeta: FactMeta{Name: name, Agent: agent, Path: s.FactPath(agent, name), Size: int64(len(file)), Meta: m, Conflicts: []string{}},
 		Content:  body, Version: Version(file),
 	}
+}
+
+// remoteVersion asks the FS for the drive's version of a fact, "" when
+// it cannot say.
+func (s *Store) remoteVersion(ctx context.Context, agent, name string) string {
+	v, err := s.fs.RemoteVersionOf(ctx, s.FactPath(agent, name))
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 // Put creates or updates a fact: it checks the name, the version the
@@ -446,6 +523,10 @@ func (s *Store) Put(ctx context.Context, agent, name, content string, opt PutOpt
 	var cur Fact
 	if found {
 		cur = s.factOf(agent, name, existing)
+		cur.RemoteVersion = s.remoteVersion(ctx, agent, name)
+	}
+	if opt.ExpectedRemoteVersion != "" && (!found || cur.RemoteVersion != opt.ExpectedRemoteVersion) {
+		return Fact{}, fmt.Errorf("%w on the drive (remote version %q, expected %q)", ErrVersionChanged, cur.RemoteVersion, opt.ExpectedRemoteVersion)
 	}
 	if opt.ExpectedVersion != "" && (!found || cur.Version != opt.ExpectedVersion) {
 		return Fact{}, fmt.Errorf("%w (current version %q)", ErrVersionChanged, cur.Version)
@@ -495,6 +576,7 @@ func (s *Store) Put(ctx context.Context, agent, name, content string, opt PutOpt
 		return Fact{}, err
 	}
 	out := s.factOf(agent, name, file)
+	out.RemoteVersion = s.remoteVersion(ctx, agent, name)
 	names := make([]string, 0, len(files))
 	for _, f := range files {
 		names = append(names, f.Name)
@@ -606,6 +688,12 @@ func (s *Store) locate(p string) (agent, name string) {
 		return "", ""
 	}
 	agent, rest, _ := strings.Cut(rel, "/")
+	// v2: memory/<owner>/<agent>/facts/… — the key is owner/agent.
+	if !strings.HasPrefix(rest, "facts/") && rest != "MEMORY.md" && agent != SharedAgent {
+		if sub, more, ok := strings.Cut(rest, "/"); ok && ValidName(sub) {
+			agent, rest = agent+"/"+sub, more
+		}
+	}
 	if file, ok := strings.CutPrefix(rest, "facts/"); ok {
 		if n, ok := factName(file); ok && !strings.Contains(file, "/") {
 			return agent, n

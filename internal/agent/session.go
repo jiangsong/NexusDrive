@@ -162,7 +162,7 @@ func (m *Sessions) Principal(ctx context.Context, id string) (Principal, error) 
 	return scanPrincipal(m.store.db.QueryRowContext(ctx, principalColumns+` WHERE id = ?`, id))
 }
 
-const principalColumns = `SELECT id, kind, name, scope, token_prefix, created_at, expires_at, revoked_at, last_used_at FROM principals`
+const principalColumns = `SELECT id, kind, name, scope, token_prefix, created_at, expires_at, revoked_at, last_used_at, owner FROM principals`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -172,7 +172,7 @@ func scanPrincipal(row rowScanner) (Principal, error) {
 	var p Principal
 	var scope string
 	var created, expires, revoked, lastUsed int64
-	err := row.Scan(&p.ID, &p.Kind, &p.Name, &scope, &p.TokenPrefix, &created, &expires, &revoked, &lastUsed)
+	err := row.Scan(&p.ID, &p.Kind, &p.Name, &scope, &p.TokenPrefix, &created, &expires, &revoked, &lastUsed, &p.Owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, ErrPrincipalNotFound
 	}

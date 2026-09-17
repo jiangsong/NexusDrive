@@ -203,7 +203,7 @@ Agents
   mcp install --client claude|codex [--transport auto|stdio|http] [--with-agents-md] [--with-hooks] [--write <file>]
   hooks install|uninstall|status [--client claude,codex,gemini]
                             print or write the client registration snippet
-  mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h]
+  mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h] [--owner who]
                             issue a scoped HTTP access token; the token is printed once
   mcp token list            list issued tokens by fingerprint, never the token itself
   mcp token revoke <name|id> --confirm

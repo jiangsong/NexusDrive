@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cloudfs/internal/agent"
+	"cloudfs/internal/memory"
 )
 
 // runMCPToken implements `cloudfs mcp token create|list|revoke`. It works on
@@ -95,7 +96,7 @@ func runMCPToken(ctx context.Context, out io.Writer, args []string) error {
 // Prefix lists are comma-separated like --allow. A missing --write means
 // "the same as --read"; --write with an empty value means no writes.
 func tokenSpecFromFlags(f *flags) (agent.TokenSpec, error) {
-	spec := agent.TokenSpec{Name: f.str("name", ""), ReadOnly: f.bools["read-only"]}
+	spec := agent.TokenSpec{Name: f.str("name", ""), ReadOnly: f.bools["read-only"], Owner: strings.ToLower(strings.TrimSpace(f.str("owner", "")))}
 	if spec.Name == "" {
 		return agent.TokenSpec{}, errors.New("mcp token create: --name is required (lowercase letters, digits and dashes)")
 	}
@@ -111,6 +112,9 @@ func tokenSpecFromFlags(f *flags) (agent.TokenSpec, error) {
 			return agent.TokenSpec{}, errors.New("mcp token create: --ttl takes a duration such as 720h, or never")
 		}
 		spec.TTL = d
+	}
+	if spec.Owner != "" && !memory.ValidName(spec.Owner) {
+		return agent.TokenSpec{}, errors.New("mcp token create: --owner is a name (lowercase letters, digits and dashes)")
 	}
 	return spec, nil
 }

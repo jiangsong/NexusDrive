@@ -107,6 +107,7 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"memory_list":         {},
 		"memory_get":          {"name": "style"},
 		"memory_search":       {"query": "style"},
+		"memory_merge":        {"name": "style"},
 	}
 
 	tools, err := e.session.ListTools(ctx, nil)
