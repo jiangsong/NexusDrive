@@ -226,3 +226,44 @@ func TestConnectPanelShowsBridgeState(t *testing.T) {
 		}
 	}
 }
+
+// TestHooksCardIsReadOnly (ui-plan G7): the connect panel's Hooks card
+// reads /agent/hooks and shows each client's registration, whether its
+// shape is verified, the context mode and the shell lines to copy; it
+// never posts to the hooks route or offers a button that edits a settings
+// file. The row and command decisions live in hooks_view.js under node.
+func TestHooksCardIsReadOnly(t *testing.T) {
+	view := webSource(t, "web/hooks_view.js")
+	if strings.Contains(view, "import ") {
+		t.Error("hooks_view.js imports; it must run under node with no DOM")
+	}
+	for _, want := range []string{"export function clientRow(c)", "export function commands(r)", "'hooks.state.' + state", "'hooks.verified' : 'hooks.unverified'", "' --client ' + todo.join(',')"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("hooks_view.js lacks %s", want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join("web", "_tests", "hooks_view.test.mjs")); err != nil {
+		t.Fatalf("the node suite for hooks_view.js is missing: %v", err)
+	}
+	panel := webSource(t, "web/connect_panel.js")
+	for _, want := range []string{"import { clientRow, commands } from '/ui/hooks_view.js'", "api.get('/agent/hooks')", "function hooksCard(h)", "'data-hooks'", "'data-hook-client': r.client", "'data-hook-state': r.state", "t(r.stateKey)", "t(r.verifiedKey)", "commands(h).map(", "copyBtn(c.text)", "t('hooks.note')"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("connect_panel.js lacks %s", want)
+		}
+	}
+	if strings.Contains(panel, "api.post(") || strings.Contains(panel, "html:") {
+		t.Error("the connect panel writes or uses innerHTML")
+	}
+	if n := strings.Count(panel, "\n"); n >= 800 {
+		t.Errorf("connect_panel.js is %d lines; split it", n)
+	}
+	src := webI18nSource(t)
+	for _, lang := range []string{"zh", "en"} {
+		keys := tableKeys(t, src, lang)
+		for _, k := range []string{"hooks.title", "hooks.context.off", "hooks.context.minimal", "hooks.context.full", "hooks.col.client", "hooks.col.state", "hooks.col.verified", "hooks.col.path", "hooks.state.installed", "hooks.state.absent", "hooks.state.missing", "hooks.verified", "hooks.unverified", "hooks.registry", "hooks.cmd.install", "hooks.cmd.uninstall", "hooks.note"} {
+			if !keys[k] {
+				t.Errorf("%s lacks %s", lang, k)
+			}
+		}
+	}
+}

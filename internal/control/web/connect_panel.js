@@ -2,6 +2,7 @@ import { api } from '/ui/api.js';
 import { el, fill, copyBtn } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { stdioWarning, bridgeBanner } from '/ui/connect_view.js';
+import { clientRow, commands } from '/ui/hooks_view.js';
 
 // The connect panel sits at the top of the agents screen and answers the
 // first question a person has there: how does an agent reach this mount? It
@@ -79,17 +80,41 @@ function guidanceCard(g) {
       el('span', { class: 'dim' }, t('connect.guidance.prompts', names.join(', ')))));
 }
 
+// hooksCard is the Hooks card (ui-plan G7-1): each agent client's
+// registration under this machine's home, the context mode in force, and
+// the shell lines that would install or remove the hooks — to copy, never
+// to run from here, since the browser must not define what runs on this
+// machine. Rows and commands are decided in hooks_view.js.
+function hooksCard(h) {
+  const rows = (h.clients || []).map(clientRow);
+  return el('div', { class: 'guidance', 'data-hooks': '', style: 'margin-top:14px' },
+    el('div', { class: 'eyebrow', style: 'margin:0 0 6px' }, t('hooks.title', t('hooks.context.' + (h.context || 'minimal')))),
+    el('table', { style: 'font-size:13px' },
+      el('thead', {}, el('tr', {}, el('th', {}, t('hooks.col.client')), el('th', {}, t('hooks.col.state')), el('th', {}, t('hooks.col.verified')), el('th', {}, t('hooks.col.path')))),
+      el('tbody', {}, rows.map((r) => el('tr', { 'data-hook-client': r.client, 'data-hook-state': r.state },
+        el('td', {}, r.client),
+        el('td', {}, el('span', { style: 'display:inline-flex;align-items:center;gap:7px;white-space:nowrap' },
+          el('span', { class: 'dot ' + (r.state === 'installed' ? 'ok' : r.state === 'absent' ? 'warn' : '') }), t(r.stateKey))),
+        el('td', { class: r.verified ? '' : 'dim' }, t(r.verifiedKey)),
+        el('td', { class: 'dim', style: 'word-break:break-all' }, r.path, r.note ? el('div', { style: 'font-size:11px' }, r.note) : null))))),
+    el('div', { class: 'dim', style: 'margin:8px 0 6px;font-size:12px' }, t('hooks.registry', h.mounts_registry || '', h.mounts || 0)),
+    ...commands(h).map((c) => el('div', { class: 'row', style: 'margin-top:6px;gap:8px;align-items:center;flex-wrap:wrap' },
+      el('span', { class: 'dim' }, t(c.key)), el('code', { class: 'detail' }, c.text), copyBtn(c.text))),
+    el('p', { class: 'dim', style: 'margin:8px 0 0;font-size:12px' }, t('hooks.note')));
+}
+
 // renderConnectPanel fills host and loads once; it returns a dispose that
 // stops a late reply from landing on a screen that has moved on.
 export function renderConnectPanel(host, { open = false } = {}) {
   let disposed = false;
   const inner = el('div', { class: 'dim' }, t('connect.loading'));
   const guidance = el('div', {});
+  const hooks = el('div', {});
   const state = el('span', {});
   const details = el('details', { class: 'connect', open },
     el('summary', {},
       el('span', { class: 'connect-title' }, t('connect.title')), state),
-    el('div', { class: 'connect-body' }, inner, guidance));
+    el('div', { class: 'connect-body' }, inner, guidance, hooks));
   fill(host, details);
 
   async function load() {
@@ -113,6 +138,14 @@ export function renderConnectPanel(host, { open = false } = {}) {
       // connect state above still stands on its own.
       if (disposed) return;
       fill(guidance);
+    }
+    try {
+      const h = await api.get('/agent/hooks');
+      if (disposed) return;
+      fill(hooks, hooksCard(h));
+    } catch (e) {
+      if (disposed) return;
+      fill(hooks);
     }
   }
   load();
