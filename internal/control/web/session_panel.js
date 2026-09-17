@@ -2,7 +2,7 @@ import { api } from '/ui/api.js';
 import { el, fill, iconEl, bytes, openPanel, confirmDelete, toast } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
 import { scopeParts } from '/ui/scope_view.js';
-import { groupPlan, shortID, planCounts } from '/ui/rollback_plan.js';
+import { groupPlan, shortID, planCounts, groupSkipped, reversibility } from '/ui/rollback_plan.js';
 import { onFsChange } from '/ui/app.js';
 
 // The session panel: one MCP session in detail — who it is, what it may
@@ -21,7 +21,7 @@ const OPS_COLUMNS = 5;
 // The reasons a plan item can carry (docs/agent-roadmap.md §4.8) that have
 // a phrase of their own; anything else — the text of a write error — is
 // shown as the daemon sent it.
-const REASONS = new Set(['already', 'too_large', 'not_cached', 'dir', 'not_empty', 'missing', 'incomplete', 'exists', 'from_exists', 'too_many', 'expired']);
+const REASONS = new Set(['already', 'too_large', 'not_cached', 'dir', 'not_empty', 'missing', 'incomplete', 'exists', 'from_exists', 'too_many', 'expired', 'not_recorded']);
 
 // showInFiles sends the main window to a path: it lands on the parent
 // directory with that entry selected (see the deep link in screens/main.js).
@@ -88,15 +88,18 @@ function auditTailRow(r) {
 }
 
 
-// preState is the dot and word for what the session kept of a path before
-// it wrote: a preimage that can be restored, one that was too large or not
-// read in full, a directory (whose contents were not kept), or nothing,
-// because the path did not exist yet.
+// preState is the mark and word for whether the session's write can be
+// undone: a copy of the previous content is held (or the path did not
+// exist yet), the copy was too large, not cached, a directory, over a
+// budget or has expired (a warning with the reason), or the write was
+// never recorded. The decision is reversibility() in rollback_plan.js; the
+// word is always beside the mark, never a mark alone.
 function preState(o) {
-  const key = o.pre_reason || (o.pre_state === 'absent' ? 'absent' : o.pre_state === 'dir' ? 'dir' : 'ok');
-  const dot = key === 'ok' ? 'ok' : key === 'absent' ? '' : 'warn';
-  return el('span', { style: 'display:inline-flex;align-items:center;gap:7px;white-space:nowrap' },
-    el('span', { class: 'dot ' + dot }), t('rollback.pre.' + key));
+  const r = reversibility(o);
+  const mark = r.state === 'ok' ? '\u2713' : r.state === 'warn' ? '\u26a0' : '\u2014';
+  return el('span', { style: 'display:inline-flex;align-items:center;gap:7px;white-space:nowrap', 'data-reversible': r.state, title: t(r.key) },
+    el('span', { class: 'dot ' + (r.state === 'ok' ? 'ok' : r.state === 'warn' ? 'warn' : ''), 'aria-hidden': 'true' }),
+    el('span', { 'aria-hidden': 'true' }, mark), t(r.key));
 }
 
 // pathCell is a path, or for a rename the old and the new one.
@@ -144,19 +147,34 @@ function planItem(item) {
     item.reason ? el('span', { class: 'dim' }, ' · ', reasonText(item.reason)) : null);
 }
 
+// skipView draws the skip group by reason: one sub-heading per reason
+// (groupSkipped's order) with its paths under it, so "12 skipped" reads as
+// "10 expired, 2 too large" at a glance.
+function skipView(skipped) {
+  return el('div', {}, groupSkipped(skipped).map((g) => el('div', { style: 'margin:4px 0', 'data-reason': g.reason },
+    el('div', { class: 'dim', style: 'font-size:12px' }, g.reason ? reasonText(g.reason) : t('rollback.reason.none'), ' · ', String(g.items.length)),
+    el('ul', { style: 'margin:0;padding-left:18px;font-size:13px' }, g.items.map((it) => el('li', { style: 'word-break:break-all' },
+      el('span', { class: 'detail' }, it.to_path ? [it.path, ' → ', it.to_path] : it.path)))))));
+}
+
 // planView draws the three groups of a plan, each with its count in the
 // heading and its items below; an empty group still shows its heading with
 // a zero, so the reader sees that nothing conflicts rather than wondering.
+// The skip group is broken down by reason. A closing line says what no
+// plan can list: writes made without a session were never recorded, so a
+// rollback cannot reach them.
 function planView(plan) {
   const g = groupPlan(plan);
-  const group = (key, items, tone, heading) => el('div', { style: 'margin-bottom:12px', 'data-group': key },
+  const group = (key, items, tone, heading, body) => el('div', { style: 'margin-bottom:12px', 'data-group': key },
     el('div', { class: 'eyebrow', style: 'margin-bottom:4px;display:inline-flex;align-items:center;gap:7px' },
       el('span', { class: 'dot ' + tone }), heading),
-    items.length ? el('ul', { style: 'margin:0;padding-left:18px;font-size:13px' }, items.map(planItem)) : null);
+    items.length ? body(items) : null);
+  const plain = (items) => el('ul', { style: 'margin:0;padding-left:18px;font-size:13px' }, items.map(planItem));
   return el('div', {},
-    group('restore', g.restore, 'ok', t('rollback.group.restore', g.restore.length)),
-    group('skip', g.skip, 'warn', t('rollback.group.skip', g.skip.length)),
-    group('conflict', g.conflict, 'bad', t('rollback.group.conflict', g.conflict.length)));
+    group('restore', g.restore, 'ok', t('rollback.group.restore', g.restore.length), plain),
+    group('skip', g.skip, 'warn', t('rollback.group.skip', g.skip.length), skipView),
+    group('conflict', g.conflict, 'bad', t('rollback.group.conflict', g.conflict.length), plain),
+    el('p', { class: 'dim', style: 'margin:4px 0 0;font-size:12px', 'data-not-recorded': '' }, t('rollback.not_recorded.note')));
 }
 
 // promise is the three sentences of docs/agent-roadmap.md §4.8, under

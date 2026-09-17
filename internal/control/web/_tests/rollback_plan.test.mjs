@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { groupPlan, planCounts, shortID } from '../rollback_plan.js';
+import { groupPlan, planCounts, shortID, groupSkipped, reversibility } from '../rollback_plan.js';
 
 const plan = {
   session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
@@ -51,4 +51,26 @@ test('shortID is the first eight characters', () => {
   assert.equal(shortID('abc'), 'abc');
   assert.equal(shortID(''), '');
   assert.equal(shortID(undefined), '');
+});
+
+test('skipped items are grouped by reason in a fixed order, unknown text after, no reason last', () => {
+  const g = groupSkipped([
+    { path: '/a', reason: 'not_cached' }, { path: '/b', reason: 'expired' }, { path: '/c' },
+    { path: '/d', reason: 'disk full' }, { path: '/e', reason: 'expired' }, { path: '/f', reason: 'too_many' },
+  ]);
+  assert.deepEqual(g.map((x) => x.reason), ['expired', 'too_many', 'not_cached', 'disk full', '']);
+  assert.deepEqual(g[0].items.map((x) => x.path), ['/b', '/e']);
+  assert.deepEqual(g[4].items.map((x) => x.path), ['/c']);
+  assert.deepEqual(groupSkipped(null), []);
+  assert.deepEqual(groupSkipped([]), []);
+});
+
+test('reversibility reads the preimage fields of an op', () => {
+  assert.deepEqual(reversibility({ pre_state: 'file' }), { state: 'ok', key: 'rollback.pre.ok' });
+  assert.deepEqual(reversibility({ pre_state: 'absent' }), { state: 'ok', key: 'rollback.pre.absent' });
+  assert.deepEqual(reversibility({ pre_state: 'dir' }), { state: 'warn', key: 'rollback.pre.dir' });
+  assert.deepEqual(reversibility({ pre_state: 'file', pre_reason: 'too_large' }), { state: 'warn', key: 'rollback.pre.too_large' });
+  assert.deepEqual(reversibility({ pre_reason: 'expired' }), { state: 'warn', key: 'rollback.pre.expired' });
+  assert.deepEqual(reversibility({ pre_reason: 'not_recorded' }), { state: 'none', key: 'rollback.pre.not_recorded' });
+  assert.deepEqual(reversibility(null), { state: 'ok', key: 'rollback.pre.ok' });
 });

@@ -1,7 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, fill, copyBtn } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
-import { stdioWarning } from '/ui/connect_view.js';
+import { stdioWarning, bridgeBanner } from '/ui/connect_view.js';
 
 // The connect panel sits at the top of the agents screen and answers the
 // first question a person has there: how does an agent reach this mount? It
@@ -37,6 +37,13 @@ function body(c) {
     parts.push(el('div', { class: 'banner warn', role: 'alert', 'data-stdio-warning': '', style: 'margin-top:12px' },
       t(warning.key), ' ',
       el('a', { href: warning.href }, t(warning.linkKey))));
+  }
+  // The bridge line answers the warning: green when that stdio server's
+  // writes reach the owner, yellow with the reason when they do not.
+  const bridge = bridgeBanner(c);
+  if (bridge) {
+    parts.push(el('div', { class: 'banner ' + bridge.cls, role: 'status', 'data-bridge-banner': bridge.cls, style: 'margin-top:8px' },
+      bridge.reasonKey ? t(bridge.key) + ' ' + t(bridge.reasonKey) : t(bridge.key, bridge.arg)));
   }
   if (!c.http_listening) {
     parts.push(el('p', { class: 'detail', style: 'margin:12px 0 6px' }, t('connect.http.hint')));

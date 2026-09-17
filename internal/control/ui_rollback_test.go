@@ -1,6 +1,8 @@
 package control
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -217,6 +219,53 @@ func TestRollbackModulesStayShort(t *testing.T) {
 	for _, name := range []string{"web/session_panel.js", "web/rollback_plan.js", "web/agent_touch.js", "web/screens/agents_sessions.js", "web/screens/main.js"} {
 		if n := strings.Count(webSource(t, name), "\n"); n >= 800 {
 			t.Errorf("%s is %d lines; split it", name, n)
+		}
+	}
+}
+
+// TestRollbackPreviewGroupsSkippedByReasonAndMarksReversibility (ui-plan
+// G4): the skip group of the preview is broken down by reason through
+// groupSkipped, the plan closes with the line about writes no session
+// recorded, and each op row's Before cell is reversibility()'s decision —
+// a mark with its word beside it, never the mark alone — including the
+// not_recorded state. Both decisions live in rollback_plan.js and run
+// under node.
+func TestRollbackPreviewGroupsSkippedByReasonAndMarksReversibility(t *testing.T) {
+	plan := webSource(t, "web/rollback_plan.js")
+	for _, want := range []string{"export function groupSkipped(", "export function reversibility(", "'not_recorded') return { state: 'none'", "const SKIP_ORDER = ['expired'"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("rollback_plan.js lacks %s", want)
+		}
+	}
+	panel := webSource(t, "web/session_panel.js")
+	for _, want := range []string{
+		"groupSkipped, reversibility } from '/ui/rollback_plan.js'",
+		"groupSkipped(skipped).map(", "'data-reason': g.reason", "t('rollback.reason.none')",
+		"'data-not-recorded': ''", "t('rollback.not_recorded.note')",
+		"const r = reversibility(o)", "'data-reversible': r.state", "t(r.key)", "'aria-hidden': 'true'",
+		"'not_recorded']",
+	} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("session panel lacks %s", want)
+		}
+	}
+	src := webI18nSource(t)
+	for _, lang := range []string{"zh", "en"} {
+		keys := tableKeys(t, src, lang)
+		for _, k := range []string{"rollback.reason.none", "rollback.not_recorded.note", "rollback.pre.not_recorded", "rollback.pre.expired", "rollback.pre.too_many"} {
+			if !keys[k] {
+				t.Errorf("%s lacks %s", lang, k)
+			}
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join("web", "_tests", "rollback_plan.test.mjs"))
+	if err != nil {
+		t.Fatalf("the node suite for rollback_plan.js is missing: %v", err)
+	}
+	node := string(raw)
+	for _, want := range []string{"groupSkipped(", "reversibility("} {
+		if !strings.Contains(node, want) {
+			t.Errorf("the node suite does not exercise %s", want)
 		}
 	}
 }

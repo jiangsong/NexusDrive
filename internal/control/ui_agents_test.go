@@ -172,7 +172,7 @@ func TestConnectPanelWarnsAboutStdioNonOwner(t *testing.T) {
 		}
 	}
 	panel := webSource(t, "web/connect_panel.js")
-	for _, want := range []string{"import { stdioWarning } from '/ui/connect_view.js'", "const warning = stdioWarning(c)", "if (warning) {", "role: 'alert'", "'data-stdio-warning'", "el('a', { href: warning.href }, t(warning.linkKey))", "t(warning.key)"} {
+	for _, want := range []string{"import { stdioWarning, bridgeBanner } from '/ui/connect_view.js'", "const warning = stdioWarning(c)", "if (warning) {", "role: 'alert'", "'data-stdio-warning'", "el('a', { href: warning.href }, t(warning.linkKey))", "t(warning.key)"} {
 		if !strings.Contains(panel, want) {
 			t.Errorf("connect_panel.js lacks %s", want)
 		}
@@ -186,6 +186,40 @@ func TestConnectPanelWarnsAboutStdioNonOwner(t *testing.T) {
 	for _, lang := range []string{"zh", "en"} {
 		keys := tableKeys(t, webI18nSource(t), lang)
 		for _, k := range []string{"connect.stdio.banner", "connect.stdio.link"} {
+			if !keys[k] {
+				t.Errorf("%s lacks %s", lang, k)
+			}
+		}
+	}
+}
+
+// TestConnectPanelShowsBridgeState: the line under the stdio warning that
+// says whether that server's writes reach the owner is decided by
+// connect_view.js from /mcp/connect's bridge field — connected green with
+// the session count, disabled yellow with the reason, n/a nothing — and
+// the panel renders that decision without reading the field itself.
+func TestConnectPanelShowsBridgeState(t *testing.T) {
+	view := webSource(t, "web/connect_view.js")
+	for _, want := range []string{"export function bridgeBanner(c)", "b.state === 'connected'", "cls: 'ok'", "key: 'connect.bridge.connected'", "b.state === 'disabled'", "cls: 'warn'", "'connect.bridge.unknown'"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("connect_view.js lacks %s", want)
+		}
+	}
+	panel := webSource(t, "web/connect_panel.js")
+	for _, want := range []string{"const bridge = bridgeBanner(c)", "if (bridge) {", "'data-bridge-banner': bridge.cls", "role: 'status'", "t(bridge.key, bridge.arg)", "t(bridge.reasonKey)"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("connect_panel.js lacks %s", want)
+		}
+	}
+	if strings.Contains(panel, "c.bridge") {
+		t.Error("the panel decides the bridge line itself instead of through connect_view.js")
+	}
+	if !strings.Contains(webSource(t, "web/app.css"), ".banner.ok {") {
+		t.Error("app.css has no green banner")
+	}
+	for _, lang := range []string{"zh", "en"} {
+		keys := tableKeys(t, webI18nSource(t), lang)
+		for _, k := range []string{"connect.bridge.connected", "connect.bridge.disabled", "connect.bridge.http_off", "connect.bridge.not_loopback", "connect.bridge.no_token", "connect.bridge.unknown"} {
 			if !keys[k] {
 				t.Errorf("%s lacks %s", lang, k)
 			}
