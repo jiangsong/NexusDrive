@@ -257,3 +257,66 @@ func TestHookCursorsAreKeptPerSessionAndPrunedWithChanges(t *testing.T) {
 		t.Fatalf("a cursor set 25 days ago went: %d %v", id, known)
 	}
 }
+
+// TestRescanMarksNextChangeUnreliable: an overflow of the feed becomes a
+// rescan row with reliable false — the mark that rows before it may be
+// missing — while the rows recorded after it are reliable again; and a
+// recorder starting over a record that already has rows leaves the same
+// mark for the time nothing recorded, so a crash with a batch unflushed
+// is visible rather than silent. A first run leaves no mark.
+func TestRescanMarksNextChangeUnreliable(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	now := time.Now()
+	rows := ChangesOf(vfs.Change{Kind: vfs.KindWrite, Paths: []string{"/a"}, Origin: vfs.OriginKernel}, now)
+	rows = append(rows, ChangesOf(vfs.Change{Kind: vfs.KindRescan, Rescan: true, Origin: vfs.OriginRemote}, now)...)
+	rows = append(rows, ChangesOf(vfs.Change{Kind: vfs.KindWrite, Paths: []string{"/b"}, Origin: vfs.OriginKernel}, now)...)
+	if _, err := s.RecordChanges(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.Changes(ctx, ChangesQuery{})
+	if err != nil || len(got) != 3 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if !got[0].Reliable || got[1].Kind != "rescan" || got[1].Reliable || !got[2].Reliable {
+		t.Fatalf("reliability: %+v", got)
+	}
+
+	// A recorder over a record with rows marks its start; one over an
+	// empty record does not.
+	feed := &fakeFeed{ch: make(chan vfs.Change)}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.RunChangeRecorder(rctx, feed); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _, _ = s.Changes(ctx, ChangesQuery{})
+		if len(got) == 4 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if len(got) != 4 || got[3].Kind != "rescan" || got[3].Origin != "restart" || got[3].Reliable {
+		t.Fatalf("no restart marker: %+v", got)
+	}
+	fresh, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	rctx, cancel = context.WithCancel(ctx)
+	done = make(chan struct{})
+	go func() { fresh.RunChangeRecorder(rctx, feed); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	if id, _ := fresh.LastChangeID(ctx); id != 0 {
+		t.Fatalf("a first run left a marker: %d", id)
+	}
+}

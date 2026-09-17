@@ -106,6 +106,10 @@ var schemaV2 = []string{
 var schemaV3 = []string{
 	`ALTER TABLE audit ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE session_ops ADD COLUMN ts INTEGER NOT NULL DEFAULT 0`,
+	// A v2 row's time is the time of the audit row it was recorded
+	// beside; the backfill only touches rows still at the default, so
+	// it is repeatable.
+	`UPDATE session_ops SET ts = COALESCE((SELECT audit.ts FROM audit WHERE audit.id = session_ops.audit_id), 0) WHERE ts = 0`,
 	`ALTER TABLE sessions ADD COLUMN last_change_seen INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS changes (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,

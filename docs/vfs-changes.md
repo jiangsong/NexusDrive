@@ -54,8 +54,10 @@ MCP 已接入注册/取消/断连清理、通知合并和权限检查，只通�
 `vfs.Change` 是内存事件：64 条缓冲，溢出坍缩成一条 `KindRescan`，进程退出即消失。`internal/agent` 的 `ChangeRecorder`
 （daemon 装配的第五个 `WatchChanges` 消费者，200 ms / 128 条攒批，只在 owner 进程跑）把它落进 agent.db 的 `changes` 表：
 `(id, ts, path, kind, from, origin, session_id?, principal?, reliable)`。`origin` 来自 `WithOrigin` 打的标（`kernel` / `mcp` /
-`control` / `webdav`），`session_id` / `principal` 来自 mcpsrv session middleware 的 `WithActor`。收到 `KindRescan` 时记一行并把
-**下一行**标 `reliable = 0`——含义是"这行之前可能有遗漏"，`pull_events` 与 hooks 注入都据此提示"可能有遗漏"。
+`control` / `webdav`），`session_id` / `principal` 来自 mcpsrv session middleware 的 `WithActor`。收到 `KindRescan` 时记一行 `kind = rescan`、
+`reliable = 0`——含义是"这行之前可能有遗漏"，之后的行照常 `reliable = 1`；`pull_events` 与 hooks 注入都据此提示
+"可能有遗漏"。记录器启动时若表里已有行，也记一条 `origin = restart` 的 rescan 行：守护进程停着（或 kill -9 时攒批
+未落）的那段没人记录，用同一个标记诚实地说出来（2026-09-17）。
 `stat.last_writer`、`history`、`pull_events`、hooks 的"自上一轮谁改了什么"、控制台的变更标签都只读这张表；`mcp.session.retain`
 （默认 30 天）到期后由 `RunChangeRetention` 清理。
 

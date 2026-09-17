@@ -311,6 +311,17 @@ func (s *Store) RunChangeRecorder(ctx context.Context, src ChangeSource) {
 	}
 	ch, stop := src.WatchChanges()
 	defer stop()
+	// While no recorder ran — the daemon was down, or died with a batch
+	// unflushed — changes went unrecorded, and nothing in the table says
+	// so. A record that already has rows therefore opens with a rescan
+	// row (origin restart): the same "rows before this may be missing"
+	// mark a feed overflow leaves, which pull_events, history and the
+	// hooks all know how to show. A first run has nothing to have missed.
+	if id, err := s.LastChangeID(context.WithoutCancel(ctx)); err == nil && id > 0 {
+		if _, err := s.RecordChanges(context.WithoutCancel(ctx), []Change{{Path: "/", Kind: vfs.KindRescan.String(), Origin: "restart"}}); err != nil {
+			slog.Warn("agent: restart marker not recorded", "err", err)
+		}
+	}
 	var batch []Change
 	flush := func() {
 		if len(batch) == 0 {

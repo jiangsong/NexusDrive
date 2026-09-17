@@ -330,3 +330,62 @@ func TestSchemaV3IsAdditiveAndRepeatable(t *testing.T) {
 		t.Fatalf("tokens_out did not round-trip: %+v %v", rows, err)
 	}
 }
+
+// TestSchemaV3MigratesV2AndBackfillsTs: a v2 database's session_ops rows
+// get their time from the audit row each was recorded beside, so history
+// can place them; a row whose audit row is gone stays at zero; and the
+// backfill is repeatable, since it only touches rows still at zero.
+func TestSchemaV3MigratesV2AndBackfillsTs(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDB(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range [][]string{schemaV1, schemaV2} {
+		for _, q := range step {
+			if _, err := db.Exec(q); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	const when = int64(1758000000000000000)
+	if _, err := db.Exec(`INSERT INTO audit(id, ts, principal_id, session_id, transport, tool, paths, args, bytes_in, bytes_out, result, error, duration_ms) VALUES (7, ?, 'p', 's1', 'stdio', 'write_file', '[]', '{}', 0, 0, 'ok', '', 1)`, when); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_ops(session_id, audit_id, op, path, pre_state) VALUES ('s1', 7, 'create', '/a.txt', 'absent'), ('s1', 99, 'create', '/orphan.txt', 'absent')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var ts int64
+	if err := s.db.QueryRow(`SELECT ts FROM session_ops WHERE path = '/a.txt'`).Scan(&ts); err != nil || ts != when {
+		t.Fatalf("ts was not backfilled from audit: %d %v", ts, err)
+	}
+	if err := s.db.QueryRow(`SELECT ts FROM session_ops WHERE path = '/orphan.txt'`).Scan(&ts); err != nil || ts != 0 {
+		t.Fatalf("an orphan row got a time: %d %v", ts, err)
+	}
+	// Running the step again changes nothing.
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range schemaV3 {
+		if err := applyStep(tx, q); err != nil {
+			t.Fatalf("repeat %q: %v", q, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT ts FROM session_ops WHERE path = '/a.txt'`).Scan(&ts); err != nil || ts != when {
+		t.Fatalf("the repeat changed the time: %d %v", ts, err)
+	}
+}
