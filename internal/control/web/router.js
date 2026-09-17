@@ -14,6 +14,7 @@ export const routes = {
   '#/storage': 'storage-view',
   '#/proxy': 'proxy-view',
   '#/diagnostics': 'diagnostics-view',
+  '#/settings': 'settings-view',
   // Setup is reachable by hash but is not a nav item: it is a first-run flow
   // someone is sent to, not a place to browse back to.
   '#/setup': 'setup-view',
@@ -43,4 +44,5 @@ export const navItems = [
   { hash: '#/storage', icon: 'db', key: 'nav.storage' },
   { hash: '#/proxy', icon: 'globe', key: 'nav.proxy' },
   { hash: '#/diagnostics', icon: 'wrench', key: 'nav.diagnostics' },
+  { hash: '#/settings', icon: 'wrench', key: 'nav.settings' },
 ];
