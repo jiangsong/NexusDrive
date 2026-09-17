@@ -212,3 +212,10 @@ details.connect > summary::before { content: ""; width: 7px; height: 7px; border
 details.connect[open] > summary::before { transform: rotate(45deg); }
 details.connect > summary .connect-title { flex-grow: 1; font-weight: 600; }
 details.connect > .connect-body { padding: 0 0 16px 21px; }
+.heat-chart { margin: 0 0 12px; overflow: auto; }
+.heat-plot { display: block; max-width: 100%; }
+.heat-plot .heat-bound { stroke: var(--border); stroke-dasharray: 4 4; }
+.heat-plot .heat-label, .heat-plot .heat-empty { fill: var(--muted); font-size: 11px; }
+.heat-plot .heat-point { fill-opacity: .7; cursor: pointer; }
+.heat-plot .heat-agent { fill: var(--ok); } .heat-plot .heat-kernel { fill: #6ea8fe; } .heat-plot .heat-console { fill: var(--warn); } .heat-plot .heat-webdav { fill: #c58af9; } .heat-plot .heat-other { fill: var(--muted); }
+.heat-dot { margin-left: 6px; font-size: 11px; }

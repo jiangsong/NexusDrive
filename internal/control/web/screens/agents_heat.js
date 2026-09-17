@@ -1,6 +1,8 @@
 import { api } from '/ui/api.js';
 import { el, fill } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
+import { plot, pointsOf } from '/ui/heat_plot.js';
+import { suggestButton } from '/ui/heat_suggestions.js';
 
 // The heat tab: what is being read, by whom (agents, programs on the
 // mount, the console, WebDAV), and how long ago each file changed —
@@ -53,6 +55,13 @@ export function renderHeatTab(host) {
     el('option', { value: '' }, t('heat.filter.quadrant')),
     ...QUADRANTS.map((q) => el('option', { value: q }, t('heat.quadrant.' + q))));
   const note = el('p', { class: 'detail', style: 'margin:0 0 10px' }, t('heat.note'));
+  // The scatter is an SVG string from heat_plot.js (no DOM, every text
+  // escaped there); a click on a point selects the file in the main window.
+  const chart = el('div', { class: 'heat-chart', 'data-heat-plot': '' });
+  chart.addEventListener('click', (ev) => {
+    const c = ev.target.closest('circle[data-path]');
+    if (c) location.hash = '#/connections?path=' + encodeURIComponent(c.getAttribute('data-path'));
+  });
 
   async function load() {
     const q = new URLSearchParams();
@@ -67,6 +76,7 @@ export function renderHeatTab(host) {
         return;
       }
       const entries = (r.entries || []).filter((e) => !only.value || e.quadrant === only.value);
+      chart.innerHTML = plot(pointsOf(r.entries), { width: 720, height: 260, labels: { hot: t('heat.plot.hot'), stale: t('heat.plot.stale'), empty: t('heat.empty') } });
       fill(rows, entries.length ? entries.map(row)
         : el('tr', {}, el('td', { colspan: String(COLUMNS), class: 'dim' }, t('heat.empty'))));
     } catch (e) {
@@ -81,7 +91,10 @@ export function renderHeatTab(host) {
   fill(host,
     el('div', { style: 'padding:14px 20px 0' },
       note,
-      el('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap;margin-bottom:10px' }, path, days, only),
+      el('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap;margin-bottom:10px' }, path, days, only,
+        el('div', { class: 'grow' }),
+        suggestButton(() => ({ path: path.value.trim(), days: Number(days.value), onAdopted: load }))),
+      chart,
       el('div', { class: 'table-wrap' },
         el('table', { class: 'table' },
           el('thead', {}, el('tr', {},

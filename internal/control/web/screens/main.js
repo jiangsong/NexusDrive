@@ -16,6 +16,7 @@ import { renderIndexInfo } from '/ui/index_inspector.js';
 import { openSendToAgent } from '/ui/send_to_agent.js';
 import { mountProvenance } from '/ui/provenance.js';
 import { openHistoryPanel } from '/ui/history_panel.js';
+import { decorateHeat } from '/ui/heat_dots.js';
 import { mountAgentTouch } from '/ui/agent_touch.js';
 
 // The main window: connections on the left, the file table in the middle, an
@@ -268,6 +269,9 @@ export function renderMain(host) {
       if (!rows.children.length) fill(rows, el('tr', {}, el('td', { colspan: '4', class: 'dim' }, t('empty'))));
       const next = page.next_cursor;
       if (next) rows.append(moreRow(4, () => load(next)));
+      // The read-heat dots land after the list; heat_dots.js asks once per
+      // directory and leaves the list alone when there is no heat table.
+      decorateHeat(rows, cwd, { api });
     } catch (e) {
       // A failed continuation must not take the pages already on screen with
       // it: the rows being read cost nothing to keep.
