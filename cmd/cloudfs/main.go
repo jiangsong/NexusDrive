@@ -148,6 +148,10 @@ func main() {
 		err = runExports(ctx, os.Args[2:], os.Stdout)
 	case "audit":
 		err = runAudit(ctx, os.Args[2:], os.Stdout)
+	case "history":
+		err = runHistory(ctx, os.Args[2:], os.Stdout)
+	case "heat":
+		err = runHeat(ctx, os.Args[2:], os.Stdout)
 	case "sessions":
 		err = runSessions(ctx, os.Args[2:], os.Stdout)
 	case "index":
@@ -208,6 +212,10 @@ Agents
                             generate media .strm files through WebDAV; --prune removes verified stale outputs
   audit [--session ID] [--tool T] [--result ok|denied|error] [--since 1h] [--limit N] [--json]
                             list recorded MCP tool calls, newest first; reads agent.db when no daemon runs
+  history <path> [--limit N] [--cursor C] [--json]
+                            who changed a path (terminal, agent session, console, WebDAV, remote), newest first
+  heat [prefix] [--days 30] [--limit N] [--json]
+                            the most-read paths by kind of reader, with how long ago each changed
   sessions list [--state active|finished|expired|rolled_back] | show <id> | finish <id> [--summary text]
                             inspect agent sessions and their scope; finish needs the running daemon
   sessions rollback <id> --dry-run | --confirm [--json]

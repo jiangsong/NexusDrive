@@ -135,3 +135,31 @@ func CallTriggerRetry(ctx context.Context, socket, tcp string, id int64) (Trigge
 	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/triggers/retry", body, &out)
 	return out, online, err
 }
+
+// CallChanges asks the running daemon for a page of the change record.
+func CallChanges(ctx context.Context, socket, tcp, path, cursor string, limit int) (ChangesResponse, bool, error) {
+	params := url.Values{}
+	setIf(params, "path", path)
+	setIf(params, "cursor", cursor)
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	var out ChangesResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/changes?"+params.Encode(), nil, &out)
+	return out, online, err
+}
+
+// CallHeat asks the running daemon for the read-heat view.
+func CallHeat(ctx context.Context, socket, tcp, path string, days, limit int) (HeatResponse, bool, error) {
+	params := url.Values{}
+	setIf(params, "path", path)
+	if days > 0 {
+		params.Set("days", strconv.Itoa(days))
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	var out HeatResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/agent/heat?"+params.Encode(), nil, &out)
+	return out, online, err
+}
