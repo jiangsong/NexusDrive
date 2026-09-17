@@ -48,6 +48,10 @@ type platform struct {
 	readMatcher string
 	// timeout is in the unit the client counts hook timeouts in.
 	timeout int
+	// verified says the event names and file shape were exercised against
+	// a real install; the others carry an UNVERIFIED comment and the
+	// console says so.
+	verified bool
 	// note is what the person still has to do after install.
 	note string
 }
@@ -60,6 +64,7 @@ var platforms = map[string]platform{
 		stop:        "SessionEnd",
 		readMatcher: "Read|Grep|Bash",
 		timeout:     10,
+		verified:    true,
 	},
 	// UNVERIFIED: Codex hook event names and the hooks.json shape follow
 	// the experimental hooks feature as of 2026-09; verify against a real
@@ -207,6 +212,11 @@ type Status struct {
 	// Present says the client itself seems to be on this machine (its
 	// config directory exists).
 	Present bool `json:"present"`
+	// Verified says the client's hook shape was checked on a real install
+	// (only Claude Code so far); the others are best-effort UNVERIFIED.
+	Verified bool `json:"verified"`
+	// Note is a platform's extra step, when it has one.
+	Note string `json:"note,omitempty"`
 }
 
 // groups builds the three hook groups of a client in the client's shape.
@@ -294,7 +304,7 @@ func Statuses(home string) []Status {
 	var out []Status
 	for _, c := range Clients {
 		path, _ := ConfigPath(home, c)
-		st := Status{Client: c, Path: path}
+		st := Status{Client: c, Path: path, Verified: platforms[c].verified, Note: platforms[c].note}
 		if info, err := os.Stat(filepath.Dir(path)); err == nil && info.IsDir() {
 			st.Present = true
 		}

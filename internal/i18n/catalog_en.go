@@ -254,6 +254,7 @@ var en = map[string]string{
 	"doctor.agent.db.fix":            "stop cloudfs and move agent.db under cache.dir/agent aside; sessions and audit start empty",
 	"doctor.agent.stdio.ok":          "no stdio MCP server runs beside the cache owner",
 	"doctor.agent.stdio.warn":        "%d stdio MCP server(s) run beside the cache owner (pid %s): each has its own view of the files and no uploader",
+	"doctor.agent.stdio.bridged":     "%d stdio MCP server(s) run beside the cache owner (pid %s) and forward their writes over the stdio→HTTP bridge",
 	"doctor.agent.stdio.fix":         "register the client over HTTP instead: cloudfs mcp install --transport http",
 	"fix.index_requeued":             "requeued %d failed documents for extraction",
 

@@ -106,6 +106,24 @@ func TestChangesRecordQueryLastWriterAndHistory(t *testing.T) {
 		t.Fatalf("root history: %+v %v", h, err)
 	}
 
+	// HistoryPage walks the same rows back in time by cursor: two pages of
+	// two under /work (the second is the last), then nothing.
+	page, more, err := s.HistoryPage(ctx, HistoryQuery{Path: "/work", Limit: 2})
+	if err != nil || !more || len(page) != 2 || page[0].ID != 6 || page[1].ID != 5 {
+		t.Fatalf("page 1: %+v more=%v %v", page, more, err)
+	}
+	page, more, err = s.HistoryPage(ctx, HistoryQuery{Path: "/work", Before: page[1].ID, Limit: 2})
+	if err != nil || more || len(page) != 2 || page[0].ID != 2 || page[1].ID != 1 {
+		t.Fatalf("page 2: %+v more=%v %v", page, more, err)
+	}
+	page, more, err = s.HistoryPage(ctx, HistoryQuery{Path: "/work", Before: page[1].ID, Limit: 2})
+	if err != nil || more || len(page) != 0 {
+		t.Fatalf("page 3: %+v more=%v %v", page, more, err)
+	}
+	if page, more, err = s.HistoryPage(ctx, HistoryQuery{Limit: 10}); err != nil || more || len(page) != 6 {
+		t.Fatalf("root page: %d more=%v %v", len(page), more, err)
+	}
+
 	s.now = func() time.Time { return base.Add(40 * 24 * time.Hour) }
 	n, err := s.PruneChanges(ctx, 0)
 	if err != nil || n != 6 {

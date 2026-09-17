@@ -634,6 +634,7 @@ func (d *Daemon) Collector() *control.Collector {
 	if d.Agent != nil {
 		col.HookStore = d.Agent
 		col.HeatStore = d.Agent
+		col.Changes = d.Agent
 	}
 	if d.ReadHeat != nil {
 		col.ReadHeat = d.ReadHeat
@@ -766,6 +767,7 @@ func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, 
 		Index:           d.indexView(),
 		Agent:           d.Agent,
 		AgentDir:        filepath.Join(cacheDir, "agent"),
+		MCPHTTPAddr:     func() string { return d.mcpHTTPState().Addr },
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -45,11 +44,9 @@ import (
 // principal under its own transport name.
 const bridgePrincipalID = "bridge"
 
-// bridgeTokenFile is the secret's file name under the agent directory.
-const bridgeTokenFile = "bridge.token"
-
-// BridgeTokenPath is where the owner keeps the bridge secret.
-func BridgeTokenPath(agentDir string) string { return filepath.Join(agentDir, bridgeTokenFile) }
+// BridgeTokenPath is where the owner keeps the bridge secret; the name
+// is agent.BridgeTokenPath's so the control plane can see the file too.
+func BridgeTokenPath(agentDir string) string { return agent.BridgeTokenPath(agentDir) }
 
 // WriteBridgeToken creates (or reuses) the owner's bridge secret and
 // returns it. The file is 0600 in a 0700 directory: what the OS user can

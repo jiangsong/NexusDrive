@@ -196,6 +196,50 @@ func (s *Store) History(ctx context.Context, path string, limit int) ([]Change, 
 		p, p, likePrefix(p)+"/%", limit)
 }
 
+// HistoryQuery pages History for a console that scrolls back in time.
+type HistoryQuery struct {
+	// Path is the file or directory; "" or "/" means everything.
+	Path string
+	// Before returns rows with id < Before, the cursor of the previous
+	// page's oldest row; zero starts from the newest.
+	Before int64
+	// Limit bounds the page (default 50, max 500).
+	Limit int
+}
+
+// HistoryPage is History with a cursor: the newest rows for the path
+// (and, for a directory, the paths under it) older than Before, newest
+// first, and whether more remain.
+func (s *Store) HistoryPage(ctx context.Context, q HistoryQuery) ([]Change, bool, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	where := []string{"1 = 1"}
+	var args []any
+	if p := Normalise(q.Path); p != "/" {
+		where = append(where, `(path = ? OR from_path = ? OR path LIKE ? ESCAPE '\')`)
+		args = append(args, p, p, likePrefix(p)+"/%")
+	}
+	if q.Before > 0 {
+		where = append(where, "id < ?")
+		args = append(args, q.Before)
+	}
+	args = append(args, limit+1)
+	rows, err := s.queryChanges(ctx, changeColumns+` WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	more := len(rows) > limit
+	if more {
+		rows = rows[:limit]
+	}
+	return rows, more, nil
+}
+
 // PruneChanges drops rows older than retain (0 means 30 days) and reports
 // how many went.
 func (s *Store) PruneChanges(ctx context.Context, retain time.Duration) (int64, error) {

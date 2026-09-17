@@ -88,3 +88,34 @@ func TestDoctorReportsAgentDB(t *testing.T) {
 		t.Fatal("agent_db was reported without a store")
 	}
 }
+
+// TestDoctorAcceptsAStdioServerBehindTheBridge: with the bridge secret
+// published and the HTTP listener on loopback, a stdio server beside the
+// owner forwards its writes (T-50), so the check is ok and says so; the
+// same heartbeat warns again as soon as the listener is off loopback.
+func TestDoctorAcceptsAStdioServerBehindTheBridge(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agent")
+	if err := agent.WriteHeartbeat(dir, 4242); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agent.BridgeTokenPath(dir), []byte(strings.Repeat("y", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr := "127.0.0.1:9000"
+	d := &Doctor{AgentDir: dir, MCPHTTPAddr: func() string { return addr }}
+	c, _ := checkByName(d.Run(context.Background()), "agent_stdio")
+	if c.Level != LevelOK || !strings.Contains(c.Detail, "4242") || !strings.Contains(c.Detail, "bridge") || c.Fix != "" {
+		t.Fatalf("bridged stdio server: %+v", c)
+	}
+	if zh := c.Localize(i18n.ZH); !strings.Contains(zh.Detail, "桥") {
+		t.Fatalf("did not localize: %+v", zh)
+	}
+	addr = "0.0.0.0:9000"
+	if c, _ = checkByName(d.Run(context.Background()), "agent_stdio"); c.Level != LevelWarn {
+		t.Fatalf("listener off loopback still counts as bridged: %+v", c)
+	}
+	addr = ""
+	if c, _ = checkByName(d.Run(context.Background()), "agent_stdio"); c.Level != LevelWarn {
+		t.Fatalf("no listener still counts as bridged: %+v", c)
+	}
+}

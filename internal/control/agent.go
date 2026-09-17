@@ -47,6 +47,9 @@ type AuditView struct {
 	TS         time.Time       `json:"ts"`
 	Client     string          `json:"client"`
 	SessionID  string          `json:"session_id"`
+	// Transport is how the call arrived (stdio, http-token, http-bridge,
+	// …): the audit tab's origin column, since every audit row is MCP.
+	Transport  string          `json:"transport,omitempty"`
 	Tool       string          `json:"tool"`
 	Paths      []string        `json:"paths"`
 	Args       json.RawMessage `json:"args"`
@@ -66,8 +69,11 @@ type AuditResponse struct {
 // SessionView is one session as the console reads it. FinishedAt is a
 // pointer so an unfinished session carries no zero date.
 type SessionView struct {
-	ID            string      `json:"id"`
-	Client        string      `json:"client"`
+	ID     string `json:"id"`
+	Client string `json:"client"`
+	// Principal is the id of the principal the session runs as; a hook
+	// session's is hook:<client>, which the list marks.
+	Principal     string      `json:"principal,omitempty"`
 	ClientVersion string      `json:"client_version,omitempty"`
 	Transport     string      `json:"transport"`
 	State         string      `json:"state"`
@@ -84,6 +90,8 @@ type SessionView struct {
 	OpsCount int `json:"ops_count"`
 	// RolledBackAt is set once the session has been rolled back.
 	RolledBackAt *time.Time `json:"rolled_back_at,omitempty"`
+	// LastChangeSeen is the changes cursor the session last pulled up to.
+	LastChangeSeen int64 `json:"last_change_seen,omitempty"`
 }
 
 // SessionsResponse is GET /sessions.
@@ -269,7 +277,7 @@ func (c *clientNames) auditView(ctx context.Context, row agent.AuditRow) AuditVi
 	}
 	return AuditView{
 		ID: row.ID, TS: row.TS, Client: c.lookup(ctx, row.SessionID), SessionID: row.SessionID,
-		Tool: row.Tool, Paths: paths, Args: args, BytesIn: row.BytesIn, BytesOut: row.BytesOut,
+		Transport: row.Transport, Tool: row.Tool, Paths: paths, Args: args, BytesIn: row.BytesIn, BytesOut: row.BytesOut,
 		Result: row.Result, Error: row.Error, DurationMS: row.DurationMS,
 	}
 }
@@ -291,10 +299,10 @@ func AuditViews(ctx context.Context, v AgentView, rows []agent.AuditRow) []Audit
 // SessionViewOf is one session as the console reads it.
 func SessionViewOf(s agent.Session) SessionView {
 	v := SessionView{
-		ID: s.ID, Client: s.ClientName, ClientVersion: s.ClientVersion, Transport: s.Transport,
+		ID: s.ID, Client: s.ClientName, Principal: s.PrincipalID, ClientVersion: s.ClientVersion, Transport: s.Transport,
 		State: s.State, Scope: s.Scope, Workspace: s.Workspace, Sandbox: s.Sandbox,
 		StartedAt: s.StartedAt, LastSeenAt: s.LastSeenAt, Writes: s.Writes,
-		ArtifactCount: len(s.Artifacts), Summary: s.Summary, OpsCount: s.OpsCount,
+		ArtifactCount: len(s.Artifacts), Summary: s.Summary, OpsCount: s.OpsCount, LastChangeSeen: s.LastChangeSeen,
 	}
 	if !s.FinishedAt.IsZero() {
 		finished := s.FinishedAt

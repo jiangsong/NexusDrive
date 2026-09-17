@@ -253,6 +253,7 @@ var zh = map[string]string{
 	"doctor.agent.db.fix":            "停止 cloudfs 并把 cache.dir/agent 下的 agent.db 移走；会话与审计从空开始",
 	"doctor.agent.stdio.ok":          "没有 stdio MCP 进程与存储 owner 并存",
 	"doctor.agent.stdio.warn":        "%d 个 stdio MCP 进程与存储 owner 并存（pid %s）：它们各有一份文件视图且没有上传器",
+	"doctor.agent.stdio.bridged":     "%d 个 stdio MCP 进程与存储 owner 并存（pid %s），已通过 stdio→HTTP 桥把写入转发给 owner",
 	"doctor.agent.stdio.fix":         "改用 HTTP 传输注册客户端：cloudfs mcp install --transport http",
 	"fix.index_requeued":             "已把 %d 个失败文档重新排队抽取",
 

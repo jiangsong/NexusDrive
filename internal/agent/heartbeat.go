@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -91,4 +92,30 @@ func LiveStdioProcesses(dir string, now time.Time) []int {
 	}
 	sort.Ints(live)
 	return live
+}
+
+// bridgeTokenFile is the stdio→HTTP bridge secret's file name under the
+// agent directory. The owner writes it while serving the HTTP transport
+// (internal/mcpsrv WriteBridgeToken); a stdio server beside the mount
+// reads it to forward its writes. It lives here, next to the heartbeats,
+// so the control plane can tell whether the bridge is on offer without
+// importing the MCP adapter.
+const bridgeTokenFile = "bridge.token"
+
+// BridgeTokenPath is where the owner keeps the bridge secret.
+func BridgeTokenPath(dir string) string { return filepath.Join(dir, bridgeTokenFile) }
+
+// HasBridgeToken says the owner has published a bridge secret under dir.
+func HasBridgeToken(dir string) bool {
+	data, err := os.ReadFile(BridgeTokenPath(dir))
+	return err == nil && len(data) >= 32
+}
+
+// ActiveBridgeSessions counts the sessions a stdio server holds through
+// the bridge right now: the owner's proof that a bridge is not only on
+// offer but in use.
+func (s *Store) ActiveBridgeSessions(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE state = 'active' AND transport = 'http-bridge'`).Scan(&n)
+	return n, err
 }

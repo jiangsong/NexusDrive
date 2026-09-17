@@ -651,7 +651,7 @@ func (m *Sessions) Summary(ctx context.Context, since time.Time) (Summary, error
 // the table, the number of ops the session recorded, and the rollback
 // instant kept in meta (see markRolledBack). The two subqueries cost a
 // lookup per row on indexed keys, which a page of at most 200 rows bears.
-const sessionColumns = `SELECT id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, finished_at, summary, artifacts,
+const sessionColumns = `SELECT id, principal_id, conn_key, client_name, client_version, transport, scope, workspace, sandbox, state, started_at, last_seen_at, finished_at, summary, artifacts, last_change_seen,
 	(SELECT count(*) FROM session_ops WHERE session_ops.session_id = sessions.id),
 	COALESCE((SELECT v FROM meta WHERE meta.k = 'rolled_back_at:' || sessions.id), '0') FROM sessions`
 
@@ -661,7 +661,7 @@ func scanSession(row rowScanner) (Session, error) {
 	var sandbox int
 	var started, lastSeen, finished int64
 	err := row.Scan(&s.ID, &s.PrincipalID, &s.ConnKey, &s.ClientName, &s.ClientVersion, &s.Transport, &scope,
-		&s.Workspace, &sandbox, &s.State, &started, &lastSeen, &finished, &s.Summary, &artifacts, &s.OpsCount, &rolledBack)
+		&s.Workspace, &sandbox, &s.State, &started, &lastSeen, &finished, &s.Summary, &artifacts, &s.LastChangeSeen, &s.OpsCount, &rolledBack)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrSessionNotFound
 	}

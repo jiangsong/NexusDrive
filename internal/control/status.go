@@ -262,6 +262,8 @@ type Collector struct {
 	ReadHeat  HookReadHeat
 	// HeatStore serves GET /agent/heat; nil answers {"enabled": false}.
 	HeatStore HeatStore
+	// Changes serves GET /changes; nil answers {"enabled": false}.
+	Changes ChangeStore
 	Now       func() time.Time
 }
 

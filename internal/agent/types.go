@@ -56,6 +56,10 @@ type Session struct {
 	OpsCount int `json:"ops_count"`
 	// RolledBackAt is when the session was rolled back; zero otherwise.
 	RolledBackAt time.Time `json:"rolled_back_at,omitzero"`
+	// LastChangeSeen is the changes-table cursor the session's pull_events
+	// (or its client's turn-start hook) last returned; 0 when it never
+	// pulled.
+	LastChangeSeen int64 `json:"last_change_seen,omitempty"`
 }
 
 // Artifact is a file a session declared as one of its deliverables.

@@ -85,6 +85,18 @@ type Doctor struct {
 	// Agent is nil, so a config-only doctor still spots them.
 	Agent    *agent.Store
 	AgentDir string
+	// MCPHTTPAddr answers the MCP HTTP listener's address, "" when none:
+	// with the bridge secret beside the heartbeats, a stdio server beside
+	// the owner is bridged rather than stranded. nil means no listener.
+	MCPHTTPAddr func() string
+}
+
+// mcpHTTPAddr tolerates a Doctor built without the hook.
+func (d *Doctor) mcpHTTPAddr() string {
+	if d.MCPHTTPAddr == nil {
+		return ""
+	}
+	return d.MCPHTTPAddr()
 }
 
 // config reads the published configuration, tolerating both a Doctor built
@@ -446,9 +458,17 @@ func (d *Doctor) checkAgent(ctx context.Context) []Check {
 	}
 	c := Check{Name: "agent_stdio"}
 	if pids := agent.LiveStdioProcesses(dir, now); len(pids) > 0 {
-		c.Level = LevelWarn
-		c.setDetail("doctor.agent.stdio.warn", len(pids), pidList(pids))
-		c.setFix("doctor.agent.stdio.fix")
+		// A stdio server beside the mount is only a problem when it cannot
+		// reach the owner: with the bridge secret published on a loopback
+		// listener its writes are forwarded (T-50), so the check is ok.
+		if addr := d.mcpHTTPAddr(); addr != "" && loopbackAddr(addr) && agent.HasBridgeToken(dir) {
+			c.Level = LevelOK
+			c.setDetail("doctor.agent.stdio.bridged", len(pids), pidList(pids))
+		} else {
+			c.Level = LevelWarn
+			c.setDetail("doctor.agent.stdio.warn", len(pids), pidList(pids))
+			c.setFix("doctor.agent.stdio.fix")
+		}
 	} else {
 		c.Level = LevelOK
 		c.setDetail("doctor.agent.stdio.ok")

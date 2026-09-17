@@ -44,6 +44,24 @@ type MCPConnect struct {
 	// otherwise stdio (which, beside a running mount, cannot write; the
 	// console says so and offers to start the listener).
 	InstallTransport string `json:"install_transport"`
+	// Bridge is the stdio→HTTP bridge as the owner sees it (T-50): n/a
+	// when no stdio server runs beside this owner, connected when the
+	// secret is published on a loopback listener (Sessions counts the
+	// stdio servers using it), disabled with a reason otherwise. The
+	// console renders it as the banner under the stdio warning.
+	Bridge MCPBridge `json:"bridge"`
+}
+
+// MCPBridge is the bridge part of MCPConnect.
+type MCPBridge struct {
+	// State is n/a | connected | disabled.
+	State string `json:"state"`
+	// Reason names why the bridge is disabled: http_off (no listener),
+	// not_loopback (the listener is not on a loopback address, so the
+	// secret is not offered), no_token (the listener predates the bridge).
+	Reason string `json:"reason,omitempty"`
+	// Sessions is the number of active bridged sessions when connected.
+	Sessions int `json:"sessions,omitempty"`
 }
 
 // TokenView is one issued token as the console reads it: the fingerprint
@@ -136,6 +154,7 @@ func (v *storeMCPView) Connect(ctx context.Context) MCPConnect {
 		out.AuthRequired = err == nil && live
 	}
 	out.StdioNonOwner = len(agent.LiveStdioProcesses(v.st.Dir(), time.Now())) > 0
+	out.Bridge = bridgeState(ctx, v.st, out.StdioNonOwner, st.Addr)
 	out.InstallTransport = "stdio"
 	if out.HTTPListening {
 		out.InstallTransport = "http"
@@ -146,6 +165,26 @@ func (v *storeMCPView) Connect(ctx context.Context) MCPConnect {
 		}
 	}
 	return out
+}
+
+// bridgeState derives the bridge banner from what the owner can see: the
+// heartbeats, its own listener and the published secret. A stdio server
+// only reads the secret when the listener is on loopback, so a listener
+// elsewhere counts as disabled even with the file present.
+func bridgeState(ctx context.Context, st *agent.Store, stdio bool, addr string) MCPBridge {
+	if !stdio {
+		return MCPBridge{State: "n/a"}
+	}
+	switch {
+	case addr == "":
+		return MCPBridge{State: "disabled", Reason: "http_off"}
+	case !loopbackAddr(addr):
+		return MCPBridge{State: "disabled", Reason: "not_loopback"}
+	case !agent.HasBridgeToken(st.Dir()):
+		return MCPBridge{State: "disabled", Reason: "no_token"}
+	}
+	n, _ := st.ActiveBridgeSessions(ctx)
+	return MCPBridge{State: "connected", Sessions: n}
 }
 
 func orEmpty(m map[string]string) map[string]string {

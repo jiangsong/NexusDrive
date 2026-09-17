@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -299,5 +300,60 @@ func TestTokenRoutesAnswer503WithoutMCP(t *testing.T) {
 	}
 	if w := uiCallControl(t, h, "POST", "/mcp/tokens/x/revoke", `{"confirm":true}`); w.Code != 503 {
 		t.Fatalf("revoke %d", w.Code)
+	}
+}
+
+// TestMCPConnectReportsTheBridgeState: the bridge field follows what the
+// owner can see — no stdio server is n/a; a stdio server without a
+// listener, on a non-loopback listener, or on a listener that never
+// published the secret is disabled with the reason; the secret on a
+// loopback listener is connected, counting the bridged sessions.
+func TestMCPConnectReportsTheBridgeState(t *testing.T) {
+	f, st, _ := agentFixture(t)
+	addr := "127.0.0.1:8765"
+	f.coll.MCP = NewMCPView(st, func() MCPHTTPState { return MCPHTTPState{Addr: addr, Owner: true} }, testSnippets)
+	h := NewServer(f.coll).Handler()
+	connect := func() MCPBridge {
+		t.Helper()
+		w := uiCallControl(t, h, "GET", "/mcp/connect", "")
+		var c MCPConnect
+		if err := json.Unmarshal(w.Body.Bytes(), &c); w.Code != 200 || err != nil {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+		return c.Bridge
+	}
+	if b := connect(); b.State != "n/a" {
+		t.Fatalf("without a stdio server: %+v", b)
+	}
+	if err := agent.WriteHeartbeat(st.Dir(), 778); err != nil {
+		t.Fatal(err)
+	}
+	if b := connect(); b.State != "disabled" || b.Reason != "no_token" {
+		t.Fatalf("listener without a secret: %+v", b)
+	}
+	if err := os.WriteFile(agent.BridgeTokenPath(st.Dir()), []byte(strings.Repeat("x", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b := connect(); b.State != "connected" || b.Sessions != 0 {
+		t.Fatalf("secret on a loopback listener: %+v", b)
+	}
+	m := agent.NewSessions(st, agent.SessionOptions{})
+	p, err := m.EnsurePrincipal(context.Background(), "stdio", "local", agent.Scope{Read: []string{"/work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Resolve(context.Background(), agent.ConnInfo{Key: "bridge:abc", Transport: "http-bridge", PrincipalID: p.ID, ClientName: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if b := connect(); b.State != "connected" || b.Sessions != 1 {
+		t.Fatalf("with a bridged session: %+v", b)
+	}
+	addr = "0.0.0.0:8765"
+	if b := connect(); b.State != "disabled" || b.Reason != "not_loopback" {
+		t.Fatalf("listener off loopback: %+v", b)
+	}
+	addr = ""
+	if b := connect(); b.State != "disabled" || b.Reason != "http_off" {
+		t.Fatalf("no listener: %+v", b)
 	}
 }
