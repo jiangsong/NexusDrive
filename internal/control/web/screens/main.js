@@ -14,6 +14,8 @@ import { readSearchMode, writeSearchMode, runContentSearch, contentSearchHeader 
 import { openExtractedText } from '/ui/extracted_text.js';
 import { renderIndexInfo } from '/ui/index_inspector.js';
 import { openSendToAgent } from '/ui/send_to_agent.js';
+import { mountProvenance } from '/ui/provenance.js';
+import { openHistoryPanel } from '/ui/history_panel.js';
 import { mountAgentTouch } from '/ui/agent_touch.js';
 
 // The main window: connections on the left, the file table in the middle, an
@@ -294,6 +296,10 @@ export function renderMain(host) {
     // session wrote the file lately and fills the host, or leaves it empty.
     const touchHost = el('div', {});
     if (!e.is_dir) mountAgentTouch(touchHost, e.path, { api, openSession: openSessionPanel });
+    // And the provenance rows: who last changed it and how often it was
+    // read; provenance.js asks the change record and the heat table.
+    const provHost = el('div', {});
+    mountProvenance(provHost, e.path, { api, openSession: openSessionPanel, openHistory: (p) => openHistoryPanel(p, { openSession: openSessionPanel }) });
     fill(inspector,
       el('div', { class: 'eyebrow', style: 'margin-bottom:14px' }, t('inspector.title')),
       el('div', { style: 'font-weight:620;overflow-wrap:anywhere' }, e.name),
@@ -305,6 +311,7 @@ export function renderMain(host) {
         : `${t('avail.' + e.availability)} ${e.replicas_live}/${e.replicas_target}`) : null,
       indexHost,
       touchHost,
+      provHost,
       e.is_dir ? null : el('div', { class: 'progress' + (e.cached < 1 ? ' warn' : ''), style: 'margin:12px 0' }, el('span', { style: `width:${Math.round((e.cached || 0) * 100)}%` })),
       el('div', { class: 'row', style: 'margin-top:16px;flex-wrap:wrap' },
         e.is_dir ? null : el('button', { onclick: () => pin(e) }, iconEl('pin'), e.pinned ? t('action.unpin') : t('action.pin')),

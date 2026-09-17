@@ -23,6 +23,13 @@ const OPS_COLUMNS = 5;
 // shown as the daemon sent it.
 const REASONS = new Set(['already', 'too_large', 'not_cached', 'dir', 'not_empty', 'missing', 'incomplete', 'exists', 'from_exists', 'too_many', 'expired', 'not_recorded']);
 
+// isHookPrincipal says a session runs as an agent client's lifecycle hook
+// (principal hook:<client>, docs/agent-first-design.md §7) rather than as
+// an MCP token or the stdio default; the list and the detail mark it.
+export function isHookPrincipal(id) {
+  return typeof id === 'string' && id.startsWith('hook:');
+}
+
 // showInFiles sends the main window to a path: it lands on the parent
 // directory with that entry selected (see the deep link in screens/main.js).
 function showInFiles(path) {
@@ -317,6 +324,8 @@ export async function openSessionPanel(id, onFinished) {
     el('div', { class: 'detail' }, (s.client || s.id || '') + (s.client_version ? ' ' + s.client_version : '')),
     el('div', { class: 'muted' }, t('session.transport')),
     el('div', { class: 'detail' }, s.transport === 'console' ? t('session.transport.console') : (s.transport || '')),
+    s.principal ? el('div', { class: 'muted' }, t('session.principal')) : null,
+    s.principal ? el('div', { class: 'detail', 'data-principal': s.principal }, isHookPrincipal(s.principal) ? [iconEl('bolt'), ' '] : null, s.principal) : null,
     el('div', { class: 'muted' }, t('session.col.scope')),
     el('div', { class: 'detail' }, scope),
     el('div', { class: 'muted' }, t('session.col.state')),
@@ -331,6 +340,8 @@ export async function openSessionPanel(id, onFinished) {
     el('div', { class: 'detail tnums' }, String(s.writes || 0)),
     s.workspace ? el('div', { class: 'muted' }, t('session.workspace')) : null,
     s.workspace ? el('div', { class: 'detail' }, s.workspace) : null,
+    s.last_change_seen ? el('div', { class: 'muted' }, t('session.last_change_seen')) : null,
+    s.last_change_seen ? el('div', { class: 'detail tnums' }, String(s.last_change_seen)) : null,
     s.summary ? el('div', { class: 'muted' }, t('session.summary')) : null,
     s.summary ? el('div', { class: 'detail' }, s.summary) : null);
 

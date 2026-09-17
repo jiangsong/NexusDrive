@@ -3,7 +3,7 @@ import { el, fill, iconEl, moreRow } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
 import { pageCursor, pageFailureMode } from '/ui/paged.js';
 import { scopeParts } from '/ui/scope_view.js';
-import { openSessionPanel, openRollback } from '/ui/session_panel.js';
+import { openSessionPanel, openRollback, isHookPrincipal } from '/ui/session_panel.js';
 import { onAgentEvent } from '/ui/app.js';
 
 // The sessions tab: three headline counts and the list of MCP sessions,
@@ -73,7 +73,7 @@ export function renderSessionsTab(host, params) {
   function sessionRow(s) {
     return el('tr', { 'data-session': s.id, style: 'cursor:pointer', onclick: () => open(s.id) },
       el('td', {},
-        el('div', {}, s.client || s.id),
+        el('div', {}, s.client || s.id, isHookPrincipal(s.principal) ? el('span', { class: 'chip', style: 'margin-left:6px', 'data-principal': s.principal, title: s.principal }, iconEl('bolt'), t('session.hook')) : null),
         el('div', { class: 'dim', style: 'font-size:12px' }, transportLabel(s) + (s.client_version ? ' · ' + s.client_version : ''))),
       el('td', { class: 'detail' }, scopeSummary(s.scope)),
       el('td', {}, stateCell(s)),

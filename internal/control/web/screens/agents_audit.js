@@ -76,7 +76,7 @@ export function renderAuditTab(host) {
   function rowEl(row) {
     return el('tr', { class: row.result === 'denied' ? 'denied' : '', 'data-result': row.result, 'data-audit': String(row.id), style: 'cursor:pointer', onclick: () => showArgs(row) },
       el('td', { class: 'dim tnums', style: 'white-space:nowrap' }, when(row.ts)),
-      el('td', {}, row.client || '-'),
+      el('td', {}, row.client || '-', row.transport ? el('div', { class: 'dim', style: 'font-size:11px' }, row.transport) : null),
       el('td', {}, row.tool),
       el('td', { class: 'detail', style: 'word-break:break-all' }, pathCell(row.paths)),
       el('td', {}, t('audit.result.' + row.result)),
