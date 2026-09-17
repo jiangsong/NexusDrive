@@ -127,7 +127,7 @@ func New(opt Options) (*Provider, error) {
 		PartSize: partSize, MaxParts: int((maxDropboxFile + partSize - 1) / partSize),
 		UploadParallel: 1, SinglePutMax: defaultSinglePutMax,
 		ServerMove: true, ServerRename: true, ServerCopy: true, Delta: true,
-		LinkTTL: 4 * time.Hour, LinkShareable: true,
+		LinkTTL: 4 * time.Hour, LinkShareable: true, Share: true,
 		QPS: provider.QPS{Meta: 12, Download: 12, Upload: 6}, MaxConnsPerHost: 12,
 		Tier: provider.TierOfficial,
 	}
@@ -1067,3 +1067,57 @@ var (
 	_ provider.ServerCopier = (*Provider)(nil)
 	_ provider.ChangeLister = (*Provider)(nil)
 )
+
+// Sharing (provider.Sharer, T-55). UNVERIFIED: POST
+// /2/sharing/create_shared_link_with_settings with {path, settings:
+// {requested_visibility: public, expires, link_password}} answers {id,
+// url, expires}; a link that already exists comes back as
+// shared_link_already_exists, in which case list_shared_links is asked.
+// Expiry and passwords need a paid plan; on a basic account the server
+// ignores or refuses them — verify against a real account. Revoke is
+// /2/sharing/revoke_shared_link {url}.
+
+type sharedLink struct {
+	ID      string `json:"id"`
+	URL     string `json:"url"`
+	Expires string `json:"expires"`
+}
+
+func (p *Provider) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	id, err := cleanID(id)
+	if err != nil {
+		return provider.Share{}, err
+	}
+	settings := map[string]any{"requested_visibility": "public"}
+	if opt.Expires > 0 {
+		settings["expires"] = time.Now().Add(opt.Expires).UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if opt.Code != "" {
+		settings["requested_visibility"] = "password"
+		settings["link_password"] = opt.Code
+	}
+	var out sharedLink
+	err = p.apiJSON(ctx, "/2/sharing/create_shared_link_with_settings", map[string]any{"path": apiPath(id), "settings": settings}, &out, ratelimit.Meta, false)
+	if err != nil && strings.Contains(err.Error(), "shared_link_already_exists") {
+		var list struct {
+			Links []sharedLink `json:"links"`
+		}
+		if lerr := p.apiJSON(ctx, "/2/sharing/list_shared_links", map[string]any{"path": apiPath(id), "direct_only": true}, &list, ratelimit.Meta, true); lerr == nil && len(list.Links) > 0 {
+			out, err = list.Links[0], nil
+		}
+	}
+	if err != nil {
+		return provider.Share{}, err
+	}
+	sh := provider.Share{ID: out.URL, URL: out.URL, Code: opt.Code}
+	if t, perr := time.Parse("2006-01-02T15:04:05Z", out.Expires); perr == nil {
+		sh.ExpiresAt = t
+	}
+	return sh, nil
+}
+
+func (p *Provider) RevokeShare(ctx context.Context, shareID string) error {
+	return p.apiJSON(ctx, "/2/sharing/revoke_shared_link", map[string]string{"url": shareID}, nil, ratelimit.Meta, false)
+}
+
+var _ provider.Sharer = (*Provider)(nil)

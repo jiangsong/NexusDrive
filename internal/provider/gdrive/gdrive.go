@@ -158,6 +158,7 @@ func New(opt Options) (*Provider, error) {
 		// Drive serves private content only to an authenticated request, so
 		// there is no link a third party could follow.
 		LinkShareable:   false,
+		Share:           true,
 		QPS:             provider.QPS{Meta: 10, Download: 10, Upload: 4},
 		MaxConnsPerHost: 12,
 		Tier:            provider.TierOfficial,
@@ -1484,3 +1485,53 @@ var (
 	_ provider.ChangeLister           = (*Provider)(nil)
 	_ provider.TokenPersistenceSetter = (*Provider)(nil)
 )
+
+// Sharing (provider.Sharer, T-55). UNVERIFIED: a public link on Drive is
+// a permission {type: anyone, role: reader} on the file (POST
+// /files/{id}/permissions), after which the file's webViewLink opens for
+// anyone; the permission id is what DELETE
+// /files/{id}/permissions/{permId} revokes, so the share id is
+// "<file>/<permission>". Drive has no per-link expiry or password
+// (expirationTime on a permission needs Workspace) — verify what a real
+// account accepts.
+
+func (p *Provider) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	if id == RootID || safeID(id) != nil {
+		return provider.Share{}, errors.New("gdrive: refusing to share an invalid file or the drive root")
+	}
+	body := map[string]any{"type": "anyone", "role": "reader"}
+	if opt.Expires > 0 {
+		body["expirationTime"] = time.Now().Add(opt.Expires).UTC().Format(time.RFC3339)
+	}
+	var perm struct {
+		ID             string `json:"id"`
+		ExpirationTime string `json:"expirationTime"`
+	}
+	q := url.Values{"supportsAllDrives": {"true"}}
+	if err := p.apiJSON(ctx, http.MethodPost, p.apiURL("/files/"+url.PathEscape(id)+"/permissions")+"?"+q.Encode(), body, &perm, ratelimit.Meta, false); err != nil {
+		return provider.Share{}, err
+	}
+	var file struct {
+		WebViewLink string `json:"webViewLink"`
+	}
+	fq := url.Values{"fields": {"webViewLink"}, "supportsAllDrives": {"true"}}
+	if err := p.apiJSON(ctx, http.MethodGet, p.apiURL("/files/"+url.PathEscape(id))+"?"+fq.Encode(), nil, &file, ratelimit.Meta, true); err != nil {
+		return provider.Share{}, err
+	}
+	sh := provider.Share{ID: id + "/" + perm.ID, URL: file.WebViewLink}
+	if t, err := time.Parse(time.RFC3339, perm.ExpirationTime); err == nil {
+		sh.ExpiresAt = t
+	}
+	return sh, nil
+}
+
+func (p *Provider) RevokeShare(ctx context.Context, shareID string) error {
+	file, perm, ok := strings.Cut(shareID, "/")
+	if !ok || safeID(file) != nil || safeID(perm) != nil {
+		return errors.New("gdrive: share id is <file>/<permission>")
+	}
+	q := url.Values{"supportsAllDrives": {"true"}}
+	return p.apiJSON(ctx, http.MethodDelete, p.apiURL("/files/"+url.PathEscape(file)+"/permissions/"+url.PathEscape(perm))+"?"+q.Encode(), nil, nil, ratelimit.Meta, false)
+}
+
+var _ provider.Sharer = (*Provider)(nil)

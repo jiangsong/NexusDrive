@@ -20,6 +20,7 @@ package baidu
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,6 +209,7 @@ func New(opt Options) (*Provider, error) {
 			// answers 403 for anything over ~20 MB.
 			LinkHeaders:   map[string]string{"User-Agent": DownloadUserAgent},
 			LinkShareable: true,
+			Share:         true,
 			// Non-SVIP accounts are throttled hard; start conservative and let
 			// AIMD find the ceiling.
 			// UNVERIFIED: CDN request-rate threshold before risk control.
@@ -1321,3 +1323,79 @@ func init() {
 		Note: "config auth 会打开浏览器完成授权"})
 
 }
+
+// Sharing (provider.Sharer, T-55). UNVERIFIED: the share endpoint of the
+// open platform — POST /rest/2.0/xpan/share?method=set with fid_list (a
+// JSON list of fs_ids), period (days; 0 forever) and pwd (a four-character
+// extraction code, required) — and its answer (shareid, link) follow the
+// documented API; verify the period values the server accepts, whether
+// the app's scope grants sharing, and the code rule against a real
+// account. A code is made when the caller gives none, since the API
+// requires one.
+
+const pathShare = "/rest/2.0/xpan/share"
+
+type shareResp struct {
+	baseResp
+	ShareID int64  `json:"shareid"`
+	Link    string `json:"link"`
+	Pwd     string `json:"pwd"`
+	Period  int    `json:"period"`
+}
+
+func (p *Provider) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	f := ParseID(id)
+	if f.FSID == 0 {
+		return provider.Share{}, fmt.Errorf("baidu: %s has no fs_id", id)
+	}
+	fl, _ := json.Marshal([]uint64{f.FSID})
+	period := "0"
+	if opt.Expires > 0 {
+		days := int(opt.Expires.Hours() / 24)
+		if days < 1 {
+			days = 1
+		}
+		period = strconv.Itoa(days)
+	}
+	code := opt.Code
+	if len(code) != 4 {
+		code = shareCode()
+	}
+	q := url.Values{}
+	q.Set("method", "set")
+	var out shareResp
+	if err := p.post(ctx, "share", p.base, pathShare, q, map[string]string{
+		"fid_list": string(fl), "period": period, "pwd": code, "schannel": "4",
+	}, ratelimit.Meta, &out); err != nil {
+		return provider.Share{}, err
+	}
+	sh := provider.Share{ID: strconv.FormatInt(out.ShareID, 10), URL: out.Link, Code: code}
+	if out.Pwd != "" {
+		sh.Code = out.Pwd
+	}
+	if opt.Expires > 0 {
+		sh.ExpiresAt = time.Now().Add(opt.Expires)
+	}
+	return sh, nil
+}
+
+// RevokeShare cancels a share (method=cancel, shareid_list). UNVERIFIED.
+func (p *Provider) RevokeShare(ctx context.Context, shareID string) error {
+	q := url.Values{}
+	q.Set("method", "cancel")
+	var out baseResp
+	return p.post(ctx, "share", p.base, pathShare, q, map[string]string{"shareid_list": "[" + shareID + "]"}, ratelimit.Meta, &out)
+}
+
+// shareCode is a random four-character extraction code.
+func shareCode() string {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
+}
+
+var _ provider.Sharer = (*Provider)(nil)

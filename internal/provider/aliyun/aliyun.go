@@ -192,6 +192,7 @@ func New(opt Options) (*Provider, error) {
 			Delta:          false,
 			LinkTTL:        ttl,
 			LinkShareable:  true,
+			Share:          true,
 			// UNVERIFIED: CDN request-rate threshold before risk control.
 			QPS:             provider.QPS{Meta: 4, Download: 4, Upload: 2, Transfer: 16},
 			MaxConnsPerHost: 8,
@@ -1266,3 +1267,53 @@ func init() {
 		Note: "config auth 会打开浏览器完成授权"})
 
 }
+
+// Sharing (provider.Sharer, T-55). UNVERIFIED: the open-platform share
+// endpoint, its body and its response follow the published API
+// (POST /adrive/v1.0/openFile/createShareLink? — the documented path is
+// /adrive/v1.0/openFile/share_link, with drive_id, file_id_list,
+// expiration (RFC 3339) and share_pwd; the answer carries share_id,
+// share_url and expiration). Verify the path, whether the app scope
+// allows it, and the code length rule against a real account.
+
+const (
+	pathShareCreate = "/adrive/v1.0/openFile/share_link"
+	pathShareCancel = "/adrive/v1.0/openFile/share_link/cancel"
+)
+
+type shareResp struct {
+	ShareID    string `json:"share_id"`
+	ShareURL   string `json:"share_url"`
+	SharePwd   string `json:"share_pwd"`
+	Expiration string `json:"expiration"`
+}
+
+func (p *Provider) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	drive, err := p.drive(ctx)
+	if err != nil {
+		return provider.Share{}, err
+	}
+	body := map[string]any{"drive_id": drive, "file_id_list": []string{id}}
+	if opt.Expires > 0 {
+		body["expiration"] = time.Now().Add(opt.Expires).UTC().Format(time.RFC3339)
+	}
+	if opt.Code != "" {
+		body["share_pwd"] = opt.Code
+	}
+	var out shareResp
+	if err := p.call(ctx, pathShareCreate, ratelimit.Meta, body, &out); err != nil {
+		return provider.Share{}, err
+	}
+	sh := provider.Share{ID: out.ShareID, URL: out.ShareURL, Code: out.SharePwd}
+	if t, err := time.Parse(time.RFC3339, out.Expiration); err == nil {
+		sh.ExpiresAt = t
+	}
+	return sh, nil
+}
+
+func (p *Provider) RevokeShare(ctx context.Context, shareID string) error {
+	var out map[string]any
+	return p.call(ctx, pathShareCancel, ratelimit.Meta, map[string]any{"share_id": shareID}, &out)
+}
+
+var _ provider.Sharer = (*Provider)(nil)

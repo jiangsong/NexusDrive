@@ -137,7 +137,7 @@ func New(opt Options) (*Provider, error) {
 		PartSize: partSize, MaxParts: int((maxOneDriveFile + partSize - 1) / partSize), UploadParallel: 1,
 		SinglePutMax: defaultSinglePutMax,
 		ServerMove:   true, ServerRename: true, ServerCopy: false, Delta: true,
-		LinkTTL: linkAdvertisedTTL, LinkShareable: true,
+		LinkTTL: linkAdvertisedTTL, LinkShareable: true, Share: true,
 		QPS: provider.QPS{Meta: 12, Download: 12, Upload: 6}, MaxConnsPerHost: 12,
 		Tier: provider.TierOfficial,
 	}
@@ -1171,3 +1171,49 @@ var (
 	_ provider.ChangeLister           = (*Provider)(nil)
 	_ provider.TokenPersistenceSetter = (*Provider)(nil)
 )
+
+// Sharing (provider.Sharer, T-55). UNVERIFIED: POST
+// /drive/items/{id}/createLink {type: view, scope: anonymous,
+// expirationDateTime, password} answers a permission whose link.webUrl
+// is the public URL; the permission id is what DELETE
+// /drive/items/{id}/permissions/{permId} revokes, so the share id carries
+// both as "<item>/<permission>". Expiry and passwords are refused on
+// accounts without the feature — verify against a real account.
+
+func (p *Provider) CreateShare(ctx context.Context, id string, opt provider.ShareOptions) (provider.Share, error) {
+	if id == RootID || safeOpaqueID(id) != nil {
+		return provider.Share{}, errors.New("onedrive: refusing to share an invalid item or the drive root")
+	}
+	body := map[string]any{"type": "view", "scope": "anonymous"}
+	if opt.Expires > 0 {
+		body["expirationDateTime"] = time.Now().Add(opt.Expires).UTC().Format(time.RFC3339)
+	}
+	if opt.Code != "" {
+		body["password"] = opt.Code
+	}
+	var out struct {
+		ID   string `json:"id"`
+		Link struct {
+			WebURL string `json:"webUrl"`
+		} `json:"link"`
+		Expiration string `json:"expirationDateTime"`
+	}
+	if err := p.graphJSON(ctx, http.MethodPost, p.driveURL("/items/"+pathSegment(id)+"/createLink"), body, &out, ratelimit.Meta, false); err != nil {
+		return provider.Share{}, err
+	}
+	sh := provider.Share{ID: id + "/" + out.ID, URL: out.Link.WebURL, Code: opt.Code}
+	if t, err := time.Parse(time.RFC3339, out.Expiration); err == nil {
+		sh.ExpiresAt = t
+	}
+	return sh, nil
+}
+
+func (p *Provider) RevokeShare(ctx context.Context, shareID string) error {
+	item, perm, ok := strings.Cut(shareID, "/")
+	if !ok || safeOpaqueID(item) != nil || safeOpaqueID(perm) != nil {
+		return errors.New("onedrive: share id is <item>/<permission>")
+	}
+	return p.graphJSON(ctx, http.MethodDelete, p.driveURL("/items/"+pathSegment(item)+"/permissions/"+pathSegment(perm)), nil, nil, ratelimit.Meta, false)
+}
+
+var _ provider.Sharer = (*Provider)(nil)
