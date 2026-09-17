@@ -2716,6 +2716,9 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   局域网渲染页（独立端口、一次性 token、不进 agent.db 与浏览器 store）、`Artifact.console_url`、hooks full 上下文的
   内链公式、G8 界面（`#/fs/<path>` 屏、检查器"打开页面"、设置 share 段）。
 - T-57：`INSTALL_FOR_AGENTS.md`、README 两行 prompt、CLAUDE.md 纪律；**许可证（T-16）仍待用户决定**。
+- 验证：`./gow vet ./...` 干净；`./gow test ./...` 55 个包全绿（e2e / perf / chaos / conformance 在内）；改动包 `-race`
+  无告警。观察到一次全量并行下 `TestNeverOpenedDirectoryBecomesSearchable`（未改动的爬虫状态计数）超时失败，
+  单独跑与 e2e 包单独跑都通过——登记为负载下的偶发，未深究。
 
 ---
 
