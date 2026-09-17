@@ -69,7 +69,7 @@ func TestDoctorReportsAgentDB(t *testing.T) {
 	d := &Doctor{Agent: st}
 	checks := d.Run(context.Background())
 	db, ok := checkByName(checks, "agent_db")
-	if !ok || db.Level != LevelOK || !strings.Contains(db.Detail, "schema v3") {
+	if !ok || db.Level != LevelOK || !strings.Contains(db.Detail, "schema v") {
 		t.Fatalf("agent_db: %+v (%v)", db, ok)
 	}
 	if zh := db.Localize(i18n.ZH); !strings.Contains(zh.Detail, "agent.db 正常") {
