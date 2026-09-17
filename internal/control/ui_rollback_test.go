@@ -172,11 +172,19 @@ func TestSessionOpsRenderAsText(t *testing.T) {
 		t.Error("session_panel.js uses the html attribute")
 	}
 	for _, want := range []string{
-		"t('session.op.' + ", "t('rollback.pre.' + ", "'data-op'", "to_path", "rollback_result", "pre_reason",
+		"t('session.op.' + ", "const r = reversibility(o)", "t(r.key)", "'data-op'", "to_path", "rollback_result",
 		"t('session.ops')", "t('session.ops.empty')",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Errorf("session panel lacks %s", want)
+		}
+	}
+	// The Before cell's word is decided in rollback_plan.js from the op's
+	// preimage fields, and is always a rollback.pre.* phrase.
+	plan := webSource(t, "web/rollback_plan.js")
+	for _, want := range []string{"o.pre_reason", "o.pre_state", "'rollback.pre.' + o.pre_reason", "key: 'rollback.pre.ok'"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("rollback_plan.js lacks %s", want)
 		}
 	}
 	// A rename shows both paths as text with an arrow between them.

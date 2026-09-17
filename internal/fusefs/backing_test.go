@@ -80,6 +80,7 @@ type backingFixture struct {
 	key    cache.FileKey
 	kernel *kernelBackingStub
 	nodeID uint64
+	fake   *fakeprovider.Fake
 }
 
 func newBackingFixture(t *testing.T) *backingFixture {
@@ -131,7 +132,7 @@ func newBackingFixtureWithPolicy(t *testing.T, experimental bool) *backingFixtur
 	if st := raw.Lookup(nil, &fuse.InHeader{NodeId: 1}, "f", &out); st != fuse.OK {
 		t.Fatal(st)
 	}
-	return &backingFixture{raw: raw, root: r, cache: c, key: k, kernel: kernel, nodeID: out.NodeId}
+	return &backingFixture{raw: raw, root: r, cache: c, key: k, kernel: kernel, nodeID: out.NodeId, fake: p}
 }
 
 func (e *backingFixture) open(t *testing.T) fuse.OpenOut {

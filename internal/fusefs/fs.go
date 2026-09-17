@@ -612,7 +612,12 @@ func formatPercent(f float64) string {
 func (f *file) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	f.root.count(opRead)
 	f.root.countRead(len(dest))
+	// This is a kernel read whichever way it is served, and the read-heat
+	// observer (vfs.SetReadObserver) classifies by that mark; the splice
+	// path never enters FS.Read, so it is reported here.
+	ctx = vfs.FromKernel(ctx)
 	if res, ok := f.spliceRead(ctx, off, len(dest)); ok {
+		f.root.opt.FS.NoteRead(ctx, f.handle.Ino)
 		return res, 0
 	}
 	n, err := f.root.opt.FS.Read(ctx, f.handle, dest, off)

@@ -5,6 +5,8 @@ package fusefs
 import (
 	"context"
 	"testing"
+
+	"cloudfs/internal/vfs"
 )
 
 // seekable mirrors go-fuse's unexported seekableResult interface structurally,
@@ -155,5 +157,72 @@ func TestSpliceAndPassthroughShareOneLease(t *testing.T) {
 	f.Release(ctx)
 	if e.cache.Stats().LeasedBytes != 0 {
 		t.Fatal("release did not tear down the shared lease")
+	}
+}
+
+// TestKernelReadIsObservedAsFromKernel: the read-heat observer the daemon
+// installs (vfs.SetReadObserver) must see a read the kernel makes as a
+// kernel read, whichever way the handler serves it — through FS.Read, or
+// as a zero-copy splice that never enters FS.Read. Without this a real
+// mount recorded no kernel heat at all (found by the 2026-09-17 smoke
+// run): the handler passed go-fuse's bare context, so the daemon's
+// readerKind saw neither a kernel nor an origin mark and dropped it.
+func TestKernelReadIsObservedAsFromKernel(t *testing.T) {
+	e := newBackingFixture(t) // "f" == "content", fully hydrated: splices
+	ctx := context.Background()
+	type seen struct {
+		ino    uint64
+		kernel bool
+	}
+	var got []seen
+	e.root.opt.FS.SetReadObserver(func(ctx context.Context, ino uint64) {
+		got = append(got, seen{ino, vfs.IsFromKernel(ctx)})
+	})
+	a, err := e.root.opt.FS.StatPath(ctx, "/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.root.opt.FS.Open(ctx, a.Ino, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &file{root: e.root, handle: h}
+	defer f.Release(ctx)
+	res, errno := f.Read(ctx, make([]byte, 4), 0)
+	if errno != 0 {
+		t.Fatalf("Read errno: %v", errno)
+	}
+	if _, ok := res.(seekable); !ok {
+		t.Fatalf("the fixture no longer splices (got %T); the test needs both paths", res)
+	}
+	if len(got) != 1 || got[0].ino != a.Ino || !got[0].kernel {
+		t.Fatalf("spliced kernel read observed as %+v", got)
+	}
+	// A read the handler serves through FS.Read (no lease: a fresh handle
+	// on a file the fixture did not hydrate) is a kernel read too.
+	got = nil
+	e.fake.Seed("g", []byte("second"))
+	rootAttr, err := e.root.opt.FS.StatPath(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.root.opt.FS.Refresh(ctx, rootAttr.Ino); err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.root.opt.FS.StatPath(ctx, "/g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := e.root.opt.FS.Open(ctx, b.Ino, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2 := &file{root: e.root, handle: h2}
+	defer f2.Release(ctx)
+	if _, errno := f2.Read(ctx, make([]byte, 6), 0); errno != 0 {
+		t.Fatalf("Read errno: %v", errno)
+	}
+	if len(got) != 1 || got[0].ino != b.Ino || !got[0].kernel {
+		t.Fatalf("plain kernel read observed as %+v", got)
 	}
 }

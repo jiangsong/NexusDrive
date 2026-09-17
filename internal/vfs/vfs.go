@@ -1178,6 +1178,13 @@ type readSeenKey struct {
 	origin string
 }
 
+// NoteRead reports a read of ino that did not go through Read — the FUSE
+// adapter's zero-copy splice serves a fully cached file from a leased fd
+// and never enters the data path — so the read-heat observer still sees
+// it. Debounced like Read's own report; a caller that then does enter
+// Read costs nothing extra.
+func (f *FS) NoteRead(ctx context.Context, ino uint64) { f.noteRead(ctx, ino) }
+
 // noteRead reports a read of ino to the observer, debounced.
 func (f *FS) noteRead(ctx context.Context, ino uint64) {
 	fn := f.readObserverFn.Load()
