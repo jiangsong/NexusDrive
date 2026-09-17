@@ -47,6 +47,7 @@ export function sections(v) {
   const memory = s.memory || {};
   const index = s.index || {};
   const heat = s.heat || {};
+  const share = s.share || {};
   const budget = readTextTokens(mcp.max_tokens);
   return [
     {
@@ -98,6 +99,17 @@ export function sections(v) {
         { key: 'settings.memory.max_fact_bytes', value: memory.max_fact_bytes || 0, bytes: true },
       ],
       yaml: yamlBlock('memory', { root: memory.root || '', layout: memory.layout || 'v1' }),
+    },
+    {
+      id: 'share',
+      rows: [
+        { key: 'settings.share.console_links', value: share.console_links !== false },
+        { key: 'settings.share.default_expiry', value: share.default_expiry || '' },
+        { key: 'settings.share.render.enabled', value: !!(share.render && share.render.enabled) },
+        { key: 'settings.share.render.listen', value: (share.render && share.render.listen) || '' },
+        { key: 'settings.share.render.token_ttl', value: (share.render && share.render.token_ttl) || '' },
+      ],
+      yaml: yamlBlock('share', { console_links: share.console_links !== false, default_expiry: share.default_expiry || '168h', render: { enabled: !!(share.render && share.render.enabled), listen: (share.render && share.render.listen) || '0.0.0.0:9102', token_ttl: (share.render && share.render.token_ttl) || '1h' } }),
     },
     {
       id: 'index',

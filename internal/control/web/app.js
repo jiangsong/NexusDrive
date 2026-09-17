@@ -16,6 +16,7 @@ import { renderAgents } from '/ui/screens/agents.js';
 import { renderIndex } from '/ui/screens/index.js';
 import { renderTriggers } from '/ui/screens/triggers.js';
 import { renderSettings } from '/ui/screens/settings.js';
+import { renderFs } from '/ui/screens/fs.js';
 
 const screens = {
   'main-window': renderMain,
@@ -31,6 +32,7 @@ const screens = {
   'index-view': renderIndex,
   'triggers-view': renderTriggers,
   'settings-view': renderSettings,
+  'fs-view': renderFs,
 };
 
 // healthOf reads the structured snapshot, never the warning text: the daemon

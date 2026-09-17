@@ -328,3 +328,29 @@ func TestHookRuntimeOverTheSocket(t *testing.T) {
 		t.Fatalf("offline: err=%v out=%q", err, out.String())
 	}
 }
+
+// TestHookFullContextCarriesTheConsoleLinkFormula: with hooks.context
+// full and a console, the injected text tells the agent how to link a
+// file to its render page; minimal context and a daemon without a
+// console do not.
+func TestHookFullContextCarriesTheConsoleLinkFormula(t *testing.T) {
+	f, _, _, mount := hooksFixture(t)
+	cfg := *f.coll.ConfigView()
+	cfg.Hooks.Context = "full"
+	cfg.Control.Metrics = "0.0.0.0:9101"
+	cfg.Control.UI = true
+	f.coll.PublishConfigView(&cfg)
+	s := NewServer(f.coll)
+	var resp hooks.ContextResponse
+	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", hooks.ContextRequest{Client: "claude", SessionID: "link-1", CWD: mount}), &resp)
+	if !strings.Contains(resp.Context, "http://127.0.0.1:9101/#/fs/") {
+		t.Fatalf("full context lacks the link formula:\n%s", resp.Context)
+	}
+	cfg.Hooks.Context = "minimal"
+	f.coll.PublishConfigView(&cfg)
+	resp = hooks.ContextResponse{}
+	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", hooks.ContextRequest{Client: "claude", SessionID: "link-2", CWD: mount}), &resp)
+	if strings.Contains(resp.Context, "#/fs/") {
+		t.Fatalf("minimal context carries the link formula:\n%s", resp.Context)
+	}
+}

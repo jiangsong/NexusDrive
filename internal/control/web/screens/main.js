@@ -327,6 +327,9 @@ export function renderMain(host) {
         sessionDirOf(e.path, workspaceRoot()) ? el('button', { onclick: () => fromSession(e) }, iconEl('bot'), t('inspector.fromsession') + ' ' + sessionDirOf(e.path, workspaceRoot()).split('/').pop()) : null,
         // Files and directories alike: the prompt tells a directory to list itself first.
         el('button', { onclick: () => openSendToAgent({ path: e.path }) }, iconEl('bot'), t('action.sendtoagent')),
+        // The render page holds the sharing surface: the console link to
+        // copy and the public link to create (ui-plan G8-2).
+        e.is_dir ? null : el('a', { 'data-open-page': e.path, class: 'btn', href: '#/fs/' + e.path.split('/').filter(Boolean).map(encodeURIComponent).join('/') }, iconEl('globe'), t('action.openpage')),
         el('button', { class: 'danger', onclick: () => remove(e) }, t('action.delete'))));
   }
   // fromSession asks the daemon which session owns this path rather than

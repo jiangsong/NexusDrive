@@ -24,6 +24,18 @@ type SettingsView struct {
 	Memory SettingsMemory `json:"memory"`
 	Index  SettingsIndex  `json:"index"`
 	Heat   SettingsHeat   `json:"heat"`
+	Share  SettingsShare  `json:"share"`
+}
+
+// SettingsShare is the share section (T-55).
+type SettingsShare struct {
+	ConsoleLinks  bool   `json:"console_links"`
+	DefaultExpiry string `json:"default_expiry"`
+	Render        struct {
+		Enabled  bool   `json:"enabled"`
+		Listen   string `json:"listen,omitempty"`
+		TokenTTL string `json:"token_ttl"`
+	} `json:"render"`
 }
 
 // SettingsMCP is the mcp section.
@@ -127,6 +139,11 @@ func settingsViewOf(cfg *config.Config, heat bool) SettingsView {
 	v.Index.Enabled = cfg.Index.Enabled
 	v.Index.Pinned = cfg.Index.Pinned
 	v.Index.Rules = len(cfg.Index.Rules)
+	v.Share.ConsoleLinks = cfg.Share.ConsoleLinksOn()
+	v.Share.DefaultExpiry = durationText(cfg.Share.DefaultExpiry)
+	v.Share.Render.Enabled = cfg.Share.Render.Enabled
+	v.Share.Render.Listen = cfg.Share.Render.Listen
+	v.Share.Render.TokenTTL = durationText(cfg.Share.Render.TokenTTL)
 	v.Heat.Enabled = heat && cfg.MCP.Heat.On()
 	v.Heat.RetentionDays = cfg.MCP.Heat.Retention()
 	return v

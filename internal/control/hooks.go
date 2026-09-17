@@ -158,6 +158,11 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if cfg.Hooks.Context == "full" {
+		// The link formula (docs/agent-first-design.md §8.1): a path the
+		// agent mentions can carry the console's render page beside it.
+		if cfg.Share.ConsoleLinksOn() && cfg.Control.Metrics != "" && cfg.Control.UI {
+			parts = append(parts, fmt.Sprintf("When you mention a file in the mount, you may add a link to its page in the console: http://%s/#/fs/<mount-relative path, URL-encoded per segment>.", loopbackHost(cfg.Control.Metrics)))
+		}
 		if head := s.hookMemoryHead(r.Context(), q.Client); head != "" {
 			parts = append(parts, "Your memory index (memory_* tools, or the files under "+cfg.Memory.Root+"):\n"+head)
 		}

@@ -219,3 +219,10 @@ details.connect > .connect-body { padding: 0 0 16px 21px; }
 .heat-plot .heat-point { fill-opacity: .7; cursor: pointer; }
 .heat-plot .heat-agent { fill: var(--ok); } .heat-plot .heat-kernel { fill: #6ea8fe; } .heat-plot .heat-console { fill: var(--warn); } .heat-plot .heat-webdav { fill: #c58af9; } .heat-plot .heat-other { fill: var(--muted); }
 .heat-dot { margin-left: 6px; font-size: 11px; }
+.rendered { line-height: 1.6; font-size: 14px; max-width: 860px; }
+.rendered h1, .rendered h2, .rendered h3 { margin: 18px 0 8px; }
+.rendered pre { background: var(--panel); padding: 10px 12px; border-radius: var(--radius-sm); overflow: auto; }
+.rendered code { font-family: ui-monospace, monospace; font-size: 12.5px; }
+.rendered table { border-collapse: collapse; } .rendered td, .rendered th { border: 1px solid var(--border); padding: 4px 8px; }
+.rendered blockquote { border-left: 3px solid var(--border); margin: 0; padding: 0 12px; color: var(--muted); }
+.rendered img { max-width: 100%; }

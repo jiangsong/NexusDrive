@@ -21,7 +21,18 @@ export const routes = {
 };
 export function currentTag() {
   const base = (location.hash || '#/connections').split('?')[0];
+  // #/fs/<path> carries the path in the hash: the render page (ui-plan
+  // G8), reachable by link and not a nav item.
+  if (base === '#/fs' || base.startsWith('#/fs/')) return 'fs-view';
   return routes[base] || 'main-window';
+}
+
+// fsPathFromHash is the mount path a #/fs/<path> hash names, decoded per
+// segment; '' when the hash is not one.
+export function fsPathFromHash(hash) {
+  const base = String(hash || '').split('?')[0];
+  if (!base.startsWith('#/fs/')) return '';
+  return '/' + base.slice('#/fs/'.length).split('/').map((s) => { try { return decodeURIComponent(s); } catch (_) { return s; } }).join('/');
 }
 export function start(onChange) {
   const apply = () => { set({ route: location.hash }); onChange(currentTag()); };
