@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/daemon"
 	"cloudfs/internal/embed"
 	"cloudfs/internal/index"
@@ -426,4 +427,56 @@ func renderedDOMAndValue(t *testing.T, chrome, url, expr string, want ...string)
 		t.Fatal(err)
 	}
 	return dom, fmt.Sprint(out.Result.Value)
+}
+
+// TestMemoryPutIsVisibleInTheMountAndSearchableInLayoutV2 (T-56): the
+// same chain under memory.layout v2 — the agent's memory lands under
+// memory/<owner>/<agent>/ on the real mount, the shell reads it there,
+// memory_search finds it and names the owner/agent key, and an
+// owner-qualified key reads another person's memory.
+func TestMemoryPutIsVisibleInTheMountAndSearchableInLayoutV2(t *testing.T) {
+	s := newStackWith(t, "writeback", stackOptions{extraYAML: memoryYAML + "  layout: v2\n", mcp: withMemory})
+	owner := agent.DefaultOwner()
+	const body = "Layout two, needle 7f1a.\n"
+	var put memoryFact
+	if res := s.callTool(t, "memory_put", map[string]any{"name": "style", "content": body}, &put); res.IsError {
+		t.Fatalf("memory_put: %s", toolText(res))
+	}
+	if put.Agent != owner+"/e2e" || put.Path != "/agent-memory/memory/"+owner+"/e2e/facts/style.md" {
+		t.Fatalf("memory_put in v2 returned %+v", put)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.dir, "agent-memory", "memory", owner, "e2e", "facts", "style.md"))
+	if err != nil || !strings.HasSuffix(string(raw), body) {
+		t.Fatalf("the shell does not see the v2 fact: %v %q", err, raw)
+	}
+	if res := s.callTool(t, "memory_put", map[string]any{"name": "style", "content": "bob's\n", "agent": "bob/e2e"}, &put); res.IsError || put.Path != "/agent-memory/memory/bob/e2e/facts/style.md" {
+		t.Fatalf("another owner's memory: %+v %s", put, toolText(res))
+	}
+	var got memoryFact
+	if res := s.callTool(t, "memory_get", map[string]any{"name": "style", "agent": "bob/e2e"}, &got); res.IsError || got.Agent != "bob/e2e" {
+		t.Fatalf("memory_get owner/agent: %+v %s", got, toolText(res))
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var found struct {
+			Hits []struct {
+				Agent string `json:"agent"`
+				Name  string `json:"name"`
+			} `json:"hits"`
+		}
+		res := s.callTool(t, "memory_search", map[string]any{"query": "needle 7f1a"}, &found)
+		if res.IsError {
+			t.Fatalf("memory_search: %s", toolText(res))
+		}
+		if len(found.Hits) > 0 {
+			if found.Hits[0].Agent != owner+"/e2e" || found.Hits[0].Name != "style" {
+				t.Fatalf("memory_search hit %+v", found.Hits[0])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("memory_search never found the v2 fact")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
