@@ -1,12 +1,12 @@
 package mcpsrv
 
 import (
-	"net"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sync"

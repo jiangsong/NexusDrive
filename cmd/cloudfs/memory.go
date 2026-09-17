@@ -34,7 +34,7 @@ func runMemoryWith(ctx context.Context, args []string, in io.Reader, out io.Writ
 	f := parseFlags(args, "json", "confirm", "append", "no-shared")
 	for k := range f.values {
 		switch k {
-		case "config", "timeout", "agent", "cursor", "limit", "file", "description", "type", "expected-version", "mode":
+		case "config", "timeout", "agent", "cursor", "limit", "file", "description", "type", "expected-version", "mode", "owner":
 		default:
 			return fmt.Errorf("memory: unknown flag --%s", k)
 		}
@@ -48,11 +48,15 @@ func runMemoryWith(ctx context.Context, args []string, in io.Reader, out io.Writ
 	}
 	action := f.arg(0)
 	if action == "" {
-		return errors.New("memory: usage: cloudfs memory agents|list|get|put|delete|search ...")
+		return errors.New("memory: usage: cloudfs memory agents|list|get|put|delete|search|migrate ...")
 	}
 	agent := f.str("agent", memory.SharedAgent)
 	if !memory.ValidName(agent) {
-		return fmt.Errorf("memory: --agent %q: %v", agent, memory.ErrBadName)
+		// owner/agent names another person's agent in memory layout v2.
+		owner, ag, ok := strings.Cut(agent, "/")
+		if !ok || !memory.ValidName(owner) || !memory.ValidName(ag) {
+			return fmt.Errorf("memory: --agent %q: %v", agent, memory.ErrBadName)
+		}
 	}
 	name := f.arg(1)
 	switch action {
@@ -70,6 +74,10 @@ func runMemoryWith(ctx context.Context, args []string, in io.Reader, out io.Writ
 	case "search":
 		if len(f.args) < 2 {
 			return errors.New("memory search: give a query")
+		}
+	case "migrate":
+		if len(f.args) > 1 {
+			return errors.New("memory migrate: unexpected argument")
 		}
 	default:
 		return fmt.Errorf("memory: unknown action %q", action)
@@ -96,8 +104,39 @@ func runMemoryWith(ctx context.Context, args []string, in io.Reader, out io.Writ
 		return c.put(ctx, name, f)
 	case "delete":
 		return c.delete(ctx, name, f.bools["confirm"])
+	case "migrate":
+		return c.migrate(ctx, f.str("owner", ""), f.bools["confirm"])
 	}
 	return c.search(ctx, strings.TrimSpace(strings.Join(f.args[1:], " ")), f)
+}
+
+// migrate is `cloudfs memory migrate [--owner who] --confirm`: the one-way
+// move of the memory tree to layout v2 (memory/<owner>/<agent>/), done by
+// the daemon on the drive so every device follows.
+func (c *memoryCLI) migrate(ctx context.Context, owner string, confirm bool) error {
+	if !confirm {
+		return errors.New("memory migrate: this moves every agent's memory directory under an owner on the drive (layout v2); re-run with --confirm")
+	}
+	socket, tcp := c.endpoints()
+	res, online, err := control.CallMemoryMigrate(ctx, socket, tcp, owner, true)
+	if err != nil {
+		return err
+	}
+	if err := needMemoryDaemon(online); err != nil {
+		return err
+	}
+	if c.asJSON {
+		return json.NewEncoder(c.out).Encode(res)
+	}
+	if len(res.Moved) == 0 {
+		fmt.Fprintf(c.out, "nothing to move; memory layout is %s (owner %s)\n", res.Layout, res.Owner)
+		return nil
+	}
+	fmt.Fprintf(c.out, "moved %d agent memories under %s; memory layout is now %s\n", len(res.Moved), res.Owner, res.Layout)
+	for _, m := range res.Moved {
+		fmt.Fprintf(c.out, "  %s -> %s/%s\n", m, res.Owner, m)
+	}
+	return nil
 }
 
 type memoryCLI struct {

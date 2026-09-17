@@ -95,3 +95,15 @@ func CallMemorySearch(ctx context.Context, socket, tcp string, opt memory.Search
 	online, err := callControl(ctx, socket, tcp, http.MethodGet, "/memory/search?"+params.Encode(), nil, &out)
 	return out, online, err
 }
+
+// CallMemoryMigrate moves the memory tree to layout v2 under owner
+// through the running daemon.
+func CallMemoryMigrate(ctx context.Context, socket, tcp, owner string, confirm bool) (MemoryMigrateResponse, bool, error) {
+	body, err := json.Marshal(MemoryMigrateRequest{Owner: owner, Confirm: confirm})
+	if err != nil {
+		return MemoryMigrateResponse{}, false, err
+	}
+	var out MemoryMigrateResponse
+	online, err := callControl(ctx, socket, tcp, http.MethodPost, "/memory/migrate", body, &out)
+	return out, online, err
+}

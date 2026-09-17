@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"os/user"
-	"os"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/user"
 	"regexp"
 	"strings"
 	"time"

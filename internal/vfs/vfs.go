@@ -229,9 +229,9 @@ type FS struct {
 	// lastWriterFn answers "who last changed this inode" for the
 	// user.cloudfs.writer xattr (SetLastWriter); the daemon installs it
 	// over the change record, the VFS only asks.
-	lastWriterFn atomic.Pointer[func(ctx context.Context, ino uint64) (string, bool)]
-	readSeen       sync.Map
-	readSeenCount  atomic.Int64
+	lastWriterFn  atomic.Pointer[func(ctx context.Context, ino uint64) (string, bool)]
+	readSeen      sync.Map
+	readSeenCount atomic.Int64
 	// paths caches ino -> path for MountForIno; see pathOf. dirIDs caches
 	// ino -> provider id for directories.
 	paths  atomic.Pointer[sync.Map]

@@ -21,6 +21,7 @@ import (
 // recording what reached it so a test can prove the command sent the
 // right agent, name, body and version.
 type cliMemory struct {
+	layout, migratedTo string
 	mu       sync.Mutex
 	root     string
 	facts    map[string]memory.Fact // agent/name
@@ -269,5 +270,57 @@ func TestMemoryCLIDeleteNeedsConfirm(t *testing.T) {
 	}
 	if err := runMemoryWith(ctx, []string{"delete", "todo", "--agent", "codex", "--confirm", "--config", p}, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("delete twice: %v", err)
+	}
+}
+
+func (m *cliMemory) Layout(context.Context) string {
+	if m.layout == "" {
+		return memory.LayoutV1
+	}
+	return m.layout
+}
+
+func (m *cliMemory) Migrate(_ context.Context, owner string) ([]string, error) {
+	if m.layout == memory.LayoutV2 {
+		return nil, nil
+	}
+	m.layout = memory.LayoutV2
+	m.migratedTo = owner
+	return []string{"codex"}, nil
+}
+
+func (m *cliMemory) Merge(context.Context, string, string, string, string) (memory.MergeResult, error) {
+	return memory.MergeResult{}, memory.ErrNoConflict
+}
+
+// TestMemoryCLIMigrateNeedsConfirm: migrate refuses without --confirm
+// and asks the daemon nothing; with it the daemon moves the tree once,
+// names the owner, and a second run finds nothing to move.
+func TestMemoryCLIMigrateNeedsConfirm(t *testing.T) {
+	ctx := context.Background()
+	fake, p := memoryCLIDaemon(t)
+	var out bytes.Buffer
+	if err := runMemoryWith(ctx, []string{"migrate", "--owner", "alice", "--config", p}, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "--confirm") {
+		t.Fatalf("migrate without confirm: %v", err)
+	}
+	if fake.layout != "" {
+		t.Fatal("the daemon migrated without confirmation")
+	}
+	if err := runMemoryWith(ctx, []string{"migrate", "--owner", "alice", "--confirm", "--config", p}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if fake.migratedTo != "alice" || !strings.Contains(out.String(), "codex -> alice/codex") || !strings.Contains(out.String(), "v2") {
+		t.Fatalf("migrate: %q %s", fake.migratedTo, out.String())
+	}
+	out.Reset()
+	if err := runMemoryWith(ctx, []string{"migrate", "--confirm", "--config", p}, strings.NewReader(""), &out); err != nil || !strings.Contains(out.String(), "nothing to move") {
+		t.Fatalf("second migrate: %v %s", err, out.String())
+	}
+	// An owner/agent key is accepted for --agent.
+	if err := runMemoryWith(ctx, []string{"list", "--agent", "alice/codex", "--config", p}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("owner/agent key: %v", err)
+	}
+	if err := runMemoryWith(ctx, []string{"list", "--agent", "Alice/codex", "--config", p}, strings.NewReader(""), &out); err == nil {
+		t.Fatal("a bad owner was accepted")
 	}
 }

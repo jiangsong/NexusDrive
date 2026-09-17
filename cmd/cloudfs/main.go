@@ -248,6 +248,8 @@ Agents
                             remove a fact and its MEMORY.md line, on the remote too
   memory search <query> [--agent A] [--no-shared] [--mode keyword|hybrid|vector] [--limit N] [--json]
                             search an agent's facts and the shared area through the content index
+  memory migrate [--owner who] --confirm
+                            move agent memories to layout v2 (memory/<owner>/<agent>/) on the drive; needs the running daemon
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)

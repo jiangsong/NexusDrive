@@ -11,8 +11,8 @@ import (
 // a conflict block; an insertion by one side lands where it was made.
 func TestMerge3TakesOneSidedChangesAndMarksTheRest(t *testing.T) {
 	base := "a\nb\nc\nd\n"
-	ours := "a\nB\nc\nd\ne\n"   // changed b, appended e
-	theirs := "a\nb\nC\nd\n"    // changed c
+	ours := "a\nB\nc\nd\ne\n" // changed b, appended e
+	theirs := "a\nb\nC\nd\n"  // changed c
 	got, n := merge3(base, ours, theirs, true)
 	if n != 0 || got != "a\nB\nC\nd\ne" {
 		t.Fatalf("clean three-way: %q (%d)", got, n)

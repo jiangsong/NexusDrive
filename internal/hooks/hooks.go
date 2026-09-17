@@ -63,10 +63,10 @@ type platform struct {
 
 var platforms = map[string]platform{
 	"claude": {
-		configPath:  []string{".claude", "settings.json"},
-		prompt:      "UserPromptSubmit",
-		tool:        "PostToolUse",
-		stop:        "SessionEnd",
+		configPath:   []string{".claude", "settings.json"},
+		prompt:       "UserPromptSubmit",
+		tool:         "PostToolUse",
+		stop:         "SessionEnd",
 		readMatcher:  "Read|Grep|Bash",
 		writeMatcher: "Write|Edit|MultiEdit|NotebookEdit",
 		timeout:      10,
@@ -79,23 +79,23 @@ var platforms = map[string]platform{
 	// question — an event it never fires costs nothing, a per-turn one
 	// would finish sessions mid-run, so the session-end name is used.
 	"codex": {
-		configPath:  []string{".codex", "hooks.json"},
-		prompt:      "UserPromptSubmit",
-		tool:        "PostToolUse",
-		stop:        "SessionEnd",
+		configPath:   []string{".codex", "hooks.json"},
+		prompt:       "UserPromptSubmit",
+		tool:         "PostToolUse",
+		stop:         "SessionEnd",
 		readMatcher:  "read_file|shell",
 		writeMatcher: "apply_patch",
 		timeout:      10,
-		note:        "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true) and trust the hook when Codex asks",
+		note:         "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true) and trust the hook when Codex asks",
 	},
 	// UNVERIFIED: Gemini CLI event names (BeforeAgent, AfterTool,
 	// SessionEnd) and millisecond timeouts; verify against a real install.
 	// AfterAgent is per turn, like Claude's Stop, so it is not used.
 	"gemini": {
-		configPath:  []string{".gemini", "settings.json"},
-		prompt:      "BeforeAgent",
-		tool:        "AfterTool",
-		stop:        "SessionEnd",
+		configPath:   []string{".gemini", "settings.json"},
+		prompt:       "BeforeAgent",
+		tool:         "AfterTool",
+		stop:         "SessionEnd",
 		readMatcher:  "read_file|read_many_files|search_file_content|run_shell_command",
 		writeMatcher: "write_file|replace|edit",
 		timeout:      10000,

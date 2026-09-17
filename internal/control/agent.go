@@ -50,10 +50,10 @@ type AgentView interface {
 // AuditView is one audit row as the console reads it: the session's client
 // name is joined in so a table row needs no second request.
 type AuditView struct {
-	ID         int64           `json:"id"`
-	TS         time.Time       `json:"ts"`
-	Client     string          `json:"client"`
-	SessionID  string          `json:"session_id"`
+	ID        int64     `json:"id"`
+	TS        time.Time `json:"ts"`
+	Client    string    `json:"client"`
+	SessionID string    `json:"session_id"`
 	// Transport is how the call arrived (stdio, http-token, http-bridge,
 	// …): the audit tab's origin column, since every audit row is MCP.
 	Transport  string          `json:"transport,omitempty"`

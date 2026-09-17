@@ -292,6 +292,8 @@ var zh = map[string]string{
 	"err.memory_bad_mode":   "mode 只能是 replace 或 append",
 	"err.memory_no_index":   "记忆检索需要内容索引，但 index.enabled: false；请在配置里启用",
 	"err.memory_failed":     "记忆库无法应答：%v",
+	"confirm.memory.migrate":          "把每个 agent 的记忆目录移到所有者 %s 之下（记忆布局 v2），发生在网盘上，所有设备都会看到新布局",
+	"err.memory.no_conflict":         "这条记忆没有可合并的冲突副本",
 	"confirm.memory.delete": "删除记忆 %s/%s 及其 MEMORY.md 行，远端也一并删除",
 
 	// 发送给 Agent：控制台把这段提示词交给用户粘贴进自己的 MCP 客户端。

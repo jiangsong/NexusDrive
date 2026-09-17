@@ -295,6 +295,8 @@ var en = map[string]string{
 	"err.memory_bad_mode":   "mode must be replace or append",
 	"err.memory_no_index":   "memory search needs the content index, but index.enabled: false; enable it in the configuration",
 	"err.memory_failed":     "the memory store could not answer: %v",
+	"confirm.memory.migrate":          "moves every agent memory directory under owner %s (memory layout v2), on the drive; every device sees the new layout",
+	"err.memory.no_conflict":         "this memory has no conflict copy to merge",
 	"confirm.memory.delete": "deletes memory %s/%s and its MEMORY.md line, on the remote too",
 
 	// Send to agent: the console hands this prompt to the person to paste

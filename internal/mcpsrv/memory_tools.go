@@ -1,10 +1,10 @@
 package mcpsrv
 
 import (
-	"path"
 	"context"
 	"errors"
 	"fmt"
+	"path"
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/index"
@@ -51,8 +51,8 @@ type memoryPutInput struct {
 	Mode                  string `json:"mode,omitempty" jsonschema:"replace (default) or append"`
 	ExpectedVersion       string `json:"expected_version,omitempty" jsonschema:"Version from memory_get; the put is refused when the fact changed since"`
 	ExpectedRemoteVersion string `json:"expected_remote_version,omitempty" jsonschema:"remote_version from memory_get; the put is refused when another device's write landed on the drive since, and not when only your own write is still uploading"`
-	Description     string `json:"description,omitempty" jsonschema:"One line for MEMORY.md and the frontmatter; kept from the file when omitted"`
-	Type            string `json:"type,omitempty" jsonschema:"Free-form kind such as preference, project or person; kept from the file when omitted"`
+	Description           string `json:"description,omitempty" jsonschema:"One line for MEMORY.md and the frontmatter; kept from the file when omitted"`
+	Type                  string `json:"type,omitempty" jsonschema:"Free-form kind such as preference, project or person; kept from the file when omitted"`
 }
 
 type memoryPutOutput struct {

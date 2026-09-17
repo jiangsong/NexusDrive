@@ -459,7 +459,9 @@ func TestMemoryMergeNeverWritesWithoutConfirm(t *testing.T) {
 		t.Fatalf("no conflict copy to merge: %+v", got)
 	}
 	// Reading the copy may download it once; nothing may be written.
-	writes := func() int { return e.fake.Calls("Upload") + e.fake.Calls("UploadPart") + e.fake.Calls("Create") + e.fake.Calls("Delete") + e.fake.Calls("Rename") }
+	writes := func() int {
+		return e.fake.Calls("Upload") + e.fake.Calls("UploadPart") + e.fake.Calls("Create") + e.fake.Calls("Delete") + e.fake.Calls("Rename")
+	}
 	before := writes()
 	var res memory.MergeResult
 	if r := e.call(t, "memory_merge", map[string]any{"name": "notes", "ancestor": base}, &res); r.IsError {

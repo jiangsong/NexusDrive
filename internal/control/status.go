@@ -264,7 +264,7 @@ type Collector struct {
 	HeatStore HeatStore
 	// Changes serves GET /changes; nil answers {"enabled": false}.
 	Changes ChangeStore
-	Now       func() time.Time
+	Now     func() time.Time
 }
 
 // ConfigView returns the configuration as it stands now. The returned value
