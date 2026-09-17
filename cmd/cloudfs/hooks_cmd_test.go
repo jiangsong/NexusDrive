@@ -43,7 +43,7 @@ func TestHooksCommandInstallsStatusAndUninstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var st []hooks.Status
-	if err := json.Unmarshal(out.Bytes(), &st); err != nil || len(st) != 3 || !st[0].Installed || st[1].Installed {
+	if err := json.Unmarshal(out.Bytes(), &st); err != nil || len(st) != 4 || !st[0].Installed || st[1].Installed || st[3].Client != "hermes" {
 		t.Fatalf("%v %s", err, out.String())
 	}
 	out.Reset()

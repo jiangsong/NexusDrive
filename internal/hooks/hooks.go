@@ -27,7 +27,7 @@ import (
 )
 
 // Clients lists the supported clients, in the order they are reported.
-var Clients = []string{"claude", "codex", "gemini"}
+var Clients = []string{"claude", "codex", "gemini", "hermes"}
 
 // marker identifies our hook groups inside a config, for idempotency,
 // status and removal. Removal is scoped to ourEvents as well, so a hook
@@ -54,6 +54,9 @@ type platform struct {
 	// a real install; the others carry an UNVERIFIED comment and the
 	// console says so.
 	verified bool
+	// yaml says the config file is YAML with flat hook entries (Hermes)
+	// rather than the JSON groups of the other three.
+	yaml bool
 	// note is what the person still has to do after install.
 	note string
 }
@@ -97,6 +100,22 @@ var platforms = map[string]platform{
 		writeMatcher: "write_file|replace|edit",
 		timeout:      10000,
 	},
+	// UNVERIFIED: Hermes hooks follow BearDrive's table as of 2026-09 —
+	// ~/.hermes/config.yaml, hooks.<event> as flat lists of {matcher?,
+	// command, timeout} under pre_llm_call / post_tool_call. Whether
+	// Hermes has a session-end event is unknown; session_end is used
+	// because an event that never fires costs nothing. The file is
+	// rewritten through a YAML round trip, which drops comments.
+	"hermes": {
+		configPath:   []string{".hermes", "config.yaml"},
+		prompt:       "pre_llm_call",
+		tool:         "post_tool_call",
+		stop:         "session_end",
+		readMatcher:  "read_file|grep|bash",
+		writeMatcher: "write_file|patch",
+		timeout:      10,
+		yaml:         true,
+	},
 }
 
 // ourEvents is every event any platform registers or has registered
@@ -107,6 +126,7 @@ var ourEvents = map[string]bool{
 	"UserPromptSubmit": true, "PostToolUse": true, "SessionEnd": true,
 	"BeforeAgent": true, "AfterTool": true,
 	"Stop": true, "AfterAgent": true,
+	"pre_llm_call": true, "post_tool_call": true, "session_end": true,
 }
 
 // ConfigPath is where a client's hooks live under home.
@@ -265,7 +285,11 @@ func Install(home string, clients []string) ([]Result, error) {
 			return out, fmt.Errorf("unknown client %q (supported: %s)", c, strings.Join(Clients, ", "))
 		}
 		path, _ := ConfigPath(home, c)
-		changed, err := mergeInto(path, c)
+		merge := mergeInto
+		if p.yaml {
+			merge = mergeIntoYAML
+		}
+		changed, err := merge(path, c)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", c, err)
 		}
@@ -286,7 +310,11 @@ func Uninstall(home string, clients []string) ([]Result, error) {
 		if err != nil {
 			return out, err
 		}
-		changed, err := removeFrom(path)
+		remove := removeFrom
+		if platforms[c].yaml {
+			remove = removeFromYAML
+		}
+		changed, err := remove(path)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", c, err)
 		}

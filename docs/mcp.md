@@ -555,21 +555,23 @@ MCP 之外的第二条通道（docs/agent-first-design.md §7，T-54）：agent 
 MCP 时，仍能在每轮开始拿到"你在哪、自上一轮谁改了什么"，读过的文件进读热度，结束时会话被关闭。
 
 ```sh
-cloudfs hooks install [--client claude,codex,gemini]   # 省略 --client 时注册检测到的客户端
+cloudfs hooks install [--client claude,codex,gemini,hermes]   # 省略 --client 时注册检测到的客户端
 cloudfs hooks status
 cloudfs hooks uninstall [--client …]
 ```
 
-写的是**用户级**配置（`~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.gemini/settings.json`），三组 hook
+写的是**用户级**配置（`~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.gemini/settings.json`、
+`~/.hermes/config.yaml`——Hermes 是 YAML 扁平条目，回写会丢注释，`UNVERIFIED`），四组 hook
 以 `cloudfs agent-hook` 为标记，重复安装只收敛不重复，卸载只删自己的组；hook 配置永远不从挂载里读。每条命令
 以纯 shell 的 guard 开头：当前目录（或 `CLAUDE_PROJECT_DIR`）不在 `~/.config/cloudfs/mounts` 登记的挂载之内、
 或 `cloudfs` 不在 PATH 时立即退出，不起任何进程；登记表由 `cloudfs mount` 与 `hooks install` 写。
 
-| 事件（Claude / Codex；Gemini 用 BeforeAgent / AfterTool / SessionEnd，`UNVERIFIED`） | 命令 | 做什么 |
+| 事件（Claude / Codex；Gemini 用 BeforeAgent / AfterTool / SessionEnd，Hermes 用 pre_llm_call / post_tool_call / session_end，均 `UNVERIFIED`） | 命令 | 做什么 |
 |---|---|---|
-| `UserPromptSubmit` | `cloudfs agent-hook prompt` | 向控制面 `POST /agent/hook-context` 要本轮上下文，作为 `additionalContext` 打印：所在挂载、可写范围、"自上一轮以来被别的进程 / agent / 设备改过的文件——先重读再改"（上限 20 条 + 计数，按内核视角的相对路径；内核写不列，它多半是 agent 自己；同一客户端的 MCP 会话写的也不列——hook 会话与 MCP 会话 id 不同，按客户端名归为"自己的"）、丢失变更时的 `re-list` 提醒；`hooks.context: full` 再加 MEMORY.md 前 30 行；`off` 不注入 |
+| `UserPromptSubmit` | `cloudfs agent-hook prompt` | 向控制面 `POST /agent/hook-context` 要本轮上下文，作为 `additionalContext` 打印：所在挂载、可写范围、"自上一轮以来被别的进程 / agent / 设备改过的文件——先重读再改"（上限 `hooks.changed_max` = 20 条 + 计数，按内核视角的相对路径；**不列的**：本客户端 write hook 上报过的自己的内核写、同一客户端 MCP 会话的写、本地写落地后的 `remote` 回声；终端与别的程序的内核写**列**）、丢失变更时的 `re-list` 提醒；`hooks.context: full` 再加 MEMORY.md 前 `hooks.memory_head_lines` = 30 行；`off` 不注入。同时为这段对话建（或续）一个 `hook:<client>` 主体的会话（transport `hook`，只读作用域），控制台会话列表可见 |
 | `PostToolUse`（`Read\|Grep\|Bash`） | `cloudfs agent-hook read` | 从工具输入里挖出真实存在的文件（`file_path` / `path`、shell 命令里的文件名），`POST /agent/hook-read` 计入读热度（`actor_kind: agent`）；列目录不算读 |
-| `SessionEnd` | `cloudfs agent-hook stop` | `POST /agent/hook-stop` 结束该客户端的活动 MCP 会话（按客户端名匹配，尽力而为）。用会话结束事件而不是每轮都触发的 `Stop`，否则多轮会话第一轮后就被关掉；stdio 会话随进程结束不算候选；候选多于一个（同一客户端开了两个实例）时一个都不结束，让会话按 `mcp.session.idle` 过期 |
+| `PostToolUse`（`Write\|Edit\|MultiEdit\|NotebookEdit`） | `cloudfs agent-hook write` | 同样挖路径，但以 `wrote: true` 上报：这是 agent 自己的写，记进本对话的"自己的写"集合，下一轮不当别人的变更报回来；不计热度 |
+| `SessionEnd` | `cloudfs agent-hook stop` | `POST /agent/hook-stop` 结束本对话的 hook 会话，并结束该客户端的活动 MCP 会话（按客户端名匹配，尽力而为）。用会话结束事件而不是每轮都触发的 `Stop`，否则多轮会话第一轮后就被关掉；stdio 与 hook 会话不算候选；候选多于一个（同一客户端开了两个实例）时一个都不结束，让会话按 `mcp.session.idle` 过期 |
 
 守护进程离线、目录不在挂载内、输入格式不对：一律静默成功退出，hook 永不让一轮失败。每轮的游标按
 `<client>:<session_id>` 存在 agent.db 的 meta 表里，首轮不报旧账；`mcp.session.retain` 之内没再出现的游标随

@@ -49,7 +49,7 @@ func cmdHooks(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		if len(results) == 0 {
-			fmt.Fprintln(out, "no agent client found (no ~/.claude, ~/.codex or ~/.gemini); pass --client to register anyway")
+			fmt.Fprintln(out, "no agent client found (no ~/.claude, ~/.codex, ~/.gemini or ~/.hermes); pass --client to register anyway")
 			return nil
 		}
 		return printHookResults(out, results, f.bool("json"), "installed")

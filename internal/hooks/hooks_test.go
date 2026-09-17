@@ -299,3 +299,85 @@ func TestHookGuardIsPureShell(t *testing.T) {
 		}
 	}
 }
+
+// TestHermesInstallWritesYAMLAndIsIdempotent (T-58, UNVERIFIED shape):
+// the Hermes config is YAML with flat hook entries under pre_llm_call /
+// post_tool_call; install adds our four entries beside the person's own,
+// a second install changes nothing, and uninstall leaves the file as it
+// was but for our entries — the person's entry and other keys survive.
+func TestHermesInstallWritesYAMLAndIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".hermes")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("model: gpt\nhooks:\n  post_tool_call:\n    - matcher: write_file\n      command: my-formatter\n      timeout: 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Detect(home); len(got) != 1 || got[0] != "hermes" {
+		t.Fatalf("detect: %v", got)
+	}
+	res, err := Install(home, []string{"hermes"})
+	if err != nil || len(res) != 1 || !res[0].Changed {
+		t.Fatalf("install: %+v %v", res, err)
+	}
+	first, _ := os.ReadFile(path)
+	root, err := readYAML(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root["model"] != "gpt" {
+		t.Fatalf("unrelated keys lost: %v", root)
+	}
+	hooks := root["hooks"].(map[string]any)
+	post := hooks["post_tool_call"].([]any)
+	if len(post) != 3 || post[0].(map[string]any)["command"] != "my-formatter" {
+		t.Fatalf("post_tool_call: %v", post)
+	}
+	if pre := hooks["pre_llm_call"].([]any); len(pre) != 1 || !strings.Contains(fmt.Sprint(pre[0]), "cloudfs agent-hook prompt --client hermes") {
+		t.Fatalf("pre_llm_call: %v", pre)
+	}
+	if stop := hooks["session_end"].([]any); len(stop) != 1 || !strings.Contains(fmt.Sprint(stop[0]), "agent-hook stop") {
+		t.Fatalf("session_end: %v", stop)
+	}
+	for _, e := range post[1:] {
+		m := e.(map[string]any)
+		if _, ok := m["hooks"]; ok {
+			t.Fatalf("a Hermes entry is a JSON-style group: %v", m)
+		}
+		if m["matcher"] == "" || m["timeout"] != 10 {
+			t.Fatalf("entry shape: %v", m)
+		}
+	}
+	if res, err := Install(home, []string{"hermes"}); err != nil || res[0].Changed {
+		t.Fatalf("second install: %+v %v", res, err)
+	}
+	if second, _ := os.ReadFile(path); string(first) != string(second) {
+		t.Fatal("the second install rewrote the file")
+	}
+	st := Statuses(home)
+	var hermes Status
+	for _, s := range st {
+		if s.Client == "hermes" {
+			hermes = s
+		}
+	}
+	if !hermes.Installed || !hermes.Present || hermes.Verified {
+		t.Fatalf("status: %+v", hermes)
+	}
+	if res, err := Uninstall(home, []string{"hermes"}); err != nil || !res[0].Changed {
+		t.Fatalf("uninstall: %+v %v", res, err)
+	}
+	root, _ = readYAML(path)
+	hooks = root["hooks"].(map[string]any)
+	if post := hooks["post_tool_call"].([]any); len(post) != 1 || post[0].(map[string]any)["command"] != "my-formatter" {
+		t.Fatalf("after uninstall: %v", hooks)
+	}
+	if _, ok := hooks["pre_llm_call"]; ok {
+		t.Fatalf("our event survived uninstall: %v", hooks)
+	}
+	if root["model"] != "gpt" {
+		t.Fatalf("unrelated keys lost on uninstall: %v", root)
+	}
+}
