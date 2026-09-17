@@ -105,6 +105,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `history` | `path`, `limit? = 50` | 该路径（目录则含其下）按守护进程记录的变更，最新在前：内核写、agent 会话（带 `session_id`）、控制台、WebDAV、远端发现的变更；`reliable: false` 的 `rescan` 行表示那段时间可能有遗漏。不是网盘的版本历史，记录从守护进程开始记起，按 `mcp.session.retain` 保留 |
 | `pull_events` | `cursor?`, `path?`, `kinds[]?`, `include_own?`, `limit?` | 自游标以来的变更事件（读 `changes` 表，不依赖触发器规则）。省略游标时从本会话上次拉取处（首次从会话开始处）继续，游标同时存进会话；默认不含本会话自己的改动；`rescan: true` 时请重新 list 依赖的目录 |
 | `share` | `path`, `confirm`, `expires?`, `force?`, `code?` | 为网盘上的文件创建公开链接（T-55）。`confirm` 必须为 true；只对已上传（`state = synced`）且**完整缓存**的文件——凭据扫描只读缓存，未缓存的拒绝并提示先 `pin`；扫描命中（AWS key、私钥头、`password=` 等）时拒绝并给出规则与行号，`force` 覆盖；成功恰好一次 `CreateShare` 远端调用，响应带 `url` / `code` / `expires_at` 与控制台内链 `console_url`。只有 `Caps.Share` 的驱动可用（见 providers.md） |
+| `stale_docs` | `path?`, `limit? = 50` | 目录下链接到"比自己更新的文件"的 Markdown 文档（T-58，借 `bdrive stale`）：每条带 `newer[]{target, modified}`；只读已缓存的文档，未缓存的计入 `skipped`，零远端调用；只是清单，不下判断 |
 | `hot_paths` | `path?`, `days? = 7`, `limit? = 50` | 窗口内读得最多的路径，按读取者类型（`agent` / `kernel` / `console` / `webdav`）计数，带 `mtime` 与 `stale`（窗口内被读、窗口前就没改过）；`suggestions[]` 只建议 pin / 复核，不做任何事 |
 | `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?` | 文本读。非 UTF-8 会被拒绝并提示改用 `read_range`。截断时返回 `next_offset`；`tail` 落在多字节字符中间时自动前移到字符边界 |
 | `read_range` | `path`, `offset`, `length` | 任意字节范围，base64 返回。用于二进制或大文件分页 |
@@ -577,7 +578,7 @@ cloudfs hooks uninstall [--client …]
 
 | 事件（Claude / Codex；Gemini 用 BeforeAgent / AfterTool / SessionEnd，Hermes 用 pre_llm_call / post_tool_call / session_end，均 `UNVERIFIED`） | 命令 | 做什么 |
 |---|---|---|
-| `UserPromptSubmit` | `cloudfs agent-hook prompt` | 向控制面 `POST /agent/hook-context` 要本轮上下文，作为 `additionalContext` 打印：所在挂载、可写范围、"自上一轮以来被别的进程 / agent / 设备改过的文件——先重读再改"（上限 `hooks.changed_max` = 20 条 + 计数，按内核视角的相对路径；**不列的**：本客户端 write hook 上报过的自己的内核写、同一客户端 MCP 会话的写、本地写落地后的 `remote` 回声；终端与别的程序的内核写**列**）、丢失变更时的 `re-list` 提醒；`hooks.context: full` 再加 MEMORY.md 前 `hooks.memory_head_lines` = 30 行；`off` 不注入。同时为这段对话建（或续）一个 `hook:<client>` 主体的会话（transport `hook`，只读作用域），控制台会话列表可见 |
+| `UserPromptSubmit` | `cloudfs agent-hook prompt` | 向控制面 `POST /agent/hook-context` 要本轮上下文，作为 `additionalContext` 打印：所在挂载、可写范围、"自上一轮以来被别的进程 / agent / 设备改过的文件——先重读再改"（上限 `hooks.changed_max` = 20 条 + 计数，按内核视角的相对路径；**不列的**：本客户端 write hook 上报过的自己的内核写、同一客户端 MCP 会话的写、本地写落地后的 `remote` 回声；终端与别的程序的内核写**列**）、丢失变更时的 `re-list` 提醒；`hooks.context: full` 再加 MEMORY.md 前 `hooks.memory_head_lines` = 30 行、内链公式，以及"这些变了的文件看起来含凭据"（只扫已缓存文件的前 1 MiB，只报规则与行号，不报内容）；`off` 不注入。同时为这段对话建（或续）一个 `hook:<client>` 主体的会话（transport `hook`，只读作用域），控制台会话列表可见 |
 | `PostToolUse`（`Read\|Grep\|Bash`） | `cloudfs agent-hook read` | 从工具输入里挖出真实存在的文件（`file_path` / `path`、shell 命令里的文件名），`POST /agent/hook-read` 计入读热度（`actor_kind: agent`）；列目录不算读 |
 | `PostToolUse`（`Write\|Edit\|MultiEdit\|NotebookEdit`） | `cloudfs agent-hook write` | 同样挖路径，但以 `wrote: true` 上报：这是 agent 自己的写，记进本对话的"自己的写"集合，下一轮不当别人的变更报回来；不计热度 |
 | `SessionEnd` | `cloudfs agent-hook stop` | `POST /agent/hook-stop` 结束本对话的 hook 会话，并结束该客户端的活动 MCP 会话（按客户端名匹配，尽力而为）。用会话结束事件而不是每轮都触发的 `Stop`，否则多轮会话第一轮后就被关掉；stdio 与 hook 会话不算候选；候选多于一个（同一客户端开了两个实例）时一个都不结束，让会话按 `mcp.session.idle` 过期 |

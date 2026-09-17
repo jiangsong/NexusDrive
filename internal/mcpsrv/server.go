@@ -309,6 +309,7 @@ func New(opt Options) (*Server, error) {
 	s.registerPullEvents()
 	s.registerHotPaths()
 	s.registerShareTool()
+	s.registerStaleDocs()
 	s.registerCopyTools()
 	s.registerUploadTools()
 	s.registerExportTools()

@@ -15,6 +15,7 @@ import (
 	"cloudfs/internal/cache"
 	"cloudfs/internal/i18n"
 	"cloudfs/internal/journal"
+	"cloudfs/test/fakeprovider"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/net/proxy"
 	"cloudfs/internal/net/ratelimit"
@@ -22,6 +23,7 @@ import (
 )
 
 type fixture struct {
+	fake *fakeprovider.Fake
 	dir   string
 	meta  *meta.Store
 	cache *cache.Cache

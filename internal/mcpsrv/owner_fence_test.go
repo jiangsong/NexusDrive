@@ -83,6 +83,7 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"history":          {"path": "/work/a.txt"},
 		"pull_events":      {"path": "/work"},
 		"hot_paths":        {"path": "/work"},
+		"stale_docs":       {"path": "/work"},
 		"stat":             {"path": "/work/a.txt"},
 		"stat_many":        {"paths": []string{"/work/a.txt", "/work/b.txt"}},
 		"read_text":        {"path": "/work/a.txt"},

@@ -13,6 +13,7 @@ import (
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
 	"cloudfs/internal/hooks"
+	"cloudfs/internal/secrets"
 	"cloudfs/internal/memory"
 )
 
@@ -138,7 +139,7 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		parts = append(parts, fmt.Sprintf("Agents may change files under: %s (mount-relative).", strings.Join(cfg.MCP.Allow, ", ")))
 	}
 	if st := s.hookStore(); st != nil && q.SessionID != "" {
-		changed, more, rescan, err := s.hookChanges(r.Context(), st, q, mount, virtual)
+		changed, more, rescan, virtuals, err := s.hookChangesWithPaths(r.Context(), st, q, mount, virtual)
 		if err == nil {
 			resp.Changed, resp.More, resp.Rescan = changed, more, rescan
 			if len(changed) > 0 {
@@ -154,6 +155,15 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 			}
 			if rescan {
 				parts = append(parts, "Some changes since your last turn were not recorded; re-list the directories you rely on before trusting what you remember.")
+			}
+			// The credential hint (borrowed from BearDrive): a changed file
+			// whose cached content looks like a credential is named with
+			// the rule, never the text — and only when it is fully cached,
+			// since the scan must not download anything.
+			if cfg.Hooks.Context == "full" {
+				if hint := s.hookCredentialHint(r.Context(), mount, q.CWD, virtuals); hint != "" {
+					parts = append(parts, hint)
+				}
 			}
 		}
 	}
@@ -184,16 +194,23 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 // agent just wrote would teach it to ignore the line. Other kernel
 // writes are the terminal's or another program's and are reported.
 func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextRequest, mount config.Mount, virtual string) (changed []string, more int, rescan bool, err error) {
+	changed, more, rescan, _, err = s.hookChangesWithPaths(ctx, st, q, mount, virtual)
+	return changed, more, rescan, err
+}
+
+// hookChangesWithPaths is hookChanges returning the virtual paths of the
+// listed changes as well, for the credential hint.
+func (s *Server) hookChangesWithPaths(ctx context.Context, st HookStore, q hooks.ContextRequest, mount config.Mount, virtual string) (changed []string, more int, rescan bool, virtuals []string, err error) {
 	cursor, known, err := st.HookCursor(ctx, q.Client, q.SessionID)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, false, nil, err
 	}
 	last, err := st.LastChangeID(ctx)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, false, nil, err
 	}
 	if !known {
-		return nil, 0, false, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
+		return nil, 0, false, nil, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
 	}
 	changedMax, _ := s.hookBudgets()
 	seen := map[string]bool{}
@@ -224,7 +241,7 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 	for cursor < last {
 		rows, hasMore, err := st.Changes(ctx, agent.ChangesQuery{After: cursor, Prefix: virtual, Limit: 500})
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, nil, err
 		}
 		for _, c := range rows {
 			cursor = c.ID
@@ -253,6 +270,9 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 				continue
 			}
 			changed = append(changed, p)
+			if c.Kind != "remove" {
+				virtuals = append(virtuals, c.Path)
+			}
 		}
 		if !hasMore {
 			break
@@ -260,7 +280,7 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 	}
 	sort.Strings(changed)
 	_ = st.ClearHookWrites(ctx, q.Client, q.SessionID)
-	return changed, more, rescan, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
+	return changed, more, rescan, virtuals, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
 }
 
 // hookMemoryHead is the first lines of the client's MEMORY.md, read
@@ -427,4 +447,34 @@ func (s *Server) agentHookStop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, resp)
+}
+
+// hookCredentialHint scans the fully cached files among the changed ones
+// (first MiB, internal/secrets) and names the ones that look like they
+// hold a credential.
+func (s *Server) hookCredentialHint(ctx context.Context, mount config.Mount, cwd string, virtuals []string) string {
+	if s.collector.FS == nil {
+		return ""
+	}
+	var found []string
+	for _, p := range virtuals {
+		if len(found) >= 5 {
+			break
+		}
+		a, err := s.collector.FS.StatPath(ctx, p)
+		if err != nil || a.IsDir || a.Size == 0 || (a.Cached < 1 && !a.LocalOnly) {
+			continue
+		}
+		data, err := s.collector.FS.ReadFileRange(ctx, p, 0, min(a.Size, secrets.ScanLimit))
+		if err != nil {
+			continue
+		}
+		if f := secrets.Scan(data); len(f) > 0 {
+			found = append(found, fmt.Sprintf("`%s` (%s, line %d)", agentPath(mount, cwd, p), f[0].Rule, f[0].Line))
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return "These changed files look like they contain credentials; do not copy their contents into answers, files or commands: " + strings.Join(found, ", ") + "."
 }

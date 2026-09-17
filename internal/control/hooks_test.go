@@ -19,7 +19,8 @@ import (
 // directory, an agent store as the hook store and a read observer.
 func hooksFixture(t *testing.T) (*fixture, *agent.Store, *agent.ReadObserver, string) {
 	t.Helper()
-	f, _ := fsControl(t)
+	f, fake := fsControl(t)
+	f.fake = fake
 	st, err := agent.Open(filepath.Join(f.dir, "agent"))
 	if err != nil {
 		t.Fatal(err)
@@ -352,5 +353,48 @@ func TestHookFullContextCarriesTheConsoleLinkFormula(t *testing.T) {
 	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", hooks.ContextRequest{Client: "claude", SessionID: "link-2", CWD: mount}), &resp)
 	if strings.Contains(resp.Context, "#/fs/") {
 		t.Fatalf("minimal context carries the link formula:\n%s", resp.Context)
+	}
+}
+
+// TestHookContextListsCredentialLookingCachedFilesOnly (T-58): with full
+// context, a changed file whose cached content looks like a credential is
+// named with the rule and line and never its text; a changed file the
+// cache does not hold is not read for it (fake ReadRange count 0).
+func TestHookContextListsCredentialLookingCachedFilesOnly(t *testing.T) {
+	f, st, _, mount := hooksFixture(t)
+	fake := f.fake
+	fake.Seed("/docs/env.md", []byte("# setup\npassword = hunter2hunter2\n"))
+	fake.Seed("/docs/far.md", []byte("password = alsoasecretvalue\n"))
+	cfg := *f.coll.ConfigView()
+	cfg.Hooks.Context = "full"
+	f.coll.PublishConfigView(&cfg)
+	ctx := context.Background()
+	if _, err := f.coll.FS.ReadDirPath(ctx, "/docs"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.coll.FS.Prefetch(ctx, "/docs/env.md"); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(f.coll)
+	req := hooks.ContextRequest{Client: "claude", SessionID: "cred-1", CWD: filepath.Join(mount, "docs")}
+	_ = hookPost(t, s, "/agent/hook-context", req)
+	now := time.Now()
+	if _, err := st.RecordChanges(ctx, []agent.Change{
+		{TS: now, Path: "/docs/env.md", Kind: "write", Origin: "remote", Reliable: true},
+		{TS: now, Path: "/docs/far.md", Kind: "write", Origin: "remote", Reliable: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reads := fake.Calls("ReadRange")
+	var resp hooks.ContextResponse
+	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", req), &resp)
+	if !strings.Contains(resp.Context, "look like they contain credentials") || !strings.Contains(resp.Context, "`env.md` (password-assignment, line 2)") {
+		t.Fatalf("no credential hint:\n%s", resp.Context)
+	}
+	if strings.Contains(resp.Context, "hunter2") || strings.Contains(resp.Context, "far.md` (") {
+		t.Fatalf("the hint leaks text or names an uncached file:\n%s", resp.Context)
+	}
+	if fake.Calls("ReadRange") != reads {
+		t.Fatalf("the hint downloaded a file: %d reads", fake.Calls("ReadRange")-reads)
 	}
 }

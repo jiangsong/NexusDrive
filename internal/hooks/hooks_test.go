@@ -63,6 +63,11 @@ func TestInstallIsIdempotentAndPreservesOtherHooks(t *testing.T) {
 	if !strings.HasPrefix(cmd, "sh -c '") || !strings.Contains(cmd, "cloudfs agent-hook read --client claude") || !strings.Contains(cmd, "/cloudfs/mounts") {
 		t.Fatalf("command: %s", cmd)
 	}
+	// The turn-start hook carries the status line Claude Code shows while
+	// the person waits; the async ones do not.
+	if prompt := hooks["UserPromptSubmit"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any); prompt["statusMessage"] != "cloudfs: preparing context" || prompt["async"] != nil {
+		t.Fatalf("prompt hook: %v", prompt)
+	}
 	// The write group reports the client's own writes, so the next turn
 	// does not hand them back as someone else's.
 	wrote := post[2].(map[string]any)

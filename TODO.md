@@ -3155,7 +3155,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `LICENSE` 存在；`cloudfs version` 输出非空。
 - **依赖**：无。估算 S。
 
-### [~] T-58 BearDrive 对照补遗：hermes 平台、`statusMessage`、凭据提示注入、`stale` 清单（P2，2026-09-17 登记；hermes 已随 T-54 落地，其余待做）
+### [x] T-58 BearDrive 对照补遗：hermes 平台、`statusMessage`、凭据提示注入、`stale` 清单（P2，2026-09-17 登记并同日完成：hermes、Claude 提示 hook 的 `statusMessage`、full 上下文的凭据提示（`TestHookContextListsCredentialLookingCachedFilesOnly`）、`stale_docs` 工具（`TestStaleDocsCostsNoRemoteCalls`）；`TestHermesInstallWritesYAMLAndIsIdempotent`）
 
 - **证据**：BearDrive `internal/agenthooks` 四平台表含 hermes（`~/.hermes/config.yaml`，YAML `hooks.pre_llm_call` /
   `hooks.post_tool_call[{matcher, command, timeout}]`），本仓库 `internal/hooks/hooks.go` `Clients` 只有三个；BearDrive 的

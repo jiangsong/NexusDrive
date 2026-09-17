@@ -254,8 +254,14 @@ func groups(client string) []struct {
 	p := platforms[client]
 	hook := func(event string, async bool) map[string]any {
 		h := map[string]any{"type": "command", "command": Command(event, client), "timeout": p.timeout}
-		if async && client == "claude" {
-			h["async"] = true
+		if client == "claude" {
+			if async {
+				h["async"] = true
+			} else {
+				// The turn-start hook is the one the person waits on;
+				// Claude Code shows this line while it runs.
+				h["statusMessage"] = "cloudfs: preparing context"
+			}
 		}
 		return h
 	}
