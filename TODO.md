@@ -2679,11 +2679,29 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   协同编辑（设计 §3.3）。
 - **本轮开工**：文档落库 → 最小后端路由（`/mcp/connect.bridge`、`/changes`、`/agent/suggestions`、`/agent/hooks`、`/settings`）→
   界面 G1-2 / G2 / G4-2 / G5 / G6-1,3,4 / G7 + 只读 `#/settings`。下一轮：缺失的 perf / chaos / e2e 验收测试、两个 CLI、
-  配置键、doctor 桥感知、hermes。之后按设计 §10.2：T-56 → T-55 → T-57。
+  配置键、hermes。之后按设计 §10.2：T-56 → T-55 → T-57。
+
+**2026-09-17 落地**（同日，界面 G 项 + 只读路由，逐项见 `docs/ui-plan.md` 阶段 G 与 `docs/mcp.md`「控制面只读路由」）：
+
+- 后端：`GET /changes`（`agent.Store.HistoryPage` 游标翻页）、`GET /agent/suggestions`（只出草案）、`GET /agent/hooks`
+  （只读，`hooks.Status` 加 `verified` / `note`）、`GET /settings`（白名单，无凭据字段）、`/mcp/connect.bridge` 三态
+  （`agent.HasBridgeToken` / `ActiveBridgeSessions`，桥密钥路径移到 `internal/agent`）、`doctor.agent_stdio` 桥连接报 ok、
+  `AuditView.transport`、`SessionView.principal` / `last_change_seen`。测试：`TestChangesRouteFollowsCursorAndFiltersByPath`、
+  `TestSuggestionsNeverWriteRules`、`TestHeatResponsesCarryNoIdentity`、`TestHooksRouteNeverWritesUserConfig`、
+  `TestSettingsViewIsReadOnlyAndCarriesNoSecret`、`TestMCPConnectReportsTheBridgeState`、`TestDoctorAcceptsAStdioServerBehindTheBridge`。
+- 界面：G2 桥横幅；G3 只读 `#/settings`；G4 回滚预览按 reason 分组 + 逐行可逆性；G5 检查器"最近修改" / "历史"浮层 /
+  "变更"标签 / 审计 transport / 会话 principal；G6 散点（`heat_plot.js`）/ 建议浮层 / 文件列表热度点 / 检查器"30 天读取"；
+  G7 Hooks 卡 + 会话 `hook:` chip。纯模块各带 node 套件（`connect_view` / `rollback_plan` / `heat_plot` / `hooks_view` /
+  `settings_view`）。G1-2 决定不改（两份 prompt 不同源），G5-4 留空（见 ui-plan）。
+- **顺带修复**：真实挂载冒烟发现 FUSE `Read` 处理器不打 `vfs.FromKernel` 标、splice 零拷贝路径根本不进 `FS.Read`，
+  于是内核读一条热度都没记过（T-53 的单测直接用 `FromKernel` ctx 调 `FS.Read`，没覆盖适配层）。修法：处理器打标 +
+  `FS.NoteRead` 供 splice 路径上报；`TestKernelReadIsObservedAsFromKernel` 先失败后通过。**这正是 T-53 验收里缺失的
+  e2e 断言要抓的东西**，下一轮补 e2e 时以它为样板。
+- 观察：外部 `fusermount -u` 之后再给守护进程 SIGINT，它打印"unmounting…"后不退出，需 SIGKILL；未深究，登记待查。
 
 ---
 
-### [~] T-46 运行时指引：server instructions、prompts、错误分层、`next`（P0，2026-09-16 后端与界面完成）
+### [x] T-46 运行时指引：server instructions、prompts、错误分层、`next`（P0，2026-09-16 完成；G1-2 于 2026-09-17 决定不改）
 
 - **2026-09-16 完成**：`internal/agent/prompttext`（`Caps` 门控的 `Instructions(caps, lang)` 与四个 prompt 的
   `Render`，句子在 `internal/i18n` `agent.instructions.*` / `agent.prompt.*`，中英各一套；
@@ -2727,7 +2745,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 界面 `ui_agents_test.go` 断言指引卡调用 `/agent/prompt?kind=instructions`；i18n 两表键一致；screens 无汉字。
 - **依赖**：无。估算 S + M。
 
-### [~] T-47 token 预算 `MaxTokens`、`list_directory fields`、`directory_tree`（P0，2026-09-16 后端完成，G3 待做）
+### [x] T-47 token 预算 `MaxTokens`、`list_directory fields`、`directory_tree`（P0，2026-09-16 后端完成；G3 只读设置屏 2026-09-17 完成）
 
 - **2026-09-16 完成**：`agent.EstimateTokens`（CJK 每字 1、其余每 4 字节 1、+10%）；`Limits.MaxTokens`（默认
   20,000，负数关闭；配置 `mcp.limits.max_tokens`）；审计中间件只计量（`tokens_out` 列，超限 `result: oversize`）；
@@ -2764,7 +2782,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `docs/mcp.md` 工具表加 `directory_tree` 与 `fields`。
 - **依赖**：无。估算 M。
 
-### [~] T-48 写入响应 `reversible` / `preimage_reason`、递归删除 `plan` 与逐文件前像（P0，2026-09-16 后端完成）
+### [x] T-48 写入响应 `reversible` / `preimage_reason`、递归删除 `plan` 与逐文件前像（P0，2026-09-16 后端完成；G4 2026-09-17 完成）
 
 - **2026-09-16 完成**：`opRecord.reversibility()`（nil → `not_recorded`）；`writeOutput / editOutput / okOutput`
   的 `reversible` + `preimage_reason`（pin/unpin `not_applicable`）；`internal/mcpsrv/delete_plan.go`：`walkForDelete`
@@ -2797,7 +2815,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestRecursiveDeleteHonoursPreimageFileBudget`。
 - **依赖**：无。估算 S + M。
 
-### [~] T-49 `mcp install` 默认传输按 owner 在线判定、`--with-agents-md`（P0，2026-09-16 完成）
+### [x] T-49 `mcp install` 默认传输按 owner 在线判定、`--with-agents-md`（P0，2026-09-16 完成；G2 2026-09-17 完成）
 
 - **2026-09-16 完成**：`--transport` 默认 `auto`（配置 `mcp.install.transport`），`mcpOwnerOnline` 经
   `control.FetchStatusInLanguage` 判定，stderr 打印一行原因；`cmd/cloudfs/agents_md.go`（目标选择、标记块、幂等
@@ -2873,7 +2891,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 关闭 T-43。
 - **依赖**：T-51 的 schemaV3（`audit.result = forwarded` 只是值，不需 schema；但 `tokens_out` 列应同时到位）。估算 L。
 
-### [~] T-51 来源：agent.db schemaV3、`changes` 表、`last_writer`、`history`、保留期拆分（P1，2026-09-16 后端完成）
+### [~] T-51 来源：agent.db schemaV3、`changes` 表、`last_writer`、`history`、保留期拆分（P1，2026-09-16 后端完成；G5 2026-09-17 完成；余：xattr、CLI `history`、验收 e2e / chaos）
 
 - **2026-09-16 完成**：schemaV3（`audit.tokens_out`、`session_ops.ts`、`sessions.last_change_seen`、`changes`、
   `read_heat`；`applyStep` 让 `ADD COLUMN` 可重跑，`TestSchemaV3IsAdditiveAndRepeatable`）；`vfs.Change` 加
@@ -2922,7 +2940,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `security_all_routes_test` 覆盖 `/changes`；`docs/vfs-changes.md` 加 `changes` 表一节。
 - **依赖**：无（P1 公共前提）。估算 L。
 
-### [~] T-52 `pull_events` 与订阅投递重校验（P1，2026-09-16 后端完成）
+### [~] T-52 `pull_events` 与订阅投递重校验（P1，2026-09-16 后端完成；界面复用 G5 已完成；余：点名的四个验收测试）
 
 - **2026-09-16 完成**：`pull_events` 读 `changes` 表（不复用 `trigger_deliveries`——变更表本身就是"记录一切"，
   设计 §6.4 的内建规则不再需要），游标 = 行 id，省略时取会话的 `last_change_seen`、首次取会话开始前的 id，
@@ -2950,7 +2968,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestSubscriptionDeliveryRechecksScope`（人为改会话 scope 后不再投递）。
 - **依赖**：T-51。估算 S–M。
 
-### [~] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏（P1，2026-09-16 完成）
+### [~] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏（P1，2026-09-16 完成；G6 与 `/agent/suggestions` 2026-09-17 完成，同日修复内核读从未被记录；余：`mcp.heat.*` 配置键、CLI `heat`、perf / chaos 验收）
 
 - **2026-09-16 完成**：`internal/agent/readheat.go`（`BumpReadHeat` upsert、`HotPaths`、`PruneReadHeat`、
   `ReadObserver` 10 分钟按 `(path, kind)` 去抖 + 30 秒批量落库，只在 owner 跑）；`vfs.SetReadObserver`（`Read`
@@ -2992,7 +3010,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 - **依赖**：T-51（schemaV3）。估算 L。
 
-### [~] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 三事件、注入、`SessionEnd` 经控制面结束会话（P1，2026-09-16 后端完成）
+### [~] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 三事件、注入、`SessionEnd` 经控制面结束会话（P1，2026-09-16 后端完成；G7 与 `GET /agent/hooks` 2026-09-17 完成；余：真实 `claude` 会话验证、hermes、配置键、点名的验收测试）
 
 - **2026-09-16 完成**：`internal/hooks`（三平台表，`ConfigPath`、纯 shell `Guard()`、`Command`、`Install` /
   `Uninstall` / `Statuses` / `Detect`、`MountsPath` / `WriteMounts` / `ReadMounts`；运行时 `Client`（控制面 socket）、

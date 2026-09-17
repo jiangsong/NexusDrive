@@ -588,4 +588,18 @@ cloudfs hooks uninstall [--client …]
   （内容，默认 7 天）。内容先于行释放的记录标 `pre_reason: expired`，`history` 仍能指名那次写入，回滚跳过它。
 - **`read_heat` 表**：按 `(path, day, actor_kind)` 计数，从不记人。VFS 每个 inode 每种读取者 10 分钟最多报一次
   （纯内存去抖），守护进程解析路径后 30 秒批量落库；索引抽取等后台读不计。`hot_paths` 与控制台「Agent →
-  读热度」标签（`GET /agent/heat`，四象限：热且新 / **热但陈旧** / 温…）读它。
+  读热度」标签（`GET /agent/heat`，四象限：热且新 / **热但陈旧** / 温…）读它。内核读在 FUSE `Read` 处理器里打
+  `FromKernel` 标并在 splice 零拷贝路径上也上报（2026-09-17 修复：此前真实挂载的内核读一条都没记）。
+
+### 控制面只读路由（2026-09-17，界面 G 项）
+
+全部只读、同一 `privateRequest` 门禁、零远端调用；没有 agent.db 的进程答 `{"enabled": false}`：
+
+| 路由 | 用途 |
+|---|---|
+| `GET /changes?path=&cursor=&limit=` | 变更记录，最新在前，游标翻页；检查器"最近修改"行、"历史"浮层与「Agent → 变更」标签读它 |
+| `GET /agent/heat?path=&days=&limit=` | 读热度 × 陈旧度（散点图、热度标签、文件列表热度点、检查器"30 天读取"行） |
+| `GET /agent/suggestions?path=&days=` | 只出草案：pin（常读未缓存）/ index（常读无规则）/ stale（常读 90 天未改）/ unpin（无人读的 pin）；采用走既有 `/cache/pin`、`/cache/unpin`、`/index/add` |
+| `GET /agent/hooks` | 各客户端 hook 安装状态、是否已验证、`hooks.context`、要复制的安装 / 卸载命令；**从不改写用户配置** |
+| `GET /settings` | 白名单配置视图（mcp.limits / install / session / audit、hooks、memory.root、index 开关）供只读 `#/settings` 屏；不含任何凭据字段 |
+| `GET /mcp/connect` 的 `bridge{state, reason, sessions}` | 桥三态：`n/a`（无并存 stdio）/ `connected`（回环监听已发布密钥，`sessions` 为经桥的活跃会话数）/ `disabled`（`http_off` / `not_loopback` / `no_token`）；`doctor.agent_stdio` 在 `connected` 时报 ok |

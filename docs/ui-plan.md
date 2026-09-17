@@ -421,50 +421,50 @@ F5–F10 属二期。
 **G1 —— 运行时指引卡（T-46 · P0）**
 
 - [x] **G1-1**（2026-09-16，`connect_panel.js` `guidanceCard`；prompt 名以文字列出，未做逐个复制）`#/agents` 接入面板加"运行时指引"卡：`GET /agent/prompt?kind=instructions` 的文本（只读、可复制）、token 估算、四个 prompt 名（`onboard` / `search-this-tree` / `write-safely` / `finish`）各带"复制"。
-- [ ] **G1-2** `send_to_agent.js` 的预填改为 `kind=onboard`（输出与今天一致）。
+- [x] **G1-2**（2026-09-17 决定不改：`?path=` 的"发送给 agent"提示与 `onboard` prompt 不是同一份文本——前者含文件详情与命中标题，改了输出会变；指引卡已给出 `onboard` 名字）`send_to_agent.js` 的预填保持 `?path=`。
 - [x] **G1-3**（2026-09-16：`connect.guidance.*`；`TestConnectPanelShowsGuidanceAndInstallTransport`）i18n 键 `agent.instructions.*`；`ui_agents_test.go`：指引卡调用 `?kind=instructions`，文本按文本插入。
 
 **G2 —— 接入面板传输与桥状态（T-49、T-50 · P0）**
 
-- [~] **G2-1**（2026-09-16：`install_transport` 文案已加；桥三态横幅未做——`/mcp/connect` 尚无 `bridge` 字段）`connect_view.js`：显示"推荐传输：http（挂载运行中）/ stdio（未检测到挂载）"（来自 `/mcp/connect` 的 `install_transport`）；stdio 非 owner 横幅按 `bridge` 三态渲染：`connected` 绿色"已通过桥连接到 owner"、`disabled` 黄色附原因、`n/a` 不渲染。
-- [ ] **G2-2** `_tests/connect_view.test.mjs` 覆盖三态；`ui_agents_test.go` 断言横幅文案来自 i18n。
+- [x] **G2-1**（2026-09-17：`/mcp/connect.bridge` + `connect_view.js` `bridgeBanner` + 面板 `data-bridge-banner`；`doctor.agent_stdio` 桥连接时报 ok）`connect_view.js`：显示"推荐传输：http（挂载运行中）/ stdio（未检测到挂载）"（来自 `/mcp/connect` 的 `install_transport`）；stdio 非 owner 横幅按 `bridge` 三态渲染：`connected` 绿色"已通过桥连接到 owner"、`disabled` 黄色附原因、`n/a` 不渲染。
+- [x] **G2-2**（2026-09-17：`connect_view.test.mjs` 三态；`TestConnectPanelShowsBridgeState`）`_tests/connect_view.test.mjs` 覆盖三态；`ui_agents_test.go` 断言横幅文案来自 i18n。
 
 **G3 —— 设置屏 MCP 段（T-47 · P0）**
 
-- [ ] **G3-1** 只读 `#/settings` 屏（`router.js` + `navItems` + `screens/settings.js` + 零 import `settings_view.js`）：MCP 段展示
+- [x] **G3-1**（2026-09-17：`screens/settings.js` + `settings_view.js` + `GET /settings`）只读 `#/settings` 屏（`router.js` + `navItems` + `screens/settings.js` + 零 import `settings_view.js`）：MCP 段展示
   `max_tokens`（0 = 关闭）与提示"一次 `read_text` 上限约 N token"、`install.transport`、`allow`、`read_only`；会话段展示
   `idle / retain / retain_blobs / preimage_files / max_preimage_bytes`；每段 `pre.snippet` YAML + `copyBtn`；页头一句"配置只在
   YAML 文件里改，改后重启"。
-- [ ] **G3-2** `ui_settings_test.go`：路由与导航已注册、屏内无 `api.post`、无凭据输入、键存在；`_tests/settings_view.test.mjs`
+- [x] **G3-2**（2026-09-17：`TestSettingsScreenIsReadOnly`、`settings_view.test.mjs`、`TestSettingsViewIsReadOnlyAndCarriesNoSecret`）`ui_settings_test.go`：路由与导航已注册、屏内无 `api.post`、无凭据输入、键存在；`_tests/settings_view.test.mjs`
   覆盖 YAML 片段渲染；Go 侧 `GET /settings` 白名单视图不含任何 `config.IsSecretField` 字段、`POST` → 405。
 
 **G4 —— 可逆性与回滚预览（T-48 · P0）**
 
-- [~] **G4-1**（既有前像状态列即此项；2026-09-16 补 `too_many / expired / not_recorded` 文案）会话详情浮层操作列表每行可逆性图标（✓ / ⚠ 不可回滚，hover 显示 `preimage_reason` / — 未记录），文字标签不只靠图标。
-- [ ] **G4-2** 回滚预览浮层 `skipped` 按 reason 分组，`not_recorded` 单独一行说明"该写入发生时没有会话"；`rollback_plan.js` 纯函数扩展，`_tests/rollback_plan.test.mjs` 覆盖分组。
+- [x] **G4-1**（2026-09-17：`rollback_plan.js` `reversibility()` 决定 ✓ / ⚠ / — 与文字，`data-reversible`）会话详情浮层操作列表每行可逆性图标（✓ / ⚠ 不可回滚，hover 显示 `preimage_reason` / — 未记录），文字标签不只靠图标。
+- [x] **G4-2**（2026-09-17：`groupSkipped()` + `skipView`，`data-reason`；`rollback.not_recorded.note` 收尾行；`TestRollbackPreviewGroupsSkippedByReasonAndMarksReversibility`）回滚预览浮层 `skipped` 按 reason 分组，`not_recorded` 单独一行说明"该写入发生时没有会话"；`rollback_plan.js` 纯函数扩展，`_tests/rollback_plan.test.mjs` 覆盖分组。
 
 **G5 —— 来源、历史与变更（T-51、T-52 · P1）**
 
-- [ ] **G5-1** 检查器加"最近修改：来源 · 主体 · 时间"一行（`last_writer`，`console` / `webdav` / `kernel` / `mcp` 四种来源各有图标 + 文字）。
-- [ ] **G5-2** 检查器"历史"按钮 → `openPanel` 分页浮层（见上方修正 (2)）：`GET /changes?path=&cursor=`，列 时间 / 种类 / 来源 / 主体 / 会话（可点开会话详情）/ 可逆性；`reliable = 0` 行带"可能有遗漏"标签。
-- [ ] **G5-3** `#/agents` 审计标签加来源列；新"变更"标签：`GET /changes?prefix=&since=` 分页 + 前缀过滤 + SSE `change` 刷新（未翻页、无过滤时）。
-- [ ] **G5-4** `#/agents` 会话详情浮层：内核写标"推断属于本会话"（展示层推断，不入库）。
-- [ ] **G5-5** i18n 键 `changes.*` / `origin.*`；`ui_agents_test.go`、`ui_inspector_test.go`：变更表跟随 `next_cursor`、来源图标有文字、`reliable = 0` 有文字标签。
+- [x] **G5-1**（2026-09-17：`provenance.js` `mountProvenance`，`originCell` 四种来源图标 + 文字）检查器加"最近修改：来源 · 主体 · 时间"一行（`last_writer`，`console` / `webdav` / `kernel` / `mcp` 四种来源各有图标 + 文字）。
+- [x] **G5-2**（2026-09-17：`history_panel.js`）检查器"历史"按钮 → `openPanel` 分页浮层（见上方修正 (2)）：`GET /changes?path=&cursor=`，列 时间 / 种类 / 来源 / 主体 / 会话（可点开会话详情）/ 可逆性；`reliable = 0` 行带"可能有遗漏"标签。
+- [x] **G5-3**（2026-09-17：审计行 `transport` 暗行——审计全是 MCP，来源即传输；`screens/agents_changes.js` 变更标签经 `onFsChange` 去抖刷新）`#/agents` 审计标签加来源列；新"变更"标签：`GET /changes?prefix=&since=` 分页 + 前缀过滤 + SSE `change` 刷新（未翻页、无过滤时）。
+- [ ] **G5-4**（2026-09-17 未做：会话详情只列 `session_ops`，内核写不在其中；要做需按会话时间窗查 `changes`，留待有真实需求）`#/agents` 会话详情浮层：内核写标"推断属于本会话"（展示层推断，不入库）。
+- [x] **G5-5**（2026-09-17：`TestInspectorShowsProvenance`、`TestHistoryPanelPagesTheChangeRecord`、`TestChangesTabIsRoutedAndPaged`）i18n 键 `changes.*` / `origin.*`；`ui_agents_test.go`、`ui_inspector_test.go`：变更表跟随 `next_cursor`、来源图标有文字、`reliable = 0` 有文字标签。
 
 **G6 —— 热度（T-53 · P1）**
 
-- [ ] **G6-1** `web/heat_plot.js`（零 import 纯函数）：输入 `[]{x, y, kind, path}` 与尺寸，输出 SVG 字符串；象限边界取中位数，半径按读取数对数缩放，hover 显示路径与数字，点击派发 `open-inspector`；`_tests/heat_plot.test.mjs`（象限划分、对数半径、空数据、单点）。
-- [~] **G6-2**（2026-09-16：`screens/agents_heat.js` 表格 + 象限筛选，读 `GET /agent/heat`；散点图 G6-1 与建议浮层 G6-3 未做）`#/agents` 新"热度"标签：`GET /agent/heat?prefix=&days=&by=path` 驱动散点；hot-but-stale 清单（右上象限）每行"打开检查器"与"生成建议"；`days` 分段 7 / 30 / 90。
-- [ ] **G6-3** 建议浮层（`openPanel`）：`GET /agent/suggestions?prefix=` 的草案列表（pin / index / 热但陈旧 / 可解除 pin），每条"采用"按钮走既有 `/cache/pins`、`/index/rules` 带确认路由，浮层本身不写规则。
-- [ ] **G6-4** 主窗口文件列表热度点（30 天读取数，hover 显示 agent / kernel / console 拆分）；检查器"30 天读取"一行；`#/settings` 热度段展示 `enabled`（`retention_days` 待配置键落地后再展示）。
-- [~] **G6-5**（2026-09-16：`heat.*` 键、`ui_agents_heat_test.go` 的路由与标签断言；建议浮层部分未做）i18n 键 `heat.*`；`ui_agents_heat_test.go`：热度标签调用 `/agent/heat`、建议浮层调用 `/agent/suggestions` 且不调用写路由、采用按钮带 `confirm: true`、响应中的路径按文本插入；浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
+- [x] **G6-1**（2026-09-17：`heat_plot.js` + `_tests/heat_plot.test.mjs`；点击圆点跳 `#/connections?path=`）`web/heat_plot.js`（零 import 纯函数）：输入 `[]{x, y, kind, path}` 与尺寸，输出 SVG 字符串；象限边界取中位数，半径按读取数对数缩放，hover 显示路径与数字，点击派发 `open-inspector`；`_tests/heat_plot.test.mjs`（象限划分、对数半径、空数据、单点）。
+- [x] **G6-2**（2026-09-17：散点 + 表格 + "建议"按钮）`#/agents` 新"热度"标签：`GET /agent/heat?prefix=&days=&by=path` 驱动散点；hot-but-stale 清单（右上象限）每行"打开检查器"与"生成建议"；`days` 分段 7 / 30 / 90。
+- [x] **G6-3**（2026-09-17：`heat_suggestions.js`，`GET /agent/suggestions`，采用经 `confirmDelete` 键入文件名后走 `/cache/pin` / `/cache/unpin` / `/index/add`）建议浮层（`openPanel`）：`GET /agent/suggestions?prefix=` 的草案列表（pin / index / 热但陈旧 / 可解除 pin），每条"采用"按钮走既有 `/cache/pins`、`/index/rules` 带确认路由，浮层本身不写规则。
+- [x] **G6-4**（2026-09-17：`heat_dots.js` `decorateHeat`；检查器"读取（30 天）"行在 `provenance.js`；`#/settings` 热度段）主窗口文件列表热度点（30 天读取数，hover 显示 agent / kernel / console 拆分）；检查器"30 天读取"一行；`#/settings` 热度段展示 `enabled`（`retention_days` 待配置键落地后再展示）。
+- [x] **G6-5**（2026-09-17：`TestHeatTabPlotsAndSuggestsWithoutWriting`、`TestSuggestionsNeverWriteRules`、`TestHeatResponsesCarryNoIdentity`；浏览器冒烟改为 curl 冒烟：真实挂载上 `dd iflag=direct` 读后 30 s 内 `/agent/heat` 出现 `kernel` 行——顺带发现并修复了 FUSE `Read` 不打 `FromKernel` 标的 bug）i18n 键 `heat.*`；`ui_agents_heat_test.go`：热度标签调用 `/agent/heat`、建议浮层调用 `/agent/suggestions` 且不调用写路由、采用按钮带 `confirm: true`、响应中的路径按文本插入；浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 
 **G7 —— Hooks（T-54 · P1）**
 
-- [ ] **G7-1** 接入面板"Hooks"卡：`GET /agent/hooks` 的每平台安装状态（已安装 / 未安装 / 未验证）、`context` 档位、最近一次 hook 调用时间、要执行的安装 / 卸载命令（`copyBtn`，**不**提供"在浏览器里安装"按钮）。
-- [ ] **G7-2** 会话列表 principal 列显示 `hook:claude` 并带图标；会话详情显示 `reads` 计数与 `last_change_seen`。
-- [ ] **G7-3** `#/settings` hooks 段展示 `context`（off / minimal / full）与 YAML 片段；`changed_max`、`memory_head_lines` 在配置键落地前显示为内置常量 20 / 30。
-- [ ] **G7-4** i18n 键 `hooks.*`；`ui_agents_test.go`：Hooks 卡调用 `/agent/hooks`、命令按文本插入、无任何 POST 到 `/agent/hooks`；`TestHooksRouteNeverWritesUserConfig`。
+- [x] **G7-1**（2026-09-17：`hooks_view.js` + `connect_panel.js` `hooksCard`，`GET /agent/hooks`）接入面板"Hooks"卡：`GET /agent/hooks` 的每平台安装状态（已安装 / 未安装 / 未验证）、`context` 档位、最近一次 hook 调用时间、要执行的安装 / 卸载命令（`copyBtn`，**不**提供"在浏览器里安装"按钮）。
+- [x] **G7-2**（2026-09-17：`isHookPrincipal` chip；详情显示 principal 与 `last_change_seen`；`reads` 无存储，不显示）会话列表 principal 列显示 `hook:claude` 并带图标；会话详情显示 `last_change_seen`。
+- [x] **G7-3**（2026-09-17）`#/settings` hooks 段展示 `context`（off / minimal / full）与 YAML 片段；`changed_max`、`memory_head_lines` 在配置键落地前显示为内置常量 20 / 30。
+- [x] **G7-4**（2026-09-17：`TestHooksCardIsReadOnly`、`TestHooksRouteNeverWritesUserConfig`）i18n 键 `hooks.*`；`ui_agents_test.go`：Hooks 卡调用 `/agent/hooks`、命令按文本插入、无任何 POST 到 `/agent/hooks`；`TestHooksRouteNeverWritesUserConfig`。
 
 **G8 —— 渲染屏与分享（T-55 · P2）**
 
