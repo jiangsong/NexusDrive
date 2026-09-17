@@ -104,6 +104,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `stat_many` | `paths[]`（≤100） | 批量。单个路径出错不会让整次调用失败，错误写在该项的 `error` 字段；token 预算截断时 `truncated: true`，未检查的路径需再调一次 |
 | `history` | `path`, `limit? = 50` | 该路径（目录则含其下）按守护进程记录的变更，最新在前：内核写、agent 会话（带 `session_id`）、控制台、WebDAV、远端发现的变更；`reliable: false` 的 `rescan` 行表示那段时间可能有遗漏。不是网盘的版本历史，记录从守护进程开始记起，按 `mcp.session.retain` 保留 |
 | `pull_events` | `cursor?`, `path?`, `kinds[]?`, `include_own?`, `limit?` | 自游标以来的变更事件（读 `changes` 表，不依赖触发器规则）。省略游标时从本会话上次拉取处（首次从会话开始处）继续，游标同时存进会话；默认不含本会话自己的改动；`rescan: true` 时请重新 list 依赖的目录 |
+| `share` | `path`, `confirm`, `expires?`, `force?`, `code?` | 为网盘上的文件创建公开链接（T-55）。`confirm` 必须为 true；只对已上传（`state = synced`）且**完整缓存**的文件——凭据扫描只读缓存，未缓存的拒绝并提示先 `pin`；扫描命中（AWS key、私钥头、`password=` 等）时拒绝并给出规则与行号，`force` 覆盖；成功恰好一次 `CreateShare` 远端调用，响应带 `url` / `code` / `expires_at` 与控制台内链 `console_url`。只有 `Caps.Share` 的驱动可用（见 providers.md） |
 | `hot_paths` | `path?`, `days? = 7`, `limit? = 50` | 窗口内读得最多的路径，按读取者类型（`agent` / `kernel` / `console` / `webdav`）计数，带 `mtime` 与 `stale`（窗口内被读、窗口前就没改过）；`suggestions[]` 只建议 pin / 复核，不做任何事 |
 | `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?` | 文本读。非 UTF-8 会被拒绝并提示改用 `read_range`。截断时返回 `next_offset`；`tail` 落在多字节字符中间时自动前移到字符边界 |
 | `read_range` | `path`, `offset`, `length` | 任意字节范围，base64 返回。用于二进制或大文件分页 |
@@ -184,9 +185,10 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `memory_list` | `agent?`, `cursor?`, `limit?` | 列出 `<memory.root>/memory/<agent>/facts/*.md`：每条带 `name`、`path`、`size`、`meta{name, description, type, updated_at}`（frontmatter）与 `conflicts[]`（同目录里以该名字开头、又不是合法 fact 文件的兄弟——网盘生成的冲突副本）。`agent` 省略 = 调用方自己（HTTP 令牌名或 stdio 的 client name 规范化为 `[a-z0-9-]`，`cloudfs mcp --agent` 覆盖）；`shared` 是所有 agent 共读的区域 |
-| `memory_get` | `name`, `agent?` | 读一条：`content`（frontmatter 之下的正文）、`version`（文件字节的内容哈希，不是网盘版本）、`conflicts[]` |
+| `memory_get` | `name`, `agent?` | 读一条：`content`（frontmatter 之下的正文）、`version`（文件字节的内容哈希，不是网盘版本）、`remote_version`（网盘上最后一次看到的版本，本地未上传时为空——T-56）、`conflicts[]` |
 | `memory_put` | `name`, `content`, `agent?`, `mode?`, `expected_version?`, `description?`, `type?` | 写一条：`name` 须匹配 `^[a-z0-9][a-z0-9-]{0,63}$`；`mode` 为 `replace`（默认）或 `append`；带 `expected_version` 时与当前 `version` 不同就拒绝且内容不变（`memory changed elsewhere; re-read`，消息里给当前版本）；单条超过 `memory.max_fact_bytes`（64 KiB，含 frontmatter）或该 agent 超过 `memory.max_agent_bytes`（32 MiB）拒绝并给出当前用量；`description` / `type` 省略时保留文件里的。写 `facts/<name>.md` 后把 `MEMORY.md` 里唯一指向它的行替换、否则追加。返回 `version` 与 `state`（`local` / `synced`） |
 | `memory_delete` | `name`, `agent?`, `confirm` | 删除 fact 文件与 `MEMORY.md` 里指向它的行，`confirm` 必须为 true；冲突副本不动，由 agent 自己读过后删 |
+| `memory_merge` | `name`, `agent?`, `conflict?`, `ancestor?` | 给出 fact 与其一份冲突副本的合并建议：给了 `ancestor`（你上次 `memory_put` 前读到的正文）就是三方合并，只有一方改过的行照单全收，双方都改的行成为 `<<<<<<<` 冲突块；不给则两方合并，所有差异都是冲突块。**不写任何东西**：把 `merged` 交给 `memory_put`（带返回的 `version` / `remote_version`），再删副本 |
 | `memory_search` | `query`, `agent?`, `include_shared?`, `top_k?`, `mode?` | 限定在 `memory/<agent>`（默认加 `memory/shared`）的 `semantic_search`：每个 hit 多带 `agent` 与 `name`，`mode` / `mode_used` / `degraded` 同上。记忆树由内置索引规则（`index_status` 里 `rule_source: builtin`）自动索引 `**/*.md`，`unindex` 不能删它；`index.enabled: false` 时返回 `memory_search needs the content index, but index.enabled: false` |
 
 五个工具只在配置了 `memory.root`（默认 `mcp.workspace`，再退到第一个 `mcp.allow` 前缀 + `/.agent`）时有意义：
@@ -195,6 +197,13 @@ root 为空或不在调用方作用域内，五个工具都返回同一句配置
 并进审计。记忆就是网盘上的普通 Markdown，终端 `cat` / 编辑同一个文件，控制台「Agent」屏记忆标签与
 `cloudfs memory` 也走同一实现；跨设备同步交给网盘，两边同时写时输掉的一方以网盘的冲突副本形式留在同目录，
 `memory_get.conflicts` 把它列出来。`skills/<name>/SKILL.md` 只约定位置，没有工具。
+
+**多人共用一个网盘（记忆布局 v2，T-56）**：`memory.layout: v2`（或网盘上 `memory/.layout` 标记文件）时目录变成
+`memory/<owner>/<agent>/`，`shared/` 不变；`agent` 参数写 `owner/agent`，省略 owner 就是调用方自己的——owner 来自
+principal（`cloudfs mcp token create --owner`，缺省为本机用户名）。`cloudfs memory migrate --confirm`（或控制台记忆标签
+的"迁移到布局 v2"）把 v1 树逐目录移到本机用户名之下，每步幂等、全部完成后才写标记，标记在网盘上，所有设备跟着切。
+v1 下给 `owner/agent` 会被拒绝并指向迁移。`memory_put` 的 `expected_remote_version` 与 `expected_version` 双比对：
+网盘版本变了（别的设备写了）拒绝，只有本机待上传的写不拒绝——比对用的是 `meta.Node.RemoteVersion`，不是 `Version`。
 
 ### 复制任务管理
 

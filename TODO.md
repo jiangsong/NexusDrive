@@ -2699,6 +2699,24 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   e2e 断言要抓的东西**，下一轮补 e2e 时以它为样板。
 - 观察：外部 `fusermount -u` 之后再给守护进程 SIGINT，它打印"unmounting…"后不退出，需 SIGKILL；未深究，登记待查。
 
+**2026-09-17 第二批落地**（同日下午，目标"完成所有模块"）：
+
+- P1 验收清单里点名的 21 个测试全部落地或以既有别名对应（`TestPreimageGCKeepsRowsDropsBlobs` = 既有
+  `TestGCReleasesBlobsBeforeRows`；`TestHookSurvivesControlPlaneDown` 由 `TestAgentHookNeverFailsTheTurn` 改名）。
+  过程中改了几处行为：记录器启动时若表里已有行记一条 `origin: restart` 的 rescan 行（kill -9 后的空窗诚实标出）；
+  schemaV3 的 `session_ops.ts` 从 `audit.ts` 回填；订阅投递按 store 里的会话现状重查作用域；桥只在持有者回环监听时
+  启用（`BridgeOptionsFor`），stdio 退出时经桥 `finish_session`；hooks 加第四个 `write` 事件与 `hook:<client>` 会话。
+- 配置键 `mcp.heat.enabled/retention_days`、`hooks.changed_max/memory_head_lines`；CLI `cloudfs history` / `heat`；
+  xattr `user.cloudfs.writer`；hermes 平台（YAML，UNVERIFIED）。
+- T-56 全部：`Principal.Owner`（schema v4，`--owner`）、`memory.layout` v1/v2 + 网盘上的 `.layout` 标记、
+  `cloudfs memory migrate` / `POST /memory/migrate`、`remote_version` 双比对、`memory_merge`（LCS 三方 / 两方）、
+  G9 界面（按 owner 分组、迁移按钮、合并建议 + 采用）。
+- T-55 全部：`Caps.Share` / `Sharer`（aliyun、baidu、dropbox、onedrive、gdrive，全 UNVERIFIED）、`internal/secrets`
+  扫描、`internal/share` 策略、`share` 工具、`POST /share`、`GET /fs/render` + `/fs/raw`（自写的全转义 Markdown 渲染器）、
+  局域网渲染页（独立端口、一次性 token、不进 agent.db 与浏览器 store）、`Artifact.console_url`、hooks full 上下文的
+  内链公式、G8 界面（`#/fs/<path>` 屏、检查器"打开页面"、设置 share 段）。
+- T-57：`INSTALL_FOR_AGENTS.md`、README 两行 prompt、CLAUDE.md 纪律；**许可证（T-16）仍待用户决定**。
+
 ---
 
 ### [x] T-46 运行时指引：server instructions、prompts、错误分层、`next`（P0，2026-09-16 完成；G1-2 于 2026-09-17 决定不改）
@@ -2891,7 +2909,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 关闭 T-43。
 - **依赖**：T-51 的 schemaV3（`audit.result = forwarded` 只是值，不需 schema；但 `tokens_out` 列应同时到位）。估算 L。
 
-### [~] T-51 来源：agent.db schemaV3、`changes` 表、`last_writer`、`history`、保留期拆分（P1，2026-09-16 后端完成；G5 2026-09-17 完成；余：xattr、CLI `history`、验收 e2e / chaos）
+### [x] T-51 来源：agent.db schemaV3、`changes` 表、`last_writer`、`history`、保留期拆分（P1，2026-09-16 后端完成；G5、xattr `user.cloudfs.writer`、CLI `cloudfs history`、验收测试 2026-09-17 完成）
 
 - **2026-09-16 完成**：schemaV3（`audit.tokens_out`、`session_ops.ts`、`sessions.last_change_seen`、`changes`、
   `read_heat`；`applyStep` 让 `ADD COLUMN` 可重跑，`TestSchemaV3IsAdditiveAndRepeatable`）；`vfs.Change` 加
@@ -2940,7 +2958,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `security_all_routes_test` 覆盖 `/changes`；`docs/vfs-changes.md` 加 `changes` 表一节。
 - **依赖**：无（P1 公共前提）。估算 L。
 
-### [~] T-52 `pull_events` 与订阅投递重校验（P1，2026-09-16 后端完成；界面复用 G5 已完成；余：点名的四个验收测试）
+### [x] T-52 `pull_events` 与订阅投递重校验（P1，2026-09-16 后端完成；2026-09-17 补 `TestPullEventsCursorSurvivesRestart`、`TestSubscriptionDeliveryRechecksScope`（投递时按 store 里的会话重查）
 
 - **2026-09-16 完成**：`pull_events` 读 `changes` 表（不复用 `trigger_deliveries`——变更表本身就是"记录一切"，
   设计 §6.4 的内建规则不再需要），游标 = 行 id，省略时取会话的 `last_change_seen`、首次取会话开始前的 id，
@@ -2968,7 +2986,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestSubscriptionDeliveryRechecksScope`（人为改会话 scope 后不再投递）。
 - **依赖**：T-51。估算 S–M。
 
-### [~] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏（P1，2026-09-16 完成；G6 与 `/agent/suggestions` 2026-09-17 完成，同日修复内核读从未被记录；余：`mcp.heat.*` 配置键、CLI `heat`、perf / chaos 验收）
+### [x] T-53 读热度：`read_heat` 表、MCP / 内核 / 控制台记录、`hot_paths`、四象限屏（P1，2026-09-16 完成；2026-09-17 补 G6、`/agent/suggestions`、`mcp.heat.enabled/retention_days`（旧桶折进 all-time 行）、CLI `cloudfs heat`、`TestReadCountingIsFree`、`TestHeatFlushSurvivesKill9`、`TestHotPathsNeverCarryPrincipal`，并修复内核读从未被记录）
 
 - **2026-09-16 完成**：`internal/agent/readheat.go`（`BumpReadHeat` upsert、`HotPaths`、`PruneReadHeat`、
   `ReadObserver` 10 分钟按 `(path, kind)` 去抖 + 30 秒批量落库，只在 owner 跑）；`vfs.SetReadObserver`（`Read`
@@ -3010,7 +3028,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - 浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 - **依赖**：T-51（schemaV3）。估算 L。
 
-### [~] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 三事件、注入、`SessionEnd` 经控制面结束会话（P1，2026-09-16 后端完成；G7 与 `GET /agent/hooks` 2026-09-17 完成；余：真实 `claude` 会话验证、hermes、配置键、点名的验收测试）
+### [~] T-54 hooks：`cloudfs hooks install | uninstall | status`、`agent-hook` 四事件、注入、`SessionEnd` 经控制面结束会话（P1，2026-09-16 后端完成；2026-09-17 补 G7、`GET /agent/hooks`、第四个 `write` hook（agent 自己的内核写不再当别人的变更报回）、`hook:<client>` 主体的会话、hermes、`hooks.changed_max/memory_head_lines`、`TestHookGuardIsPureShell`、e2e `TestHookPromptInjectsChangedFiles`；**唯一未闭**：真实 `claude` 会话验证（需 `CLOUDFS_CLAUDE=1` 沙箱），Codex / Gemini / Hermes 事件名 UNVERIFIED）
 
 - **2026-09-16 完成**：`internal/hooks`（三平台表，`ConfigPath`、纯 shell `Guard()`、`Command`、`Install` /
   `Uninstall` / `Statuses` / `Detect`、`MountsPath` / `WriteMounts` / `ReadMounts`；运行时 `Client`（控制面 socket）、
@@ -3073,7 +3091,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
     缺环境 `t.Skip` 并标 UNVERIFIED。Codex / Gemini / Hermes 配置格式 UNVERIFIED。
 - **依赖**：T-51、T-52、T-53。估算 XL。
 
-### [ ] T-55 分享面：控制台内链、`#/fs/<path>` 渲染屏、局域网渲染页、`Caps.Share` / `Sharer` / `share` 工具（P2）
+### [x] T-55 分享面：控制台内链、`#/fs/<path>` 渲染屏、局域网渲染页、`Caps.Share` / `Sharer` / `share` 工具（P2，2026-09-17 完成；各驱动 `Sharer` 保持 UNVERIFIED）
 
 - **证据**：控制面 `/fs/preview`（`control/fs.go`）只给原始字节、`privateRequest` 门禁，非渲染页；前端无 `#/fs/<path>`
   屏；`agent.Artifact` 有 `URI / DownloadURL`，`docs/agent-roadmap.md` §2.6 禁止把签名直链写进 manifest。
@@ -3097,7 +3115,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `Sharer` 各驱动：真实账号验收前保持 UNVERIFIED，`providers.md` 加"分享"列。
 - **依赖**：T-51、T-53（检查器内容）。估算 S + M + L。
 
-### [ ] T-56 多人记忆：`Principal.owner`、memory layout v2 与迁移、双比对 CAS、`memory_merge`（P2）
+### [x] T-56 多人记忆：`Principal.owner`、memory layout v2 与迁移、双比对 CAS、`memory_merge`（P2，2026-09-17 完成）
 
 - **证据**：`agent.Principal{ID, Kind, Name, Scope, …}` 无 owner；`memory.Store.AgentDir = memory/<agent>`，
   `SharedAgent = "shared"`；两人共用一个网盘账号时记忆混在一起，冲突副本互相覆盖——失败模式已存在无模型。
@@ -3120,7 +3138,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `TestMemoryMergeNeverWritesWithoutConfirm`；e2e `TestMemoryPutIsVisibleInTheMountAndSearchable` 在 v2 下通过。
 - **依赖**：无。估算 M–L。
 
-### [ ] T-57 产品面：`INSTALL_FOR_AGENTS.md`、README 两行 prompt、T-16 许可证收口、CLAUDE.md 纪律（P2）
+### [~] T-57 产品面：`INSTALL_FOR_AGENTS.md`、README 两行 prompt、T-16 许可证收口、CLAUDE.md 纪律（P2，2026-09-17 除许可证外完成——许可证是产品决定，等用户定）
 
 - **证据**：仓库无给 agent 读的安装文档（`docs/getting-started.md` 给人）；T-16 许可证与版本号未定；CLAUDE.md 未写
   "finding 不存在直到有失败的测试"。BearDrive 的 `INSTALL_FOR_AGENTS.md`（一命令一调用、无 preflight、被拒不重试、
@@ -3137,7 +3155,7 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   - `LICENSE` 存在；`cloudfs version` 输出非空。
 - **依赖**：无。估算 S。
 
-### [ ] T-58 BearDrive 对照补遗：hermes 平台、`statusMessage`、凭据提示注入、`stale` 清单（P2，2026-09-17 登记）
+### [~] T-58 BearDrive 对照补遗：hermes 平台、`statusMessage`、凭据提示注入、`stale` 清单（P2，2026-09-17 登记；hermes 已随 T-54 落地，其余待做）
 
 - **证据**：BearDrive `internal/agenthooks` 四平台表含 hermes（`~/.hermes/config.yaml`，YAML `hooks.pre_llm_call` /
   `hooks.post_tool_call[{matcher, command, timeout}]`），本仓库 `internal/hooks/hooks.go` `Clients` 只有三个；BearDrive 的

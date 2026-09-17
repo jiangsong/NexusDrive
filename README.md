@@ -4,6 +4,12 @@
 
 完整设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+**让 agent 替你装**：把下面两行粘给 Claude Code / Codex / Gemini CLI，它会按 [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md)
+一步步来，该由你做的（装 FUSE、浏览器授权）它会停下来等你。
+
+> Follow https://raw.githubusercontent.com/jiangsong/NexusDrive/main/INSTALL_FOR_AGENTS.md to set up CloudFS.
+> Ask me which drive to mount and where before running anything.
+
 ## 它解决什么
 
 - **挂载即用**：`ls`、`grep -r`、`git status`、编辑器都能直接工作在网盘目录上，不需要先同步。

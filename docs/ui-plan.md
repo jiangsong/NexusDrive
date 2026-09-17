@@ -448,7 +448,7 @@ F5–F10 属二期。
 - [x] **G5-1**（2026-09-17：`provenance.js` `mountProvenance`，`originCell` 四种来源图标 + 文字）检查器加"最近修改：来源 · 主体 · 时间"一行（`last_writer`，`console` / `webdav` / `kernel` / `mcp` 四种来源各有图标 + 文字）。
 - [x] **G5-2**（2026-09-17：`history_panel.js`）检查器"历史"按钮 → `openPanel` 分页浮层（见上方修正 (2)）：`GET /changes?path=&cursor=`，列 时间 / 种类 / 来源 / 主体 / 会话（可点开会话详情）/ 可逆性；`reliable = 0` 行带"可能有遗漏"标签。
 - [x] **G5-3**（2026-09-17：审计行 `transport` 暗行——审计全是 MCP，来源即传输；`screens/agents_changes.js` 变更标签经 `onFsChange` 去抖刷新）`#/agents` 审计标签加来源列；新"变更"标签：`GET /changes?prefix=&since=` 分页 + 前缀过滤 + SSE `change` 刷新（未翻页、无过滤时）。
-- [ ] **G5-4**（2026-09-17 未做：会话详情只列 `session_ops`，内核写不在其中；要做需按会话时间窗查 `changes`，留待有真实需求）`#/agents` 会话详情浮层：内核写标"推断属于本会话"（展示层推断，不入库）。
+- [ ] **G5-4**（仍未做：会话详情只列 `session_ops`，内核写不在其中；要做需按会话时间窗查 `changes`，留待有真实需求）`#/agents` 会话详情浮层：内核写标"推断属于本会话"（展示层推断，不入库）。
 - [x] **G5-5**（2026-09-17：`TestInspectorShowsProvenance`、`TestHistoryPanelPagesTheChangeRecord`、`TestChangesTabIsRoutedAndPaged`）i18n 键 `changes.*` / `origin.*`；`ui_agents_test.go`、`ui_inspector_test.go`：变更表跟随 `next_cursor`、来源图标有文字、`reliable = 0` 有文字标签。
 
 **G6 —— 热度（T-53 · P1）**
@@ -468,13 +468,13 @@ F5–F10 属二期。
 
 **G8 —— 渲染屏与分享（T-55 · P2）**
 
-- [ ] **G8-1** `router.js` 加 `#/fs/<path>`（不进 `navItems`）；`screens/fs.js`：`GET /fs/render?path=` 渲染（Markdown / 代码 / 图片 / PDF / 其它下载），顶部"最近修改"与"30 天读取"两行，按钮"复制内链"、"创建分享"（`confirmDelete` 键入文件名 → `POST /share` 带 `confirm: true`）、"历史"标签复用 G5-2。
-- [ ] **G8-2** 检查器加"复制内链"与"创建分享"两个按钮（同一入口）；分享成功后 toast 附链接与过期时间；驱动 `Caps.Share = false` 时按钮禁用并说明。
-- [ ] **G8-3** `#/settings` share 段展示（`console_links`、`render.enabled`、`render.token_ttl`）；渲染页 token 不进 `store.js`。
-- [ ] **G8-4** i18n 键 `share.*` / `fs.*`；`ui_fs_test.go`：渲染内容来自 `/fs/render` 且不含 `<script>`、创建分享前 `confirmDelete`、`Caps.Share = false` 禁用；`_tests/store.test.mjs` 断言 store 键集合不含 `render_token`。
+- [x] **G8-1**（2026-09-17：`screens/fs.js` + `fs_view.js`，`GET /fs/render`；历史复用 G5-2 的浮层）`router.js` 加 `#/fs/<path>`（不进 `navItems`）；`screens/fs.js`：`GET /fs/render?path=` 渲染（Markdown / 代码 / 图片 / PDF / 其它下载），顶部"最近修改"与"30 天读取"两行，按钮"复制内链"、"创建分享"（`confirmDelete` 键入文件名 → `POST /share` 带 `confirm: true`）、"历史"标签复用 G5-2。
+- [x] **G8-2**（2026-09-17：检查器加"打开页面"进渲染屏，两个动作都在那里；`Caps.Share = false` 时按钮禁用并说明）检查器加"复制内链"与"创建分享"两个按钮（同一入口）；分享成功后 toast 附链接与过期时间；驱动 `Caps.Share = false` 时按钮禁用并说明。
+- [x] **G8-3**（2026-09-17）`#/settings` share 段展示（`console_links`、`render.enabled`、`render.token_ttl`）；渲染页 token 不进 `store.js`。
+- [x] **G8-4**（2026-09-17：`TestFsPageRendersSafelyAndConfirmsShares`、`fs_view.test.mjs`）i18n 键 `fs.*`；`ui_fs_test.go`：渲染内容来自 `/fs/render` 且不含 `<script>`、创建分享前 `confirmDelete`、`Caps.Share = false` 禁用；`_tests/store.test.mjs` 断言 store 键集合不含 `render_token`。
 
 **G9 —— 多人记忆（T-56 · P2）**
 
-- [ ] **G9-1** `#/agents` 记忆标签按 owner 分组（v2 布局），v1 布局时不分组；`#/settings` memory 段 `layout` 只读显示；"迁移到 v2"按钮放在记忆标签（`confirmDelete` 键入 `migrate` → `POST /memory/migrate` 带 `confirm: true`）——迁移是带确认的动作路由，不是写配置。
-- [ ] **G9-2** 冲突合并浮层：`memory_merge` 结果的三方 diff（零 import `three_way_view.js`）与"采用合并结果"（调 `memory_put` 带 `expected_version` 与 `remote_version`）。
-- [ ] **G9-3** i18n 键 `memory.owner.*` / `memory.merge.*`；`ui_agents_memory_test.go`：分组渲染、迁移带 `confirm: true`、采用按钮带两个版本；`_tests/three_way_view.test.mjs`。
+- [x] **G9-1**（2026-09-17：`memory_layout_view.js` `groupByOwner`，迁移按钮键入 `migrate`）`#/agents` 记忆标签按 owner 分组（v2 布局），v1 布局时不分组；`#/settings` memory 段 `layout` 只读显示；"迁移到 v2"按钮放在记忆标签（`confirmDelete` 键入 `migrate` → `POST /memory/migrate` 带 `confirm: true`）——迁移是带确认的动作路由，不是写配置。
+- [x] **G9-2**（2026-09-17：`GET /memory/merge` 建议 + `mergeRows` 渲染 + "采用合并结果"带两个版本）冲突合并浮层：`memory_merge` 结果的三方 diff（零 import `three_way_view.js`）与"采用合并结果"（调 `memory_put` 带 `expected_version` 与 `remote_version`）。
+- [x] **G9-3**（2026-09-17：`TestMemoryTabGroupsByOwnerAndMigrates`、`memory_layout_view.test.mjs`）i18n 键 `memory.owner.*` / `memory.*`；`ui_agents_memory_test.go`：分组渲染、迁移带 `confirm: true`、采用按钮带两个版本；`_tests/three_way_view.test.mjs`。
