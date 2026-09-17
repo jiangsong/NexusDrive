@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestInstallIsIdempotentAndPreservesOtherHooks(t *testing.T) {
 		t.Fatal("unrelated settings lost")
 	}
 	hooks := root["hooks"].(map[string]any)
-	if len(hooks["PostToolUse"].([]any)) != 2 || len(hooks["UserPromptSubmit"].([]any)) != 1 || len(hooks["SessionEnd"].([]any)) != 1 {
+	if len(hooks["PostToolUse"].([]any)) != 3 || len(hooks["UserPromptSubmit"].([]any)) != 1 || len(hooks["SessionEnd"].([]any)) != 1 {
 		t.Fatalf("groups: %v", hooks)
 	}
 	// The per-turn Stop is not where the session ends: our stale group is
@@ -61,6 +62,12 @@ func TestInstallIsIdempotentAndPreservesOtherHooks(t *testing.T) {
 	cmd := ours["hooks"].([]any)[0].(map[string]any)["command"].(string)
 	if !strings.HasPrefix(cmd, "sh -c '") || !strings.Contains(cmd, "cloudfs agent-hook read --client claude") || !strings.Contains(cmd, "/cloudfs/mounts") {
 		t.Fatalf("command: %s", cmd)
+	}
+	// The write group reports the client's own writes, so the next turn
+	// does not hand them back as someone else's.
+	wrote := post[2].(map[string]any)
+	if wrote["matcher"] != "Write|Edit|MultiEdit|NotebookEdit" || !strings.Contains(fmt.Sprint(wrote["hooks"]), "cloudfs agent-hook write --client claude") {
+		t.Fatalf("write matcher: %v", wrote)
 	}
 	if res, err := Install(home, []string{"claude"}); err != nil || res[0].Changed {
 		t.Fatalf("second install: %+v %v", res, err)
@@ -246,5 +253,49 @@ func TestParseEventTakesSessionAndCwd(t *testing.T) {
 	}
 	if ev := ParseEvent(strings.NewReader("not json")); ev.SessionID != "" || ev.CWD == "" {
 		t.Fatalf("malformed: %+v", ev)
+	}
+}
+
+// TestHookGuardIsPureShell: the guard every hook command starts with
+// names no executable but the shell's own builtins, grep and cloudfs —
+// no python, no jq, no curl — so a turn outside a mount costs one grep
+// of a small file and spawns nothing else; and the command templates add
+// only cloudfs itself. The runtime half (a real sh, strace-free) is
+// TestGuardExitsBeforeSpawningOutsideAMount.
+func TestHookGuardIsPureShell(t *testing.T) {
+	guard := Guard()
+	allowed := map[string]bool{"cd": true, "exit": true, "grep": true, "break": true, "case": true, "esac": true, "in": true, "while": true, "do": true, "done": true, "command": true, "-v": true, "cloudfs": true, "d=$PWD;": true}
+	// Every word that could be a program: the first word of each ';' or
+	// '||' or '&&' separated command, and the word after 'command -v'.
+	for _, stmt := range regexp.MustCompile(`\|\||&&|;`).Split(guard, -1) {
+		fields := strings.Fields(stmt)
+		if len(fields) == 0 {
+			continue
+		}
+		head := fields[0]
+		if strings.Contains(head, "=") || strings.HasPrefix(head, "[") || strings.HasPrefix(head, "$") || strings.HasPrefix(head, "\"") {
+			continue
+		}
+		if !allowed[head] {
+			t.Errorf("the guard runs %q: %s", head, stmt)
+		}
+	}
+	for _, bad := range []string{"python", "jq", "curl", "node", "perl", "awk", "sed", "find", "stat", "cat", "$(", "`"} {
+		if strings.Contains(guard, bad) {
+			t.Errorf("the guard uses %q", bad)
+		}
+	}
+	for _, event := range []string{"prompt", "read", "stop"} {
+		cmd := Command(event, "claude")
+		if !strings.HasPrefix(cmd, "sh -c '"+guard) {
+			t.Errorf("%s command does not start with the guard: %s", event, cmd)
+		}
+		rest := strings.TrimPrefix(cmd, "sh -c '"+guard)
+		for _, word := range strings.Fields(rest) {
+			if word == "exec" || word == "cloudfs" || word == "agent-hook" || word == event || strings.HasPrefix(word, "--") || word == "claude" || strings.HasPrefix(word, ">") || strings.HasPrefix(word, "2>") || word == "||" || word == "true'" {
+				continue
+			}
+			t.Errorf("%s command runs %q: %s", event, word, rest)
+		}
 	}
 }

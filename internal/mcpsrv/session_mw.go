@@ -340,6 +340,24 @@ func (s *Server) visible(ctx context.Context, p string) bool {
 	return err == nil
 }
 
+// visibleNow is visible against the session as the store holds it now,
+// not as the context captured it: a subscription is reserved once and
+// delivered for as long as the client stays, and in between the session
+// may have been finished, expired or rolled back. Without a session layer
+// the scope is the process's and cannot change.
+func (s *Server) visibleNow(ctx context.Context, p string) bool {
+	sess, ok := agent.FromContext(ctx)
+	if !ok || s.opt.Sessions == nil {
+		return s.visible(ctx, p)
+	}
+	current, err := s.opt.Sessions.Get(ctx, sess.ID)
+	if err != nil || current.State != "active" {
+		return false
+	}
+	_, err = current.Scope.Check(p, false)
+	return err == nil
+}
+
 // visibleFrom is the source path of a rename as the caller may see it:
 // itself when readable, "" when it lies outside the caller's scope, so a
 // change feed shows that a file arrived without naming where from.

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/agent"
 	"cloudfs/internal/vfs"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -503,4 +504,42 @@ func TestResourceSubscriptionsIsolateSessionsAndReleaseDisconnects(t *testing.T)
 	a.quiet(t)
 	b.session.Close()
 	waitSubscriptionCount(t, e.server, 0)
+}
+
+// TestSubscriptionDeliveryRechecksScope (T-52): a subscription reserved
+// under a session is re-checked against the session as the store holds
+// it at every delivery, not as it was at subscribe time — once the
+// session is finished, a change to the watched file is no longer
+// delivered, while an untouched session keeps receiving.
+func TestSubscriptionDeliveryRechecksScope(t *testing.T) {
+	e, st := newAgentEnv(t, Options{}, agent.Scope{Read: []string{"/work"}})
+	ctx := context.Background()
+	e.fake.Seed("work/file", []byte("old"))
+	if _, err := e.fs.StatPath(ctx, "/work/file"); err != nil {
+		t.Fatal(err)
+	}
+	c := newSubscriptionClient(t, e.server)
+	uri := "cloudfs://ali/work/file"
+	id := c.subscribe(t, uri)
+	if _, err := e.fs.WriteFile(vfs.FromKernel(ctx), "/work/file", []byte("one"), false); err != nil {
+		t.Fatal(err)
+	}
+	c.update(t, uri, id)
+	c.quiet(t)
+	// The subscriber's session ends (finished from the control plane, as
+	// a hook's SessionEnd does); the subscription is still registered.
+	m := agent.NewSessions(st, agent.SessionOptions{})
+	list, _, err := m.List(ctx, agent.ListQuery{State: "active"})
+	if err != nil || len(list) == 0 {
+		t.Fatalf("active sessions: %+v %v", list, err)
+	}
+	for _, sess := range list {
+		if _, err := m.Finish(ctx, sess.ID, "done"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.fs.WriteFile(vfs.FromKernel(ctx), "/work/file", []byte("two"), false); err != nil {
+		t.Fatal(err)
+	}
+	c.quiet(t)
 }

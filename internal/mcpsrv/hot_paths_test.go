@@ -2,6 +2,7 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -130,4 +131,71 @@ func TestHotPathsMarksStaleAndSuggestsPins(t *testing.T) {
 	if res := e.call(t, "hot_paths", hotPathsInput{Path: "/private"}, nil); !res.IsError {
 		t.Fatal("hot_paths outside the scope answered")
 	}
+}
+
+// TestHotPathsNeverCarryPrincipal: the hot_paths result — its structured
+// content and its text alike — names no principal, session, token or
+// user at any depth. The heat tables aggregate by kind of reader; who
+// read a file is the audit trail's business, behind its own filters.
+func TestHotPathsNeverCarryPrincipal(t *testing.T) {
+	e, st := newAgentEnv(t, Options{Allow: []string{"/work"}}, agent.Scope{Read: []string{"/work"}})
+	e.fake.Seed("work/a.md", []byte("a"))
+	e.listDirs(t, "/work")
+	now := time.Now()
+	if err := st.BumpReadHeat(context.Background(), []agent.ReadSample{
+		{Path: "/work/a.md", ActorKind: agent.ReadByAgent, TS: now, Count: 3},
+		{Path: "/work/a.md", ActorKind: agent.ReadByKernel, TS: now, Count: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := e.call(t, "hot_paths", hotPathsInput{Days: 7}, nil)
+	if res.IsError {
+		t.Fatal(errText(res))
+	}
+	var doc any
+	if err := json.Unmarshal(mustJSON(t, res.StructuredContent), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if key := identityKeyIn(doc); key != "" {
+		t.Fatalf("hot_paths carries %q: %s", key, mustJSON(t, res.StructuredContent))
+	}
+	for _, bad := range []string{"principal", "session", "token", "user"} {
+		if strings.Contains(strings.ToLower(firstText(res)), bad) {
+			t.Fatalf("hot_paths text names %q: %s", bad, firstText(res))
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// identityKeyIn walks decoded JSON for a key naming an identity.
+func identityKeyIn(v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, child := range x {
+			lk := strings.ToLower(k)
+			for _, bad := range []string{"principal", "session", "token", "user"} {
+				if strings.Contains(lk, bad) {
+					return k
+				}
+			}
+			if key := identityKeyIn(child); key != "" {
+				return key
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if key := identityKeyIn(child); key != "" {
+				return key
+			}
+		}
+	}
+	return ""
 }

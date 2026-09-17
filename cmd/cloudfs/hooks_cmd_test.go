@@ -55,9 +55,9 @@ func TestHooksCommandInstallsStatusAndUninstalls(t *testing.T) {
 	}
 }
 
-// TestAgentHookNeverFailsTheTurn: with no daemon (and even no
+// TestHookSurvivesControlPlaneDown (T-54): with no daemon (and even no
 // configuration) the hook runtime exits successfully and prints nothing.
-func TestAgentHookNeverFailsTheTurn(t *testing.T) {
+func TestHookSurvivesControlPlaneDown(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cfgPath := filepath.Join(home, "cloudfs.yaml")

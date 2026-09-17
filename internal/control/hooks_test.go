@@ -73,21 +73,35 @@ func TestHookContextNamesTheMountAndWhatChanged(t *testing.T) {
 		t.Errorf("minimal context estimates at %d tokens", resp.Tokens)
 	}
 	now := time.Now()
+	// The client's own write tool wrote /docs/mine (reported by its
+	// post-write hook); /docs/k is a kernel write by someone else.
+	hookPost(t, s, "/agent/hook-read", hooks.ReadRequest{Client: "claude", SessionID: "sess-1", Wrote: true, Paths: []string{filepath.Join(mount, "docs", "mine")}})
 	if _, err := st.RecordChanges(context.Background(), []agent.Change{
 		{TS: now, Path: "/docs/b", Kind: "write", Origin: "remote", Reliable: true},
 		{TS: now, Path: "/docs/sub/c", Kind: "remove", Origin: "mcp", SessionID: "other", Reliable: true},
 		{TS: now, Path: "/docs/k", Kind: "write", Origin: "kernel", Reliable: true},
+		{TS: now, Path: "/docs/mine", Kind: "write", Origin: "kernel", Reliable: true},
 		{TS: now, Path: "/other", Kind: "write", Origin: "webdav", Reliable: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resp = hooks.ContextResponse{}
 	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", req), &resp)
-	if strings.Join(resp.Changed, ",") != "b,sub/c (deleted)" {
+	if strings.Join(resp.Changed, ",") != "b,k,sub/c (deleted)" {
 		t.Fatalf("changed: %v", resp.Changed)
 	}
 	if !strings.Contains(resp.Context, "Changed since your last turn") || !strings.Contains(resp.Context, "`sub/c (deleted)`") || strings.Contains(resp.Context, "/other") {
 		t.Fatalf("context:\n%s", resp.Context)
+	}
+	// The own-write set was consumed by that turn: a later kernel write
+	// of the same path by someone else is reported.
+	if _, err := st.RecordChanges(context.Background(), []agent.Change{{TS: now, Path: "/docs/mine", Kind: "write", Origin: "kernel", Reliable: true}}); err != nil {
+		t.Fatal(err)
+	}
+	resp = hooks.ContextResponse{}
+	_ = json.Unmarshal(hookPost(t, s, "/agent/hook-context", req), &resp)
+	if strings.Join(resp.Changed, ",") != "mine" {
+		t.Fatalf("after the set was consumed: %v", resp.Changed)
 	}
 	// The cursor moved: the same turn asked again has nothing new.
 	resp = hooks.ContextResponse{}

@@ -33,6 +33,13 @@ type AgentView interface {
 	Rollback(ctx context.Context, id string, dryRun bool) (agent.Plan, agent.Session, error)
 	// Summary counts active sessions and today's writes and denials.
 	Summary(ctx context.Context) (agent.Summary, error)
+	// Principal returns one principal by id, for the kind:name a session
+	// view shows.
+	Principal(ctx context.Context, id string) (agent.Principal, error)
+	// BeginHook and FinishHook are the sessions an agent client's
+	// lifecycle hooks hold (docs/agent-first-design.md §7).
+	BeginHook(ctx context.Context, client, sessionID string, read []string) (agent.Session, error)
+	FinishHook(ctx context.Context, client, sessionID, summary string) (agent.Session, bool, error)
 	Watch() (<-chan agent.Event, func())
 	AuditWriteFailures() int64
 	// Workspace is the delivery directory sessions write into; "" until the
@@ -71,8 +78,10 @@ type AuditResponse struct {
 type SessionView struct {
 	ID     string `json:"id"`
 	Client string `json:"client"`
-	// Principal is the id of the principal the session runs as; a hook
-	// session's is hook:<client>, which the list marks.
+	// PrincipalID is the id of the principal the session runs as;
+	// Principal is its kind:name (stdio:local, token:<name>, hook:claude
+	// — which the list marks) when the store can say.
+	PrincipalID   string      `json:"principal_id,omitempty"`
 	Principal     string      `json:"principal,omitempty"`
 	ClientVersion string      `json:"client_version,omitempty"`
 	Transport     string      `json:"transport"`
@@ -215,6 +224,18 @@ func (v *storeAgentView) Rollback(ctx context.Context, id string, dryRun bool) (
 
 // Summary counts from local midnight: "today" is the day the person looking
 // at the console is in.
+func (v *storeAgentView) Principal(ctx context.Context, id string) (agent.Principal, error) {
+	return v.m.Principal(ctx, id)
+}
+
+func (v *storeAgentView) BeginHook(ctx context.Context, client, sessionID string, read []string) (agent.Session, error) {
+	return v.m.BeginHook(ctx, client, sessionID, read)
+}
+
+func (v *storeAgentView) FinishHook(ctx context.Context, client, sessionID, summary string) (agent.Session, bool, error) {
+	return v.m.FinishHook(ctx, client, sessionID, summary)
+}
+
 func (v *storeAgentView) Summary(ctx context.Context) (agent.Summary, error) {
 	now := time.Now()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -299,7 +320,7 @@ func AuditViews(ctx context.Context, v AgentView, rows []agent.AuditRow) []Audit
 // SessionViewOf is one session as the console reads it.
 func SessionViewOf(s agent.Session) SessionView {
 	v := SessionView{
-		ID: s.ID, Client: s.ClientName, Principal: s.PrincipalID, ClientVersion: s.ClientVersion, Transport: s.Transport,
+		ID: s.ID, Client: s.ClientName, PrincipalID: s.PrincipalID, ClientVersion: s.ClientVersion, Transport: s.Transport,
 		State: s.State, Scope: s.Scope, Workspace: s.Workspace, Sandbox: s.Sandbox,
 		StartedAt: s.StartedAt, LastSeenAt: s.LastSeenAt, Writes: s.Writes,
 		ArtifactCount: len(s.Artifacts), Summary: s.Summary, OpsCount: s.OpsCount, LastChangeSeen: s.LastChangeSeen,
@@ -316,6 +337,43 @@ func SessionViewOf(s agent.Session) SessionView {
 }
 
 func sessionView(s agent.Session) SessionView { return SessionViewOf(s) }
+
+// principalNames resolves principal ids to kind:name once per page.
+type principalNames struct {
+	v     AgentView
+	names map[string]string
+}
+
+func newPrincipalNames(v AgentView) *principalNames {
+	return &principalNames{v: v, names: map[string]string{}}
+}
+
+func (c *principalNames) label(ctx context.Context, id string) string {
+	if id == "" {
+		return ""
+	}
+	if name, ok := c.names[id]; ok {
+		return name
+	}
+	name := ""
+	if p, err := c.v.Principal(ctx, id); err == nil {
+		name = p.Kind + ":" + p.Name
+	}
+	c.names[id] = name
+	return name
+}
+
+// sessionViews is a page of sessions with their principals named.
+func sessionViews(ctx context.Context, v AgentView, list []agent.Session) []SessionView {
+	names := newPrincipalNames(v)
+	out := make([]SessionView, 0, len(list))
+	for _, s := range list {
+		sv := SessionViewOf(s)
+		sv.Principal = names.label(ctx, s.PrincipalID)
+		out = append(out, sv)
+	}
+	return out
+}
 
 // SessionDetailOf is one session with its newest audit rows and artifacts,
 // as GET /sessions/{id} answers and `cloudfs sessions show` prints offline.
@@ -341,7 +399,7 @@ func SessionDetailOf(ctx context.Context, v AgentView, id string) (SessionDetail
 	}
 	names := newClientNames(v)
 	names.names[sess.ID] = sess.ClientName
-	return SessionDetail{Session: SessionViewOf(sess), Audit: names.auditViews(ctx, rows), Artifacts: artifacts, Ops: ops}, nil
+	return SessionDetail{Session: sessionViews(ctx, v, []agent.Session{sess})[0], Audit: names.auditViews(ctx, rows), Artifacts: artifacts, Ops: ops}, nil
 }
 
 // queryLimit reads ?limit= with a default and a cap, answering the request
@@ -460,10 +518,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		httpErrorT(w, r, agentStatus(err), "err.sessions_list_failed")
 		return
 	}
-	out := SessionsResponse{Sessions: make([]SessionView, 0, len(sessions)), NextCursor: next}
-	for _, sess := range sessions {
-		out.Sessions = append(out.Sessions, sessionView(sess))
-	}
+	out := SessionsResponse{Sessions: sessionViews(r.Context(), v, sessions), NextCursor: next}
 	if out.Summary, err = v.Summary(r.Context()); err != nil {
 		httpErrorT(w, r, agentStatus(err), "err.sessions_list_failed")
 		return

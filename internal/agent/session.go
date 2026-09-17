@@ -271,7 +271,38 @@ func (m *Sessions) Resolve(ctx context.Context, c ConnInfo) (Session, error) {
 // process on another side of HTTP, whose end the owner never sees, so it
 // rotates like a token's.
 func (m *Sessions) rotates(transport string) bool {
-	return m.opt.Idle > 0 && (transport == "http-token" || transport == "http-loopback" || transport == "http-bridge")
+	return m.opt.Idle > 0 && (transport == "http-token" || transport == "http-loopback" || transport == "http-bridge" || transport == TransportHook)
+}
+
+// TransportHook is the transport of a session an agent client's
+// lifecycle hooks hold (docs/agent-first-design.md §7): begun by the
+// turn-start hook, finished by the session-end hook, and idled out like
+// a token's when the client never says goodbye.
+const TransportHook = "hook"
+
+// HookPrincipalName is how a client's hook principal reads (kind:name),
+// which is what the console shows beside a hook session.
+func HookPrincipalName(client string) string { return "hook:" + client }
+
+// hookConnKey is the connection key of one client conversation.
+func hookConnKey(client, sessionID string) string { return "hook:" + client + ":" + sessionID }
+
+// BeginHook resolves the hook session of one client conversation,
+// creating the hook:<client> principal on first use with the read scope
+// given (what the client may see through the mount; hooks never write
+// through the session, so it is read-only).
+func (m *Sessions) BeginHook(ctx context.Context, client, sessionID string, read []string) (Session, error) {
+	p, err := m.EnsurePrincipal(ctx, "hook", client, Scope{Read: read, ReadOnly: true})
+	if err != nil {
+		return Session{}, err
+	}
+	return m.Resolve(ctx, ConnInfo{Key: hookConnKey(client, sessionID), Transport: TransportHook, PrincipalID: p.ID, ClientName: client})
+}
+
+// FinishHook finishes the hook session of one client conversation and
+// reports whether there was one.
+func (m *Sessions) FinishHook(ctx context.Context, client, sessionID, summary string) (Session, bool, error) {
+	return m.FinishConn(ctx, hookConnKey(client, sessionID), summary)
 }
 
 // Get returns one session by id.

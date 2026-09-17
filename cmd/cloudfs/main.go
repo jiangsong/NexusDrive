@@ -775,8 +775,18 @@ func cmdMCP(ctx context.Context, args []string) error {
 	// secret (an owner not serving HTTP) they refuse as before.
 	var bridge *mcpsrv.BridgeOptions
 	if nonOwner && d.Agent != nil {
-		if tok := mcpsrv.ReadBridgeToken(d.Agent.Dir()); tok != "" {
-			bridge = &mcpsrv.BridgeOptions{URL: mcpHTTPURL(f, cfg), Token: tok}
+		listen := "127.0.0.1:8765"
+		if cfg.MCP.HTTP != "" {
+			listen = cfg.MCP.HTTP
+		}
+		tok := mcpsrv.ReadBridgeToken(d.Agent.Dir())
+		if bridge = mcpsrv.BridgeOptionsFor(listen, tok); bridge == nil {
+			switch {
+			case tok == "":
+				fmt.Fprintln(os.Stderr, "cloudfs mcp: another process owns the cache and serves no HTTP transport; writes are refused here (register the client with --transport http)")
+			default:
+				fmt.Fprintf(os.Stderr, "cloudfs mcp: another process owns the cache and its HTTP transport listens on %s, not a loopback address, so the bridge is off; writes are refused here\n", listen)
+			}
 		}
 	}
 	srv, err := mcpsrv.New(mcpsrv.Options{

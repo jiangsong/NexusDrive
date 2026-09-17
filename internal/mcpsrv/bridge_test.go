@@ -305,3 +305,86 @@ func (t *bareBearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+t.token)
 	return http.DefaultTransport.RoundTrip(r)
 }
+
+// TestBridgedSessionFinishesOnStdioExit: the stdio process was its
+// session; when it goes (its server closes, as `cloudfs mcp` does when
+// the transport ends) the owner-side session it held through the bridge
+// is finished, not left active until the idle sweep. A stdio process
+// that never forwarded anything holds no owner session and leaves
+// nothing behind.
+func TestBridgedSessionFinishesOnStdioExit(t *testing.T) {
+	owner, stdio, ownerStore, _ := bridgedPair(t)
+	owner.fake.Seed("work/.keep", []byte(""))
+	if res := stdio.call(t, "write_file", writeInput{Path: "/work/held.txt", Content: "x"}, nil); res.IsError {
+		t.Fatal(errText(res))
+	}
+	m := agent.NewSessions(ownerStore, agent.SessionOptions{})
+	active := func() []agent.Session {
+		t.Helper()
+		list, _, err := m.List(context.Background(), agent.ListQuery{State: "active"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []agent.Session
+		for _, s := range list {
+			if s.Transport == "http-bridge" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if got := active(); len(got) != 1 {
+		t.Fatalf("bridged sessions before exit: %+v", got)
+	}
+	if err := stdio.server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := active(); len(got) != 0 {
+		t.Fatalf("the bridged session outlived the stdio process: %+v", got)
+	}
+	all, _, _ := m.List(context.Background(), agent.ListQuery{})
+	finished := false
+	for _, s := range all {
+		finished = finished || (s.Transport == "http-bridge" && s.State == "finished")
+	}
+	if !finished {
+		t.Fatalf("the bridged session was not finished: %+v", all)
+	}
+}
+
+// TestBridgeDisabledOffLoopbackFallsBackToFence: a stdio server beside
+// the owner only forwards when the owner listens on loopback — that is
+// where the secret is honoured (TestBridgeSecretIsLoopbackOnly) — so a
+// process configured with an owner off loopback gets no bridge and its
+// writes meet the fence, cleanly, before touching anything; the
+// configuration's decision lives in BridgeOptionsFor.
+func TestBridgeDisabledOffLoopbackFallsBackToFence(t *testing.T) {
+	if opt := BridgeOptionsFor("0.0.0.0:8765", "cfsb_"+strings.Repeat("a", 48)); opt != nil {
+		t.Fatalf("a listener off loopback got a bridge: %+v", opt)
+	}
+	if opt := BridgeOptionsFor("127.0.0.1:8765", ""); opt != nil {
+		t.Fatalf("a missing secret got a bridge: %+v", opt)
+	}
+	opt := BridgeOptionsFor("127.0.0.1:8765", "cfsb_"+strings.Repeat("a", 48))
+	if opt == nil || opt.URL != "http://127.0.0.1:8765/" {
+		t.Fatalf("loopback with a secret: %+v", opt)
+	}
+	if opt := BridgeOptionsFor("[::1]:8765", "cfsb_"+strings.Repeat("a", 48)); opt == nil || opt.URL != "http://[::1]:8765/" {
+		t.Fatalf("IPv6 loopback: %+v", opt)
+	}
+	stdio := newEnv(t, Options{NonOwner: true, Bridge: BridgeOptionsFor("0.0.0.0:8765", "cfsb_"+strings.Repeat("a", 48))})
+	if stdio.server.Bridged() {
+		t.Fatal("the server built a bridge from a nil option")
+	}
+	before := stdio.fake.TotalCalls()
+	res := stdio.call(t, "write_file", writeInput{Path: "/work/x.txt", Content: "x"}, nil)
+	if !res.IsError || !strings.Contains(errText(res), "does not own the cache") {
+		t.Fatalf("fence: %s", errText(res))
+	}
+	if stdio.fake.TotalCalls() != before {
+		t.Fatal("the fenced write touched the provider")
+	}
+	if _, err := stdio.fs.StatPath(context.Background(), "/work/x.txt"); err == nil {
+		t.Fatal("the fenced write landed on the stdio side's VFS")
+	}
+}

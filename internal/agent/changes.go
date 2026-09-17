@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"context"
 	"database/sql"
 	"errors"
@@ -478,5 +479,101 @@ func (s *Store) PruneHookCursors(ctx context.Context, retain time.Duration) (int
 		return 0, fmt.Errorf("agent: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	// The own-write sets of those sessions go the same way ("<json>\n<nanos>").
+	if res, err := s.db.ExecContext(ctx, `DELETE FROM meta WHERE k LIKE 'hook_writes:%' AND (instr(v, char(10)) = 0 OR CAST(substr(v, instr(v, char(10)) + 1) AS INTEGER) < ?)`, cutoff); err == nil {
+		m, _ := res.RowsAffected()
+		n += m
+	}
 	return n, nil
+}
+
+// Hook own-writes (docs/agent-first-design.md §7.4): the client's write
+// tools go through the kernel, so their changes are kernel rows like any
+// other program's. The post-write hook reports the paths the client
+// itself wrote; the turn-start hook then leaves those out of "changed
+// since your last turn" and reports the other kernel writes — the
+// terminal's, another program's — which is what a person means by
+// "someone else changed this". The set lives in the meta table under the
+// hook session, as a JSON list with the time it was last touched, and
+// goes with the hook cursors.
+
+func hookWritesKey(client, sessionID string) string {
+	return "hook_writes:" + client + ":" + sessionID
+}
+
+// maxHookWrites bounds the set; past it the oldest paths go, and a
+// forgotten own write is reported as someone else's, which is the safe
+// side.
+const maxHookWrites = 500
+
+// AddHookWrites records paths the client's own tools wrote in this hook
+// session.
+func (s *Store) AddHookWrites(ctx context.Context, client, sessionID string, paths []string) error {
+	if s.readOnly {
+		return errors.New("agent: the store is read-only")
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	have, err := s.HookWrites(ctx, client, sessionID)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, p := range have {
+		seen[p] = true
+	}
+	for _, p := range paths {
+		if p = Normalise(p); !seen[p] {
+			seen[p] = true
+			have = append(have, p)
+		}
+	}
+	if len(have) > maxHookWrites {
+		have = have[len(have)-maxHookWrites:]
+	}
+	return s.setHookWrites(ctx, client, sessionID, have)
+}
+
+// HookWrites lists the paths the client's own tools wrote in this hook
+// session since the set was last cleared.
+func (s *Store) HookWrites(ctx context.Context, client, sessionID string) ([]string, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT v FROM meta WHERE k = ?`, hookWritesKey(client, sessionID)).Scan(&v)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	body, _, _ := strings.Cut(v, "\n")
+	var out []string
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// ClearHookWrites empties the set once a turn has taken it into account.
+func (s *Store) ClearHookWrites(ctx context.Context, client, sessionID string) error {
+	if s.readOnly {
+		return errors.New("agent: the store is read-only")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM meta WHERE k = ?`, hookWritesKey(client, sessionID)); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) setHookWrites(ctx context.Context, client, sessionID string, paths []string) error {
+	body, err := json.Marshal(paths)
+	if err != nil {
+		return err
+	}
+	v := string(body) + "\n" + strconv.FormatInt(s.now().UnixNano(), 10)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO meta(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+		hookWritesKey(client, sessionID), v); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
 }

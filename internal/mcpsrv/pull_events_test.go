@@ -174,3 +174,74 @@ func TestPullEventsAndHistoryHideARenameSourceOutsideTheScope(t *testing.T) {
 		t.Fatal("history has no entry for the arrival")
 	}
 }
+
+// TestPullEventsCursorSurvivesRestart: the cursor a session's pull left
+// behind is in agent.db, not in the process — after the store is closed
+// and reopened (the daemon restarted) the session's cursor reads back,
+// and a pull from that cursor on the new server returns exactly what was
+// recorded after it, the restart marker included, and nothing twice.
+func TestPullEventsCursorSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	st, err := agent.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := agent.Scope{}
+	e := newEnv(t, Options{Sessions: agent.NewSessions(st, agent.SessionOptions{Idle: 30 * time.Minute}), Scope: &sc})
+	recordChanges(t, e, st)
+	if res := e.call(t, "list_roots", struct{}{}, nil); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if _, err := e.fs.WriteFile(context.Background(), "/before.txt", []byte("1"), false); err != nil {
+		t.Fatal(err)
+	}
+	waitLastWriter(t, st, "/before.txt")
+	var first pullEventsOutput
+	if res := e.call(t, "pull_events", pullEventsInput{}, &first); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if len(first.Events) == 0 || first.Cursor == "" {
+		t.Fatalf("first pull: %+v", first)
+	}
+	sess := currentSession(t, st)
+	stored, err := st.LastChangeSeen(context.Background(), sess.ID)
+	if err != nil || strconv.FormatInt(stored, 10) != first.Cursor {
+		t.Fatalf("stored cursor %d vs %s (%v)", stored, first.Cursor, err)
+	}
+	// The restart: the store closes with the session's cursor in it.
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := agent.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st2.Close() })
+	if again, err := st2.LastChangeSeen(context.Background(), sess.ID); err != nil || again != stored {
+		t.Fatalf("the cursor did not survive the restart: %d %v", again, err)
+	}
+	e2 := newEnv(t, Options{Sessions: agent.NewSessions(st2, agent.SessionOptions{Idle: 30 * time.Minute}), Scope: &sc})
+	recordChanges(t, e2, st2)
+	if res := e2.call(t, "list_roots", struct{}{}, nil); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if _, err := e2.fs.WriteFile(context.Background(), "/after.txt", []byte("2"), false); err != nil {
+		t.Fatal(err)
+	}
+	waitLastWriter(t, st2, "/after.txt")
+	var second pullEventsOutput
+	if res := e2.call(t, "pull_events", pullEventsInput{Cursor: first.Cursor}, &second); res.IsError {
+		t.Fatal(errText(res))
+	}
+	paths := map[string]bool{}
+	for _, ev := range second.Events {
+		paths[ev.Path] = true
+	}
+	if paths["/before.txt"] || !paths["/after.txt"] {
+		t.Fatalf("continuing from the old cursor: %+v", second.Events)
+	}
+	// The recorder that started over an existing record marked the gap.
+	if !second.Rescan {
+		t.Fatalf("the restart was not flagged as a possible gap: %+v", second)
+	}
+}

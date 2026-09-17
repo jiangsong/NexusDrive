@@ -44,8 +44,10 @@ type platform struct {
 	// session there would cut a multi-turn run after its first turn.
 	prompt, tool, stop string
 	// readMatcher names the tools whose runs count as reads; listing
-	// tools are deliberately not among them.
-	readMatcher string
+	// tools are deliberately not among them. writeMatcher names the
+	// tools that write files: what they wrote is the client's own change,
+	// which the next turn must not report back to it as someone else's.
+	readMatcher, writeMatcher string
 	// timeout is in the unit the client counts hook timeouts in.
 	timeout int
 	// verified says the event names and file shape were exercised against
@@ -62,9 +64,10 @@ var platforms = map[string]platform{
 		prompt:      "UserPromptSubmit",
 		tool:        "PostToolUse",
 		stop:        "SessionEnd",
-		readMatcher: "Read|Grep|Bash",
-		timeout:     10,
-		verified:    true,
+		readMatcher:  "Read|Grep|Bash",
+		writeMatcher: "Write|Edit|MultiEdit|NotebookEdit",
+		timeout:      10,
+		verified:     true,
 	},
 	// UNVERIFIED: Codex hook event names and the hooks.json shape follow
 	// the experimental hooks feature as of 2026-09; verify against a real
@@ -77,8 +80,9 @@ var platforms = map[string]platform{
 		prompt:      "UserPromptSubmit",
 		tool:        "PostToolUse",
 		stop:        "SessionEnd",
-		readMatcher: "read_file|shell",
-		timeout:     10,
+		readMatcher:  "read_file|shell",
+		writeMatcher: "apply_patch",
+		timeout:      10,
 		note:        "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true) and trust the hook when Codex asks",
 	},
 	// UNVERIFIED: Gemini CLI event names (BeforeAgent, AfterTool,
@@ -89,8 +93,9 @@ var platforms = map[string]platform{
 		prompt:      "BeforeAgent",
 		tool:        "AfterTool",
 		stop:        "SessionEnd",
-		readMatcher: "read_file|read_many_files|search_file_content|run_shell_command",
-		timeout:     10000,
+		readMatcher:  "read_file|read_many_files|search_file_content|run_shell_command",
+		writeMatcher: "write_file|replace|edit",
+		timeout:      10000,
 	},
 }
 
@@ -219,10 +224,12 @@ type Status struct {
 	Note string `json:"note,omitempty"`
 }
 
-// groups builds the three hook groups of a client in the client's shape.
+// groups builds the four hook groups of a client in the client's shape.
+// kind is the agent-hook event a group runs, which tells two of our
+// groups under one client event (read and write, both PostToolUse) apart.
 func groups(client string) []struct {
-	event string
-	group map[string]any
+	event, kind string
+	group       map[string]any
 } {
 	p := platforms[client]
 	hook := func(event string, async bool) map[string]any {
@@ -233,12 +240,13 @@ func groups(client string) []struct {
 		return h
 	}
 	return []struct {
-		event string
-		group map[string]any
+		event, kind string
+		group       map[string]any
 	}{
-		{p.prompt, map[string]any{"hooks": []any{hook("prompt", false)}}},
-		{p.tool, map[string]any{"matcher": p.readMatcher, "hooks": []any{hook("read", true)}}},
-		{p.stop, map[string]any{"hooks": []any{hook("stop", true)}}},
+		{p.prompt, "prompt", map[string]any{"hooks": []any{hook("prompt", false)}}},
+		{p.tool, "read", map[string]any{"matcher": p.readMatcher, "hooks": []any{hook("read", true)}}},
+		{p.tool, "write", map[string]any{"matcher": p.writeMatcher, "hooks": []any{hook("write", true)}}},
+		{p.stop, "stop", map[string]any{"hooks": []any{hook("stop", true)}}},
 	}
 }
 
@@ -338,7 +346,7 @@ func mergeInto(path, client string) (bool, error) {
 	for _, g := range groups(client) {
 		current[g.event] = true
 		arr, _ := hooks[g.event].([]any)
-		if i := indexOfOurs(arr); i >= 0 {
+		if i := indexOfOurs(arr, g.kind); i >= 0 {
 			if !jsonEqual(arr[i], g.group) {
 				arr[i] = g.group
 				hooks[g.event] = arr
@@ -426,13 +434,29 @@ func removeFrom(path string) (bool, error) {
 	return true, writeJSON(path, root)
 }
 
-func indexOfOurs(arr []any) int {
+// indexOfOurs finds our group of the given kind (prompt, read, write,
+// stop) in an event's list, -1 when absent; an older shape's group of no
+// recognisable kind counts as any kind, so it is converged rather than
+// left beside the new one.
+func indexOfOurs(arr []any, kind string) int {
+	fallback := -1
 	for i, g := range arr {
-		if containsMarker(g) {
+		if !containsMarker(g) {
+			continue
+		}
+		b, _ := json.Marshal(g)
+		if strings.Contains(string(b), marker+" "+kind+" ") {
 			return i
 		}
+		known := false
+		for _, k := range []string{"prompt", "read", "write", "stop"} {
+			known = known || strings.Contains(string(b), marker+" "+k+" ")
+		}
+		if !known && fallback < 0 {
+			fallback = i
+		}
 	}
-	return -1
+	return fallback
 }
 
 func containsMarker(v any) bool {

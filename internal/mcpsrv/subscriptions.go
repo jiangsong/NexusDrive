@@ -481,7 +481,7 @@ func (r *resourceSubscriptions) deliver(session *mcp.ServerSession, sender *sess
 			// Re-checked at delivery, not only at subscribe: a scope that
 			// narrowed since (a token re-issued, a session expired) must not
 			// keep leaking the paths it once allowed (T-52).
-			if !r.server.visible(w.token.context(), w.path) {
+			if !r.server.visibleNow(w.token.context(), w.path) {
 				delete(sender.queued, uri)
 				r.mu.Unlock()
 				continue

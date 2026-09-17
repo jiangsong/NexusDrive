@@ -66,6 +66,9 @@ type ContextResponse struct {
 	More    int      `json:"more,omitempty"`
 	Rescan  bool     `json:"rescan,omitempty"`
 	Tokens  int      `json:"tokens"`
+	// SessionID is the hook session the daemon holds for this
+	// conversation (principal hook:<client>).
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // ReadRequest is what the read hook reports: absolute paths the agent
@@ -73,6 +76,10 @@ type ContextResponse struct {
 type ReadRequest struct {
 	Client string   `json:"client"`
 	Paths  []string `json:"paths"`
+	// Wrote says the paths are what the client's own write tool wrote,
+	// not reads: they count as the session's own changes, not as heat.
+	Wrote     bool   `json:"wrote,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // StopRequest asks the daemon to finish the client's active session.
@@ -86,9 +93,12 @@ type StopRequest struct {
 // how many active sessions looked like the client's; with more than one
 // the daemon finishes none rather than guess.
 type StopResponse struct {
-	Finished   bool   `json:"finished"`
-	SessionID  string `json:"session_id,omitempty"`
-	Candidates int    `json:"candidates,omitempty"`
+	// Finished says the client's MCP session was finished; SessionID
+	// names it. HookFinished says the conversation's own hook session was.
+	Finished     bool   `json:"finished"`
+	HookFinished bool   `json:"hook_finished,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	Candidates   int    `json:"candidates,omitempty"`
 }
 
 // Client talks to the daemon's control plane over its unix socket (or
@@ -209,6 +219,20 @@ func RunRead(ctx context.Context, in io.Reader, client string, api *Client) erro
 		return nil
 	}
 	_ = api.Read(ctx, ReadRequest{Client: client, Paths: paths})
+	return nil
+}
+
+// RunWrite is `cloudfs agent-hook write`, run after the client's own
+// write tools: the paths they wrote are reported as this session's own
+// changes, so the next turn's "changed since your last turn" leaves
+// them out. Nothing is read on the way, and a missing daemon is fine.
+func RunWrite(ctx context.Context, in io.Reader, client string, api *Client) error {
+	ev := ParseEvent(in)
+	paths := ReadPaths(ev)
+	if len(paths) == 0 {
+		return nil
+	}
+	_ = api.Read(ctx, ReadRequest{Client: client, Paths: paths, Wrote: true, SessionID: ev.SessionID})
 	return nil
 }
 

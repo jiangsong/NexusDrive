@@ -1,6 +1,7 @@
 package mcpsrv
 
 import (
+	"net"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -230,14 +231,22 @@ func (b *bridge) drop(session *mcp.ClientSession) {
 	}
 }
 
-// close ends the owner session.
+// close ends the owner session. The stdio process was the session: when
+// it goes, its owner-side CloudFS session is finished first (the same
+// finish_session an agent would call, with no arguments so it names the
+// bridged session itself), so the console shows the run as finished
+// rather than active until the idle sweep.
 func (b *bridge) close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.session != nil {
-		_ = b.session.Close()
-		b.session = nil
+	if b.session == nil {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = b.session.CallTool(ctx, &mcp.CallToolParams{Name: "finish_session", Arguments: map[string]any{}})
+	_ = b.session.Close()
+	b.session = nil
 }
 
 // forward runs one tool call on the owner.
@@ -305,3 +314,33 @@ func (s *Server) bridgeMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 
 // Bridged reports whether this server forwards fenced calls.
 func (s *Server) Bridged() bool { return s.bridge != nil }
+
+// BridgeOptionsFor decides whether a stdio server beside the owner gets a
+// bridge: only when the owner's HTTP transport listens on a loopback
+// address — the only place the secret is honoured (HTTPAuth.Bridge reads
+// the peer's address) — and the owner has published one. Anything else
+// returns nil, and the fenced tools refuse as they do without an owner
+// serving HTTP; `cloudfs mcp` says why on stderr.
+func BridgeOptionsFor(listen, token string) *BridgeOptions {
+	if token == "" || !loopbackListen(listen) {
+		return nil
+	}
+	return &BridgeOptions{URL: "http://" + listen + "/", Token: token}
+}
+
+// loopbackListen says a listen address binds a loopback interface;
+// ":8765" binds every interface and is not one.
+func loopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

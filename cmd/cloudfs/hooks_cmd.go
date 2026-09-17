@@ -125,8 +125,10 @@ func cmdAgentHook(ctx context.Context, args []string, in io.Reader, out io.Write
 		return hooks.RunPrompt(ctx, in, out, client, api)
 	case "read":
 		return hooks.RunRead(ctx, in, client, api)
+	case "write":
+		return hooks.RunWrite(ctx, in, client, api)
 	case "stop":
 		return hooks.RunStop(ctx, in, client, api)
 	}
-	return errors.New("agent-hook: use prompt, read or stop")
+	return errors.New("agent-hook: use prompt, read, write or stop")
 }

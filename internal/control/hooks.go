@@ -38,6 +38,11 @@ type HookStore interface {
 	LastChangeID(ctx context.Context) (int64, error)
 	HookCursor(ctx context.Context, client, sessionID string) (id int64, known bool, err error)
 	SetHookCursor(ctx context.Context, client, sessionID string, id int64) error
+	// The client's own kernel writes, reported by its post-write hook,
+	// which the next turn leaves out of "changed by someone else".
+	AddHookWrites(ctx context.Context, client, sessionID string, paths []string) error
+	HookWrites(ctx context.Context, client, sessionID string) ([]string, error)
+	ClearHookWrites(ctx context.Context, client, sessionID string) error
 }
 
 // hookChangedMax caps the changed-file list a turn pays for.
@@ -110,6 +115,14 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Mount = config.ExpandHome(mount.Path)
+	// The conversation is a session of the hook:<client> principal: the
+	// console lists it beside the MCP ones, the session-end hook finishes
+	// it, and it idles out like a token's when the client never says so.
+	if s.collector.Agent != nil && q.Client != "" && q.SessionID != "" {
+		if sess, err := s.collector.Agent.BeginHook(r.Context(), q.Client, q.SessionID, cfg.MCP.Allow); err == nil {
+			resp.SessionID = sess.ID
+		}
+	}
 	var parts []string
 	parts = append(parts, fmt.Sprintf("cloudfs: this directory is inside the CloudFS mount at %s (cloud storage mounted locally). A file you have not read yet is downloaded on first read and counts against the provider's rate limit, so read what you need rather than whole trees; a write is durable locally at once and uploads in the background.", resp.Mount))
 	if len(cfg.MCP.Allow) > 0 {
@@ -149,12 +162,13 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 // hookChanges lists what changed under virtual since the hook session's
 // cursor, rendered as the agent sees paths from cwd, and moves the
 // cursor. A first turn starts from now: the agent has nothing to catch
-// up on. Kernel changes are left out — inside a turn they are almost
-// always the agent's own file tools — and so are MCP changes made by a
-// session of the same client: a hook session and an MCP session have
-// different ids, so the client name is the closest the store gets to
-// "this agent's own writes", and a false alarm on every file the agent
-// just wrote would teach it to ignore the line.
+// up on. Left out are the client's own writes — the kernel changes its
+// post-write hook reported, and the MCP changes made by a session of the
+// same client (a hook session and an MCP session have different ids, so
+// the client name is the closest the store gets to "this agent") — and
+// the remote echo of any local write; a false alarm on every file the
+// agent just wrote would teach it to ignore the line. Other kernel
+// writes are the terminal's or another program's and are reported.
 func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextRequest, mount config.Mount, virtual string) (changed []string, more int, rescan bool, err error) {
 	cursor, known, err := st.HookCursor(ctx, q.Client, q.SessionID)
 	if err != nil {
@@ -168,6 +182,14 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 		return nil, 0, false, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
 	}
 	seen := map[string]bool{}
+	// Kernel rows are every program's writes, the client's own tools
+	// included; the post-write hook told us which paths were its own.
+	ownKernel := map[string]bool{}
+	if wrote, err := st.HookWrites(ctx, q.Client, q.SessionID); err == nil {
+		for _, p := range wrote {
+			ownKernel[p] = true
+		}
+	}
 	own := map[string]bool{}
 	ownSession := func(id string) bool {
 		if id == "" || s.collector.Agent == nil {
@@ -180,6 +202,10 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 		own[id] = err == nil && hookClientMatches(sess.ClientName, q.Client)
 		return own[id]
 	}
+	// A local write is followed by a remote row when its upload lands
+	// (the provider's view of the same change); that echo is not a
+	// second change and never someone else's.
+	localWrite := map[string]bool{}
 	for cursor < last {
 		rows, hasMore, err := st.Changes(ctx, agent.ChangesQuery{After: cursor, Prefix: virtual, Limit: 500})
 		if err != nil {
@@ -191,7 +217,12 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 				rescan = true
 				continue
 			}
-			if c.Origin == "kernel" || c.Origin == "mcp" && ownSession(c.SessionID) {
+			if c.Origin != "remote" {
+				localWrite[c.Path] = true
+			} else if localWrite[c.Path] {
+				continue
+			}
+			if c.Origin == "kernel" && ownKernel[c.Path] || c.Origin == "mcp" && ownSession(c.SessionID) {
 				continue
 			}
 			p := agentPath(mount, q.CWD, c.Path)
@@ -213,6 +244,7 @@ func (s *Server) hookChanges(ctx context.Context, st HookStore, q hooks.ContextR
 		}
 	}
 	sort.Strings(changed)
+	_ = st.ClearHookWrites(ctx, q.Client, q.SessionID)
 	return changed, more, rescan, st.SetHookCursor(ctx, q.Client, q.SessionID, last)
 }
 
@@ -266,7 +298,9 @@ func (s *Server) hookMemoryDirs(ctx context.Context, client string) []string {
 	if s.collector.Agent != nil {
 		if list, _, err := s.collector.Agent.Sessions(ctx, agent.ListQuery{Limit: 50}); err == nil {
 			for _, sess := range list {
-				if hookClientMatches(sess.ClientName, client) {
+				// The hook's own session carries the short client name;
+				// the MCP session's is what named the memory directory.
+				if sess.Transport != agent.TransportHook && hookClientMatches(sess.ClientName, client) {
 					add(memory.NormalizeAgent(sess.ClientName))
 					break
 				}
@@ -295,6 +329,24 @@ func (s *Server) agentHookRead(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.collector.ConfigView()
 	counted := 0
+	if q.Wrote {
+		// The client's own writes: remembered for the next turn, never heat.
+		var own []string
+		if cfg != nil {
+			for _, p := range q.Paths {
+				if _, virtual, ok := mountFor(cfg, p); ok && virtual != "/" {
+					own = append(own, virtual)
+				}
+			}
+		}
+		if st := s.hookStore(); st != nil && len(own) > 0 {
+			if err := st.AddHookWrites(r.Context(), q.Client, q.SessionID, own); err == nil {
+				counted = len(own)
+			}
+		}
+		writeJSON(w, map[string]int{"counted": counted})
+		return
+	}
 	if s.collector.ReadHeat != nil && cfg != nil {
 		for _, p := range q.Paths {
 			if _, virtual, ok := mountFor(cfg, p); ok && virtual != "/" {
@@ -334,9 +386,15 @@ func (s *Server) agentHookStop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+	// The hook session of this conversation ends here, whatever else.
+	if q.SessionID != "" {
+		if _, ok, err := s.collector.Agent.FinishHook(r.Context(), q.Client, q.SessionID, "session-end hook"); err == nil && ok {
+			resp.HookFinished = true
+		}
+	}
 	var candidates []agent.Session
 	for _, sess := range list {
-		if sess.Transport == "stdio" || !hookClientMatches(sess.ClientName, q.Client) {
+		if sess.Transport == "stdio" || sess.Transport == agent.TransportHook || !hookClientMatches(sess.ClientName, q.Client) {
 			continue
 		}
 		candidates = append(candidates, sess)
