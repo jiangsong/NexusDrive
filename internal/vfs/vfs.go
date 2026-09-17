@@ -226,6 +226,10 @@ type FS struct {
 	// read of a large file reports once, not once per block. Memory only:
 	// a read never costs a query or a provider call on its account.
 	readObserverFn atomic.Pointer[func(ctx context.Context, ino uint64)]
+	// lastWriterFn answers "who last changed this inode" for the
+	// user.cloudfs.writer xattr (SetLastWriter); the daemon installs it
+	// over the change record, the VFS only asks.
+	lastWriterFn atomic.Pointer[func(ctx context.Context, ino uint64) (string, bool)]
 	readSeen       sync.Map
 	readSeenCount  atomic.Int64
 	// paths caches ino -> path for MountForIno; see pathOf. dirIDs caches
@@ -1168,6 +1172,28 @@ func (f *FS) SetReadObserver(fn func(ctx context.Context, ino uint64)) {
 		return
 	}
 	f.readObserverFn.Store(&fn)
+}
+
+// SetLastWriter installs the hook the FUSE adapter asks for the
+// user.cloudfs.writer xattr: who last changed the inode, rendered as
+// "<origin>" or "<origin> <session>" by the daemon from the change record
+// (docs/agent-first-design.md §6.1). nil removes the hook; without one
+// the xattr does not exist.
+func (f *FS) SetLastWriter(fn func(ctx context.Context, ino uint64) (string, bool)) {
+	if fn == nil {
+		f.lastWriterFn.Store(nil)
+		return
+	}
+	f.lastWriterFn.Store(&fn)
+}
+
+// LastWriter asks the installed hook, if any.
+func (f *FS) LastWriter(ctx context.Context, ino uint64) (string, bool) {
+	fn := f.lastWriterFn.Load()
+	if fn == nil || *fn == nil {
+		return "", false
+	}
+	return (*fn)(ctx, ino)
 }
 
 // readSeenKey debounces per inode and per kind of reader, so an agent's

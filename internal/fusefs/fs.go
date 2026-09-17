@@ -589,6 +589,14 @@ func (n *node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 		val = at.Remote
 	case "user.cloudfs.cached":
 		val = formatPercent(at.Cached)
+	case "user.cloudfs.writer":
+		// Who last changed the file, from the change record the daemon
+		// keeps: "kernel", "mcp <session>", "control", "webdav", "remote".
+		w, ok := n.root.opt.FS.LastWriter(ctx, n.vfsIno())
+		if !ok {
+			return 0, syscall.ENODATA
+		}
+		val = w
 	default:
 		return 0, syscall.ENODATA
 	}

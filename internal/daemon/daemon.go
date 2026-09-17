@@ -427,6 +427,21 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		// the fifth consumer of the change feed and pruned with the
 		// session rows, since both answer "who changed this, when".
 		go agentStore.RunChangeRecorder(retentionCtx, fsys)
+		// getfattr -n user.cloudfs.writer answers from the same record.
+		fsys.SetLastWriter(func(ctx context.Context, ino uint64) (string, bool) {
+			p, err := fsys.Meta().Path(ctx, ino)
+			if err != nil {
+				return "", false
+			}
+			c, ok, err := agentStore.LastWriter(ctx, p)
+			if err != nil || !ok {
+				return "", false
+			}
+			if c.SessionID != "" {
+				return c.Origin + " " + c.SessionID, true
+			}
+			return c.Origin, true
+		})
 		go agentStore.RunChangeRetention(retentionCtx, cfg.MCP.Session.Retain, 24*time.Hour)
 		// Read heat: the VFS says which inode was read and under what
 		// request; the path and the kind of reader are resolved here, so

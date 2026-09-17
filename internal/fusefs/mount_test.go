@@ -427,6 +427,26 @@ func TestMountXattrReportsState(t *testing.T) {
 	if err != nil || string(buf[:n]) != "ali" {
 		t.Fatalf("remote xattr = %q, %v", buf[:n], err)
 	}
+	// user.cloudfs.writer answers from the hook the daemon installs
+	// (SetLastWriter, over the change record); without one it does not
+	// exist, with one it is what the hook says for that inode.
+	if _, err := getxattr(target, "user.cloudfs.writer", buf); err == nil {
+		t.Fatal("writer xattr exists without a hook")
+	}
+	at, err := e.fs.StatPath(context.Background(), "/state.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.fs.SetLastWriter(func(_ context.Context, ino uint64) (string, bool) {
+		if ino == at.Ino {
+			return "mcp 0123456789abcdef", true
+		}
+		return "", false
+	})
+	n, err = getxattr(target, "user.cloudfs.writer", buf)
+	if err != nil || string(buf[:n]) != "mcp 0123456789abcdef" {
+		t.Fatalf("writer xattr = %q, %v", buf[:n], err)
+	}
 }
 
 func TestMountStatfsReportsCacheBudget(t *testing.T) {
