@@ -43,7 +43,8 @@ shell 命令验证。真实内核路径能暴露单元测试发现不了的 FUSE
 
 ```
 cmd/cloudfs ── fusefs (内核) ─┐
-            └─ mcpsrv (agent) ┴─→ vfs ─→ meta / cache / journal / upload ─→ provider ─→ httpx ─→ net/{proxy,ratelimit,retry}
+            ├─ mcpsrv (agent) ┴─→ vfs ─→ meta / cache / journal / upload ─→ provider ─→ httpx ─→ net/{proxy,ratelimit,retry}
+            └─ hooks (agent 平台 hook) ─→ control (Unix socket) ─→ agent.db（会话 / changes / read_heat）
 ```
 
 - **`internal/vfs` 是文件系统核心**，`fusefs` 与 `mcpsrv` 都是它的薄适配器。任何关于缓存、
@@ -86,6 +87,10 @@ cmd/cloudfs ── fusefs (内核) ─┐
   只能用 `meta.SetRemoteVersion` 记远端版本，不能把读到的整行旧值写回。
 - 一致性模式 `writeback`（默认，日志提交即返回）/ `strict`（远端上传完成才返回）/ `readonly`
   （`EROFS`）按挂载子树配置，判断都在 vfs。
+- **vfs 的回调注入点只能由 daemon 设置**（`SetReadObserver`、`WatchChanges` 的消费者、invalidate hook）。vfs 自身不做任何
+  agent 判断，读热度 / 变更记录 / 触发器都是 daemon 装配的消费者；mcpsrv、control、hooks 都不得直接往 vfs 挂回调。
+- **finding 不存在直到有失败的测试**：修 bug 先写在当前树上失败的用例再改代码；perf 类回归用 `test/fakeprovider` 的
+  调用计数断言，不用墙钟。
 - 没有引入 rclone 依赖（会拉入数百个包）；国外网盘按同一 `Provider` 接口自研，共享层已就位。
 
 ## 驱动现状与 `UNVERIFIED` 约定

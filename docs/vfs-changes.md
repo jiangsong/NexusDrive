@@ -48,3 +48,14 @@
 MCP 已接入注册/取消/断连清理、通知合并和权限检查，只通知已授权的订阅 URI，不把原始
 事件直接广播给客户端。每个 MCP 服务只使用一个事件流，协议层另有资源/会话/流数量上限。
 大量订阅和真实 FUSE/网盘长期运行尚未验收；直接绕过 VFS 改元数据库不在此事件流承诺中。
+
+## `changes` 表：内存事件 vs 持久事实（T-51，2026-09-16）
+
+`vfs.Change` 是内存事件：64 条缓冲，溢出坍缩成一条 `KindRescan`，进程退出即消失。`internal/agent` 的 `ChangeRecorder`
+（daemon 装配的第五个 `WatchChanges` 消费者，200 ms / 128 条攒批，只在 owner 进程跑）把它落进 agent.db 的 `changes` 表：
+`(id, ts, path, kind, from, origin, session_id?, principal?, reliable)`。`origin` 来自 `WithOrigin` 打的标（`kernel` / `mcp` /
+`control` / `webdav`），`session_id` / `principal` 来自 mcpsrv session middleware 的 `WithActor`。收到 `KindRescan` 时记一行并把
+**下一行**标 `reliable = 0`——含义是"这行之前可能有遗漏"，`pull_events` 与 hooks 注入都据此提示"可能有遗漏"。
+`stat.last_writer`、`history`、`pull_events`、hooks 的"自上一轮谁改了什么"、控制台的变更标签都只读这张表；`mcp.session.retain`
+（默认 30 天）到期后由 `RunChangeRetention` 清理。
+

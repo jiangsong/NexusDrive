@@ -412,6 +412,12 @@ F5–F10 属二期。
 （`openForm` / `openPanel` / `showPanel` / `confirmDelete`、`moreRow` + `paged.js`、i18n 两表、零 import 模块进
 `web/` 根与 `web/_tests/*.test.mjs`、文本按文本插入、破坏性动作键入确认 + `confirm: true`）。
 
+**2026-09-17 核对与两条修正**：(1) 控制台此前没有 `#/settings` 屏，而 G3 / G6-4 / G7-3 / G8-3 / G9-1 都假设它存在；
+控制面又没有任何写配置的路由（配置只在 YAML 定义——"浏览器不能定义在本机执行的东西"）。决定新建**只读**
+`#/settings` 屏（`GET /settings` 白名单视图：展示生效值 + 每段可复制的 YAML 片段），下面凡写"`#/settings` 加 X 输入"
+的条目一律读作"`#/settings` 展示 X 与其 YAML 片段"。(2) 检查器没有 tab 机制，G5-2 的"历史"标签做成检查器里的"历史"
+按钮 + `openPanel` 分页浮层。
+
 **G1 —— 运行时指引卡（T-46 · P0）**
 
 - [x] **G1-1**（2026-09-16，`connect_panel.js` `guidanceCard`；prompt 名以文字列出，未做逐个复制）`#/agents` 接入面板加"运行时指引"卡：`GET /agent/prompt?kind=instructions` 的文本（只读、可复制）、token 估算、四个 prompt 名（`onboard` / `search-this-tree` / `write-safely` / `finish`）各带"复制"。
@@ -425,8 +431,12 @@ F5–F10 属二期。
 
 **G3 —— 设置屏 MCP 段（T-47 · P0）**
 
-- [ ] **G3-1** `#/settings` MCP 段加 `max_tokens`（数字输入，0 = 关闭）与提示"一次 `read_text` 上限约 N token"；`install.transport` 下拉（auto / stdio / http）。
-- [ ] **G3-2** `ui_settings_test.go` 断言两个字段经既有配置变更库写入、非法值被拒。
+- [ ] **G3-1** 只读 `#/settings` 屏（`router.js` + `navItems` + `screens/settings.js` + 零 import `settings_view.js`）：MCP 段展示
+  `max_tokens`（0 = 关闭）与提示"一次 `read_text` 上限约 N token"、`install.transport`、`allow`、`read_only`；会话段展示
+  `idle / retain / retain_blobs / preimage_files / max_preimage_bytes`；每段 `pre.snippet` YAML + `copyBtn`；页头一句"配置只在
+  YAML 文件里改，改后重启"。
+- [ ] **G3-2** `ui_settings_test.go`：路由与导航已注册、屏内无 `api.post`、无凭据输入、键存在；`_tests/settings_view.test.mjs`
+  覆盖 YAML 片段渲染；Go 侧 `GET /settings` 白名单视图不含任何 `config.IsSecretField` 字段、`POST` → 405。
 
 **G4 —— 可逆性与回滚预览（T-48 · P0）**
 
@@ -436,7 +446,7 @@ F5–F10 属二期。
 **G5 —— 来源、历史与变更（T-51、T-52 · P1）**
 
 - [ ] **G5-1** 检查器加"最近修改：来源 · 主体 · 时间"一行（`last_writer`，`console` / `webdav` / `kernel` / `mcp` 四种来源各有图标 + 文字）。
-- [ ] **G5-2** 检查器"历史"标签：`GET /changes?path=` 分页，列 时间 / 种类 / 来源 / 主体 / 会话（可点开会话详情）/ 可逆性；`reliable = 0` 行带"可能有遗漏"标签。
+- [ ] **G5-2** 检查器"历史"按钮 → `openPanel` 分页浮层（见上方修正 (2)）：`GET /changes?path=&cursor=`，列 时间 / 种类 / 来源 / 主体 / 会话（可点开会话详情）/ 可逆性；`reliable = 0` 行带"可能有遗漏"标签。
 - [ ] **G5-3** `#/agents` 审计标签加来源列；新"变更"标签：`GET /changes?prefix=&since=` 分页 + 前缀过滤 + SSE `change` 刷新（未翻页、无过滤时）。
 - [ ] **G5-4** `#/agents` 会话详情浮层：内核写标"推断属于本会话"（展示层推断，不入库）。
 - [ ] **G5-5** i18n 键 `changes.*` / `origin.*`；`ui_agents_test.go`、`ui_inspector_test.go`：变更表跟随 `next_cursor`、来源图标有文字、`reliable = 0` 有文字标签。
@@ -446,25 +456,25 @@ F5–F10 属二期。
 - [ ] **G6-1** `web/heat_plot.js`（零 import 纯函数）：输入 `[]{x, y, kind, path}` 与尺寸，输出 SVG 字符串；象限边界取中位数，半径按读取数对数缩放，hover 显示路径与数字，点击派发 `open-inspector`；`_tests/heat_plot.test.mjs`（象限划分、对数半径、空数据、单点）。
 - [~] **G6-2**（2026-09-16：`screens/agents_heat.js` 表格 + 象限筛选，读 `GET /agent/heat`；散点图 G6-1 与建议浮层 G6-3 未做）`#/agents` 新"热度"标签：`GET /agent/heat?prefix=&days=&by=path` 驱动散点；hot-but-stale 清单（右上象限）每行"打开检查器"与"生成建议"；`days` 分段 7 / 30 / 90。
 - [ ] **G6-3** 建议浮层（`openPanel`）：`GET /agent/suggestions?prefix=` 的草案列表（pin / index / 热但陈旧 / 可解除 pin），每条"采用"按钮走既有 `/cache/pins`、`/index/rules` 带确认路由，浮层本身不写规则。
-- [ ] **G6-4** 主窗口文件列表热度点（30 天读取数，hover 显示 agent / kernel / console 拆分）；检查器"30 天读取"一行；`#/settings` 加 `heat.enabled`、`retention_days`。
+- [ ] **G6-4** 主窗口文件列表热度点（30 天读取数，hover 显示 agent / kernel / console 拆分）；检查器"30 天读取"一行；`#/settings` 热度段展示 `enabled`（`retention_days` 待配置键落地后再展示）。
 - [~] **G6-5**（2026-09-16：`heat.*` 键、`ui_agents_heat_test.go` 的路由与标签断言；建议浮层部分未做）i18n 键 `heat.*`；`ui_agents_heat_test.go`：热度标签调用 `/agent/heat`、建议浮层调用 `/agent/suggestions` 且不调用写路由、采用按钮带 `confirm: true`、响应中的路径按文本插入；浏览器冒烟：人为拨旧 mtime 后 hot-but-stale 清单出现该文件。
 
 **G7 —— Hooks（T-54 · P1）**
 
 - [ ] **G7-1** 接入面板"Hooks"卡：`GET /agent/hooks` 的每平台安装状态（已安装 / 未安装 / 未验证）、`context` 档位、最近一次 hook 调用时间、要执行的安装 / 卸载命令（`copyBtn`，**不**提供"在浏览器里安装"按钮）。
 - [ ] **G7-2** 会话列表 principal 列显示 `hook:claude` 并带图标；会话详情显示 `reads` 计数与 `last_change_seen`。
-- [ ] **G7-3** `#/settings` hooks 段：`context`（off / minimal / full）、`changed_max`、`memory_head_lines`。
+- [ ] **G7-3** `#/settings` hooks 段展示 `context`（off / minimal / full）与 YAML 片段；`changed_max`、`memory_head_lines` 在配置键落地前显示为内置常量 20 / 30。
 - [ ] **G7-4** i18n 键 `hooks.*`；`ui_agents_test.go`：Hooks 卡调用 `/agent/hooks`、命令按文本插入、无任何 POST 到 `/agent/hooks`；`TestHooksRouteNeverWritesUserConfig`。
 
 **G8 —— 渲染屏与分享（T-55 · P2）**
 
 - [ ] **G8-1** `router.js` 加 `#/fs/<path>`（不进 `navItems`）；`screens/fs.js`：`GET /fs/render?path=` 渲染（Markdown / 代码 / 图片 / PDF / 其它下载），顶部"最近修改"与"30 天读取"两行，按钮"复制内链"、"创建分享"（`confirmDelete` 键入文件名 → `POST /share` 带 `confirm: true`）、"历史"标签复用 G5-2。
 - [ ] **G8-2** 检查器加"复制内链"与"创建分享"两个按钮（同一入口）；分享成功后 toast 附链接与过期时间；驱动 `Caps.Share = false` 时按钮禁用并说明。
-- [ ] **G8-3** `#/settings` share 段（`console_links`、`render.enabled`、`render.token_ttl`）；渲染页 token 不进 `store.js`。
+- [ ] **G8-3** `#/settings` share 段展示（`console_links`、`render.enabled`、`render.token_ttl`）；渲染页 token 不进 `store.js`。
 - [ ] **G8-4** i18n 键 `share.*` / `fs.*`；`ui_fs_test.go`：渲染内容来自 `/fs/render` 且不含 `<script>`、创建分享前 `confirmDelete`、`Caps.Share = false` 禁用；`_tests/store.test.mjs` 断言 store 键集合不含 `render_token`。
 
 **G9 —— 多人记忆（T-56 · P2）**
 
-- [ ] **G9-1** `#/agents` 记忆标签按 owner 分组（v2 布局），v1 布局时不分组；`#/settings` memory 段 `layout` 只读显示 + "迁移到 v2"按钮（`confirmDelete` 键入 `migrate` → `POST /memory/migrate` 带 `confirm: true`）。
+- [ ] **G9-1** `#/agents` 记忆标签按 owner 分组（v2 布局），v1 布局时不分组；`#/settings` memory 段 `layout` 只读显示；"迁移到 v2"按钮放在记忆标签（`confirmDelete` 键入 `migrate` → `POST /memory/migrate` 带 `confirm: true`）——迁移是带确认的动作路由，不是写配置。
 - [ ] **G9-2** 冲突合并浮层：`memory_merge` 结果的三方 diff（零 import `three_way_view.js`）与"采用合并结果"（调 `memory_put` 带 `expected_version` 与 `remote_version`）。
 - [ ] **G9-3** i18n 键 `memory.owner.*` / `memory.merge.*`；`ui_agents_memory_test.go`：分组渲染、迁移带 `confirm: true`、采用按钮带两个版本；`_tests/three_way_view.test.mjs`。
