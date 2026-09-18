@@ -1,4 +1,4 @@
-// Package config parses and validates ~/.config/cloudfs/config.yaml. The
+// Package config parses and validates ~/.cloudfs/config.yaml. The
 // schema mirrors docs/DESIGN.md §6.
 package config
 
@@ -688,7 +688,11 @@ func (h *Hooks) validate() error {
 func Default() Config {
 	return Config{
 		Cache: Cache{
-			Dir:          "~/.cache/cloudfs",
+			// Empty, not a literal path: BlockCacheDir resolves it beside
+			// the configuration file, so a config carried to another
+			// directory takes its cache with it instead of reaching back
+			// into the default root.
+			Dir:          "",
 			MaxSize:      50 << 30,
 			MinFree:      5 << 30,
 			BlockSize:    4 << 20,
@@ -696,7 +700,7 @@ func Default() Config {
 			MaxAge:       30 * 24 * time.Hour,
 		},
 		Journal: Journal{Durability: "power"},
-		Control: Control{Socket: "~/.cache/cloudfs/control.sock", UI: true},
+		Control: Control{Socket: DefaultRoot + "/control.sock", UI: true},
 		WebDAV:  WebDAV{Prefix: "/dav", Root: "/", Strategy: "proxy"},
 		Export:  DefaultExport(),
 	}

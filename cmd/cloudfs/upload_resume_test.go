@@ -66,7 +66,7 @@ func TestUploadResumeCLIUsesOwnerOrQueuesOfflineWithoutUploads(t *testing.T) {
 			if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.State != journal.StatePending {
 				t.Fatalf("response: %s %v", out.String(), err)
 			}
-			ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+			ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 			if err != nil {
 				t.Fatal(err)
 			}

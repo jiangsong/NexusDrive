@@ -37,7 +37,7 @@ func TestIndexDisabledCreatesNoIndexDB(t *testing.T) {
 }
 
 func TestIndexEnabledRunsTheIndexerOnlyInTheOwner(t *testing.T) {
-	cfg, cacheDir := writeConfig(t, baseConfig+"index:\n  enabled: true\n")
+	cfg, _ := writeConfig(t, baseConfig+"index:\n  enabled: true\n")
 	if !cfg.Index.Enabled {
 		t.Fatal("index.enabled was not read")
 	}
@@ -54,7 +54,7 @@ func TestIndexEnabledRunsTheIndexerOnlyInTheOwner(t *testing.T) {
 	if !owner.Index.Progress().Running {
 		t.Fatal("the owner's worker was not started")
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "index.db")); err != nil {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cfg.SourcePath), "index.db")); err != nil {
 		t.Fatalf("index.db: %v", err)
 	}
 	other, err := Open(ctx, Options{Config: cfg, Version: "status"})

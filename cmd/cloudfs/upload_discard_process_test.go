@@ -122,12 +122,12 @@ func TestUploadDiscardProductionProcessKillAndRecovery(t *testing.T) {
 		}
 	}
 	stopOwner := startOwner()
-	ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+	ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ro.Close()
-	store, err := meta.Open(filepath.Join(cfg.Cache.Dir, "meta.db"), meta.Options{NoIndexMaintenance: true})
+	store, err := meta.Open(filepath.Join(cfg.StateDir(), "meta.db"), meta.Options{NoIndexMaintenance: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestUploadDiscardProductionProcessKillAndRecovery(t *testing.T) {
 		t.Fatalf("payload survived cleanup: %v", err)
 	}
 	stopRestarted()
-	store, err = meta.Open(filepath.Join(cfg.Cache.Dir, "meta.db"), meta.Options{NoIndexMaintenance: true})
+	store, err = meta.Open(filepath.Join(cfg.StateDir(), "meta.db"), meta.Options{NoIndexMaintenance: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestUploadDiscardProductionProcessKillAndRecovery(t *testing.T) {
 	if _, err := store.Get(ctx, u.Ino); !errors.Is(err, meta.ErrNotFound) {
 		t.Fatalf("startup republished deleted node: %v", err)
 	}
-	c, err := cache.New(cache.Options{Dir: filepath.Join(cfg.Cache.Dir, "blocks"), BlockSize: int64(cfg.Cache.BlockSize)})
+	c, err := cache.New(cache.Options{Dir: filepath.Join(cfg.BlockCacheDir(), "blocks"), BlockSize: int64(cfg.Cache.BlockSize)})
 	if err != nil {
 		t.Fatal(err)
 	}

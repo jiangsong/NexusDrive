@@ -23,7 +23,7 @@ URL path。省略 `webdav.http` 即关闭服务。
 
 ```sh
 export CLOUDFS_WEBDAV_TOKEN="replace-with-a-long-random-token"
-cloudfs mount --config ~/.config/cloudfs/config.yaml
+cloudfs mount --config ~/.cloudfs/config.yaml
 ```
 
 客户端可用 bearer token，或使用 Basic Auth 用户名 `cloudfs`、密码为同一个 token。

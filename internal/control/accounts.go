@@ -46,6 +46,13 @@ type AccountType struct {
 	BrowserAuth bool `json:"browser_auth,omitempty"`
 	// Credentials is what `config auth` will ask for, in plain words.
 	Credentials string `json:"credentials,omitempty"`
+	// AppSecret says the backend authorizes as a confidential OAuth client,
+	// so its own registration's secret is part of adding the account.
+	AppSecret bool `json:"app_secret,omitempty"`
+	// Setup is the walkthrough for a backend whose OAuth application the
+	// person has to register themselves, in order. Empty for every backend
+	// the daemon can authorize with a shipped registration.
+	Setup []string `json:"setup,omitempty"`
 }
 
 // AccountSummary is a configured remote, without any credential value.
@@ -104,7 +111,7 @@ func (c *Collector) accountTypes(lang i18n.Lang) []AccountType {
 	types := provider.DescribedTypes()
 	out := make([]AccountType, 0, len(types))
 	for _, typ := range types {
-		entry := AccountType{Type: typ, Credentials: credentialSummary(lang, typ)}
+		entry := AccountType{Type: typ, Credentials: credentialSummary(lang, typ), Setup: setupSteps(lang, typ)}
 		for _, f := range provider.Fields(typ) {
 			entry.Fields = append(entry.Fields, AccountField{
 				Name: f.Name, Prompt: i18n.FieldPrompt(lang, typ, f.Name, f.Prompt), Required: f.Required,
@@ -122,7 +129,10 @@ func (c *Collector) accountTypes(lang i18n.Lang) []AccountType {
 // thing a resumed setup needs to know.
 func hasStoredCredential(r config.Remote) bool {
 	for k, v := range r.Extra {
-		if !config.IsSecretField(k) {
+		// The application's own secret is not an authorization: a person can
+		// register an application and never sign in, and a setup that treated
+		// that as done would skip the only step still missing.
+		if !config.IsSecretField(k) || config.IsOAuthAppField(k) {
 			continue
 		}
 		if text, ok := v.(string); ok && text != "" {
@@ -130,6 +140,13 @@ func hasStoredCredential(r config.Remote) bool {
 		}
 	}
 	return false
+}
+
+// setupSteps renders a backend's registration walkthrough in lang, falling
+// back to what the driver wrote when the catalog has no translation — the
+// same rule the prompts and the credential note follow.
+func setupSteps(lang i18n.Lang, typ string) []string {
+	return i18n.CredentialSetup(lang, typ, provider.CredentialsFor(typ).Setup)
 }
 
 func credentialSummary(lang i18n.Lang, typ string) string {
@@ -156,9 +173,14 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	out := AccountsResponse{Types: s.collector.accountTypes(LangFrom(r))}
-	if s.auth != nil && s.auth.Supported != nil {
+	if s.auth != nil {
 		for i := range out.Types {
-			out.Types[i].BrowserAuth = s.auth.Supported(out.Types[i].Type)
+			if s.auth.Supported != nil {
+				out.Types[i].BrowserAuth = s.auth.Supported(out.Types[i].Type)
+			}
+			if s.auth.AppSecret != nil {
+				out.Types[i].AppSecret = s.auth.AppSecret(out.Types[i].Type)
+			}
 		}
 	}
 	if cfg := s.collector.ConfigView(); cfg != nil && cfg.SourcePath != "" {

@@ -3,9 +3,11 @@
 // runs the credential step in place — a daemon-driven browser/QR authorization
 // where the backend supports it, or the exact terminal command where the secret
 // cannot travel through a browser. Which backends support which is the API's
-// answer at runtime, not a list kept here. It never renders a field for a
-// credential secret: Quark's QR flow obtains its cookie in the daemon without
-// asking the page to collect it.
+// answer at runtime, not a list kept here. It never renders a field for an
+// account credential: Quark's QR flow obtains its cookie in the daemon without
+// asking the page to collect it. The authorization step asks for one thing —
+// the secret of an OAuth application the person registered themselves, without
+// which no login can start at all; see auth_step.js.
 import { api, ApiError } from '/ui/api.js';
 import { el, fill, toast, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
@@ -74,6 +76,12 @@ export async function openAddDrive(opts = {}) {
     const nameInput = el('input', { type: 'text', placeholder: t('add.name.ph'), autocomplete: 'off', spellcheck: 'false' });
     const fieldsHost = el('div', { style: 'display:grid;gap:10px;margin-top:6px' });
     const credNote = el('div', { class: 'dim', style: 'font-size:12px;margin-top:4px' });
+    // Backends whose OAuth application the person has to register themselves
+    // carry a walkthrough. Google Drive is the one that does: its scope is
+    // restricted, so no application ships with the binary, and two of the
+    // steps prevent failures that are otherwise silent — a callback the
+    // authorization server rejects, and a grant that expires after a week.
+    const setupNote = el('div', { style: 'font-size:12px;margin-top:4px' });
     const mountWrap = el('label', { style: 'display:flex;align-items:center;gap:9px;font-size:13px' });
     const mountChk = el('input', { type: 'checkbox' });
     // A pool exists: the new drive joins it by default, and a prefix of
@@ -108,6 +116,12 @@ export async function openAddDrive(opts = {}) {
           f.prompt ? el('div', { class: 'dim', style: 'font-size:11.5px;margin-top:3px' }, f.prompt) : null);
       }));
       credNote.textContent = tp.credentials ? t('add.credstep.value', tp.credentials) : '';
+      const steps = tp.setup || [];
+      fill(setupNote, ...(steps.length
+        ? [el('div', { style: 'font-weight:600;margin-bottom:4px' }, t('add.setup.title')),
+           el('ol', { class: 'dim', style: 'margin:0;padding-left:18px;line-height:1.6' },
+             ...steps.map((step) => el('li', {}, step)))]
+        : []));
       if (!prefixInput.dataset.touched) prefixInput.value = '/' + (nameInput.value || tp.type);
     }
     typeSel.addEventListener('change', refreshType);
@@ -127,6 +141,7 @@ export async function openAddDrive(opts = {}) {
         labeled(t('add.type'), typeSel),
         labeled(t('add.name'), nameInput),
         fieldsHost,
+        setupNote,
         credNote,
         poolNames.length ? poolWrap : null,
         poolNames.length ? poolNote : null,

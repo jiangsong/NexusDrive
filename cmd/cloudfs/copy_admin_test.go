@@ -89,7 +89,7 @@ func TestCopyAdminCLIOnlineAndOfflineIsolation(t *testing.T) {
 			if err := runCopies(ctx, []string{"retry", id, "--config", p, "--json"}, &out); err != nil {
 				t.Fatal(err)
 			}
-			ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+			ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestCopyAdminCLIOnlineAndOfflineIsolation(t *testing.T) {
 			if _, err := ro.GetCopy(ctx, id); !errors.Is(err, journal.ErrNotFound) {
 				t.Fatalf("cleanup retained history: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(cfg.Cache.Dir, "journal", "copies", id+".part")); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(cfg.StateDir(), "journal", "copies", id+".part")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("cleanup retained private payload: %v", err)
 			}
 		})

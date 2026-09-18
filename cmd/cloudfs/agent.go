@@ -85,7 +85,7 @@ func runAudit(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if !online {
-		view, err := openAgentOffline(cfg.Cache.Dir)
+		view, err := openAgentOffline(cfg.StateDir())
 		if errors.Is(err, os.ErrNotExist) {
 			return printAudit(out, control.AuditResponse{Rows: []control.AuditView{}}, asJSON)
 		}
@@ -220,7 +220,7 @@ func runSessions(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		if !online {
-			view, err := openAgentOffline(cfg.Cache.Dir)
+			view, err := openAgentOffline(cfg.StateDir())
 			if err != nil {
 				return err
 			}
@@ -237,7 +237,7 @@ func runSessions(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if !online {
-		view, err := openAgentOffline(cfg.Cache.Dir)
+		view, err := openAgentOffline(cfg.StateDir())
 		if errors.Is(err, os.ErrNotExist) {
 			return printSessions(out, control.SessionsResponse{Sessions: []control.SessionView{}}, asJSON)
 		}

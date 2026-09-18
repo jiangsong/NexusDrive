@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,9 +37,7 @@ func TestCopyProductionProcessKillAndDaemonResume(t *testing.T) {
 	if out, err := install.CombinedOutput(); err != nil || !bytes.Contains(out, []byte("mcpServers")) {
 		t.Fatalf("registration initialized unusable provider: %v\n%s", err, out)
 	}
-	if _, err := os.Stat(installCfg.Cache.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("registration created daemon storage: %v", err)
-	}
+	assertNoDaemonStorage(t, installCfg, "registration")
 	body := bytes.Repeat([]byte("real-cli-checkpoint!"), 120000)
 	blocked := make(chan struct{}, 1)
 	var resumed atomic.Bool
@@ -148,7 +145,7 @@ func TestCopyProductionProcessKillAndDaemonResume(t *testing.T) {
 	if err := <-copyDone; err == nil {
 		t.Fatal("cp was not killed")
 	}
-	ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+	ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 	if err != nil {
 		t.Fatal(err)
 	}

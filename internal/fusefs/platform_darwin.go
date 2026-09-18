@@ -5,12 +5,18 @@ package fusefs
 import (
 	"fmt"
 	"os"
+	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // platformName identifies the FUSE implementation in use.
 const platformName = "macFUSE"
+
+// errNoAttr is "no such extended attribute". macOS gives it its own number;
+// Linux spells the same fact ENODATA, and a tool that checks for the wrong one
+// reads a missing attribute as an unexpected error.
+const errNoAttr = syscall.ENOATTR
 
 // applyPlatformOptions adds the macOS-specific mount options. macFUSE caps
 // max_write far below Linux, and Finder wants a volume name.
@@ -24,7 +30,13 @@ func applyPlatformOptions(o *fuse.MountOptions) {
 		// Keep Finder from writing .DS_Store into every remote directory,
 		// which would create a write per browsed folder.
 		"noappledouble",
-		"noapplexattr",
+		// Deliberately not "noapplexattr": it answers every com.apple.*
+		// extended-attribute call with EPERM, and copyfile(3) — which is
+		// what the Finder, cp -p and ditto all copy with — stops on EPERM
+		// and reports "you do not have permission to access some of these
+		// items" for the whole copy. The filesystem stores no extended
+		// attributes, and the way to say that is ENOTSUP, which copyfile
+		// skips over; see the node's Setxattr.
 		// UNVERIFIED: macFUSE 4.x honours iosize; Fuse-T ignores it.
 		"iosize=1048576",
 	)

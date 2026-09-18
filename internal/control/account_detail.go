@@ -26,9 +26,16 @@ type AccountDetail struct {
 	QPS           *config.QPS       `json:"qps,omitempty"`
 	UploadWorkers int               `json:"upload_workers,omitempty"`
 	Fields        map[string]string `json:"fields"`
-	// HasCredentials says whether any credential is configured, never which
-	// or what.
+	// HasCredentials says whether the account is authorized — whether a
+	// credential of its own is configured, never which or what. The OAuth
+	// application's secret is deliberately not one: it identifies the
+	// application, and an account that has one has still never signed in.
 	HasCredentials bool `json:"has_credentials"`
+	// AppSecret says this backend authorizes as a confidential OAuth client,
+	// so the person's own application secret is part of starting a login.
+	AppSecret bool `json:"app_secret,omitempty"`
+	// HasAppSecret says one is already stored, never what it is.
+	HasAppSecret bool `json:"has_app_secret,omitempty"`
 	// BrowserAuth says the daemon can drive authorization or reauthorization
 	// for this provider without accepting a credential field from the page.
 	BrowserAuth bool           `json:"browser_auth,omitempty"`
@@ -134,11 +141,19 @@ func (s *Server) accountDetail(name string) (AccountDetail, bool) {
 	if s.auth != nil && s.auth.Supported != nil {
 		d.BrowserAuth = s.auth.Supported(r.Type)
 	}
+	if s.auth != nil && s.auth.AppSecret != nil {
+		d.AppSecret = s.auth.AppSecret(r.Type)
+	}
 	for k, v := range r.Extra {
 		// A legacy inline secret can still sit in Extra before migration;
 		// filter, do not assume none is there.
 		if config.IsSecretField(k) {
-			if text, ok := v.(string); ok && text != "" {
+			text, ok := v.(string)
+			switch {
+			case !ok || text == "":
+			case config.IsOAuthAppField(k):
+				d.HasAppSecret = true
+			default:
 				d.HasCredentials = true
 			}
 			continue

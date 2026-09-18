@@ -146,7 +146,20 @@ type PoolStatusResponse struct {
 	// Candidates lists remotes that could become members: ordinary remotes
 	// not yet in any pool.
 	Candidates []string `json:"candidates"`
+	// Mount is where a pool created from this page should be mounted: the
+	// mount the configuration already declares, so a second pool joins the
+	// folder the person already opens, or the default folder when there is
+	// none. It exists because a pool without a mount is a pool nobody can
+	// open — the daemon builds its filesystem from the mounts in the file,
+	// and a console that created one without asking left the person with a
+	// restarted daemon and an empty filesystem.
+	Mount string `json:"mount,omitempty"`
 }
+
+// DefaultMountPath is where the console offers to mount a first pool. It is
+// the same folder the guided setup proposes: two screens that suggest
+// different homes for the same drives would each be wrong half the time.
+const DefaultMountPath = "~/CloudFS"
 
 // PoolMemberRequest is POST /pool/members and the drain/state actions.
 type PoolMemberRequest struct {
@@ -380,6 +393,10 @@ func (s *Server) poolStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if cfg := s.collector.ConfigView(); cfg != nil && cfg.SourcePath != "" {
 		out.Configurable = true
+		out.Mount = DefaultMountPath
+		if len(cfg.Mounts) > 0 {
+			out.Mount = cfg.Mounts[0].Path
+		}
 		markPendingPoolMembers(out.Pools, cfg)
 		inPool := map[string]bool{}
 		for _, p := range cfg.Pools {

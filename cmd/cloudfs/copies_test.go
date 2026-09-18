@@ -58,11 +58,11 @@ func TestCopiesCLIReadsActiveOwnerWithoutRecovering(t *testing.T) {
 	if err != nil || row.State != journal.StateUploading {
 		t.Fatalf("inspection recovered live upload: %+v %v", row, err)
 	}
-	b, err := os.ReadFile(filepath.Join(cfg.Cache.Dir, "journal", "copies", c.Job().ID+".part"))
+	b, err := os.ReadFile(filepath.Join(cfg.StateDir(), "journal", "copies", c.Job().ID+".part"))
 	if err != nil || string(b) != "prefixxx" {
 		t.Fatalf("inspection truncated live tail: %q %v", b, err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Cache.Dir, "meta.db")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cfg.StateDir(), "meta.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("inspection constructed metadata stack")
 	}
 }
@@ -81,7 +81,5 @@ func TestCopiesCLIEmptyAndInvalidRequestsCreateNothing(t *testing.T) {
 			t.Fatalf("accepted %v", args)
 		}
 	}
-	if _, err := os.Stat(cfg.Cache.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("read-only command created cache")
-	}
+	assertNoDaemonStorage(t, cfg, "read-only command")
 }

@@ -20,7 +20,7 @@ import (
 func TestHistoryAndHeatCLIReadTheStoreOfflineAndOnline(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
 	ctx := context.Background()
-	seed, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	seed, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestHistoryAndHeatCLIReadTheStoreOfflineAndOnline(t *testing.T) {
 	seed.Close()
 	for _, online := range []bool{false, true} {
 		if online {
-			st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+			st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 			if err != nil {
 				t.Fatal(err)
 			}

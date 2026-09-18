@@ -21,15 +21,16 @@
 
 ## 快速开始
 
-第一次使用，跑 `./cloudfs setup`：它会写一份最小配置、在本机开一个控制台，
-在浏览器里一步步加网盘、建池、挂载。完整走法见 [从零开始](docs/getting-started.md)，
+第一次使用，直接跑 `./cloudfs`（不带任何子命令）：没有配置时它会写一份最小配置、在本机
+开一个控制台、打开浏览器，让你一步步加网盘、建池、挂载；已经配好了就直接挂载并打开面板。
+`./cloudfs setup` 是同一个流程的显式别名。完整走法见 [从零开始](docs/getting-started.md)，
 文档索引见 [docs/](docs/README.md)。下面是手写配置的路子。
 
 ```sh
 go build -o cloudfs ./cmd/cloudfs
 
 # 1. 写配置（示例见下）
-mkdir -p ~/.config/cloudfs && $EDITOR ~/.config/cloudfs/config.yaml
+mkdir -p ~/.cloudfs && $EDITOR ~/.cloudfs/config.yaml
 ./cloudfs config check
 
 # 2. 检查环境
@@ -66,11 +67,14 @@ docker compose --profile mcp up --build
 
 ## 配置
 
-`~/.config/cloudfs/config.yaml`：
+`~/.cloudfs/config.yaml`。配置、`meta.db`、日志（journal）、agent 数据库、凭据回退文件
+和控制 socket 都在 `~/.cloudfs/` 下；只有块缓存可以改到别的盘（`cache.dir`，默认
+`~/.cloudfs/cache`）。旧版的 `~/.config/cloudfs` + `~/.cache/cloudfs` 布局会在第一次启动时
+自动搬到新位置，块缓存留在原地继续用。
 
 ```yaml
 cache:
-  dir: ~/.cache/cloudfs
+  dir: ~/.cloudfs/cache
   max_size: 200GiB      # 缓存内容预算：块与完整文件
   min_free: 10GiB       # 缓存/日志写入的空间准入门槛，详见缓存管理文档
   block_size: 4MiB
@@ -243,7 +247,7 @@ webdav:
 
 ### 凭据与控制面
 
-控制面支持 `control.socket`（默认 `~/.cache/cloudfs/control.sock`），权限为 0600；
+控制面支持 `control.socket`（默认 `~/.cloudfs/control.sock`），权限为 0600；
 `status` 优先读取运行中服务的状态，服务未运行时只读检查本地上传日志。
 `control.metrics` 可同时启用，仅允许绑定回环地址。
 

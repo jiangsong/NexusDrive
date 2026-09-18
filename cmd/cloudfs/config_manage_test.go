@@ -93,9 +93,7 @@ func TestConfigAuthImportsAndChecksWithoutMountOrCache(t *testing.T) {
 		t.Fatal("inline credential remained")
 	}
 	cfg, _ := config.Load(p)
-	if _, err := os.Stat(cfg.Cache.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("check created cache: %v", err)
-	}
+	assertNoDaemonStorage(t, cfg, "check")
 	out.Reset()
 	if err := runConfig(context.Background(), []string{"list", "--json", "--config", p}, c); err != nil {
 		t.Fatal(err)

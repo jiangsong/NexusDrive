@@ -45,7 +45,7 @@ func runHistory(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if !online {
-		st, err := agent.OpenReadOnly(agentDirOf(cfg.Cache.Dir))
+		st, err := agent.OpenReadOnly(agentDirOf(cfg.StateDir()))
 		if errors.Is(err, os.ErrNotExist) {
 			result = control.ChangesResponse{Path: p, Changes: []agent.Change{}}
 		} else if err != nil {
@@ -130,7 +130,7 @@ func runHeat(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if !online {
-		st, err := agent.OpenReadOnly(agentDirOf(cfg.Cache.Dir))
+		st, err := agent.OpenReadOnly(agentDirOf(cfg.StateDir()))
 		if errors.Is(err, os.ErrNotExist) {
 			result = control.HeatResponse{Path: prefix, Days: days, Entries: []control.HeatEntry{}}
 		} else if err != nil {

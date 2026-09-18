@@ -4,9 +4,12 @@
 // serving the layout it started with until it restarts, which every reply
 // says and this panel repeats once, at the bottom, rather than per field.
 //
-// It never renders a credential field. Passwords, cookies and tokens are
-// collected by the daemon itself or typed in a terminal; the browser is not
-// on that path, and `rejectSecretFields` refuses them server-side anyway.
+// It never renders an account credential field. Passwords, cookies and tokens
+// are collected by the daemon itself or typed in a terminal; the browser is
+// not on that path, and `rejectSecretFields` refuses them server-side anyway.
+// The one secret-shaped value the authorization step can ask for — the secret
+// of an OAuth application the person registered themselves — belongs to
+// auth_step.js, which owns that exception and explains it.
 import { api, ApiError } from '/ui/api.js';
 import { el, fill, toast, confirmDelete, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
@@ -125,7 +128,13 @@ export async function openConnection(name, opts = {}) {
       el('div', { class: 'row', style: 'align-items:baseline;gap:10px' },
         el('span', { class: 'dim', style: 'font-size:12px' }, detail.type),
         el('span', { class: 'dim', style: 'font-size:12px' }, detail.live ? t('conn.live') : t('conn.offline')),
-        el('span', { class: 'dim', style: 'font-size:12px' }, detail.has_credentials ? t('conn.hascreds') : t('conn.nocreds'))),
+        el('span', { class: 'dim', style: 'font-size:12px' }, detail.has_credentials ? t('conn.hascreds') : t('conn.nocreds')),
+        // An account that authorizes as the person's own OAuth application
+        // cannot start a login without that application's secret, and the
+        // authorization button gives no hint which of the two is missing.
+        detail.app_secret
+          ? el('span', { class: 'dim', style: 'font-size:12px' }, detail.has_app_secret ? t('conn.appsecret.set') : t('conn.appsecret.none'))
+          : null),
 
       detail.browser_auth ? section(t('conn.authorization'), authBtn, authHost) : null,
 

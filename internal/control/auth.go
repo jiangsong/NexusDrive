@@ -39,6 +39,17 @@ type AuthStarter struct {
 	// authorizations, and this package sits below it. Leaving it nil means no
 	// application is shipped, which is exactly today's behaviour.
 	FillClientID func(r *config.Remote)
+	// AppSecret reports whether authorizing this backend needs an OAuth
+	// application secret the person supplies. It gates the one route through
+	// which a secret-shaped value may enter from a page, so the answer comes
+	// from the layer that performs authorizations rather than from a list
+	// kept here.
+	AppSecret func(remoteType string) bool
+	// AppSecretMissing classifies a start failure as "the application secret
+	// has not been stored yet". Setup failures are otherwise kept server-side
+	// because they can name a secrets path or proxy internals; this one is
+	// the person's own next action, so it is the one that is said out loud.
+	AppSecretMissing func(err error) bool
 }
 
 // authSession is one in-flight login. It is addressed by an unguessable id;
@@ -244,6 +255,12 @@ func (s *Server) authStart(w http.ResponseWriter, r *http.Request, name string) 
 	if startErr != nil {
 		cancel()
 		s.authReg.remove(id)
+		if s.auth.AppSecretMissing != nil && s.auth.AppSecretMissing(startErr) {
+			// Not a failure to report: a value the person has and the daemon
+			// does not. 428 is what the page branches on to collect it.
+			httpErrorT(w, r, http.StatusPreconditionRequired, "err.app_secret_required")
+			return
+		}
 		// The setup error can name a local secrets-file path or proxy
 		// internals (it comes from reading credentials / building the proxy
 		// before any URL is shown). Keep it server-side; the async path is
@@ -387,6 +404,11 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request, name, action
 			return
 		}
 		s.authQR(w, r, name)
+	case "app-secret":
+		if !allowMethod(w, r, http.MethodPost) {
+			return
+		}
+		s.authAppSecret(w, r, name)
 	default:
 		http.NotFound(w, r)
 	}

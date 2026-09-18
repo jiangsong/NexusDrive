@@ -104,6 +104,9 @@ func setupControlEndpoints(cfg *config.Config, listenOverride string) (socket, t
 func cmdSetup(ctx context.Context, args []string) error {
 	f := parseFlags(args)
 	path := f.str("config", defaultConfigPath())
+	if err := migrateLegacyLayout(path, os.Stdout); err != nil {
+		return err
+	}
 
 	switch stageFor(path) {
 	case setupWriteStarter:
@@ -113,7 +116,7 @@ func cmdSetup(ctx context.Context, args []string) error {
 		fmt.Printf("wrote a starter configuration at %s\n", path)
 	case setupAlreadyUsable:
 		if !f.bools["force"] {
-			fmt.Printf("%s already describes a mountable filesystem; run cloudfs mount\n", path)
+			fmt.Printf("%s already describes a mountable filesystem; run cloudfs to mount it\n", path)
 			return nil
 		}
 	}

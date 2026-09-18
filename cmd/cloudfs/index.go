@@ -154,7 +154,7 @@ func (c *indexCLI) call(ctx context.Context, method, target string, body, out an
 // when no index was ever built, which the callers turn into a sentence
 // about index.enabled rather than a stack of paths.
 func (c *indexCLI) offline() (*index.Store, error) {
-	st, err := index.OpenStoreReadOnly(c.cfg.Cache.Dir)
+	st, err := index.OpenStoreReadOnly(c.cfg.StateDir())
 	if errors.Is(err, os.ErrNotExist) {
 		if !c.cfg.Index.Enabled {
 			return nil, errIndexDisabled

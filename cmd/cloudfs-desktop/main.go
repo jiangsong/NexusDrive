@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", defaultConfigPath(), "config file (default ~/.config/cloudfs/config.yaml)")
+	configPath := flag.String("config", defaultConfigPath(), "config file (default ~/.cloudfs/config.yaml)")
 	flag.Parse()
 
 	// One window per user. If another shell holds the lock, ask it to come
@@ -39,7 +39,11 @@ func main() {
 	// page it then navigates to negotiates its own.
 	lang := i18n.FromEnv()
 
-	cfg, _ := config.Load(*configPath) // a missing config surfaces below as a launch error
+	// A missing configuration is a normal starting point, not a failure: the
+	// daemon this shell launches writes a starter file and serves the setup
+	// screen. Only a configuration that exists and does not parse is an
+	// error, and that one surfaces below as a launch error.
+	cfg, _ := config.Load(*configPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -94,9 +98,4 @@ func main() {
 	<-resolved
 }
 
-func defaultConfigPath() string {
-	if p := os.Getenv("CLOUDFS_CONFIG"); p != "" {
-		return p
-	}
-	return config.ExpandHome("~/.config/cloudfs/config.yaml")
-}
+func defaultConfigPath() string { return config.DefaultConfigPath() }

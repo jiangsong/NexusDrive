@@ -146,7 +146,16 @@ func (s *shell) launch(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot find the cloudfs binary next to this shell or on PATH: %w", err)
 	}
-	args := []string{"mount"}
+	// The no-argument front door, not "mount". `cloudfs mount` refuses to
+	// start when the configuration names nothing mountable, which is exactly
+	// the state a person is in the first time they open this window: the
+	// shell would show its "no daemon" placeholder and the setup screen it is
+	// supposed to lead to would be unreachable. The front door serves setup
+	// in that state and mounts once there is something to mount.
+	//
+	// --no-open keeps the daemon from opening an external browser: this
+	// window is the browser.
+	args := []string{"--no-open"}
 	if s.configPath != "" {
 		args = append(args, "--config", s.configPath)
 	}

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 	"cloudfs/internal/vfs"
 
@@ -119,6 +120,9 @@ var (
 	_ fs.NodeSetattrer      = (*node)(nil)
 	_ fs.NodeStatfser       = (*node)(nil)
 	_ fs.NodeGetxattrer     = (*node)(nil)
+	_ fs.NodeSetxattrer     = (*node)(nil)
+	_ fs.NodeRemovexattrer  = (*node)(nil)
+	_ fs.NodeListxattrer    = (*node)(nil)
 )
 
 // Ino returns the VFS inode of the root.
@@ -570,8 +574,11 @@ func (n *node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 	n.root.count(opGetxattr)
 	// The kernel probes security.* and system.* on every create and write;
 	// answer those without touching the metadata store.
+	if reservedXattr(attr) {
+		return 0, errNoAttr
+	}
 	if !strings.HasPrefix(attr, "user.cloudfs.") {
-		return 0, syscall.ENODATA
+		return n.storedXattr(ctx, attr, dest)
 	}
 	at, err := n.root.opt.FS.Stat(ctx, n.vfsIno())
 	if err != nil {
@@ -598,12 +605,106 @@ func (n *node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 		}
 		val = w
 	default:
-		return 0, syscall.ENODATA
+		return n.storedXattr(ctx, attr, dest)
 	}
 	if len(dest) < len(val) {
 		return uint32(len(val)), syscall.ERANGE
 	}
 	return uint32(copy(dest, val)), 0
+}
+
+// storedXattr answers from what was set on this node.
+func (n *node) storedXattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	value, err := n.root.opt.FS.Xattr(ctx, n.vfsIno(), attr)
+	if err != nil {
+		return 0, xattrErrno(err)
+	}
+	if len(dest) < len(value) {
+		return uint32(len(value)), syscall.ERANGE
+	}
+	return uint32(copy(dest, value)), 0
+}
+
+// Setxattr stores an extended attribute for this node.
+//
+// macOS makes this unavoidable rather than optional: it attaches
+// com.apple.quarantine to anything downloaded, FinderInfo and tags to plenty
+// else, and copyfile(3) — the Finder's copy engine, and what cp -p and ditto
+// use — abandons the whole copy when a setxattr fails. The mount read and
+// wrote perfectly from a shell while the Finder refused every copy with a
+// permission error.
+//
+// The values stay local; see internal/vfs/xattr.go for why they are not sent
+// to the backend.
+func (n *node) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	// The kernel probes these on writes and creates. Answering "no such
+	// attribute" without a database round trip keeps the write path clear,
+	// and storing a security label would be a claim this filesystem cannot
+	// honour anyway.
+	if reservedXattr(attr) {
+		return syscall.ENOTSUP
+	}
+	return xattrErrno(n.root.opt.FS.SetXattr(ctx, n.vfsIno(), attr, data))
+}
+
+// Removexattr drops one.
+func (n *node) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	if reservedXattr(attr) {
+		return errNoAttr
+	}
+	return xattrErrno(n.root.opt.FS.RemoveXattr(ctx, n.vfsIno(), attr))
+}
+
+// Listxattr reports the stored attributes.
+//
+// The derived user.cloudfs.* values Getxattr answers with are deliberately not
+// listed: they are filesystem state, not attributes the file carries, and
+// listing them would make every copy try to reproduce them on the destination
+// and mark every file with an @ in ls.
+func (n *node) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	names, err := n.root.opt.FS.XattrNames(ctx, n.vfsIno())
+	if err != nil {
+		return 0, xattrErrno(err)
+	}
+	size := 0
+	for _, name := range names {
+		size += len(name) + 1
+	}
+	if len(dest) < size {
+		// A zero-length buffer is how a caller asks for the size.
+		return uint32(size), syscall.ERANGE
+	}
+	at := 0
+	for _, name := range names {
+		at += copy(dest[at:], name)
+		dest[at] = 0
+		at++
+	}
+	return uint32(at), 0
+}
+
+// reservedXattr is the namespace the kernel probes and this filesystem does
+// not implement: security labels and POSIX ACLs, which it has no way to
+// enforce.
+func reservedXattr(attr string) bool {
+	return strings.HasPrefix(attr, "security.") || strings.HasPrefix(attr, "system.")
+}
+
+// xattrErrno maps the store's answers. ENOATTR and "no such attribute" are the
+// same fact under different names on Linux and macOS; a value too large for
+// the local database is E2BIG, which is what a kernel filesystem returns when
+// an attribute does not fit.
+func xattrErrno(err error) syscall.Errno {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, meta.ErrNoXattr):
+		return errNoAttr
+	case errors.Is(err, meta.ErrXattrTooBig):
+		return syscall.E2BIG
+	default:
+		return errno(err)
+	}
 }
 
 func formatPercent(f float64) string {

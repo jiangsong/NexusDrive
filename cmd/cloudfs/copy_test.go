@@ -76,7 +76,7 @@ func TestCopyCLIOfflinePersistsWithoutStartingUploads(t *testing.T) {
 	if !strings.Contains(out.String(), "journaled locally") {
 		t.Fatal(out.String())
 	}
-	j, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+	j, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestCopyCLIRefusesUnavailableOwner(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "owned by another process") {
 		t.Fatalf("owner=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Cache.Dir, "meta.db")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cfg.StateDir(), "meta.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("opened metadata before ownership check")
 	}
 }

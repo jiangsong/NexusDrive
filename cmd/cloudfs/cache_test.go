@@ -66,9 +66,7 @@ func TestCacheCLIUsesOwnerInsteadOfBuildingAnotherStack(t *testing.T) {
 			t.Fatal(out.String())
 		}
 	}
-	if _, err := os.Stat(cfg.Cache.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("online CLI touched another cache: %v", err)
-	}
+	assertNoDaemonStorage(t, cfg, "online CLI")
 	if len(f.PinPolicies()) != 0 || c.Stats().Blocks != 1 {
 		t.Fatal("commands did not manage live policy/cache")
 	}
@@ -88,7 +86,7 @@ func TestCacheCLIRefusesOfflineFallbackWhenStorageHasAnOwner(t *testing.T) {
 			t.Fatalf("%s: %v", action, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Cache.Dir, "meta.db")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cfg.StateDir(), "meta.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("opened metadata before ownership check")
 	}
 }
@@ -138,7 +136,7 @@ func TestOfflineCacheCLIPersistsPinsWithoutStartingUploads(t *testing.T) {
 	if downloads.Load() != 1 || unexpected.Load() != 0 {
 		t.Fatalf("downloads=%d unexpected/upload=%d", downloads.Load(), unexpected.Load())
 	}
-	ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+	ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 	if err != nil {
 		t.Fatal(err)
 	}

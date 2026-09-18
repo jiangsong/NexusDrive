@@ -15,27 +15,35 @@
 
 网盘不允许一个程序直接拿你的账号密码，要走浏览器授权。授权前需要一个"应用"身份：
 
-- **Google Drive**：Google Cloud Console 建一个项目，创建 OAuth 客户端，类型选**桌面应用**，
-  拿到 `client_id` 和 `client_secret`。回调地址填 `http://127.0.0.1:53682/callback`。
+- **Google Drive**：Google Cloud Console 建一个项目，启用 Drive API，创建 OAuth 客户端，
+  类型选**桌面应用**（桌面类型接受回环回调，不用登记具体 URI），拿到 `client_id` 和
+  `client_secret`。**把应用发布到 Production**：停在 Testing 状态时授权 7 天后失效，之后
+  只会看到 `invalid_grant`。发布到 Production 不需要通过验证——同意页提示应用未经验证，
+  只给自己用时继续即可。挂载整个云端硬盘需要受限范围 `auth/drive`，带这个范围的应用要做
+  品牌验证加每年一次的第三方安全评估，所以 CloudFS 不内置 Google 应用，由你自己注册。
 - **Dropbox**：App Console 建一个应用，access type 选 **Full Dropbox**（选 App folder 的话
   所有文件会被关在 `/Apps/` 下面），拿到 App key。回调地址同样填
   `http://127.0.0.1:53682/callback`。Dropbox 走 PKCE，**不需要 client secret**。
 
 同一个应用可以给同厂商的多个账号用，四个账号不用建四个应用。
 
-## 最省事的走法：`cloudfs setup`
+## 最省事的走法：直接跑 `cloudfs`
 
 ```sh
-cloudfs setup
+cloudfs
 ```
 
-它做三件事：写一份最小配置（如果还没有）、在本机 `127.0.0.1:9101` 上启动控制台、打开浏览器。
+不带子命令启动就是这套引导。它做三件事：写一份最小配置（如果还没有）、在本机
+`127.0.0.1:9101` 上启动控制台、打开浏览器。配置已经可以挂载时，它改为直接挂载并打开面板。
+`cloudfs setup` 是同一个流程的显式别名。配置与数据库都在 `~/.cloudfs/` 下。
 控制台**只监听本机回环地址**，不会暴露到网络上。加 `--no-open` 只打印地址不开浏览器。
 
 浏览器里是五步：
 
 1. **选网盘**——每行一个，选类型、起个本地名字。至少两个才有冗余。
 2. **逐个连接**——点「开始授权」，浏览器跳到网盘的授权页，回来就显示「已连接 · 剩余 87 GB」。
+   用自己注册的 OAuth 应用的网盘（gdrive、box、onedrive 等），第一次点「开始授权」会先
+   让你填 client secret：它存进系统钥匙串，不写配置文件，填完立刻继续授权。
    **一次只能授权一个**，界面会把其余几行的按钮禁用；这不是保守，是授权回调共用本机
    53682 端口，两个一起来会撞。
 3. **每个文件保存几份**——默认 2 份。这一步会告诉你可用空间大约是总空间的几分之一，
@@ -43,7 +51,7 @@ cloudfs setup
 4. **放在哪个文件夹**——默认 `~/CloudFS`。
 5. **重启并完成**——所有配置改动都在守护进程下次启动时生效。点一下，页面会自己等它回来。
 
-中途关掉浏览器也没关系：进度是从配置文件推出来的，重跑 `cloudfs setup` 会回到你停下的
+中途关掉浏览器也没关系：进度是从配置文件推出来的，重跑 `cloudfs` 会回到你停下的
 那个网盘。在终端里 `cloudfs config add` 加的账号，向导也认。
 
 下面是同样的事情用命令行做一遍。
@@ -55,6 +63,7 @@ cloudfs setup
 ```sh
 cloudfs config add gd1 --type gdrive --client-id <你的 CLIENT_ID>
 cloudfs config auth gd1        # 隐藏输入 client_secret，然后自动打开浏览器
+                               # （控制台里加的账号在「开始授权」时填同一个值）
 ```
 
 `config auth` 会打印一个授权链接并打开浏览器。授权完成后它会回显

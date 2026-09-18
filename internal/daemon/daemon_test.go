@@ -125,9 +125,14 @@ func TestOpenAssemblesEverything(t *testing.T) {
 			t.Fatalf("dir_ttl override lost: %v", m.DirTTL)
 		}
 	}
-	// Cache directories exist under the configured root.
-	for _, sub := range []string{"blocks", "journal", "meta.db"} {
-		if _, err := os.Stat(filepath.Join(cacheDir, sub)); err != nil {
+	// Blocks go under cache.dir; state that cannot be fetched again stays
+	// beside the configuration file. See Config.StateDir.
+	if _, err := os.Stat(filepath.Join(cacheDir, "blocks")); err != nil {
+		t.Errorf("missing blocks: %v", err)
+	}
+	stateDir := filepath.Dir(cfg.SourcePath)
+	for _, sub := range []string{"journal", "meta.db"} {
+		if _, err := os.Stat(filepath.Join(stateDir, sub)); err != nil {
 			t.Errorf("missing %s: %v", sub, err)
 		}
 	}
@@ -596,7 +601,7 @@ mounts:
 // remotes. The daemon builds the members first, hands them to the pool, and
 // mounts the pool like any drive — next to a direct view of one member.
 func TestPoolRemoteIsAssembledAfterItsMembers(t *testing.T) {
-	cfg, cacheDir := writeConfig(t, `
+	cfg, _ := writeConfig(t, `
 cache:
   dir: %s
 remotes:
@@ -662,7 +667,7 @@ mounts:
 	if strings.Join(rawNames, ",") != ".cloudfs-pool.json,from-a.txt" && strings.Join(rawNames, ",") != "from-a.txt" {
 		t.Fatalf("direct view = %v", rawNames)
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "pool", "pool-home.db")); err != nil {
-		t.Fatalf("pool index not in the cache dir: %v", err)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cfg.SourcePath), "pool", "pool-home.db")); err != nil {
+		t.Fatalf("pool index not in the state dir: %v", err)
 	}
 }

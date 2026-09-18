@@ -143,29 +143,47 @@ func TestWebAppRefusesReboundHostAndCrossSite(t *testing.T) {
 	}
 }
 
-// TestWebAppNeverAsksForACredential: the boundary is visible in the served
-// bytes. No password input, and no credential field name appears as an input
-// name or id anywhere in the app — credentials are obtained by a daemon-driven
-// exchange or imported through the terminal, and the page never collects one.
-func TestWebAppNeverAsksForACredential(t *testing.T) {
+// TestWebAppCollectsOnlyTheOAuthApplicationSecret: the credential boundary is
+// visible in the served bytes, and it has exactly one opening.
+//
+// No account credential — a token, a password, a cookie — is named as an input
+// anywhere: those are obtained by a daemon-driven exchange or imported through
+// the terminal. The exception is the secret of an OAuth application the person
+// registered themselves, without which no authorization can begin at all; it
+// lives in one module, so this test names that module rather than allowing a
+// password field to appear anywhere it pleases.
+func TestWebAppCollectsOnlyTheOAuthApplicationSecret(t *testing.T) {
 	srv := NewServer(&Collector{Version: "ui-test"})
 	srv.EnableUI()
+	const appSecretModule = "/ui/auth_step.js"
 	var all strings.Builder
 	for path := range srv.assets {
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, uiReq(http.MethodGet, path))
-		all.Write(rr.Body.Bytes())
-	}
-	blob := all.String()
-	if strings.Contains(blob, `type="password"`) || strings.Contains(blob, "type=password") {
-		t.Fatal("the app renders a password input")
-	}
-	for _, secret := range []string{"refresh_token", "client_secret", "access_token", `name="password"`, `name="cookie"`, `id="secret"`} {
-		if strings.Contains(blob, secret) {
-			t.Fatalf("the app names a credential field: %q", secret)
+		body := rr.Body.String()
+		all.WriteString(body)
+		if path == appSecretModule {
+			continue
+		}
+		if strings.Contains(body, "type: 'password'") || strings.Contains(body, `type="password"`) || strings.Contains(body, "type=password") {
+			t.Fatalf("%s renders a password input; the application secret belongs to %s alone", path, appSecretModule)
+		}
+		if strings.Contains(body, "client_secret") {
+			t.Fatalf("%s names the application secret; it belongs to %s alone", path, appSecretModule)
 		}
 	}
-	// It does point people at the terminal for authorization.
+	blob := all.String()
+	for _, secret := range []string{"refresh_token", "access_token", `name="password"`, `name="cookie"`, `id="secret"`} {
+		if strings.Contains(blob, secret) {
+			t.Fatalf("the app names an account credential field: %q", secret)
+		}
+	}
+	// The application secret is posted to the route that stores it and is
+	// never read back: nothing in the app asks the daemon for one.
+	if !strings.Contains(blob, "auth/app-secret") {
+		t.Fatal("the app has no way to supply an OAuth application secret")
+	}
+	// It does point people at the terminal for credentials it cannot collect.
 	if !strings.Contains(blob, "config auth") {
 		t.Fatal("the app does not tell the user where credentials are set")
 	}

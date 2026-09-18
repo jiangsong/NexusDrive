@@ -37,6 +37,14 @@ type Credentials struct {
 	// remote. Empty when the flow is a browser or device authorization the
 	// command drives itself.
 	Note string
+	// Setup is the walkthrough for a backend whose application a person has
+	// to register themselves, one short imperative step per entry, in order.
+	//
+	// It is empty for every backend the daemon can authorize with a shipped
+	// registration — there is nothing to walk through — and non-empty exactly
+	// where a missing step produces an error no one can act on: a callback the
+	// authorization server rejects, or a grant that expires a week later.
+	Setup []string
 }
 
 var (
@@ -71,8 +79,9 @@ func CredentialsFor(typ string) Credentials {
 	fieldsMu.RLock()
 	defer fieldsMu.RUnlock()
 	c := credsByType[typ]
-	out := Credentials{Note: c.Note, Fields: make([]string, len(c.Fields))}
+	out := Credentials{Note: c.Note, Fields: make([]string, len(c.Fields)), Setup: make([]string, len(c.Setup))}
 	copy(out.Fields, c.Fields)
+	copy(out.Setup, c.Setup)
 	return out
 }
 

@@ -86,7 +86,7 @@ func runCopies(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if !online && mutation {
-		dir := filepath.Join(cfg.Cache.Dir, "journal")
+		dir := filepath.Join(cfg.StateDir(), "journal")
 		if _, err := os.Stat(filepath.Join(dir, "journal.db")); err != nil {
 			return err
 		}
@@ -128,7 +128,7 @@ func runCopies(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 	} else if !online {
-		j, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+		j, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 		if errors.Is(err, os.ErrNotExist) {
 			if q.ID != "" {
 				return journal.ErrNotFound

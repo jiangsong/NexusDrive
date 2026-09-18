@@ -120,7 +120,7 @@ func (c *triggersCLI) socket() (string, string) { return c.cfg.Control.Socket, c
 // offline opens agent.db read-only for the delivery table. os.ErrNotExist
 // (wrapped) means no daemon ever wrote one.
 func (c *triggersCLI) offline() (*agent.Store, error) {
-	return agent.OpenReadOnly(filepath.Join(c.cfg.Cache.Dir, "agent"))
+	return agent.OpenReadOnly(filepath.Join(c.cfg.StateDir(), "agent"))
 }
 
 func needTriggerDaemon() error {

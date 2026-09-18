@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 
 	"cloudfs/internal/config"
 )
@@ -63,6 +64,22 @@ func BuiltinOAuthAppFor(remoteType string) (BuiltinOAuthApp, bool) {
 	return app, true
 }
 
+// ErrClientSecretRequired is the one authorization setup failure a person can
+// fix themselves, so it is the one that is worth recognizing. A confidential
+// OAuth client cannot exchange a code without the secret its registration
+// issued, and only whoever registered the application has it. Callers match on
+// this to ask for the secret instead of reporting a generic failure.
+var ErrClientSecretRequired = errors.New("client_secret is required")
+
+// NeedsAppSecret reports whether authorizing this backend needs an application
+// secret the person supplies. A public client (PKCE) is issued none, and a
+// backend with no OAuth profile has no application at all; asking for a secret
+// in either case sends someone looking for a value that does not exist.
+func NeedsAppSecret(remoteType string) bool {
+	profile, ok := OAuthProfileFor(remoteType)
+	return ok && !profile.PKCE
+}
+
 // ResolveOAuthClient decides which application an authorization runs as.
 //
 // The account's own client id wins outright: whoever registered one did it for
@@ -108,7 +125,7 @@ func ResolveOAuthClient(cfg *config.Config, r config.Remote, profile OAuthProfil
 		secret = asked
 	}
 	if secret == "" && !profile.PKCE {
-		return "", "", errors.New("client_secret is required for this authorization mode; import it first with `cloudfs config auth --stdin`")
+		return "", "", fmt.Errorf("%w for this authorization mode; add it in the console, or import it with `cloudfs config auth --stdin`", ErrClientSecretRequired)
 	}
 	return id, secret, nil
 }

@@ -290,6 +290,13 @@ export function renderPool(host) {
 
   function createForm(res) {
     const name = el('input', { type: 'text', value: 'home', autocomplete: 'off', spellcheck: 'false' });
+    // Where the pool is mounted. A pool with no mount point is a pool nobody
+    // can open: the daemon builds its filesystem from the mounts in the
+    // configuration, so creating one without this left a person with a
+    // restarted daemon and an empty filesystem, and nothing on this page had
+    // asked. The daemon suggests the mount that already exists, or the same
+    // folder the guided setup proposes.
+    const mountPath = el('input', { type: 'text', value: res.mount || '', placeholder: '~/CloudFS', autocomplete: 'off', spellcheck: 'false' });
     const replicas = el('input', { type: 'number', value: '3', min: '1', max: '9', style: 'width:80px' });
     const minimum = el('input', { type: 'number', value: '1', min: '1', max: '9', style: 'width:80px' });
     const domain = el('select', {}, ...['account', 'provider', 'member'].map((x) => el('option', { value: x }, x)));
@@ -318,7 +325,7 @@ export function renderPool(host) {
         return { prefix: prefix.trim(), replicas: Number(count) || 0, prefer: split(prefer), avoid: split(avoid), require: split(require) };
       });
       act('/pool/create', { name: name.value.trim() || 'home', members, replicas: Number(replicas.value) || 3,
-        min_replicas: Number(minimum.value) || 1, mount: res.mount || '', prefix: '/', settings: {
+        min_replicas: Number(minimum.value) || 1, mount: mountPath.value.trim(), prefix: '/', settings: {
           failure_domain: domain.value, write_mode: mode.value, min_replicas_timeout: timeout.value.trim(), out_after: outAfter.value.trim(),
           repair_concurrency: Number(repair.value) || 1, target_skew: parseSkew(skew.value), auto_backfill: backfill.checked,
           rebalance_max_rate: 31457280, pause_between: '500ms', member_classes: memberClasses, rules: parsedRules,
@@ -334,6 +341,8 @@ export function renderPool(host) {
       el('p', { class: 'detail', style: 'max-width:640px' }, t('pool.none.body')),
       res.configurable ? el('div', { class: 'panel pad', style: 'max-width:760px;display:grid;gap:12px' },
         field(t('pool.create.name'), name),
+        field(t('pool.create.mount'), mountPath),
+        el('div', { class: 'dim', style: 'font-size:11.5px;margin-top:-6px' }, t('pool.create.mount.note')),
         el('div', {}, el('div', { style: 'font-size:12px;margin-bottom:4px' }, t('pool.create.members')),
           checks.length ? el('div', { style: 'display:grid;gap:6px' }, ...checks) : el('div', { class: 'dim' }, t('pool.create.nocandidates'))),
         field(t('pool.replicas'), replicas), field(t('pool.config.minimum'), minimum),

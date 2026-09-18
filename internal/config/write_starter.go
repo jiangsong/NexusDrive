@@ -38,6 +38,7 @@ func WriteStarter(path string) error {
 		}
 	}
 	d := Default()
+	cacheDir := filepath.Join(filepath.Dir(path), "cache")
 	body := fmt.Sprintf(`# CloudFS 配置。这份文件由 cloudfs setup 生成，只包含起步所需的部分。
 # 网盘账号、存储池和挂载点在控制台里添加，也可以用 cloudfs config add / cloudfs pool create。
 
@@ -55,7 +56,7 @@ remotes: {}
 # 挂载点在创建存储池时写入（cloudfs pool create --mount ...）。
 # 这里留空是有意的：cloudfs mount 用的是第一个挂载点，占位项会永远变成错的那一个。
 mounts: []
-`, d.Cache.Dir, d.Control.Socket, starterMetricsAddr)
+`, cacheDir, d.Control.Socket, starterMetricsAddr)
 	if err := atomicPrivateWrite(path, []byte(body)); err != nil {
 		return err
 	}

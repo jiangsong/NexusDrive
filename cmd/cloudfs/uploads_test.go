@@ -52,7 +52,7 @@ func uploadCLIConfig(t *testing.T) (*config.Config, string) {
 
 func uploadCLIJournal(t *testing.T, cfg *config.Config) (*journal.Journal, journal.Upload) {
 	t.Helper()
-	j, err := journal.Open(journal.Options{Dir: filepath.Join(cfg.Cache.Dir, "journal")})
+	j, err := journal.Open(journal.Options{Dir: filepath.Join(cfg.StateDir(), "journal")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestUploadsOfflineRetryRequiresOwnershipNotCredentials(t *testing.T) {
 	if !strings.Contains(out.String(), "requeued 1") {
 		t.Fatalf("retry output: %s", out.String())
 	}
-	ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+	ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 	if err != nil {
 		t.Fatal(err)
 	}

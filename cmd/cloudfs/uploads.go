@@ -83,7 +83,7 @@ func runUploads(ctx context.Context, args []string, out io.Writer) error {
 	if online {
 		return printUploads(out, q, result, f.bools["json"])
 	}
-	dir := filepath.Join(cfg.Cache.Dir, "journal")
+	dir := filepath.Join(cfg.StateDir(), "journal")
 	if action == "list" {
 		j, err := journal.OpenReadOnly(dir)
 		if errors.Is(err, os.ErrNotExist) {

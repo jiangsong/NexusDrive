@@ -1,5 +1,26 @@
 # CloudFS 待办清单
 
+## 2026-09-18 扩展属性与浏览器配置补齐
+
+- **[x] Finder 复制失败（`无法完成此操作，因为你没有访问一些项目的许可`）**：根因是
+  macFUSE 挂载选项 `noapplexattr` 把每个 `com.apple.*` 的 xattr 调用变成 `EPERM`，
+  `copyfile(3)` 遇 `EPERM` 放弃整份复制。改为在 `meta` 里真实存储扩展属性
+  （schema v13 的 `xattrs` 表 + 随节点删除的触发器）、`vfs` 加 `SetXattr/Xattr/
+  XattrNames/RemoveXattr`（只读子树 `EROFS`）、`fusefs` 实现 `Setxattr/Listxattr/
+  Removexattr` 并按平台返回 `ENOATTR`/`ENODATA`。属性只存本地，绝不上传——网盘没处放，
+  内核的 `._` AppleDouble 替代方案等于每个文件一份垃圾上传。验收：
+  `internal/fusefs/copy_metadata_darwin_test.go` 真挂载跑 `ditto` 双向复制，
+  并断言任何 xattr 失败都不得是 `EPERM`/`EACCES`。
+- **[x] 控制台建池不写挂载点**：`screens/pool.js` 发的是 `mount: res.mount || ''`，
+  而 `/pool/status` 从不返回 `mount`，于是从存储池页面建的池没有挂载点，重启后
+  `/fs/list` 仍然报「这个守护进程没有挂载文件系统」，而页面全程没提示。
+  `/pool/status` 现在给出 `mount`（已有挂载点优先，否则 `DefaultMountPath`），
+  建池表单加「挂载目录」输入框。
+- **[ ] 丢失 journal 属主时静默只读**：旧守护进程还持有 `journal.lock` 时启动新的一份，
+  新进程照样挂载成功，但 `vfs.requireOwner` 让每次写返回 `EROFS`——日志、`doctor`、
+  状态页都不说这件事，表现为「挂载正常但整个盘只读」。应当在挂载前就报错退出，
+  或至少在日志与 `doctor` 里明确报告「本进程不是 journal 属主，写入会被拒绝」。
+
 对照 `docs/DESIGN.md` 与最初的实施计划逐条核对代码后得出的差距清单。
 首次核对时间：2026-09-02；2026-09-05 持续更新。历史条目与补充混排时，以
 `docs/IMPLEMENTATION.md` 顶部工作清单及各条最新进展为准，不直接统计历史勾选比例。
@@ -10,6 +31,65 @@
 
 图例：`[ ]` 未开始 · `[~]` 部分完成 · `[x]` 完成
 每条的**验收**一栏就是这条做完之后应当成立的断言，写测试时直接照抄。
+
+---
+
+## 已完成（2026-09-18）：单一状态目录与开箱即用的引导
+
+设计见 `docs/plans/2026-09-18-single-home-dir-onboarding-design.md`（五节：目录布局、
+入口、OAuth、迁移、测试）。
+
+- **[x] 状态目录与块缓存拆开。** `Config.StateDir()` 跟随 config.yaml，承载 `meta.db`、
+  `journal/`、`agent/`、`pool/`、`index.db`、`exports.db`、`secrets/`；`cache.dir` 只管
+  `blocks/`，默认 `<state>/cache`。此前这些全部拼在 `cache.dir` 之下，一旦用户把缓存指到
+  外置盘，**未上传的 journal 会跟着走**，拔盘即丢数据。
+  回归：`internal/config/statedir_test.go`、`internal/daemon/statedir_test.go`
+  （断言 `cache.dir` 改到别处后 journal 仍在配置旁边）。
+- **[x] 默认根目录改为 `~/.cloudfs`。** 配置、数据库、凭据回退文件、控制 socket 一个目录。
+  解析优先级 `--config` > `CLOUDFS_CONFIG` > `~/.cloudfs/config.yaml`（`config.DefaultConfigPath`）。
+- **[x] 旧布局一次性迁移。** `config.MigrateLegacyLayout`：`~/.config/cloudfs` +
+  `~/.cache/cloudfs` → `~/.cloudfs`，**块缓存原地不动**并把 `cache.dir` 显式写进迁移后的
+  配置；逐项搬、目标存在则跳过、config.yaml 最后写，因此中断可续；跨文件系统（`EXDEV`）
+  报错不静默复制；控制 socket 有应答则拒绝迁移。回归：`internal/config/migrate_test.go`。
+- **[x] 裸 `cloudfs` 成为入口。** 无子命令时按 `stageFor` 分流：没配置 → 写 starter + 控制面 +
+  开浏览器；有配置不可挂载 → 控制面 + 开浏览器；可挂载 → 挂载 + 开浏览器。
+  `cloudfs mount` **不开浏览器**（服务路径，`opensBrowser(entryMount) == false`）。
+  桌面壳改为拉起同一入口（此前固定 `cloudfs mount`，全新机器上必然停在"没有守护进程"占位页）。
+  回归：`cmd/cloudfs/start_test.go`。
+- **[x] Google Drive 走 BYO 注册引导，不内置应用。** `provider.Credentials.Setup` →
+  `/accounts` 的 `setup` → `web/add_drive.js` 的有序步骤（中英双语）。引导点名两个静默失败：
+  客户端类型要选 Desktop app（否则 `redirect_uri_mismatch`），应用要发布到 Production
+  （Testing 下授权 7 天后失效）。刷新失败时 `invalid_grant` 会直接点名 Testing 过期。
+  回归：`internal/daemon/oauth_policy_test.go`、`internal/provider/gdrive/setup_guide_test.go`、
+  `internal/provider/gdrive/invalid_grant_test.go`、`internal/control/accounts_setup_guide_test.go`。
+
+前门的参数解析有两处坑，都由手工冒烟和测试固化：`parseFlags` 把未声明的 `--name` 当成
+取下一个 token 作为值，所以前门为每个处理函数重建命令行而不是原样转发（否则
+`cloudfs --force /mnt/drives` 的挂载点会被 `--force` 吃掉）；只有标志没有子命令的调用
+（`cloudfs --no-open`）必须进前门而不是 switch。
+
+验收：`./gow vet ./...` 干净；`-race` 在改动包上无 DATA RACE；
+`./gow test ./...`（含 `./test/chaos/`、`./test/conformance/`、`./test/perf/`、`./test/e2e/`）
+除本机既有的环境失败外全绿（`TestAgentClientHelpersRoundTrip`、
+`TestTriggerEngineRunsOnlyInTheOwner`、`TestLseekReportsNoHoles`、
+`TestWalkCostsOneRequestPerDirectoryAndThenNone`、`TestGuardExitsBeforeSpawningOutsideAMount`
+在 HEAD 上同样失败，已用 worktree 基线确认；`test/e2e` 的 `TestKernelWriteLandsInChanges`
+在本机时好时坏，HEAD 上也复现过，最后一轮 `./test/...` 全绿）。
+`test/e2e` 的 `bridge_e2e_test.go` 与 `coexist_e2e_test.go` 原先按旧布局在 `cache/agent` 下找
+agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新 HOME 下裸 `cloudfs --no-open`
+写出 `~/.cloudfs/config.yaml` 并在 9101 上给出 200（`/accounts` 的 gdrive 带 6 条注册步骤）；
+配好 fake remote 后同一命令直接挂载，状态全部落在 `~/.cloudfs/`。
+
+迁移在三个会启动守护进程的入口都会跑（裸 `cloudfs`、`cloudfs mount`、`cloudfs setup`），
+只读命令不碰（`cloudfs status` 不该搬用户的文件）。
+
+**遗留**：
+- 控制台的"缓存位置"设置项（`cache.dir` 可改到别的盘）尚未加到设置页。
+- **`min_free` 现在只看块缓存那块盘。** 拆分之后 journal 与 blocks 可以落在不同文件系统上，
+  而 `cache.MinFree` 的准入检查和 doctor 的 `CacheDir` 都只量块缓存目录所在盘的剩余空间。
+  journal 所在盘写满时没有任何前置门禁——这是"允许 `cache.dir` 指到别处"带来的新缺口，
+  拆分前两者永远同盘。验收：doctor 分别报告两个目录的剩余空间；journal 所在盘低于
+  `min_free` 时写入准入拒绝并给出指向该目录的错误。
 
 ---
 
@@ -358,9 +438,13 @@
 三个新前端模块都是 200）。
 
 **已知遗留**：内置应用表是空的 —— 注册 Dropbox 应用（Full Dropbox、PKCE、回调
-`http://127.0.0.1:53682/callback`、申请 Production）是维护者的活；gdrive 的
+`http://127.0.0.1:53682/callback`、申请 Production）是维护者的活。gdrive 的
 `.../auth/drive` 是 restricted scope，发布要 OAuth 品牌验证加每年一次的第三方 CASA
-评估，值不值得投由人来定。另外 Dropbox 的 App Console 是否接受字面 IP 回调
+评估；**2026-09-18 决定不内置 Google 应用**，改为控制台里的 BYO 注册引导
+（`provider.Credentials.Setup` → `/accounts` 的 `setup` → `web/add_drive.js`），
+见 `docs/plans/2026-09-18-single-home-dir-onboarding-design.md` 第三节。
+`internal/daemon/oauth_policy_test.go` 守住这条：任何带 restricted scope 的内置注册都会让
+测试变红。另外 Dropbox 的 App Console 是否接受字面 IP 回调
 （`internal/auth/oauth.go:100` 明确拒绝 `localhost` 这个名字）必须在真实控制台上验一次，
 它卡着整条 Dropbox 授权路径。
 
@@ -1272,10 +1356,16 @@ CloudFS 在"不出事"这一条上**已经明显强于所有竞品**（三维 AI
 - 名称/字段名/值都有窄校验（名称只允许字母数字与 `-_`，拒绝结构性键 `type`/`proxy`/
   `qps`/`upload_workers` 与 `_` 前缀，拒绝含换行的值——否则就是往 YAML 里注入）。
   声明为必填的字段缺失即拒绝。
-- 另有回归断言**页面上没有 password 类型的输入框、也不出现任何凭据字段名**：服务端会
-  拒绝，但一个问你要密码的表单已经教会用户把密码往浏览器里敲了。
+- 另有回归断言**页面上不出现任何账号凭据字段名**：服务端会拒绝，但一个问你要密码的
+  表单已经教会用户把密码往浏览器里敲了。**唯一的例外是 OAuth 应用密钥**
+  （2026-09-18，见 docs/plans/2026-09-18-single-home-dir-onboarding-design.md 第六节）：
+  用户自己注册的应用，不给这个值就没有任何授权能开始。它走单独的
+  `POST /accounts/{name}/auth/app-secret`，只收这一个字段、只对非 PKCE 的 OAuth 后端
+  开放、进钥匙串不进 YAML、且不计入 `has_credentials`。回归断言 password 输入框与
+  `client_secret` 字面量只允许出现在 `web/auth_step.js`。
 - 无配置文件的守护进程（MCP-only 容器）如实报告 `configurable: false`，POST 返回 409。
-- **仍缺**：真实浏览器的截图级验收；Web 侧不做也不打算做凭据输入与 OAuth 回调。
+- **仍缺**：真实浏览器的截图级验收。Web 侧仍然不做账号凭据输入与 OAuth 回调——回调始终
+  由守护进程监听，token 不经过页面。
 
 **当前实现（2026-09-05）**：`control.ui` 默认开启，在既有 `control.metrics` 回环监听的
 `/` 提供内嵌只读状态页；设为 false 后根路由恢复 404，`/status`、`/metrics` 和 Unix

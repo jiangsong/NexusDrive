@@ -111,7 +111,7 @@ func TestUploadDiscardCLIUsesOwnerOrOnlyTargetedLocalStores(t *testing.T) {
 				if strings.Contains(out.String(), u.BlobPath) {
 					t.Fatal("private path exposed")
 				}
-				ro, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+				ro, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -139,9 +139,7 @@ func TestUploadDiscardCLIInvalidRequestsCreateNoStorage(t *testing.T) {
 		if err := runUploads(t.Context(), append(args, "--config", p), &bytes.Buffer{}); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
-		if _, err := os.Stat(cfg.Cache.Dir); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("invalid request created storage: %v", err)
-		}
+		assertNoDaemonStorage(t, cfg, "invalid request")
 	}
 	if err := runUploads(t.Context(), []string{"drop", "missing", "--confirm", "--config", p}, &bytes.Buffer{}); err == nil {
 		t.Fatal("missing local databases accepted")
@@ -212,7 +210,7 @@ func TestUploadDiscardOfflineDoesNotCreateNewMountNodes(t *testing.T) {
 	if err := runUploads(t.Context(), []string{"drop", u.ID, "--confirm", "--config", p}, &bytes.Buffer{}); err == nil {
 		t.Fatal("changed mount accepted")
 	}
-	s, err := meta.Open(filepath.Join(cfg.Cache.Dir, "meta.db"), meta.Options{NoIndexMaintenance: true})
+	s, err := meta.Open(filepath.Join(cfg.StateDir(), "meta.db"), meta.Options{NoIndexMaintenance: true})
 	if err != nil {
 		t.Fatal(err)
 	}

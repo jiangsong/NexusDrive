@@ -44,7 +44,7 @@ func TestMCPTokenCreatePrintsThePlainTokenOnce(t *testing.T) {
 		}
 	}
 	// The store the daemon opens sees the same token, hashed.
-	st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}

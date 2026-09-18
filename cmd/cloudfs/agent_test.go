@@ -64,13 +64,13 @@ func agentCLIStore(t *testing.T, cacheDir string) agent.Session {
 
 func TestAuditAndSessionsCLIReadTheStoreOfflineAndOnline(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
-	s := agentCLIStore(t, cfg.Cache.Dir)
+	s := agentCLIStore(t, cfg.StateDir())
 	ctx := context.Background()
 	for _, online := range []bool{false, true} {
 		if online {
 			// The daemon's view over the same store: a second Open is the
 			// non-owner, which is what a status process beside a mount is.
-			st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+			st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,7 +124,7 @@ func TestAuditAndSessionsCLIReadTheStoreOfflineAndOnline(t *testing.T) {
 
 func TestSessionsFinishRequiresTheDaemon(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
-	s := agentCLIStore(t, cfg.Cache.Dir)
+	s := agentCLIStore(t, cfg.StateDir())
 	var out bytes.Buffer
 	err := runSessions(context.Background(), []string{"finish", s.ID, "--config", p}, &out)
 	if err == nil || !strings.Contains(err.Error(), "requires the running daemon") {
@@ -179,7 +179,7 @@ func (v *rollbackView) Rollback(_ context.Context, id string, dryRun bool) (agen
 
 func TestSessionsRollbackCLI(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
-	s := agentCLIStore(t, cfg.Cache.Dir)
+	s := agentCLIStore(t, cfg.StateDir())
 	ctx := context.Background()
 	var out bytes.Buffer
 	// Offline there is nothing to write through.
@@ -187,7 +187,7 @@ func TestSessionsRollbackCLI(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires the running daemon") {
 		t.Fatalf("offline rollback: %v", err)
 	}
-	st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}

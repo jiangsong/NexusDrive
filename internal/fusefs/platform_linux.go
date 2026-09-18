@@ -7,12 +7,16 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // platformName identifies the FUSE implementation in use.
 const platformName = "libfuse (Linux)"
+
+// errNoAttr is "no such extended attribute", which Linux spells ENODATA.
+const errNoAttr = syscall.ENODATA
 
 // applyPlatformOptions adds the Linux-specific mount options: a large
 // max_write to match the block size, and the kernel's own read-ahead.

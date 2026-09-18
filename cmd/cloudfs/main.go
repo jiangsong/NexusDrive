@@ -80,19 +80,46 @@ func resolveCLILanguage() i18n.Lang {
 // baseline instead of reporting an empty version.
 var version = "0.1.0"
 
+// isFrontDoor reports whether argv names no subcommand, so the no-argument
+// entry point should handle it.
+//
+// Flags count: `cloudfs --no-open` and `cloudfs --config path` are the front
+// door with an option, not an unknown command. Sending them to the switch is
+// how the first smoke test of this entry point failed — with the full usage
+// text and "unknown command \"--no-open\"", for a flag the front door
+// documents. --help is left to the switch, which prints usage deliberately.
+func isFrontDoor(argv []string) bool {
+	if len(argv) < 2 {
+		return true
+	}
+	switch argv[1] {
+	case "-h", "--help", "help":
+		return false
+	}
+	return strings.HasPrefix(argv[1], "-")
+}
+
 // errRestart signals from cmdMount up to main that the control plane asked for
 // a restart. main runs it after cmdMount's defers have released everything.
 var errRestart = errors.New("cloudfs: restart requested")
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var err error
+	// No arguments is the front door, not a usage error. Someone who ran the
+	// binary wants their drives; which of "set them up" and "mount them" that
+	// means is exactly what they should not have to know. See cmdStart.
+	//
+	// It returns through the same restart path as every other command, and
+	// must not fall through into the switch: a restart rewrites os.Args, so
+	// reading a subcommand out of it here would run that command inline in a
+	// process that is supposed to be handing itself over.
+	if isFrontDoor(os.Args) {
+		finish(stop, cmdStart(ctx, os.Args[1:]))
+		return
+	}
 	switch os.Args[1] {
 	case "version":
 		fmt.Printf("cloudfs %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
@@ -170,6 +197,13 @@ func main() {
 		usage()
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
+	finish(stop, err)
+}
+
+// finish turns a command's error into this process's exit, including the
+// hand-over a restart asks for. It is shared with the no-argument path so the
+// front door and every subcommand end the same way.
+func finish(stop context.CancelFunc, err error) {
 	if errors.Is(err, errRestart) {
 		stop() // stop catching signals before we hand the process over
 		if xerr := reexecSelf(); xerr != nil {
@@ -185,9 +219,11 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: cloudfs <command> [args]
+	fmt.Fprint(os.Stderr, `usage: cloudfs [command] [args]
 
 Getting started
+  cloudfs                   with no command: set up your drives in the browser,
+                            or mount them and open the dashboard if they are ready
   setup [--force] [--listen addr]
                             add or recover drives in the browser, even beside a running daemon
 
@@ -288,7 +324,7 @@ Other
   version
 
 Global flags
-  --config <path>           config file (default ~/.config/cloudfs/config.yaml)
+  --config <path>           config file (default ~/.cloudfs/config.yaml)
 `)
 }
 
@@ -347,12 +383,7 @@ func (f *flags) arg(i int) string {
 	return ""
 }
 
-func defaultConfigPath() string {
-	if p := os.Getenv("CLOUDFS_CONFIG"); p != "" {
-		return p
-	}
-	return config.ExpandHome("~/.config/cloudfs/config.yaml")
-}
+func defaultConfigPath() string { return config.DefaultConfigPath() }
 
 func loadConfig(f *flags) (*config.Config, string, error) {
 	path := f.str("config", defaultConfigPath())
@@ -395,7 +426,7 @@ func cmdConfig(ctx context.Context, args []string) error {
 	printConfigWarnings(os.Stderr, cfg)
 	fmt.Printf("ok: %s\n", path)
 	fmt.Printf("  cache %s (max %s, min free %s, block %s)\n",
-		cfg.Cache.Dir, cfg.Cache.MaxSize, cfg.Cache.MinFree, cfg.Cache.BlockSize)
+		cfg.BlockCacheDir(), cfg.Cache.MaxSize, cfg.Cache.MinFree, cfg.Cache.BlockSize)
 	known := map[string]bool{}
 	for _, t := range provider.Types() {
 		known[t] = true
@@ -530,7 +561,19 @@ func reportChecks(checks []control.Check, asJSON bool) error {
 }
 
 func cmdMount(ctx context.Context, args []string) error {
-	f := parseFlags(args, "allow-other", "debug", "read-only", "foreground")
+	return runMount(ctx, args, entryMount)
+}
+
+// runMount is cmdMount with the caller's entry point, which decides only
+// whether the dashboard is opened once the control plane answers. See
+// opensBrowser: the service path must stay silent.
+func runMount(ctx context.Context, args []string, from entry) error {
+	f := parseFlags(args, "allow-other", "debug", "read-only", "foreground", "no-open")
+	// A service unit runs this command with no --config, so it is one of the
+	// paths that has to find a pre-single-root installation and move it.
+	if err := migrateLegacyLayout(f.str("config", defaultConfigPath()), os.Stderr); err != nil {
+		return err
+	}
 	cfg, _, err := loadConfig(f)
 	if err != nil {
 		return err
@@ -633,6 +676,9 @@ func cmdMount(ctx context.Context, args []string) error {
 			fmt.Printf("  metrics on http://%s/metrics\n", controlTCP)
 			if controlUI {
 				fmt.Printf("  dashboard on http://%s/  (or run: cloudfs ui)\n", controlTCP)
+				if opensBrowser(from) && !f.bool("no-open") {
+					_ = openBrowser(ctx, "http://"+controlTCP+"/")
+				}
 			}
 		}
 	}
@@ -1225,7 +1271,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 		}
 		defer d.Close()
 		col := d.Collector()
-		j, err := journal.OpenReadOnly(filepath.Join(cfg.Cache.Dir, "journal"))
+		j, err := journal.OpenReadOnly(filepath.Join(cfg.StateDir(), "journal"))
 		if err == nil {
 			defer j.Close()
 			col.Journal = j

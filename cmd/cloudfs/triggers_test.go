@@ -75,7 +75,7 @@ func TestTriggersCLIListsAndRetries(t *testing.T) {
 	}
 
 	// A daemon left a dead delivery behind.
-	st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}

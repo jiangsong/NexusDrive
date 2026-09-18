@@ -163,7 +163,7 @@ func (c *cliIndex) RecordedEmbedding(context.Context) (string, int, error) { ret
 
 func TestIndexCLIReadsTheStoreOfflineAndTheDaemonOnline(t *testing.T) {
 	cfg, p := uploadCLIConfig(t)
-	indexCLIStore(t, cfg.Cache.Dir)
+	indexCLIStore(t, cfg.StateDir())
 	ctx := context.Background()
 
 	var out bytes.Buffer

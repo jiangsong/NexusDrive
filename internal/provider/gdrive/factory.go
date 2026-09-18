@@ -16,7 +16,28 @@ func init() {
 		{Name: "client_id", Prompt: "OAuth client ID"},
 		{Name: "drive_id", Prompt: "Shared drive ID, blank for My Drive"},
 	}, provider.Credentials{Fields: []string{"refresh_token", "client_secret", "access_token"},
-		Note: "the client secret from the Google Cloud console; config auth then opens a browser for the rest"})
+		Note: "the client secret from the Google Cloud console; the console or config auth asks for it, then opens a browser for the rest",
+		// Google classes the scope a mounted drive needs as restricted, so no
+		// application can be shipped with this binary: carrying it would mean
+		// brand verification plus a third-party security assessment renewed
+		// every twelve months, and every account authorized under it would
+		// stop refreshing the day that lapsed. Registering one takes a few
+		// minutes and the account then belongs to the person who made it.
+		Setup: []string{
+			"Create a project in the Google Cloud console.",
+			"Enable the Google Drive API for it.",
+			// A Web application client accepts only the exact redirect URIs
+			// registered for it, and the callback here is a loopback port. A
+			// Desktop client accepts any loopback port, so choosing it here
+			// removes a step that otherwise fails with redirect_uri_mismatch.
+			"Create an OAuth client and choose the Desktop app type; it accepts the loopback callback with no URI to register.",
+			// An application left in Testing issues refresh tokens that expire
+			// seven days after consent, and the only symptom is invalid_grant
+			// on a drive that worked all week.
+			"Publish the application to Production. In Testing, authorization expires after 7 days. Production does not require verification: the consent screen warns that the app is unverified, and continuing is fine for an application only you use.",
+			"Paste the client ID here.",
+			"Paste the client secret when the authorization step asks for it; it is stored in the system keyring, never in the configuration file.",
+		}})
 }
 
 // Factory builds a Drive provider from its `remotes.<name>` config block.

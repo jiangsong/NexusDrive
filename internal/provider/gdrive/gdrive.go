@@ -1258,7 +1258,7 @@ func (p *Provider) refresh(ctx context.Context, stale string) (string, error) {
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := p.doJSON(ctx, httpx.Request{Method: http.MethodPost, URL: p.tokenURL, Class: ratelimit.Meta, Form: form}, &out); err != nil || out.AccessToken == "" {
-		return "", fmt.Errorf("%w: gdrive token refresh failed", provider.ErrAuth)
+		return "", refreshFailure(err)
 	}
 	p.mu.Lock()
 	p.accessToken = out.AccessToken
@@ -1279,6 +1279,32 @@ func (p *Provider) refresh(ctx context.Context, stale string) (string, error) {
 		}
 	}
 	return out.AccessToken, nil
+}
+
+// refreshFailure turns a refused token refresh into an error someone can act
+// on.
+//
+// invalid_grant is the one worth naming. Google issues it when the refresh
+// token is no longer valid, and by far the most common cause on a drive that
+// worked yesterday is an OAuth application still in Testing: there,
+// authorization expires seven days after consent. The token is not corrupt
+// and re-authorizing works — for another seven days — so without this the
+// error sends people round that loop indefinitely, reading "token refresh
+// failed" every week.
+func refreshFailure(err error) error {
+	var se *httpx.StatusError
+	if errors.As(err, &se) {
+		var envelope struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal([]byte(se.Body), &envelope)
+		if strings.EqualFold(envelope.Error, "invalid_grant") {
+			return fmt.Errorf("%w: gdrive refused the refresh token (invalid_grant). "+
+				"If the OAuth application is still in Testing, authorization expires 7 days after consent; "+
+				"publish it to Production and authorize again", provider.ErrAuth)
+		}
+	}
+	return fmt.Errorf("%w: gdrive token refresh failed", provider.ErrAuth)
 }
 
 func (p *Provider) hasRefresh() bool {

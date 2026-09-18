@@ -21,10 +21,7 @@ func DiscardUploadOffline(ctx context.Context, cfg *config.Config, id string, co
 	if !confirm || cfg == nil || id == "" || len(cfg.Mounts) == 0 {
 		return errors.New("daemon: offline discard requires configuration, an upload id and confirmation")
 	}
-	dir := cfg.Cache.Dir
-	if dir == "" {
-		dir = config.ExpandHome("~/.cache/cloudfs")
-	}
+	dir := cfg.StateDir()
 	for _, p := range []string{filepath.Join(dir, "journal", "journal.db"), filepath.Join(dir, "meta.db")} {
 		info, err := os.Stat(p)
 		if err != nil {

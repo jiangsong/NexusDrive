@@ -1,5 +1,7 @@
 package i18n
 
+import "strings"
+
 // Backend field prompts live apart from the rest of the catalog because they
 // are keyed mechanically: field.<backend type>.<config key>, and
 // creds.<backend type>.note. A driver keeps registering a plain prompt beside
@@ -37,7 +39,8 @@ var fieldsEN = map[string]string{
 	"creds.dropbox.note":       "config auth opens a browser and Dropbox hands back a lasting grant; no client secret is needed, and no pasted token either",
 	"field.gdrive.client_id":   "OAuth client ID",
 	"field.gdrive.drive_id":    "Shared drive ID, blank for My Drive",
-	"creds.gdrive.note":        "the client secret from the Google Cloud console; config auth then opens a browser for the rest",
+	"creds.gdrive.note":        "the client secret from the Google Cloud console; the authorization step asks for it, then opens a browser for the rest",
+	"creds.gdrive.setup":       "Create a project in the Google Cloud console.\nEnable the Google Drive API for it.\nCreate an OAuth client and choose the Desktop app type; it accepts the loopback callback with no URI to register.\nPublish the application to Production. In Testing, authorization expires after 7 days. Production does not require verification: the consent screen warns that the app is unverified, and continuing is fine for an application only you use.\nPaste the client ID here.\nPaste the client secret when the authorization step asks for it; it is stored in the system keyring, never in the configuration file.",
 	"field.onedrive.client_id": "Application (client) ID",
 	"field.onedrive.tenant":    "Directory (tenant) ID",
 	"field.onedrive.drive_id":  "Drive ID, blank for the signed-in user's drive",
@@ -95,7 +98,8 @@ var fieldsZH = map[string]string{
 	"creds.dropbox.note":       "config auth 会打开浏览器，Dropbox 直接给出长期授权；不需要 client secret，也不用手工粘贴 token",
 	"field.gdrive.client_id":   "OAuth client ID",
 	"field.gdrive.drive_id":    "共享云端硬盘 ID，留空用“我的云端硬盘”",
-	"creds.gdrive.note":        "Google Cloud 控制台的 client secret；随后 config auth 会打开浏览器完成其余步骤",
+	"creds.gdrive.note":        "Google Cloud 控制台的 client secret；开始授权时会让你填，然后打开浏览器完成其余步骤",
+	"creds.gdrive.setup":       "在 Google Cloud 控制台新建一个项目。\n为它启用 Google Drive API。\n新建 OAuth 客户端，类型选“桌面应用”；桌面类型接受回环地址回调，不用登记具体 URI。\n把应用发布到 Production。停在 Testing 状态时授权 7 天后失效。Production 不需要通过验证：同意页会提示应用未经验证，只给自己用时继续即可。\n把 client ID 填在这里。\n开始授权时按提示填 client secret；它存进系统钥匙串，不会写进配置文件。",
 	"field.onedrive.client_id": "应用程序(客户端) ID",
 	"field.onedrive.tenant":    "目录(租户) ID",
 	"field.onedrive.drive_id":  "Drive ID，留空用登录用户的盘",
@@ -137,6 +141,20 @@ func FieldPrompt(lang Lang, backendType, name, fallback string) string {
 	key := "field." + backendType + "." + name
 	if Has(key) {
 		return T(lang, key)
+	}
+	return fallback
+}
+
+// CredentialSetup renders a backend's registration walkthrough, one step per
+// entry. The catalog stores the steps as one newline-separated value, because
+// the catalog is a flat map and a list of keys per backend would drift out of
+// order the first time a step was inserted.
+func CredentialSetup(lang Lang, backendType string, fallback []string) []string {
+	key := "creds." + backendType + ".setup"
+	if Has(key) {
+		if text := T(lang, key); text != "" {
+			return strings.Split(text, "\n")
+		}
 	}
 	return fallback
 }

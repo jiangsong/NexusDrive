@@ -676,11 +676,11 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
     └── mcp.md                   # MCP 注册与工具说明
 ```
 
-配置示例 `~/.config/cloudfs/config.yaml`：
+配置示例 `~/.cloudfs/config.yaml`：
 
 ```yaml
 cache:
-  dir: ~/.cache/cloudfs
+  dir: ~/.cloudfs/cache
   max_size: 200GiB
   min_free: 10GiB
   block_size: 4MiB
@@ -718,7 +718,7 @@ mcp:
   allow: [/mnt/cloud/work, /mnt/cloud/nas]
   read_only: false
 control:
-  socket: ~/.cache/cloudfs/control.sock
+  socket: ~/.cloudfs/control.sock
   metrics: 127.0.0.1:9101
   ui: true
 
@@ -798,10 +798,27 @@ sshfs 与本地磁盘上，数字见 `docs/perf-report.html`。这一轮测试�
   得到不可重试的 `SQLITE_BUSY_SNAPSHOT`。`commitWrite` 在 staging 改名之后的每一步都
   记录在句柄上，失败后的下一次 FLUSH 从断点续做，而不是重新提交已不存在的 staging。
 - **元数据热点**：lookup 未命中时只确认列举新鲜、不加载列举；点查用预编译语句；
-  内核的 `security.*` xattr 探测不查库。
+  内核的 `security.*` / `system.*` xattr 探测不查库。
 - **运维**：`POST /cache/drop` 清 VFS 与内核缓存做冷启动；journal 以 `flock` 标记
   队列属主，非属主进程既不跑恢复也不跑上传；`CLOUDFS_DEBUG_ERRNO=1` 把落到 EIO 的
   原始错误写进日志。
+
+### 扩展属性（2026-09-18）
+
+- **xattr 存在 `meta` 里，不上传**（表 `xattrs(ino,name,value)`，schema v13，随节点删除
+  由触发器清理）。macOS 会给一切经它复制的文件挂上 `com.apple.quarantine`、
+  `FinderInfo`、Finder 标签，而 `copyfile(3)`（Finder、`cp -p`、`ditto` 共用的复制引擎）
+  只要 `setxattr` 失败就整份复制失败。所以「不支持 xattr」在 macOS 上等于「Finder 复制
+  不进来」——shell 读写全正常，Finder 报「你没有访问一些项目的许可」。
+- **不往后端写**：网盘没有地方放 `com.apple.*`；内核给出的替代方案是 AppleDouble 的
+  `._` 伴生文件，那等于每复制一个文件就往网盘扔一个垃圾文件，并且在其他设备上都能看见。
+  值很小、只对 macOS 有意义，留在本地是诚实的做法。
+- **macFUSE 的 `noapplexattr` 不能用**：它把每个 `com.apple.*` 调用变成 `EPERM`，而
+  `copyfile` 遇 `EPERM` 直接放弃。实测过 `ENOTSUP(45)`、`EOPNOTSUPP(102)`、`ENOSYS`
+  等各种拒绝码，`ditto` 一律失败——唯一能让复制成功的是真的把属性存下来。
+- **派生的 `user.cloudfs.*` 不进 listxattr**：那是文件系统状态（上传进度、所在网盘），
+  不是文件自带的属性；列出来会让每次复制都试图在目标上重建它们，并给每个文件打上 `@`。
+- 值上限 64 KiB、名字上限 255 字节，超限返回 `E2BIG`；只读子树拒绝写入属性（`EROFS`）。
 
 ### M9 第三轮补充
 

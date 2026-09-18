@@ -29,6 +29,15 @@ test('a refused start is shown, not disguised as a backend without a browser flo
   assert.equal(authFailureMode(403), 'surface');
 });
 
+test('a missing application secret is a step, not a failure', () => {
+  // 428 err.app_secret_required: the person registered their own OAuth
+  // application — Google Drive leaves no choice — and its secret has never
+  // been stored. Nothing is wrong with the account, and the value is in their
+  // hand, so the page collects it instead of reporting a refusal or sending
+  // them to a terminal to type it there.
+  assert.equal(authFailureMode(428), 'app_secret');
+});
+
 test('a failure that carried no status at all is shown too', () => {
   // A dropped connection throws a TypeError, not an ApiError: there is no
   // status to reason from, and guessing "no browser flow" from a network

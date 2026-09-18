@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 12
+const schemaVersion = 13
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -147,4 +147,23 @@ END;`,
 	// index over directories only costs a row per directory insert and
 	// makes all three index-only; kind = 1 is provider.KindDir.
 	`CREATE INDEX nodes_dirs ON nodes(ino) WHERE kind = 1;`,
+	// v12 -> v13: extended attributes, held locally beside the node.
+	//
+	// macOS attaches them to everything it copies, and copyfile(3) — the
+	// Finder's copy engine — abandons the whole copy when it cannot write
+	// one, so a filesystem that refuses them is one the Finder cannot copy
+	// into. They are deliberately not sent to the backend: a cloud drive has
+	// nowhere to put them, and the alternative the kernel offers (AppleDouble
+	// "._" sidecar files) would upload a junk file per copied file and show
+	// it on every other device. The trigger keeps them from outliving the
+	// node and being inherited by whatever inode the autoincrement reissues.
+	`CREATE TABLE xattrs (
+  ino   INTEGER NOT NULL,
+  name  TEXT    NOT NULL,
+  value BLOB    NOT NULL,
+  PRIMARY KEY (ino, name)
+) WITHOUT ROWID;
+CREATE TRIGGER nodes_xattr_delete AFTER DELETE ON nodes BEGIN
+  DELETE FROM xattrs WHERE ino=old.ino;
+END;`,
 }

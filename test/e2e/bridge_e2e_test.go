@@ -48,7 +48,7 @@ func TestStdioBesideMountWritesThroughTheBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentDir := filepath.Join(cacheDir, "agent")
+	agentDir := filepath.Join(cfg.StateDir(), "agent")
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()

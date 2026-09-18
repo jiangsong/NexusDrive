@@ -87,7 +87,7 @@ func TestStdioBesideMountRefusesWritesCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentDir := filepath.Join(cacheDir, "agent")
+	agentDir := filepath.Join(cfg.StateDir(), "agent")
 
 	// The owner: what `cloudfs mount` is.
 	ctx1, cancel1 := context.WithCancel(context.Background())

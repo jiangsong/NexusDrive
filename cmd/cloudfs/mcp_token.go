@@ -54,7 +54,7 @@ func runMCPToken(ctx context.Context, out io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := agent.Open(filepath.Join(cfg.Cache.Dir, "agent"))
+	st, err := agent.Open(filepath.Join(cfg.StateDir(), "agent"))
 	if err != nil {
 		return err
 	}

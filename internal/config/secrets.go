@@ -29,7 +29,7 @@ func NewSecretStore(c *Config) *SecretStore {
 		if c.SourcePath != "" {
 			dir = filepath.Join(filepath.Dir(c.SourcePath), "secrets")
 		} else {
-			dir = filepath.Join(c.Cache.Dir, "secrets")
+			dir = filepath.Join(c.StateDir(), "secrets")
 		}
 	}
 	abs, _ := filepath.Abs(dir)
@@ -42,6 +42,18 @@ func IsSecretField(field string) bool {
 		return true
 	}
 	return false
+}
+
+// IsOAuthAppField reports the fields that identify the OAuth application an
+// authorization runs as, rather than the account it authorizes.
+//
+// The distinction decides two things. A stored client_secret must not make an
+// account look authorized — it is the registration, and the sign-in has still
+// not happened — and it is the only secret-shaped value a browser form is
+// allowed to supply, because a person who registers their own application is
+// the only source of it.
+func IsOAuthAppField(field string) bool {
+	return field == "client_id" || field == "client_secret"
 }
 
 func secretReference(v string) bool {

@@ -153,11 +153,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	d := &Daemon{Config: cfg, version: opt.Version, started: time.Now(),
 		Providers: map[string]provider.Provider{}, CallStats: map[string]*provider.Stats{}, Pools: map[string]*pool.Pool{}}
 	if opt.RequireOwner {
-		cacheDir := cfg.Cache.Dir
-		if cacheDir == "" {
-			cacheDir = config.ExpandHome("~/.cache/cloudfs")
-		}
-		j, err := journal.Open(journal.Options{Dir: filepath.Join(cacheDir, "journal"), Durability: journal.Durability(cfg.Journal.Durability)})
+		j, err := journal.Open(journal.Options{Dir: filepath.Join(cfg.StateDir(), "journal"), Durability: journal.Durability(cfg.Journal.Durability)})
 		if err != nil {
 			return nil, err
 		}
@@ -194,10 +190,12 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// Providers. Pools are composite backends over other remotes, so they
 	// are assembled in a second pass once every member exists.
 	secrets := config.NewSecretStore(cfg)
-	cacheDir := cfg.Cache.Dir
-	if cacheDir == "" {
-		cacheDir = config.ExpandHome("~/.cache/cloudfs")
-	}
+	// Two roots, deliberately. stateDir holds what cannot be fetched again —
+	// the journal's unuploaded bytes above all — and follows the
+	// configuration file. blockCacheDir holds only blocks, and is the one a
+	// person may point at another disk.
+	stateDir := cfg.StateDir()
+	blockCacheDir := cfg.BlockCacheDir()
 	for name, rc := range cfg.Remotes {
 		if rc.Type == config.PoolType {
 			continue
@@ -228,7 +226,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		if rc.Type != config.PoolType {
 			continue
 		}
-		p, err := buildPool(name, rc, cfg, d.Providers, filepath.Join(cacheDir, "pool"))
+		p, err := buildPool(name, rc, cfg, d.Providers, filepath.Join(stateDir, "pool"))
 		if err != nil {
 			d.Close()
 			return nil, err
@@ -241,7 +239,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	}
 
 	// Storage layers.
-	store, err := meta.Open(filepath.Join(cacheDir, "meta.db"), meta.Options{})
+	store, err := meta.Open(filepath.Join(stateDir, "meta.db"), meta.Options{})
 	if err != nil {
 		d.Close()
 		return nil, err
@@ -250,7 +248,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	d.closers = append(d.closers, store.Close)
 
 	ca, err := cache.New(cache.Options{
-		Dir:          filepath.Join(cacheDir, "blocks"),
+		Dir:          filepath.Join(blockCacheDir, "blocks"),
 		BlockSize:    int64(cfg.Cache.BlockSize),
 		SubBlockSize: int64(cfg.Cache.SubBlockSize),
 		WriteBehind:  int64(cfg.Cache.WriteBehind),
@@ -316,7 +314,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// keep their own queue next to the cache: an export stages no blob and
 	// owns no upload row, so putting it in the journal's schema would make
 	// every daemon migrate a database it otherwise never touches.
-	exportStore, err := export.OpenStore(cacheDir)
+	exportStore, err := export.OpenStore(stateDir)
 	if err != nil {
 		d.Close()
 		return nil, err
@@ -343,7 +341,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			d.Close()
 			return nil, err
 		}
-		indexStore, err := index.OpenStore(cacheDir)
+		indexStore, err := index.OpenStore(stateDir)
 		if err != nil {
 			d.Close()
 			return nil, fmt.Errorf("daemon: index store: %w", err)
@@ -395,7 +393,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	// The agent store opens before the non-owner early return below: a
 	// stdio MCP process started while `cloudfs mount` owns the journal is
 	// exactly the process whose calls must land in the shared audit trail.
-	agentStore, err := agent.Open(filepath.Join(cacheDir, "agent"))
+	agentStore, err := agent.Open(filepath.Join(stateDir, "agent"))
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("daemon: agent store: %w", err)
@@ -474,7 +472,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		j := d.Journal
 		if j == nil {
 			j, err = journal.Open(journal.Options{
-				Dir:        filepath.Join(cacheDir, "journal"),
+				Dir:        filepath.Join(stateDir, "journal"),
 				Durability: journal.Durability(cfg.Journal.Durability),
 			})
 			if err != nil {
@@ -775,14 +773,13 @@ func (d *Daemon) serviceControl(view func() *config.Config) *control.ServiceCont
 // that existed at start-up and report a clean bill of health for the drives
 // added since, never having looked at them.
 func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, string)) *control.Doctor {
-	cacheDir := d.Config.Cache.Dir
 	if view == nil {
 		started := d.Config
 		view = func() *config.Config { return started }
 	}
 	return &control.Doctor{
 		Config:          view,
-		CacheDir:        filepath.Join(cacheDir, "blocks"),
+		CacheDir:        filepath.Join(d.Config.BlockCacheDir(), "blocks"),
 		Journal:         d.Journal,
 		Meta:            d.Meta,
 		Cache:           d.Cache,
@@ -795,7 +792,7 @@ func (d *Daemon) Doctor(view func() *config.Config, fuseSupported func() (bool, 
 		HoldMaxBytes:    d.holdBudget(),
 		Index:           d.indexView(),
 		Agent:           d.Agent,
-		AgentDir:        filepath.Join(cacheDir, "agent"),
+		AgentDir:        filepath.Join(d.Config.StateDir(), "agent"),
 		MCPHTTPAddr:     func() string { return d.mcpHTTPState().Addr },
 	}
 }
@@ -868,6 +865,11 @@ func AuthStarterFor(view func() *config.Config) *control.AuthStarter {
 	return &control.AuthStarter{
 		Supported:    SupportsDaemonAuth,
 		FillClientID: FillBuiltinClientID,
+		AppSecret:    NeedsAppSecret,
+		// The one setup failure whose fix is the person's own: they have the
+		// secret, the daemon does not, and a page that is told so can collect
+		// it instead of sending them to a terminal.
+		AppSecretMissing: func(err error) bool { return errors.Is(err, ErrClientSecretRequired) },
 		OAuth: func(ctx context.Context, name string, present func(url string)) (string, func(context.Context) error, error) {
 			p, wait, err := StartOAuthFlow(ctx, view(), name, "", func(_ context.Context, url string) error {
 				present(url)

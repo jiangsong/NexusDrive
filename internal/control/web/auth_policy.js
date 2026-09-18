@@ -12,6 +12,8 @@
 //   409 err.auth_in_progress    another authorization is already running
 //   409 err.auth_port_busy      something else holds the loopback callback port
 //   502 err.auth_start_failed   the provider refused to begin one
+//   428 err.app_secret_required  the person's own OAuth application has been
+//                                registered but its secret was never stored
 //
 // The 409s are the one-at-a-time rule the whole wizard is built around: the
 // OAuth callback binds one fixed loopback port, so the second flow cannot
@@ -20,6 +22,10 @@
 //
 // Nothing here touches the document or the network, so the rule is a fact a
 // test can hold rather than a branch buried in a rendering function.
+// 428 is the one answer that is neither: nothing is wrong and nothing has to
+// be run elsewhere — a value the person holds is missing, so the step is to
+// ask for it.
 export function authFailureMode(status) {
+  if (status === 428) return 'app_secret';
   return status === 400 || status === 501 ? 'terminal' : 'surface';
 }
