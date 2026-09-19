@@ -75,3 +75,26 @@ test('a burst of change events becomes one reload, and a long copy still refresh
   advance(1000);
   assert.equal(timers.length, 0, 'cancel drops the pending run');
 });
+
+import { listingAffected } from '../paged.js';
+
+test('a listing reloads for its own rows, not for what lands deeper down', () => {
+  // Uploads finishing under /fs/.git/objects/ab kept the listing of /fs
+  // reloading for as long as the queue ran; none of them is a row of /fs.
+  assert.equal(listingAffected({ paths: ['/fs/.git/objects/ab/cdef'] }, '/fs'), false);
+  assert.equal(listingAffected({ paths: ['/fs/README.md'] }, '/fs'), true, 'a direct child changed state');
+  assert.equal(listingAffected({ paths: ['/fs/new-dir'] }, '/fs'), true, 'a row appeared');
+  assert.equal(listingAffected({ paths: ['/fs'] }, '/fs'), true, 'the directory itself');
+  assert.equal(listingAffected({ paths: ['/other/x'] }, '/fs'), false);
+});
+
+test('the root lists its own children and nothing deeper', () => {
+  assert.equal(listingAffected({ paths: ['/smoke'] }, '/'), true);
+  assert.equal(listingAffected({ paths: ['/smoke/a.txt'] }, '/'), false);
+});
+
+test('an ancestor moving or going away takes the listing with it', () => {
+  assert.equal(listingAffected({ paths: ['/fs'], subtree: true }, '/fs/.git/objects'), true);
+  assert.equal(listingAffected({ paths: ['/fs'] }, '/fs/.git/objects'), false, 'a plain touch of an ancestor changes no row');
+  assert.equal(listingAffected({ rescan: true, paths: [] }, '/anything'), true);
+});

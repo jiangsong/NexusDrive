@@ -10,6 +10,9 @@ func currentUID() int { return 0 }
 // build; the platforms that lack service integration also lack the mount.
 func MountpointMounted(string) (bool, error) { return false, nil }
 
+// DetachStale is unsupported outside Linux and macOS in this build.
+func DetachStale(path string) error { return Unmount(path) }
+
 // Unmount is unsupported outside Linux and macOS in this build.
 func Unmount(path string) error {
 	return fmt.Errorf("unmounting is not supported on this platform; detach %s with the system tools", path)

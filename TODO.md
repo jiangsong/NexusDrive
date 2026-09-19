@@ -56,7 +56,14 @@
   实测：40 个文件的突发只触发 1 次 `/fs/list`，45 行 45 个唯一路径。
 - **[x] 旧守护进程在挂载忙时被杀，留下的 FUSE 挂载点让 `cloudfs mount` 报「file exists」**：
   stat 返回 `ENOTCONN`，`MkdirAll` 于是去创建目录。现在 `prepareMountPoint` 识别 `ENOTCONN`
-  并用 `service.Unmount` 先摘掉陈旧挂载，再挂新的。
+  并用 `service.DetachStale`（`fusermount3 -uz` / `umount -l`）**懒卸载**再挂新的——普通
+  `fusermount -u` 在有 shell 停在挂载目录里时会报 `target is busy`，而这正是让旧进程自己的
+  卸载失败、留下陈旧挂载的同一个原因；陈旧挂载没人服务，懒卸载不会让谁更糟。真机复现：
+  用户终端 `cd ~/CloudFS/fs` 后重启守护进程。停在旧挂载里的 shell 需要重新 `cd` 才能看到新挂载。
+- **[x] 进入 `/fs` 后列表一直在刷新**：变更事件按"路径在 cwd 子树内"就重载，上传队列里每个
+  `.git/objects/xx/yy` 完成都算命中，队列跑多久列表就刷多久。`paged.js#listingAffected` 只对
+  能改变本目录行的事件重载：直接子项、目录自身、带 `subtree` 的祖先、`rescan`。实测队列消化
+  42 个文件的 15 s 内 `/fs/list` 0 次；写一个直接子项 → 1 次。
 - **[ ] 只有一个网盘的用户走不完向导**：第 1 步要求至少两个网盘（池需要冗余），只想挂载
   单个网盘的人只能用 `cloudfs config mount` 命令行，而向导横幅会一直催他"继续安装"。
   应当允许单网盘走 replicas=1 的池，或在第 1 步给出"只挂载这一个"的出口。

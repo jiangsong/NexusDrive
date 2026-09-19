@@ -59,3 +59,27 @@ export function coalesce(fn, wait, { setTimer = setTimeout, clearTimer = clearTi
   call.cancel = () => { if (timer) clearTimer(timer); timer = null; };
   return call;
 }
+
+// listingAffected says whether a change event can alter what a directory
+// listing shows: the directory's own rows. A row is added, removed or
+// changes state when a path whose parent is the listed directory changes;
+// the listing itself goes away when the directory, or an ancestor of it,
+// is renamed or removed (`subtree`); and a rescan means re-read everything.
+// A change deeper down — a file landing in a subdirectory — alters nothing
+// on screen. The listing used to reload for those too: while a repository
+// was uploading, every object finishing under .git/objects/xx reloaded the
+// listing of the repository's root, one /fs/list and one heat query every
+// few hundred milliseconds for as long as the queue ran, for a table whose
+// five rows never changed.
+export function listingAffected(change, cwd) {
+  if (!change) return false;
+  if (change.rescan) return true;
+  const dir = cwd === '/' ? '/' : cwd.replace(/\/+$/, '');
+  for (const p of change.paths || []) {
+    if (p === dir) return true;
+    const parent = p.lastIndexOf('/') <= 0 ? '/' : p.slice(0, p.lastIndexOf('/'));
+    if (parent === dir) return true;
+    if (change.subtree && dir.startsWith(p + '/')) return true;
+  }
+  return false;
+}

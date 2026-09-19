@@ -1,7 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, fill, iconEl, bytes, toast, confirmDelete, promptText, showPanel, moreRow, copyBtn } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
-import { pageCursor, pageFailureMode, latestOnly, coalesce } from '/ui/paged.js';
+import { pageCursor, pageFailureMode, latestOnly, coalesce, listingAffected } from '/ui/paged.js';
 import { linkExpiry } from '/ui/expiry.js';
 import { openAddDrive } from '/ui/add_drive.js';
 import { openConnection } from '/ui/connection.js';
@@ -506,14 +506,16 @@ export function renderMain(host) {
   // An upload finishing is not a reason to throw away the page the reader
   // walked to: reloading from the top is what a directory of more than 500
   // entries looked like snapping back to its first page mid-read.
-  // A copy into this directory raises one change event per file, and the
-  // subtree test below matches every one of them. Reloading per event was
-  // hundreds of /fs/list calls for a listing that changed once; a burst is
-  // now one reload, and a copy that runs for minutes refreshes every 400 ms.
-  const reload = coalesce(() => { if (!paged) load(); }, 400);
+  // Only a change to one of this directory's own rows reloads it — a
+  // file landing three levels down changes nothing on screen, and while a
+  // repository uploaded, every object finishing under .git/objects kept the
+  // root listing reloading for as long as the queue ran. A burst of changes
+  // to the rows themselves is one reload; a copy straight into this
+  // directory refreshes it once a second while it runs.
+  const reload = coalesce(() => { if (!paged) load(); }, 1000);
   const off = onFsChange((c) => {
     if (paged) return;
-    if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) reload();
+    if (listingAffected(c, cwd)) reload();
   });
   loadAccounts();
   renderInspector();

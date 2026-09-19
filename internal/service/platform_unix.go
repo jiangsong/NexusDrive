@@ -41,6 +41,40 @@ func MountpointMounted(path string) (bool, error) {
 	return current.Dev != up.Dev, nil
 }
 
+// DetachStale takes down a mount nobody serves — the kernel still lists it,
+// stat on it answers ENOTCONN — even while something sits inside it. A
+// shell whose working directory is the mount, or a file manager showing
+// it, keeps a plain unmount refused with "target is busy", and the daemon
+// that left the mount is gone, so nothing will ever serve those holders
+// again. A lazy detach lets them go on failing exactly as they do now while
+// the path is freed for the next mount. It is only for a mount already
+// known to be stale: lazily detaching a live one would strand its users.
+func DetachStale(path string) error {
+	var candidates [][]string
+	if runtime.GOOS == "darwin" {
+		candidates = [][]string{{"umount", "-f", path}, {"diskutil", "unmount", "force", path}}
+	} else {
+		candidates = [][]string{{"fusermount3", "-uz", path}, {"fusermount", "-uz", path}, {"umount", "-l", path}}
+	}
+	var lastErr error
+	var lastOut []byte
+	for _, c := range candidates {
+		bin, err := exec.LookPath(c[0])
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(bin, c[1:]...).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastErr, lastOut = err, out
+	}
+	if lastErr == nil {
+		return fmt.Errorf("no unmount helper found; install fuse3 (Linux) or use 'umount -l %s'", path)
+	}
+	return fmt.Errorf("detach %s: %v: %s", path, lastErr, lastOut)
+}
+
 // Unmount detaches a mount this process does not own, using whichever helper
 // the platform provides.
 func Unmount(path string) error {
