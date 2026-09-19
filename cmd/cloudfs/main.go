@@ -593,8 +593,8 @@ func runMount(ctx context.Context, args []string, from entry) error {
 	if mountPath == "" {
 		mountPath = cfg.Mounts[0].Path
 	}
-	if err := os.MkdirAll(mountPath, 0o755); err != nil {
-		return fmt.Errorf("cannot create the mount point %s: %w", mountPath, err)
+	if err := prepareMountPoint(mountPath); err != nil {
+		return err
 	}
 	// The agent-client hooks' guard reads a registry of mount paths; a
 	// mount that cannot record itself still mounts.
@@ -728,6 +728,27 @@ func runMount(ctx context.Context, args []string, from entry) error {
 		// function has run — the journal lock and the listeners are released
 		// before the successor starts, so the two never coexist.
 		return errRestart
+	}
+	return nil
+}
+
+// prepareMountPoint makes sure mountPath is a directory a mount can go on.
+// A daemon that died while the mount was busy — killed under a running cp —
+// leaves the kernel's FUSE mount behind with no one answering it. stat on
+// it fails with ENOTCONN, MkdirAll then tries to create it and reports
+// "file exists", and the person is left to work out that `fusermount -u`
+// is the fix. The stale mount is detached here instead, with the same
+// helpers `cloudfs umount` uses; anything else that stat reports is still
+// an error of the person's own to see.
+func prepareMountPoint(mountPath string) error {
+	if _, err := os.Stat(mountPath); err != nil && errors.Is(err, syscall.ENOTCONN) {
+		if uerr := service.Unmount(mountPath); uerr != nil {
+			return fmt.Errorf("%s holds a mount nobody serves and it could not be detached: %w", mountPath, uerr)
+		}
+		fmt.Fprintf(os.Stderr, "detached a stale mount at %s\n", mountPath)
+	}
+	if err := os.MkdirAll(mountPath, 0o755); err != nil {
+		return fmt.Errorf("cannot create the mount point %s: %w", mountPath, err)
 	}
 	return nil
 }

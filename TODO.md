@@ -30,6 +30,30 @@
   两个哨兵，控制面映射成本地化的 422 / 409（`err.link_unshareable`、`err.link_not_uploaded`）；
   `/fs/list` 多返回 `link_shareable`，检查器对不能出直链的目录直接不画这个按钮。回归：
   `internal/control/fs_test.go#TestDownloadURLRefusalIsLocalizedAndTheListingSaysSo`。
+- **[x] 往池里复制源码树很慢**（`cp -r ~/workspace/fs ~/CloudFS/`）。用 `/metrics` 的
+  `cloudfs_remote_{calls,seconds}_total` 按 op 算平均耗时定位到三件事，都在 `internal/pool`：
+  1. `fanout` 逐个成员串行执行 mkdir/rename/delete：两个 Drive 账号经代理各 1.3 s，一次 mkdir
+     2.7 s，而 mkdir 在挂载下是同步的——`.git/objects` 有 256 个子目录，光 mkdir 就十几分钟。
+     现在并行问所有成员，耗时取最慢者：实测 3.3 s → 1.45 s。
+  2. 池不实现 `SinglePutter`，`Caps.SinglePutMax` 为 0，uploader 对池只能走
+     begin/part/complete 三次往返（3.4 s/文件），而成员自己一次 `put_file` 只要 2.2 s。
+     池现在声明所有成员都能承诺的 `SinglePutMax`（取最小；有一个成员不支持就为 0）并实现
+     `PutFile`：放置、满盘/不可达/拒名处理、hold、索引提交与 `BeginUpload` 一致。uploader 的
+     `putWhole` 也把 blob 硬链接放进 ctx，第二副本仍从本地 hold 复制而不是回头下载。
+  3. 池的 `UploadParallel` 取成员最小值（gdrive 声明 1）→ 整个池只有 1 个上传 worker。每个上传
+     只落一个成员，所以改为成员之和（各成员的限流器仍各自约束）：队列消化速度
+     ~18 → 52 文件/分钟。
+  剩下的上限是代理到 Google 的往返（每次调用 1.3–2.2 s），不在本机可改。回归：
+  `internal/pool/fanout_parallel_test.go`（会合屏障，串行 fanout 必超时）、
+  `internal/pool/singleput_test.go`。
+- **[x] 连接页列表在复制时反复出现重复行**：`load()` 先同步清表、`await` 拉列表后再 append；
+  复制期间每个文件一个变更事件，子树匹配让它们全部触发 `load()`，多个并发 load 各自 append，
+  于是每行画两三遍，同时 `/fs/list` 打了几百次。`paged.js` 加 `latestOnly`（只有最新一次 load
+  能画）和 `coalesce`（一阵事件合成一次重载，长时间复制每 400 ms 刷新一次）。无头 Chrome
+  实测：40 个文件的突发只触发 1 次 `/fs/list`，45 行 45 个唯一路径。
+- **[x] 旧守护进程在挂载忙时被杀，留下的 FUSE 挂载点让 `cloudfs mount` 报「file exists」**：
+  stat 返回 `ENOTCONN`，`MkdirAll` 于是去创建目录。现在 `prepareMountPoint` 识别 `ENOTCONN`
+  并用 `service.Unmount` 先摘掉陈旧挂载，再挂新的。
 - **[ ] 只有一个网盘的用户走不完向导**：第 1 步要求至少两个网盘（池需要冗余），只想挂载
   单个网盘的人只能用 `cloudfs config mount` 命令行，而向导横幅会一直催他"继续安装"。
   应当允许单网盘走 replicas=1 的池，或在第 1 步给出"只挂载这一个"的出口。
