@@ -257,9 +257,13 @@ func (p *Pool) Capabilities() provider.Caps {
 		if first || (mc.MaxParts > 0 && mc.MaxParts < c.MaxParts) {
 			c.MaxParts = mc.MaxParts
 		}
-		if first || (mc.UploadParallel > 0 && mc.UploadParallel < c.UploadParallel) {
-			c.UploadParallel = mc.UploadParallel
-		}
+		// Uploads are placed one member each, so the pool can carry as
+		// many at once as its members can between them; each member's own
+		// limiter still paces what lands on it. Taking the smallest
+		// member's figure instead gave a pool of two Drive accounts one
+		// worker, and a copied source tree went up one 600-byte file at a
+		// time. A member that declares none counts as one stream.
+		c.UploadParallel += max(mc.UploadParallel, 1)
 		if first || (mc.LinkTTL > 0 && mc.LinkTTL < c.LinkTTL) {
 			c.LinkTTL = mc.LinkTTL
 		}
@@ -287,16 +291,39 @@ func (p *Pool) Capabilities() provider.Caps {
 	}
 	c.HashTypes = sortedHashes(hashes)
 	c.RapidUpload = sortedHashes(rapid)
+	c.SinglePutMax = p.singlePutMax()
 	if c.PartSize == 0 {
 		c.PartSize = 4 << 20
 	}
 	if c.MaxParts == 0 {
 		c.MaxParts = 10000
 	}
-	if c.UploadParallel == 0 {
+	if c.UploadParallel < 2 {
 		c.UploadParallel = 2
 	}
 	return c
+}
+
+// singlePutMax is the largest file the pool can put in one request: the
+// smallest ceiling among its members, and 0 — no such request — as soon as
+// one member offers none. Placement may pick any member, so the promise has
+// to hold on all of them. It is the pool's own Caps field, so the uploader
+// takes the one-request path for the pool exactly as it does for a drive.
+func (p *Pool) singlePutMax() int64 {
+	limit := int64(0)
+	for _, m := range p.members {
+		if _, ok := m.p.(provider.SinglePutter); !ok {
+			return 0
+		}
+		mx := m.p.Capabilities().SinglePutMax
+		if mx <= 0 {
+			return 0
+		}
+		if limit == 0 || mx < limit {
+			limit = mx
+		}
+	}
+	return limit
 }
 
 func sortedHashes(set map[provider.HashType]bool) []provider.HashType {

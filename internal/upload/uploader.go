@@ -579,6 +579,10 @@ func (u *Uploader) putWhole(ctx context.Context, sp provider.SinglePutter, up jo
 		return Result{}, fmt.Errorf("upload: %w: %w", provider.ErrNotFound, err)
 	}
 	defer f.Close()
+	// A pool keeps the bytes for its other replicas by linking the blob,
+	// the same offer begin() makes; without it the copies would be read
+	// back from the member that just took them.
+	ctx = provider.WithUploadBlobLink(ctx, func(dst string) error { return os.Link(up.BlobPath, dst) })
 	var entry provider.Entry
 	err = u.opt.Policy.Do(ctx, func() error {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {

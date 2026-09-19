@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"cloudfs/internal/config"
 	"cloudfs/internal/provider"
@@ -140,6 +141,92 @@ func (p *Pool) BeginUpload(ctx context.Context, parentID, name string, size int6
 		}
 	}
 	return provider.UploadSession{}, fmt.Errorf("%w: no member can take %s", provider.ErrUnavailable, pth)
+}
+
+// PutFile is the one-request upload, offered when every member offers it
+// (Capabilities().SinglePutMax). The uploader used to have no choice but the
+// session protocol against a pool — begin, part, complete, three round
+// trips for a 600-byte file where the member under it takes one — so a
+// source tree copied onto two Drive accounts cost 3.4 s per file instead of
+// 2.2 s. Placement and the bookkeeping are BeginUpload's: the same
+// candidates in the same order, the same answers to a full, unreachable or
+// refusing member, the same hold on the local bytes for repair, the same
+// index commit. Only the member call differs.
+func (p *Pool) PutFile(ctx context.Context, parentID, name string, r io.Reader, size int64, h provider.Hashes) (provider.Entry, error) {
+	if err := validName(name); err != nil {
+		return provider.Entry{}, err
+	}
+	parentPath, err := p.pathOf(ctx, parentID)
+	if err != nil {
+		return provider.Entry{}, err
+	}
+	pth := joinPath(parentPath, name)
+	var lastUnreachable error
+	for _, m := range p.candidates(ctx, pth) {
+		sp, ok := m.p.(provider.SinglePutter)
+		if !ok || m.p.Capabilities().SinglePutMax < size {
+			// Capabilities() promised every member takes this size; a
+			// member that changed its mind is skipped, not asked.
+			continue
+		}
+		dirID, err := p.ensureDir(ctx, m, parentPath)
+		if err != nil {
+			if unreachable(err) {
+				lastUnreachable = err
+				continue
+			}
+			return provider.Entry{}, err
+		}
+		// The hold is taken before the bytes are sent: r is consumed by the
+		// member and a retry on another candidate needs the reader intact,
+		// which the caller's retry policy provides by seeking; the hold is a
+		// hard link to the same blob and costs nothing to take early.
+		hold, _ := p.takeHold(ctx, provider.UploadBlobLinkFrom(ctx), pth, size)
+		me, err := sp.PutFile(ctx, dirID, name, r, size, h)
+		if err != nil {
+			p.dropHold(ctx, hold)
+			if outOfSpace(err) {
+				m.note(nil)
+				m.markFull(p.now())
+				// r has been read; the next candidate cannot be tried
+				// with the same reader. The caller retries the whole put,
+				// and placement then skips the member marked full.
+				return provider.Entry{}, fmt.Errorf("%w: %w", provider.ErrRestartUpload, err)
+			}
+			if unreachable(err) {
+				m.note(err)
+				lastUnreachable = err
+				return provider.Entry{}, fmt.Errorf("%w: %s on %s (%v)", provider.ErrUnavailable, pth, m.name, err)
+			}
+			if refusedName(err) {
+				// BeginUpload moves on to the next candidate here; this
+				// call cannot, r is spent. The denial is learned, so the
+				// retry the queue makes places the file elsewhere — and
+				// when no member will spell the name, the next attempt
+				// finds no candidate and fails for the real reason.
+				m.note(nil)
+				p.learnDenial(ctx, m, name)
+				return provider.Entry{}, fmt.Errorf("%w: %s refused the name: %w", provider.ErrTransient, m.name, err)
+			}
+			return provider.Entry{}, err
+		}
+		m.note(nil)
+		e, err := p.finishUpload(ctx, m, pth, me, hold)
+		if err != nil {
+			return provider.Entry{}, err
+		}
+		p.awaitMinReplicas(ctx, pth)
+		return e, nil
+	}
+	if lastUnreachable != nil {
+		return provider.Entry{}, fmt.Errorf("%w: no member can take %s (%v)", provider.ErrUnavailable, pth, lastUnreachable)
+	}
+	if len(p.candidates(ctx, pth)) == 0 {
+		if err := p.whyNoMember(ctx, pth); err != nil {
+			return provider.Entry{}, err
+		}
+	}
+	return provider.Entry{}, fmt.Errorf("%w: no member can take %s", provider.ErrUnavailable, pth)
 }
 
 // whyNoMember explains an empty candidate list when it is the name's
@@ -376,6 +463,15 @@ func (p *Pool) ensureRoot(ctx context.Context, m *member) (string, error) {
 // many members took it; a member that could not be reached is given a
 // pending op instead, and a member that refused it for a reason of its own
 // is recorded as a divergence — the operation still stands on the others.
+//
+// The members are asked at once — do runs on one goroutine per member, so
+// whatever it writes besides the member must be guarded. Asked in turn, a
+// mkdir cost the sum of the
+// members' round trips — 2.7 s on two Drive accounts behind a proxy — and
+// mkdir is synchronous under the mount, so copying a source tree in spent
+// most of its time here. The bookkeeping that follows each answer (health,
+// pending ops, divergences) is done in declaration order once every answer
+// is in, so the rows it writes land in the same order they always did.
 type target struct {
 	m        *member
 	remoteID string
@@ -386,13 +482,28 @@ func (p *Pool) fanout(ctx context.Context, targets []target, op, pth string, arg
 	var lastErr, lastUnreachable error
 	now := p.now().UnixNano()
 	probe := p.probeInterval()
-	for _, t := range targets {
+	asked := make([]bool, len(targets))
+	errs := make([]error, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
 		if !t.m.usable(probe) {
+			continue
+		}
+		asked[i] = true
+		wg.Add(1)
+		go func(i int, t target) {
+			defer wg.Done()
+			errs[i] = do(t)
+		}(i, t)
+	}
+	wg.Wait()
+	for i, t := range targets {
+		if !asked[i] {
 			lastUnreachable = fmt.Errorf("member %s is %s", t.m.name, t.m.state())
 			p.pendingOp(ctx, t.m, op, pth, args, now)
 			continue
 		}
-		err := do(t)
+		err := errs[i]
 		switch {
 		case err == nil, errors.Is(err, provider.ErrNotFound):
 			t.m.note(nil)
@@ -606,11 +717,15 @@ func (p *Pool) Rename(ctx context.Context, id, newName string) (provider.Entry, 
 		return provider.Entry{}, err
 	}
 	args := map[string]string{"id": id, "from": pth, "to": newPath, "ctoken": row.ctoken}
+	// fanout asks the members at once; the answers land in one map.
+	var answers sync.Mutex
 	renamed := map[string]provider.Entry{}
 	ok, err := p.fanout(ctx, targets, "rename", pth, args, func(t target) error {
 		e, err := t.m.p.Rename(ctx, t.remoteID, newName)
 		if err == nil {
+			answers.Lock()
 			renamed[t.m.name] = e
+			answers.Unlock()
 		}
 		return err
 	})
@@ -644,6 +759,7 @@ func (p *Pool) Move(ctx context.Context, id, newParentID string) (provider.Entry
 		return provider.Entry{}, err
 	}
 	args := map[string]string{"id": id, "from": pth, "to": newPath, "ctoken": row.ctoken}
+	var answers sync.Mutex
 	moved := map[string]provider.Entry{}
 	ok, err := p.fanout(ctx, targets, "move", pth, args, func(t target) error {
 		dst, err := p.ensureDir(ctx, t.m, newParent)
@@ -652,7 +768,9 @@ func (p *Pool) Move(ctx context.Context, id, newParentID string) (provider.Entry
 		}
 		e, err := t.m.p.Move(ctx, t.remoteID, dst)
 		if err == nil {
+			answers.Lock()
 			moved[t.m.name] = e
+			answers.Unlock()
 		}
 		return err
 	})

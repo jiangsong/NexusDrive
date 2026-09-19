@@ -57,6 +57,17 @@ func (p *Pool) setHoldToken(tx *sql.Tx, holdPath, ctoken string) error {
 	return err
 }
 
+// dropHold removes one hold taken for an upload that did not land. A hold
+// whose upload failed carries bytes the index never learned about; left
+// behind it would be trimmed eventually, but only by age.
+func (p *Pool) dropHold(ctx context.Context, holdPath string) {
+	if holdPath == "" {
+		return
+	}
+	os.Remove(holdPath)
+	_, _ = p.db.ExecContext(ctx, `DELETE FROM holds WHERE hold_path = ?`, holdPath)
+}
+
 // releaseHolds drops every hold for a path.
 func (p *Pool) releaseHolds(ctx context.Context, pth string) {
 	rows, err := p.db.QueryContext(ctx, `SELECT hold_path FROM holds WHERE path = ?`, pth)
