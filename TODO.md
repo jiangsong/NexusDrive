@@ -43,7 +43,10 @@
   3. 池的 `UploadParallel` 取成员最小值（gdrive 声明 1）→ 整个池只有 1 个上传 worker。每个上传
      只落一个成员，所以改为成员之和（各成员的限流器仍各自约束）：队列消化速度
      ~18 → 52 文件/分钟。
-  剩下的上限是代理到 Google 的往返（每次调用 1.3–2.2 s），不在本机可改。回归：
+  随后把 gdrive 的 `UploadParallel` 从 1 调到 4（与其 upload 桶 4 qps 一致）：8 个在飞，
+  **194 文件/分钟**，两分钟 420 次 `put_file` 零重试、限流桶未被 AIMD 压低；是否会在长时间
+  高并发下触发 `userRateLimitExceeded` 留了 `UNVERIFIED`。剩下的上限是代理到 Google 的往返
+  （每次调用 1.3–2.2 s），不在本机可改。回归：
   `internal/pool/fanout_parallel_test.go`（会合屏障，串行 fanout 必超时）、
   `internal/pool/singleput_test.go`。
 - **[x] 连接页列表在复制时反复出现重复行**：`load()` 先同步清表、`await` 拉列表后再 append；

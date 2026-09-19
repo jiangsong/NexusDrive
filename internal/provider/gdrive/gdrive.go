@@ -153,7 +153,14 @@ func New(opt Options) (*Provider, error) {
 		HashTypes: []provider.HashType{provider.HashMD5},
 		RangeRead: true, StreamList: true,
 		PartSize: partSize, MaxParts: int((maxDriveFileSize + partSize - 1) / partSize),
-		UploadParallel: 1, SinglePutMax: singlePutMax,
+		// Drive's published limits are per-user query quotas, not connection
+		// counts, and the upload bucket below already allows four requests
+		// a second; one stream at a time left a pool over two accounts
+		// draining a queue of small files at 18 a minute. Four matches the
+		// bucket. UNVERIFIED: whether sustained 4-way uploads draw 403
+		// userRateLimitExceeded on a real account; if they do, the limiter's
+		// AIMD backs off, and this number should come down.
+		UploadParallel: 4, SinglePutMax: singlePutMax,
 		ServerMove: true, ServerRename: true, ServerCopy: true, Delta: true,
 		// Drive serves private content only to an authenticated request, so
 		// there is no link a third party could follow.

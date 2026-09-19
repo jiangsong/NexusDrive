@@ -82,7 +82,9 @@ BYO 客户端（Desktop 类型）浏览器授权 → refresh token 落到 secret
 （5 TiB）；`mkdir`、45 B 与 3 MiB 的单次上传、20 MiB 的 resumable 上传（8 MiB 分片，session
 URI 不带 Authorization）——Drive 端 `md5Checksum` 与本地一致；shell 两次重定向覆盖只留下
 第二份内容；改名、删除在两个成员上都落地；在 Drive 里直接新增的文件 33–69 s 内出现在挂载点
-（delta feed），4 MiB 冷读经修订钉住的 Range 下载 md5 一致。尚未在真机观察的：修订被清理后的
+（delta feed），4 MiB 冷读经修订钉住的 Range 下载 md5 一致。`UploadParallel` 从 1 调到 4 后（与 upload 桶的
+4 qps 匹配），两账号池的小文件队列从 52 文件/分钟到 194 文件/分钟，两分钟 420 次 `put_file`
+零重试、AIMD 未降速；持续高并发是否引来 `userRateLimitExceeded` 仍标 `UNVERIFIED`。尚未在真机观察的：修订被清理后的
 回退、`orderBy` 跨页一致性、403 的 reason 字符串、公开分享链接（代码里仍标 `UNVERIFIED`）。
 
 **Box**：Box 的文件与文件夹是两套独立编号，同一个数字可以既是文件又是文件夹，且端点不同。
