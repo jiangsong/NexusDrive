@@ -98,7 +98,7 @@ func (f *FS) checkUploadResume(ctx context.Context, u journal.Upload) error {
 		}
 		return err
 	}
-	if n.IsDir() || n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) || n.Version != localVersion(u.ID) || n.Name != u.Name || n.Size != u.Size {
+	if u.IsMkdir() || !uploadNodeMatches(n, u) {
 		return ErrUploadResumeTarget
 	}
 	path, err := f.meta.Path(ctx, n.Ino)

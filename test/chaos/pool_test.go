@@ -171,7 +171,8 @@ func TestPoolWriteThroughTheVFSLandsOnAMember(t *testing.T) {
 	if _, err := r.fs.WriteFile(ctx, "/notes/today.md", []byte("# today"), false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.up.DrainOnce(ctx, "home"); err != nil {
+	// Two rows: the directory's creation and the file, in that order.
+	if _, err := r.up.DrainAll(ctx); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := r.j.Stats(ctx)
@@ -664,5 +665,55 @@ func TestRebalanceLosesNothingWhenAMemberGoesAwayMidPlan(t *testing.T) {
 	}
 	if st.Queued+st.Done+st.Failed != len(plan.Moves) {
 		t.Fatalf("queue accounts for %+v of %d planned moves", st, len(plan.Moves))
+	}
+}
+
+// TestPoolQueuedTreeLandsOnEveryMember: a tree made with nothing but local
+// commits — directories included — reaches the pool in order: every
+// directory is mirrored on every member before a file is placed in it, and
+// no member is ever asked about a parent it does not have.
+func TestPoolQueuedTreeLandsOnEveryMember(t *testing.T) {
+	r := newPoolRig(t, "a", "b")
+	ctx := context.Background()
+	parent := uint64(meta.RootIno)
+	for _, name := range []string{"src", "pkg"} {
+		at, err := r.fs.Mkdir(ctx, parent, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parent = at.Ino
+	}
+	if _, err := r.fs.WriteFile(ctx, "/src/pkg/main.go", []byte("package main"), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range r.members {
+		if m.Calls("Mkdir") != 0 {
+			t.Fatalf("mkdir waited for a member: %d calls", m.Calls("Mkdir"))
+		}
+	}
+	if _, err := r.up.DrainAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := r.j.Stats(ctx)
+	if st.Pending+st.Uploading+st.Dead != 0 {
+		t.Fatalf("queue after drain: %+v", st)
+	}
+	landed := 0
+	for name, m := range r.members {
+		if _, ok := m.IDOf("src/pkg"); !ok {
+			t.Fatalf("member %s lacks the directory skeleton: %v", name, m.Tree())
+		}
+		if data, ok := m.Content("src/pkg/main.go"); ok {
+			if string(data) != "package main" {
+				t.Fatalf("member %s holds %q", name, data)
+			}
+			landed++
+		}
+	}
+	if landed == 0 {
+		t.Fatal("the file landed on no member")
+	}
+	if attr, err := r.fs.StatPath(ctx, "/src/pkg"); err != nil || attr.LocalOnly {
+		t.Fatalf("directory not adopted: %+v %v", attr, err)
 	}
 }

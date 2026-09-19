@@ -325,7 +325,7 @@ func (f *FS) crawlSweep(ctx context.Context, opt CrawlOptions, stop <-chan struc
 			switch {
 			case !ok, allowed != nil && !allowed[m.Remote], crawlExcluded(opt.Exclude, p):
 				skipped++
-			case n.RemoteID == "" && !f.isMountRoot(p):
+			case n.RemoteID == "" && !f.isMountRoot(p), IsLocalOnly(n.RemoteID):
 				// Not on the remote yet (a local mkdir whose upload is
 				// queued): nothing to list.
 				skipped++

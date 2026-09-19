@@ -456,8 +456,8 @@ scripts/bench/run-matrix.sh /tmp/matrix 192.168.0.20 work '~/test'        # lan/
 
 | 模式 | `close()` 返回时机 | 适用 |
 |---|---|---|
-| `writeback`（默认） | 本地日志提交后 | 日常编辑、agent 写入、IDE |
-| `strict` | 远端上传完成后 | 备份脚本、要求跨端立刻可见 |
+| `writeback`（默认） | 本地日志提交后（`mkdir` 也是：目录先在本地生效，后台再到网盘创建） | 日常编辑、agent 写入、IDE |
+| `strict` | 远端上传完成后（`mkdir` 等网盘创建完成） | 备份脚本、要求跨端立刻可见 |
 | `readonly` | 拒绝写（`EROFS`） | 媒体库、被熔断或未授权的账号 |
 
 ## 存储池：把所有网盘融合成一块盘

@@ -29,6 +29,10 @@ type Result struct {
 	// ConflictName is set when the remote changed under us and the data was
 	// stored under a different name.
 	ConflictName string
+	// Merged is set when a directory creation found the name already there
+	// and adopted that directory instead of making one. Whatever is in it
+	// is not this row's doing, and a tombstone must not delete it.
+	Merged bool
 }
 
 // Hooks let the VFS react to upload outcomes without importing it here.
@@ -241,6 +245,11 @@ func (u *Uploader) drainOnce(ctx context.Context, remote string) (int, error) {
 	return len(claimed), nil
 }
 
+// RunOne runs a row the caller has already claimed (Journal.ClaimID) to
+// completion, retry or dead letter, on the caller's goroutine. The VFS uses
+// it to create a queued directory when an operation needs its real id now.
+func (u *Uploader) RunOne(ctx context.Context, up journal.Upload) { u.process(ctx, up) }
+
 // DrainOnce processes at most one due upload for a remote. Tests and
 // `cloudfs uploads flush` use it to run the pipeline synchronously.
 func (u *Uploader) DrainOnce(ctx context.Context, remote string) (int, error) {
@@ -335,11 +344,20 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 		// Deleted locally while we were sending it: the file must not come
 		// back to life on the backend.
 		if row, gerr := u.opt.Journal.Get(ctx, up.ID); gerr == nil && row.Tombstone {
-			if res.Entry.ID != "" {
+			// A directory this row merely found is not its to delete: what
+			// is in it belongs to whoever made it.
+			if res.Entry.ID != "" && !res.Merged {
 				if derr := p.Delete(ctx, res.Entry.ID); derr != nil && !errors.Is(derr, provider.ErrNotFound) {
 					_ = u.opt.Journal.Retry(ctx, up.ID, fmt.Errorf("upload: removing tombstoned file: %w", derr), time.Second)
 					return
 				}
+			}
+			if up.IsMkdir() && res.Entry.ID != "" {
+				// Removing the directory locally cancelled what was queued
+				// under it; anything that slipped in since follows the
+				// directory's real id and finds it gone, which is what
+				// drops a row whose target no longer exists.
+				_ = u.opt.Journal.RetargetChildren(ctx, journal.LocalIDPrefix+up.ID, res.Entry.ID)
 			}
 			_ = u.opt.Journal.Drop(ctx, up.ID)
 			return
@@ -435,6 +453,9 @@ func (u *Uploader) dead(ctx context.Context, up journal.Upload, cause error) {
 
 // runOne performs the actual transfer.
 func (u *Uploader) runOne(ctx context.Context, p provider.Provider, up journal.Upload) (Result, error) {
+	if up.IsMkdir() {
+		return u.mkdirOne(ctx, p, up)
+	}
 	caps := p.Capabilities()
 	name := up.Name
 
@@ -570,6 +591,76 @@ func (u *Uploader) runOne(ctx context.Context, p provider.Provider, up journal.U
 		r.ConflictName = name
 	}
 	return r, nil
+}
+
+// mkdirOne creates a queued directory: one call, no session, no bytes. The
+// metadata bucket is the one a directory creation draws on (the drivers
+// charge it there too), not the upload bucket.
+//
+// "Exists" is a success the first attempt did not live to hear: the request
+// timed out after the backend made the directory, or the directory is one
+// the backend had all along. Either way the row's job is done once the
+// entry is known, and it is found by name in the parent.
+func (u *Uploader) mkdirOne(ctx context.Context, p provider.Provider, up journal.Upload) (Result, error) {
+	if err := u.waitLimit(ctx, up.Remote, ratelimit.Meta); err != nil {
+		return Result{}, err
+	}
+	var entry provider.Entry
+	err := u.opt.Policy.Do(ctx, func() error {
+		var e error
+		entry, e = p.Mkdir(ctx, up.RemoteParentID, up.Name)
+		return e
+	}, func(err error, _ retry.Class, _ time.Duration) { u.throttled(up.Remote, ratelimit.Meta, err) })
+	if err == nil {
+		u.succeeded(up.Remote, ratelimit.Meta)
+		if entry.ID == "" {
+			// The tree adopts the id; without one the directory stays local
+			// forever. Look it up the way the exists path does.
+			found, ferr := u.findChild(ctx, p, up.Remote, up.RemoteParentID, up.Name)
+			if ferr != nil {
+				return Result{}, ferr
+			}
+			entry = found
+		}
+		return Result{UploadID: up.ID, Entry: entry}, nil
+	}
+	if !errors.Is(err, provider.ErrExists) {
+		return Result{}, err
+	}
+	found, ferr := u.findChild(ctx, p, up.Remote, up.RemoteParentID, up.Name)
+	if ferr != nil {
+		return Result{}, ferr
+	}
+	if found.Kind != provider.KindDir {
+		// The name is a file. No retry changes that.
+		return Result{}, fmt.Errorf("upload: %q is a file on the backend, not a directory: %w", up.Name, provider.ErrExists)
+	}
+	u.succeeded(up.Remote, ratelimit.Meta)
+	return Result{UploadID: up.ID, Entry: found, Merged: true}, nil
+}
+
+// findChild lists parentID until it finds name, the whole directory and not
+// just its first page.
+func (u *Uploader) findChild(ctx context.Context, p provider.Provider, remote, parentID, name string) (provider.Entry, error) {
+	if err := u.waitLimit(ctx, remote, ratelimit.Meta); err != nil {
+		return provider.Entry{}, err
+	}
+	cursor := ""
+	for {
+		entries, next, err := p.List(ctx, parentID, cursor)
+		if err != nil {
+			return provider.Entry{}, err
+		}
+		for _, e := range entries {
+			if e.Name == name {
+				return e, nil
+			}
+		}
+		if next == "" {
+			return provider.Entry{}, fmt.Errorf("upload: %q reported as existing but not listed under its parent: %w", name, provider.ErrNotFound)
+		}
+		cursor = next
+	}
 }
 
 // putWhole sends a small file in a single request.

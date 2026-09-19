@@ -36,6 +36,14 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 				if stopped {
 					continue
 				}
+				if u.IsMkdir() {
+					// A directory creation carries no bytes to keep; with
+					// its node gone there is nothing to reconcile.
+					if err := j.DropPending(ctx, u.ID); err != nil && !errors.Is(err, journal.ErrNotFound) {
+						return err
+					}
+					continue
+				}
 				if u.Ino != 0 && !u.Tombstone {
 					if err := j.Fail(ctx, u.ID, errors.New("local publication target is missing; retained payload requires reconciliation")); err != nil {
 						return err
@@ -46,7 +54,7 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 			if err != nil {
 				return err
 			}
-			if u.Tombstone || n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) {
+			if u.Tombstone || u.IsMkdir() || n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) {
 				continue
 			}
 			key := cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version}
@@ -84,6 +92,12 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 			if stopped {
 				continue
 			}
+			if u.IsMkdir() {
+				if err := j.DropPending(ctx, u.ID); err != nil && !errors.Is(err, journal.ErrNotFound) {
+					return err
+				}
+				continue
+			}
 			// Absence alone cannot distinguish an intentional unlink from
 			// lost/corrupt metadata. Do not resurrect the name, but never
 			// destroy the only durable content based on a cache lookup.
@@ -95,8 +109,16 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 		if err != nil {
 			return err
 		}
-		if u.Ino == 0 || n.IsDir() || n.Remote != u.Remote {
+		if u.Ino == 0 || n.IsDir() != u.IsMkdir() || n.Remote != u.Remote {
 			return fmt.Errorf("vfs: cannot publish upload %s into an unrelated node", u.ID)
+		}
+		if u.IsMkdir() {
+			// The directory's local identity, the step mkdir did not reach.
+			// No cache entry: a directory has no bytes.
+			if err := f.publishQueuedDir(ctx, j, u, n); err != nil {
+				return err
+			}
+			continue
 		}
 		oldKey := cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version}
 		n.RemoteID, n.Version = localRemoteID(u.ID), localVersion(u.ID)
@@ -132,7 +154,59 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 		// background fallback; the kind is still what the content is.
 		f.changedNode(ctx, n.Ino, false, KindWrite)
 	}
+	if err := f.removeUncommittedDirs(ctx, j); err != nil {
+		return err
+	}
 	return f.recoverCopyVersions(ctx, j)
+}
+
+// publishQueuedDir finishes a queued directory's local commit: the node
+// takes the row's local identity and the row's publication gate opens.
+func (f *FS) publishQueuedDir(ctx context.Context, j *journal.Journal, u journal.Upload, n meta.Node) error {
+	n.RemoteID, n.Version = localRemoteID(u.ID), localVersion(u.ID)
+	n.Dirty = true
+	update := f.meta.UpdateByIno
+	if j.Durability() == journal.DurabilityPower {
+		update = f.meta.PublishByIno
+	}
+	if err := update(ctx, n); err != nil {
+		return err
+	}
+	if err := j.MarkPublished(ctx, u.ID); err != nil {
+		return err
+	}
+	f.invalidateFrom(ctx, n.Ino)
+	return nil
+}
+
+// removeUncommittedDirs takes out directories an interrupted mkdir left in
+// the tree with no row to create them: nothing was acknowledged for them,
+// and nothing will ever put them on the backend. Whatever was created
+// beneath one (nothing, in practice: the window is between two writes)
+// goes with it.
+func (f *FS) removeUncommittedDirs(ctx context.Context, j *journal.Journal) error {
+	dirs, err := f.meta.UncommittedDirs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, d := range dirs {
+		if f.isMountDir(d.Ino) {
+			continue
+		}
+		rows, err := j.ByIno(ctx, d.Ino)
+		if err != nil {
+			return err
+		}
+		if len(rows) != 0 {
+			continue // a row exists; publication above took care of it
+		}
+		if err := f.meta.Remove(ctx, d.Ino); err != nil && !errors.Is(err, meta.ErrNotFound) {
+			return err
+		}
+		f.dropPaths()
+		_ = f.meta.Invalidate(ctx, d.ParentIno)
+	}
+	return nil
 }
 
 // Full versions can be visible before upload handoff. They remain readable

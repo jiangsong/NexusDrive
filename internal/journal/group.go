@@ -209,11 +209,19 @@ func (j *Journal) insertUploadTx(tx *sql.Tx, u Upload) error {
 	if u.State == StatePurging {
 		return ErrUploadCleanupState // Only Begin may pair this state with an intent.
 	}
-	if err := j.checkCopyUploadOwner(tx, u.BlobPath); err != nil {
-		return err
+	if u.Kind == "" {
+		u.Kind = KindFile
 	}
-	if err := j.checkDiscardedPayload(tx, u.BlobPath); err != nil {
-		return err
+	if u.IsMkdir() && (u.BlobPath != "" || u.Size != 0) {
+		return errors.New("journal: a directory creation carries no bytes")
+	}
+	if u.BlobPath != "" {
+		if err := j.checkCopyUploadOwner(tx, u.BlobPath); err != nil {
+			return err
+		}
+		if err := j.checkDiscardedPayload(tx, u.BlobPath); err != nil {
+			return err
+		}
 	}
 	now := j.now()
 	if u.ID == "" {
@@ -248,15 +256,15 @@ func (j *Journal) insertUploadTx(tx *sql.Tx, u Upload) error {
 	}
 	st, err := j.prep(context.Background(), `INSERT INTO uploads (id, remote, remote_parent_id, name, blob_path, size, hashes,
 		   state, attempt, next_retry_at, last_error, expected_version, session, ino, created_at, needs_publish,
-		   meta_identity, mount_prefix, mount_root_id, account_binding)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		   meta_identity, mount_prefix, mount_root_id, account_binding, kind)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   remote=excluded.remote, remote_parent_id=excluded.remote_parent_id, name=excluded.name,
 		   blob_path=excluded.blob_path, size=excluded.size, hashes=excluded.hashes,
 		   state=excluded.state, expected_version=excluded.expected_version, ino=excluded.ino,
 		   needs_publish=excluded.needs_publish, meta_identity=excluded.meta_identity,
 		   mount_prefix=excluded.mount_prefix, mount_root_id=excluded.mount_root_id,
-		   account_binding=excluded.account_binding`)
+		   account_binding=excluded.account_binding, kind=excluded.kind`)
 	if err != nil {
 		return fmt.Errorf("journal: prepare: %w", err)
 	}
@@ -264,7 +272,7 @@ func (j *Journal) insertUploadTx(tx *sql.Tx, u Upload) error {
 		u.ID, u.Remote, u.RemoteParentID, u.Name, u.BlobPath, u.Size, string(hashes),
 		string(u.State), u.Attempt, unixMilli(u.NextRetryAt), u.LastError, u.ExpectedVersion,
 		string(session), u.Ino, u.CreatedAt.Unix(), u.NeedsPublish,
-		u.MetaIdentity, u.MountPrefix, u.MountRootID, u.AccountBinding)
+		u.MetaIdentity, u.MountPrefix, u.MountRootID, u.AccountBinding, string(u.Kind))
 	if err != nil {
 		return fmt.Errorf("journal: commit: %w", err)
 	}

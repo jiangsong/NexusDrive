@@ -405,6 +405,31 @@ func (s *Store) Children(ctx context.Context, dir uint64) ([]Node, error) {
 	return out, rows.Err()
 }
 
+// UncommittedDirs lists directories that exist only in the tree: no remote
+// id and dirty. A queued directory holds a local id, a backend directory a
+// real one; a directory in neither state was inserted and never committed,
+// which only an interrupted mkdir leaves behind. Mount directories, which
+// also have no remote id, are not dirty and are not listed.
+func (s *Store) UncommittedDirs(ctx context.Context) ([]Node, error) {
+	s.queries.Add(1)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+nodeCols+` FROM nodes WHERE kind = ? AND remote_id = '' AND dirty = 1 AND ino != ?`,
+		int(provider.KindDir), RootIno)
+	if err != nil {
+		return nil, fmt.Errorf("meta: uncommitted dirs: %w", err)
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, fmt.Errorf("meta: uncommitted dirs: %w", err)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // DirState returns the listing state of dir.
 func (s *Store) DirState(ctx context.Context, dir uint64) (DirState, error) {
 	var d DirState
@@ -567,6 +592,50 @@ func (s *Store) Insert(ctx context.Context, n Node) (Node, error) {
 	s.clearAbsent(n.ParentIno, n.Name)
 	if n.FetchedAt.IsZero() {
 		n.FetchedAt = s.now()
+	}
+	return n, nil
+}
+
+// InsertCompleteDir creates a directory that is known to be empty — this
+// machine just made it — so it is born with a complete listing and the first
+// lookup inside it is answered locally instead of listing an empty directory
+// on the backend. The node and its listing state are one transaction: a
+// listing marked complete afterwards would have to be reconciled against
+// children that may have arrived in between.
+func (s *Store) InsertCompleteDir(ctx context.Context, n Node) (Node, error) {
+	if n.Kind != provider.KindDir {
+		return Node{}, errors.New("meta: InsertCompleteDir needs a directory")
+	}
+	now := s.now()
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var ino uint64
+		err := tx.QueryRowContext(ctx, `SELECT ino FROM nodes WHERE parent_ino=? AND name=?`, n.ParentIno, n.Name).Scan(&ino)
+		if err == nil {
+			return ErrExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		ino, err = s.upsertNodeTx(ctx, tx, n)
+		if err != nil {
+			return err
+		}
+		n.Ino = ino
+		_, err = tx.Exec(
+			`INSERT INTO dir_state (ino, complete, listed_at, cursor, dirty) VALUES (?, 1, ?, '', 0)
+			 ON CONFLICT(ino) DO UPDATE SET complete=1, listed_at=excluded.listed_at, cursor='', dirty=0`,
+			ino, now.Unix())
+		if err != nil {
+			return fmt.Errorf("meta: mark new directory complete: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Node{}, err
+	}
+	s.clearAbsent(n.ParentIno, n.Name)
+	if n.FetchedAt.IsZero() {
+		n.FetchedAt = now
 	}
 	return n, nil
 }

@@ -35,23 +35,30 @@ func TestControlDeleteIsAudited(t *testing.T) {
 	if w := call(t, s, "POST", "/fs/delete", `{"path":"/docs/b","confirm":true}`); w.Code != 200 {
 		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
 	}
+	// By path and kind: a directory made on a writeback mount is created on
+	// the backend afterwards, and that landing is a further, remote-origin
+	// change on the same path — the way an upload landing is for a file.
+	// The recorder is asynchronous, so wait for both rows, not for a count.
 	deadline := time.Now().Add(5 * time.Second)
 	var rows []agent.Change
+	byPathKind := map[[2]string]agent.Change{}
 	for time.Now().Before(deadline) {
 		rows, _, _ = st.Changes(ctx, agent.ChangesQuery{Prefix: "/docs"})
-		if len(rows) >= 2 {
+		byPathKind = map[[2]string]agent.Change{}
+		for _, r := range rows {
+			byPathKind[[2]string{r.Path, r.Kind}] = r
+		}
+		_, madeOK := byPathKind[[2]string{"/docs/made", "mkdir"}]
+		_, removedOK := byPathKind[[2]string{"/docs/b", "remove"}]
+		if madeOK && removedOK {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	byPath := map[string]agent.Change{}
-	for _, r := range rows {
-		byPath[r.Path] = r
-	}
-	if c, ok := byPath["/docs/b"]; !ok || c.Origin != "control" || c.Kind != "remove" || !c.Reliable {
+	if c, ok := byPathKind[[2]string{"/docs/b", "remove"}]; !ok || c.Origin != "control" || !c.Reliable {
 		t.Fatalf("the console's delete is not on record as control: %+v", rows)
 	}
-	if c, ok := byPath["/docs/made"]; !ok || c.Origin != "control" || c.Kind != "mkdir" {
+	if c, ok := byPathKind[[2]string{"/docs/made", "mkdir"}]; !ok || c.Origin != "control" {
 		t.Fatalf("the console's mkdir is not on record as control: %+v", rows)
 	}
 	last, ok, err := st.LastWriter(ctx, "/docs/b")

@@ -49,6 +49,40 @@
   （每次调用 1.3–2.2 s），不在本机可改。回归：
   `internal/pool/fanout_parallel_test.go`（会合屏障，串行 fanout 必超时）、
   `internal/pool/singleput_test.go`。
+- **[x] 目录也走写回：`cp -r` 前台不再等远端**。上一条把池的 mkdir 从 2.7 s 压到 1.45 s，
+  但每个目录仍有**两次同步往返**：`vfs.Mkdir` 本身，以及 `meta.Upsert` 后 `dir_state.complete=0`
+  让新目录里的第一次 lookup/create 去 `List` 一个空目录。390 个目录 ≈ 19 分钟全在目录上，
+  文件早就是本地提交即返回。改法：
+  1. 新目录出生即"完整且为空"（`meta.InsertCompleteDir`，节点与 `dir_state` 同一事务），
+     回归 `test/perf` `TestMkdirThenCreateCostsNoListing`。
+  2. writeback 下 `mkdir` 成为 journal 里的 `kind=mkdir` 行，节点取 `cloudfs-local:<row>`；
+     `Claim` 跳过父目录仍是本地 id 的行，目录落地后 `AdoptByIno` + `RetargetChildren`。
+     提交顺序与文件一致（节点 → 行 → 本地身份 → 发布门），`RecoverPublications` 补做中断的
+     一步、丢掉没有节点的 mkdir 行、删掉插入后没来得及提交的目录节点。
+     父目录恰好在"读到本地 id"与"提交行"之间落地的运行期竞态由提交后重读父节点解决
+     （`retargetIfParentLanded`，`TestCommitAfterParentLandedRetargetsItself`）。
+  3. 前置修复：`conflictLoser` 把没有 cache 项的 local-only 节点当冲突输家——目录永远没有
+     cache 项，父目录一被列举就会把 pending 目录整棵删掉（`TestPendingDirectorySurvivesParentListing`）；
+     `renameLocalOnly` 遇到 local-only 父目录退回挂载根的兜底会把文件传到根目录，已删。
+  4. 需要真实 id 的同步操作（远端条目 Move 进 pending 目录、`Copy`、strict 挂载）用
+     `ensureRemoteDir` 自顶向下当场跑这些行（`journal.ClaimID` + `Uploader.RunOne`，不顺手
+     排空无关文件）。递归删除目录前先取消其下所有排队行，否则它们指着永远不会落地的父 id。
+  5. 管理面：`kind` 出现在 control JSON / `cloudfs uploads` / 控制台队列页；mkdir 行不可
+     cancel/resume/discard（没有字节可保留，取消即永远 local），dead 时可 retry；
+     `Stats.Blocked` 计数被 dead/缺失父行卡住的行，`uploads flush` 据此立刻报 dead letter。
+  真实账号实测（两账号 Drive 池、经代理）：`cp -r ~/workspace/fs ~/CloudFS/fs2`（389 目录、
+  3434 文件、104 MB）前台 **37 s**（此前目录上就要约 19 分钟），期间前台 0 次远端调用；后台
+  队列 389 次 `mkdir` + 3502 次 `put_file` 约 20 分钟排空，0 dead、0 重试；两个成员各 388 个
+  文件夹与本地一致，抽查 md5 全部一致；控制台队列页把目录行显示为「待创建的目录」、无停止按钮。
+  回归：`internal/vfs/mkdir_writeback_test.go`、`mkdir_recovery_test.go`、
+  `internal/journal/mkdir_test.go`、`internal/upload/mkdir_test.go`、
+  `test/chaos` `TestPoolQueuedTreeLandsOnEveryMember`。
+- **[ ] mkdir 行的取消/续传/丢弃**：v1 一律拒绝。若要支持，取消后必须能把目录及其下所有
+  排队行一起"本地化"或一起恢复，现在没有这样的原子操作。
+- **[ ] PathIDs 后端祖先改名不改写 pending 行的 `remote_parent_id`**（既有缺口，本轮发现）：
+  sftp/webdav/s3/smb 的父 id 就是路径，祖先在远端改名后 `RenameAndRetarget` 只改节点，
+  排队中的子文件仍指旧路径 → 上传时 ENOENT → 被当作"本地已删除"丢掉。验收：改名带有
+  pending 上传的 PathIDs 目录后 drain，文件落在新路径下。
 - **[x] 连接页列表在复制时反复出现重复行**：`load()` 先同步清表、`await` 拉列表后再 append；
   复制期间每个文件一个变更事件，子树匹配让它们全部触发 `load()`，多个并发 load 各自 append，
   于是每行画两三遍，同时 `/fs/list` 打了几百次。`paged.js` 加 `latestOnly`（只有最新一次 load

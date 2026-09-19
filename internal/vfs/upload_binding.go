@@ -25,6 +25,19 @@ func (f *FS) uploadBinding(ctx context.Context, m Mount) (journal.UploadBinding,
 		MountRootID: m.RootID, AccountBinding: m.AccountBinding}, nil
 }
 
+// uploadNodeMatches reports whether n is the node u was queued for, still
+// carrying the identity the queue published: a file with the row's name and
+// size, or for a directory creation the directory itself.
+func uploadNodeMatches(n meta.Node, u journal.Upload) bool {
+	if n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) || n.Version != localVersion(u.ID) || n.Name != u.Name {
+		return false
+	}
+	if u.IsMkdir() {
+		return n.IsDir()
+	}
+	return !n.IsDir() && n.Size == u.Size
+}
+
 func applyUploadBinding(u *journal.Upload, binding journal.UploadBinding) {
 	u.MetaIdentity = binding.MetaIdentity
 	u.MountPrefix = binding.MountPrefix
@@ -72,8 +85,7 @@ func (f *FS) validateUploadBinding(ctx context.Context, u journal.Upload) error 
 		}
 		return err
 	}
-	if n.IsDir() || n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) ||
-		n.Version != localVersion(u.ID) || n.Name != u.Name || n.Size != u.Size {
+	if !uploadNodeMatches(n, u) {
 		return ErrUploadBindingChanged
 	}
 	currentPath, err := f.meta.Path(ctx, n.Ino)

@@ -32,9 +32,33 @@ const (
 	StateDead      State = "dead"
 )
 
+// Kind says what a queued row does when it runs: send a file's bytes, or
+// create a directory. Everything else about a row — its place in the tree,
+// retries, cancellation — is the same for both.
+type Kind string
+
+const (
+	// KindFile uploads the blob at BlobPath. An empty Kind reads as KindFile,
+	// which is what every row written before directories were queued has.
+	KindFile Kind = "file"
+	// KindMkdir creates the directory Name under RemoteParentID. It carries
+	// no blob; Size is 0.
+	KindMkdir Kind = "mkdir"
+)
+
+// LocalIDPrefix marks a remote id that names a queued row rather than
+// anything the backend has: "cloudfs-local:<row id>". The VFS gives it to a
+// node whose only copy is local. A row whose RemoteParentID carries the
+// prefix lands in a directory that is itself still queued, and the queue
+// holds it back until that directory exists (Claim) and rewrites the parent
+// once it does (RetargetChildren).
+const LocalIDPrefix = "cloudfs-local:"
+
 // Upload is one queued write.
 type Upload struct {
 	ID string
+	// Kind is what the row does; see KindFile and KindMkdir.
+	Kind Kind
 	// StagingID transfers a live CommitStaging reservation to this durable
 	// row. It is process-local, not persisted or exposed in JSON responses.
 	StagingID      string `json:"-"`
@@ -76,6 +100,10 @@ type Upload struct {
 	AccountBinding string
 }
 
+// IsMkdir reports whether the row creates a directory rather than sending
+// a file.
+func (u Upload) IsMkdir() bool { return u.Kind == KindMkdir }
+
 // Part is one uploaded chunk.
 type Part struct {
 	Index int
@@ -89,6 +117,10 @@ var ErrNotFound = errors.New("journal: upload not found")
 // ErrInFlight is DropPending's answer for a row an uploader has already
 // claimed: the caller must tombstone it instead.
 var ErrInFlight = errors.New("journal: upload is in flight")
+
+// ErrChildrenQueued refuses to drop a directory creation while rows queued
+// under it still address it.
+var ErrChildrenQueued = errors.New("journal: rows are still queued under this directory")
 
 // ErrNotDead prevents an administrative retry from duplicating active or
 // already completed work, or bypassing the backoff on a pending upload.
@@ -115,6 +147,7 @@ type Journal struct {
 	legacyPublication   bool // read-only inspection of pre-v4 databases
 	legacyUploadBinding bool // read-only inspection of pre-v11 upload rows
 	legacyCopyAdmin     bool // read-only inspection of pre-v6 copy records
+	legacyKind          bool // read-only inspection of pre-v14 rows: all files
 	copyMu              sync.Mutex
 	copyOpen            map[string]bool
 	copyRetryFault      func()             // test boundary after prefix validation, before CAS
@@ -264,7 +297,7 @@ func OpenReadOnly(dir string) (*Journal, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Journal{db: db, dir: dir, now: time.Now, legacyPublication: version < 4, legacyUploadBinding: version < 11, legacyCopyAdmin: version < 6}, nil
+	return &Journal{db: db, dir: dir, now: time.Now, legacyPublication: version < 4, legacyUploadBinding: version < 11, legacyCopyAdmin: version < 6, legacyKind: version < 14}, nil
 }
 
 // Close releases the database and the ownership lock.
@@ -310,7 +343,8 @@ CREATE TABLE IF NOT EXISTS uploads (
   mount_prefix     TEXT NOT NULL DEFAULT '',
   mount_root_id    TEXT NOT NULL DEFAULT '',
   account_binding  TEXT NOT NULL DEFAULT '',
-  done_at          INTEGER NOT NULL DEFAULT 0
+  done_at          INTEGER NOT NULL DEFAULT 0,
+  kind             TEXT NOT NULL DEFAULT 'file'
 );
 CREATE INDEX IF NOT EXISTS uploads_state ON uploads(state, next_retry_at);
 
@@ -358,7 +392,9 @@ CREATE TABLE IF NOT EXISTS upload_resume_history (
 //
 //	determine, so an ambiguous answer becomes a question reconciliation asks
 //	the provider rather than a guess.
-const journalSchemaVersion = 13
+//
+// 14: kind distinguishes queued directory creations from file uploads.
+const journalSchemaVersion = 14
 
 func (j *Journal) migrate() error {
 	if _, err := j.db.Exec(journalSchema); err != nil {
@@ -436,6 +472,8 @@ func (j *Journal) migrate() error {
 			// Rows completed before the upgrade have 0 and are kept: their age
 			// is unknown, and keeping a row costs almost nothing.
 			"done_at INTEGER NOT NULL DEFAULT 0",
+			// v14: queued directory creations. Every earlier row is a file.
+			"kind TEXT NOT NULL DEFAULT 'file'",
 		} {
 			if _, err := j.db.Exec(`ALTER TABLE uploads ADD COLUMN ` + column); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("journal: migrate upload binding: %w", err)
@@ -517,7 +555,7 @@ func (j *Journal) releaseStagedObject(id, blob string) {
 
 const legacyUploadCols = `id, remote, remote_parent_id, name, blob_path, size, hashes, state,
                     attempt, next_retry_at, last_error, expected_version, session, ino, created_at, tombstone`
-const uploadCols = legacyUploadCols + `, needs_publish, meta_identity, mount_prefix, mount_root_id, account_binding`
+const uploadCols = legacyUploadCols + `, needs_publish, meta_identity, mount_prefix, mount_root_id, account_binding, kind`
 
 func (j *Journal) readUploadCols() string {
 	cols := legacyUploadCols
@@ -527,9 +565,14 @@ func (j *Journal) readUploadCols() string {
 		cols += `, needs_publish`
 	}
 	if j.legacyUploadBinding {
-		return cols + `, '', '', '', ''`
+		cols += `, '', '', '', ''`
+	} else {
+		cols += `, meta_identity, mount_prefix, mount_root_id, account_binding`
 	}
-	return cols + `, meta_identity, mount_prefix, mount_root_id, account_binding`
+	if j.legacyKind {
+		return cols + `, 'file'`
+	}
+	return cols + `, kind`
 }
 
 func scanUpload(sc interface{ Scan(...any) error }) (Upload, error) {
@@ -537,11 +580,16 @@ func scanUpload(sc interface{ Scan(...any) error }) (Upload, error) {
 	var hashes, session, state string
 	var nextRetry, created int64
 	var tomb, unpublished int
+	var kind string
 	err := sc.Scan(&u.ID, &u.Remote, &u.RemoteParentID, &u.Name, &u.BlobPath, &u.Size, &hashes,
 		&state, &u.Attempt, &nextRetry, &u.LastError, &u.ExpectedVersion, &session, &u.Ino, &created, &tomb, &unpublished,
-		&u.MetaIdentity, &u.MountPrefix, &u.MountRootID, &u.AccountBinding)
+		&u.MetaIdentity, &u.MountPrefix, &u.MountRootID, &u.AccountBinding, &kind)
 	if err != nil {
 		return Upload{}, err
+	}
+	u.Kind = Kind(kind)
+	if u.Kind == "" {
+		u.Kind = KindFile
 	}
 	u.Tombstone = tomb != 0
 	u.NeedsPublish = unpublished != 0
@@ -571,15 +619,19 @@ func (j *Journal) Get(ctx context.Context, id string) (Upload, error) {
 }
 
 // Claim atomically takes up to n due uploads for a remote and marks them
-// uploading, so multiple workers never pick the same row.
+// uploading, so multiple workers never pick the same row. A row whose parent
+// directory is itself still queued (RemoteParentID carries LocalIDPrefix) is
+// not due: the backend has no such parent to put it in. It becomes due when
+// the directory lands and RetargetChildren rewrites the parent.
 func (j *Journal) Claim(ctx context.Context, remote string, n int) ([]Upload, error) {
 	var out []Upload
 	err := j.tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.Query(
 			`SELECT `+uploadCols+` FROM uploads
 			 WHERE remote = ? AND state = ? AND next_retry_at <= ? AND needs_publish = 0
+			   AND substr(remote_parent_id, 1, ?) <> ?
 			 ORDER BY rowid LIMIT ?`,
-			remote, string(StatePending), unixMilli(j.now()), n)
+			remote, string(StatePending), unixMilli(j.now()), len(LocalIDPrefix), LocalIDPrefix, n)
 		if err != nil {
 			return fmt.Errorf("journal: claim: %w", err)
 		}
@@ -601,6 +653,36 @@ func (j *Journal) Claim(ctx context.Context, remote string, n int) ([]Upload, er
 				return fmt.Errorf("journal: claim: %w", err)
 			}
 		}
+		return nil
+	})
+	return out, err
+}
+
+// ClaimID takes one specific row, if it is due, and marks it uploading. The
+// caller runs it itself. ErrInFlight says a worker has it; ErrNotFound says
+// it is finished, gone, or not due (unpublished, or under a queued parent).
+func (j *Journal) ClaimID(ctx context.Context, id string) (Upload, error) {
+	var out Upload
+	err := j.tx(ctx, func(tx *sql.Tx) error {
+		row := tx.QueryRow(`SELECT `+uploadCols+` FROM uploads WHERE id = ?`, id)
+		u, err := scanUpload(row)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("journal: claim: %w", err)
+		}
+		if u.State == StateUploading {
+			return ErrInFlight
+		}
+		if u.State != StatePending || u.NeedsPublish || strings.HasPrefix(u.RemoteParentID, LocalIDPrefix) {
+			return ErrNotFound
+		}
+		if _, err := tx.Exec(`UPDATE uploads SET state = ? WHERE id = ?`, string(StateUploading), id); err != nil {
+			return fmt.Errorf("journal: claim: %w", err)
+		}
+		u.State = StateUploading
+		out = u
 		return nil
 	})
 	return out, err
@@ -775,6 +857,41 @@ func (j *Journal) Retarget(ctx context.Context, id, parentID, name string) error
 			// Already uploading or gone: the caller falls back to a server-side
 			// rename of the finished file.
 			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// RetargetParent moves one queued row to another parent, keeping its name.
+// It is how a row that addressed a queued directory follows it once the
+// directory has landed. Claimed or finished rows are left alone.
+func (j *Journal) RetargetParent(ctx context.Context, id, parentID string) error {
+	return j.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE uploads SET remote_parent_id = ? WHERE id = ? AND state = ?`,
+			parentID, id, string(StatePending))
+		if err != nil {
+			return fmt.Errorf("journal: retarget parent: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// RetargetChildren rewrites the parent of every unfinished row queued under
+// oldParentID — the local id of a directory that has just been created on
+// the backend — to the id the backend gave it. Finished rows are history
+// and are left alone; every other state follows, a cancelled row included,
+// because resuming it later must address a parent the backend has.
+func (j *Journal) RetargetChildren(ctx context.Context, oldParentID, newParentID string) error {
+	return j.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE uploads SET remote_parent_id = ? WHERE remote_parent_id = ? AND state <> ?`,
+			newParentID, oldParentID, string(StateDone))
+		if err != nil {
+			return fmt.Errorf("journal: retarget children: %w", err)
 		}
 		return nil
 	})
@@ -1105,6 +1222,19 @@ func (j *Journal) Drop(ctx context.Context, id string) error {
 		if err := guardNotCancelled(tx, id); err != nil {
 			return err
 		}
+		if u.IsMkdir() {
+			// Rows queued under this directory address it by this row's
+			// id; without the row they could never run and nothing would
+			// say why. They are the caller's to deal with first.
+			var waiting int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM uploads WHERE remote_parent_id = ? AND state <> ?`,
+				LocalIDPrefix+id, string(StateDone)).Scan(&waiting); err != nil {
+				return fmt.Errorf("journal: drop: %w", err)
+			}
+			if waiting > 0 {
+				return fmt.Errorf("%w: %d", ErrChildrenQueued, waiting)
+			}
+		}
 		for _, q := range []string{
 			`DELETE FROM uploads WHERE id = ?`,
 			`DELETE FROM upload_parts WHERE upload_id = ?`,
@@ -1274,7 +1404,7 @@ func (j *Journal) Recover(ctx context.Context) (Recovery, error) {
 		return rec, err
 	}
 	for _, u := range rows {
-		if cause := j.verifyBlob(u); cause != nil {
+		if cause := j.verifyBlob(u); cause != nil && !u.IsMkdir() {
 			if ferr := j.Fail(ctx, u.ID, cause); ferr != nil {
 				return rec, ferr
 			}
@@ -1367,6 +1497,12 @@ type Stats struct {
 	RetainedBytes int64
 	Bytes         int64
 	OldestAge     time.Duration
+	// Blocked counts pending rows that cannot run: they wait on a queued
+	// directory whose creation is dead, cancelled or gone, directly or
+	// through pending directories in between. They stay pending because
+	// their bytes are the only copy, but nothing will move them until the
+	// directory's row is retried.
+	Blocked int
 }
 
 // Stats reads queue counters.
@@ -1417,5 +1553,22 @@ func (j *Journal) Stats(ctx context.Context) (Stats, error) {
 			s.RetainedBytes += bytes
 		}
 	}
-	return s, rows.Err()
+	if err := rows.Err(); err != nil {
+		return s, err
+	}
+	if s.Pending > 0 {
+		err := j.db.QueryRowContext(ctx, `WITH RECURSIVE blocked(id) AS (
+			SELECT u.id FROM uploads u LEFT JOIN uploads p ON u.remote_parent_id = ? || p.id
+			 WHERE u.state = ? AND substr(u.remote_parent_id, 1, ?) = ?
+			   AND (p.id IS NULL OR p.state NOT IN (?, ?))
+			UNION
+			SELECT u.id FROM uploads u JOIN blocked b ON u.remote_parent_id = ? || b.id WHERE u.state = ?
+		) SELECT COUNT(*) FROM blocked`,
+			LocalIDPrefix, string(StatePending), len(LocalIDPrefix), LocalIDPrefix,
+			string(StatePending), string(StateUploading), LocalIDPrefix, string(StatePending)).Scan(&s.Blocked)
+		if err != nil {
+			return s, fmt.Errorf("journal: stats: %w", err)
+		}
+	}
+	return s, nil
 }

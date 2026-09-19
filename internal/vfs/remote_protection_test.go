@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 )
 
@@ -106,5 +107,37 @@ func TestRemoteProtectionSurvivesClosePublicationGap(t *testing.T) {
 	e.fs.mu.Unlock()
 	if count != 0 {
 		t.Fatalf("writer reference leaked after publication: %d", count)
+	}
+}
+
+// TestPendingDirectorySurvivesParentListing: a directory whose remote copy has
+// not been created yet has no cache entry to lose, so a listing of its parent
+// must keep it the way it keeps a pending file, not treat the missing cache
+// entry as a lost conflict and prune it.
+func TestPendingDirectorySurvivesParentListing(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	e.fake.Seed("keep", []byte("x"))
+	if _, err := e.fs.ReadDirPath(ctx, "/ali"); err != nil {
+		t.Fatal(err)
+	}
+	parent := e.nodeOf(t, "/ali")
+	pending, err := e.store.Insert(ctx, meta.Node{
+		ParentIno: parent.Ino, Name: "staged", Kind: provider.KindDir, Mode: 0o755,
+		Remote: "ali", RemoteID: localRemoteID("dir-1"), Version: localVersion("dir-1"), Dirty: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(2 * time.Minute)
+	if err := e.fs.Refresh(ctx, parent.Ino); err != nil {
+		t.Fatal(err)
+	}
+	after, err := e.store.Resolve(ctx, "/ali/staged")
+	if err != nil {
+		t.Fatalf("listing removed the pending directory: %v", err)
+	}
+	if after.Ino != pending.Ino || after.RemoteID != pending.RemoteID {
+		t.Fatalf("pending directory was replaced: %+v", after)
 	}
 }

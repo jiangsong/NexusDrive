@@ -84,7 +84,9 @@ URI 不带 Authorization）——Drive 端 `md5Checksum` 与本地一致；shell
 第二份内容；改名、删除在两个成员上都落地；在 Drive 里直接新增的文件 33–69 s 内出现在挂载点
 （delta feed），4 MiB 冷读经修订钉住的 Range 下载 md5 一致。`UploadParallel` 从 1 调到 4 后（与 upload 桶的
 4 qps 匹配），两账号池的小文件队列从 52 文件/分钟到 194 文件/分钟，两分钟 420 次 `put_file`
-零重试、AIMD 未降速；持续高并发是否引来 `userRateLimitExceeded` 仍标 `UNVERIFIED`。尚未在真机观察的：修订被清理后的
+零重试、AIMD 未降速；持续高并发是否引来 `userRateLimitExceeded` 仍标 `UNVERIFIED`。目录改为
+写回（`kind=mkdir` 行）后，`cp -r` 一棵 389 目录 / 3434 文件的源码树前台 37 s 完成、0 次远端
+调用，后台 389 次 `mkdir` + 3502 次 `put_file` 零重试排空，两成员的目录树与本地一致。尚未在真机观察的：修订被清理后的
 回退、`orderBy` 跨页一致性、403 的 reason 字符串、公开分享链接（代码里仍标 `UNVERIFIED`）。
 
 **Box**：Box 的文件与文件夹是两套独立编号，同一个数字可以既是文件又是文件夹，且端点不同。

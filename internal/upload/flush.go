@@ -63,9 +63,14 @@ func (u *Uploader) Flush(ctx context.Context) (journal.Stats, error) {
 		if st.Cancelled > 0 || st.Cancelling > 0 {
 			return st, ErrCancelledUploads
 		}
-		if st.Pending == 0 && st.Uploading == 0 {
+		if st.Pending == st.Blocked && st.Uploading == 0 {
+			// Nothing is running and nothing can: every pending row waits
+			// on a directory creation that is dead or gone.
 			if st.Dead > 0 {
 				return st, fmt.Errorf("%w: %d; use uploads list or uploads retry", ErrDeadLetters, st.Dead)
+			}
+			if st.Blocked > 0 {
+				return st, fmt.Errorf("%w: %d rows wait on a directory creation that no longer exists", ErrDeadLetters, st.Blocked)
 			}
 			return st, nil
 		}

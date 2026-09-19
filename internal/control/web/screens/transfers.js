@@ -51,14 +51,18 @@ export function renderTransfers(host) {
 
   function uploadRow(u) {
     const stateColor = { pending: 'var(--dim)', uploading: 'var(--ok)', dead: 'var(--bad)', cancelled: 'var(--warn)', cancelling: 'var(--warn)' }[u.state] || 'var(--dim)';
+    // A directory creation has no bytes to keep, so it can be retried but
+    // not stopped, resumed or discarded: a stopped creation would leave the
+    // directory local for good.
+    const mkdir = u.kind === 'mkdir';
     const actions = el('td', { style: 'padding-left:20px' }, el('div', { class: 'row' },
-      ...(u.state === 'dead' ? [btn(t('action.retry'), () => act('retry', u)), btn(t('action.stop'), () => act('cancel', u))] : []),
-      ...((u.state === 'pending' || u.state === 'uploading') ? [btn(t('action.stop'), () => act('cancel', u))] : []),
+      ...(u.state === 'dead' ? [btn(t('action.retry'), () => act('retry', u)), ...(mkdir ? [] : [btn(t('action.stop'), () => act('cancel', u))])] : []),
+      ...((u.state === 'pending' || u.state === 'uploading') && !mkdir ? [btn(t('action.stop'), () => act('cancel', u))] : []),
       ...(u.state === 'cancelled' ? [btn(t('action.resume'), () => resume(u)), btnDanger(t('action.discard'), () => discard(u))] : [])));
     return el('tr', {},
-      el('td', {}, el('div', {}, el('div', {}, u.name), el('div', { class: 'dim', style: 'font-size:12px' }, u.last_error || u.remote))),
+      el('td', {}, el('div', {}, el('div', {}, mkdir ? u.name + '/' : u.name), el('div', { class: 'dim', style: 'font-size:12px' }, u.last_error || (mkdir ? t('upload.kind.mkdir') : u.remote)))),
       el('td', { class: 'detail' }, u.remote),
-      el('td', { class: 'num detail' }, bytes(u.size)),
+      el('td', { class: 'num detail' }, mkdir ? '—' : bytes(u.size)),
       el('td', { style: 'padding-left:20px' }, el('span', { style: 'display:flex;align-items:center;gap:7px;color:' + stateColor }, el('span', { class: 'dot', style: 'background:' + stateColor }), t('upload.state.' + u.state))),
       actions);
   }

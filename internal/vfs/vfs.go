@@ -772,8 +772,10 @@ func (f *FS) dirListing(ctx context.Context, ino uint64, force, want bool) ([]me
 	}
 	// A directory above every mount prefix (e.g. the root when remotes are
 	// mounted at /work and /gd) has no provider; its children are the mount
-	// dirs, which ensureMountDirs created.
-	if !hasMount || dirNode.RemoteID == "" && !f.isMountRoot(p) {
+	// dirs, which ensureMountDirs created. A directory the backend does not
+	// have yet (its mkdir is queued) has nothing there to list either: what
+	// the tree holds is all there is.
+	if !hasMount || dirNode.RemoteID == "" && !f.isMountRoot(p) || IsLocalOnly(dirNode.RemoteID) {
 		if !want {
 			return nil, nil
 		}
@@ -1136,6 +1138,13 @@ func (f *FS) dirRemoteID(ctx context.Context, ino uint64) (string, error) {
 	n, err := f.meta.Get(ctx, ino)
 	if err != nil {
 		return "", err
+	}
+	if n.RemoteID == "" && ino != meta.RootIno && !f.isMountDir(ino) {
+		// A directory with no id at all is one an interrupted mkdir left
+		// between inserting the node and committing its row; startup
+		// removes it. Nothing must be written into it meanwhile — the
+		// mount root's id would be the fallback, and the wrong place.
+		return "", ErrNotFound
 	}
 	if n.RemoteID != "" && !IsLocalOnly(n.RemoteID) {
 		m.Store(ino, n.RemoteID)

@@ -176,7 +176,11 @@ func printUploads(out io.Writer, q control.UploadRequest, result control.UploadR
 			if u.NeedsPublish {
 				state += " (local publication pending)"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%q\t%d\t%d\t%q\n", u.ID, state, u.Remote, u.Name, u.Size, u.Attempt, u.LastError)
+			name := u.Name
+			if u.Kind == journal.KindMkdir {
+				name += "/"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%q\t%d\t%d\t%q\n", u.ID, state, u.Remote, name, u.Size, u.Attempt, u.LastError)
 		}
 		if err := w.Flush(); err != nil {
 			return err

@@ -26,13 +26,18 @@ func (j *Journal) RequestCancel(ctx context.Context, id string) (State, error) {
 	}
 	err := j.tx(ctx, func(tx *sql.Tx) error {
 		var tombstone bool
-		if err := tx.QueryRow(`SELECT state,tombstone FROM uploads WHERE id=?`, id).Scan(&state, &tombstone); err != nil {
+		var kind string
+		if err := tx.QueryRow(`SELECT state,tombstone,kind FROM uploads WHERE id=?`, id).Scan(&state, &tombstone, &kind); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
 			return err
 		}
-		if tombstone || state == StateDone {
+		// A cancelled file keeps its bytes for a later resume. A directory
+		// creation has no bytes and nothing to resume: cancelling it would
+		// leave the directory, and everything queued under it, local for
+		// good. Retry or remove the directory instead.
+		if tombstone || state == StateDone || Kind(kind) == KindMkdir {
 			return ErrCannotCancel
 		}
 		switch state {

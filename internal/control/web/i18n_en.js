@@ -112,6 +112,7 @@ export const en = {
   'col.file': 'File', 'col.drive': 'Drive',
   'state.cached': 'cached', 'state.dir': 'directory cached', 'state.partial': 'partial', 'state.pinned': 'pinned',
   'state.pending': 'waiting to upload', 'state.remote': 'remote only',
+  'upload.kind.mkdir': 'directory to create',
   'upload.state.pending': 'waiting to upload', 'upload.state.uploading': 'uploading', 'upload.state.done': 'finished',
   'upload.state.dead': 'upload failed', 'upload.state.cancelling': 'stopping', 'upload.state.cancelled': 'stopped', 'upload.state.purging': 'cleaning up',
   'action.pin': 'Pin', 'action.unpin': 'Unpin', 'action.warm': 'Warm',

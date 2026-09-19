@@ -22,7 +22,10 @@ import (
 // UploadItem deliberately omits blob paths, content hashes and provider
 // sessions: persisted sessions can contain signed URLs and temporary keys.
 type UploadItem struct {
-	ID           string        `json:"id"`
+	ID string `json:"id"`
+	// Kind is "file" for a queued write and "mkdir" for a queued directory
+	// creation.
+	Kind         journal.Kind  `json:"kind"`
 	Remote       string        `json:"remote"`
 	Name         string        `json:"name"`
 	State        journal.State `json:"state"`
@@ -112,7 +115,7 @@ func ManageUploads(ctx context.Context, j *journal.Journal, flush func(context.C
 		}
 		out.NextCursor = next
 		for _, u := range rows {
-			out.Uploads = append(out.Uploads, UploadItem{ID: u.ID, Remote: u.Remote, Name: u.Name, State: u.State, Size: u.Size, Attempt: u.Attempt, NextRetryAt: u.NextRetryAt, LastError: u.LastError, NeedsPublish: u.NeedsPublish})
+			out.Uploads = append(out.Uploads, UploadItem{ID: u.ID, Kind: u.Kind, Remote: u.Remote, Name: u.Name, State: u.State, Size: u.Size, Attempt: u.Attempt, NextRetryAt: u.NextRetryAt, LastError: u.LastError, NeedsPublish: u.NeedsPublish})
 		}
 	case "retry":
 		if q.ID != "" {

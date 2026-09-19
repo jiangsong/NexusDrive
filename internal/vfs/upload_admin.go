@@ -16,8 +16,11 @@ import (
 // It deliberately excludes the blob path, hashes, provider session, expected
 // remote version and raw backend error.
 type UploadInfo struct {
-	ID           string        `json:"id"`
-	Path         string        `json:"path,omitempty"`
+	ID   string `json:"id"`
+	Path string `json:"path,omitempty"`
+	// Kind says what the row does: "file" sends bytes, "mkdir" creates a
+	// directory.
+	Kind         journal.Kind  `json:"kind"`
 	Remote       string        `json:"remote"`
 	Name         string        `json:"name"`
 	State        journal.State `json:"state"`
@@ -63,9 +66,12 @@ func (f *FS) InspectUploadPage(ctx context.Context, after string, limit int) ([]
 }
 
 func (f *FS) inspectUpload(ctx context.Context, u journal.Upload) (UploadInfo, error) {
-	info := UploadInfo{ID: u.ID, Remote: u.Remote, Name: u.Name, State: u.State,
+	info := UploadInfo{ID: u.ID, Kind: u.Kind, Remote: u.Remote, Name: u.Name, State: u.State,
 		Size: u.Size, Attempt: u.Attempt,
 		NeedsPublish: u.NeedsPublish, Tombstone: u.Tombstone}
+	if info.Kind == "" {
+		info.Kind = journal.KindFile
+	}
 	if !u.NextRetryAt.IsZero() {
 		info.NextRetryAt = u.NextRetryAt.UTC().Format(time.RFC3339Nano)
 	}
@@ -85,8 +91,7 @@ func (f *FS) inspectUpload(ctx context.Context, u journal.Upload) (UploadInfo, e
 	if err != nil {
 		return UploadInfo{}, err
 	}
-	if n.IsDir() || n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) ||
-		n.Version != localVersion(u.ID) || n.Name != u.Name || n.Size != u.Size {
+	if !uploadNodeMatches(n, u) {
 		return info, nil
 	}
 	p, err := f.meta.Path(ctx, n.Ino)

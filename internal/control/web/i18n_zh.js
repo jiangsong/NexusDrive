@@ -113,6 +113,7 @@ export const zh = {
   'col.file': '文件', 'col.drive': '网盘',
   'state.cached': '已缓存', 'state.dir': '目录已缓存', 'state.partial': '部分', 'state.pinned': '已固定',
   'state.pending': '等待上传', 'state.remote': '仅在远端',
+  'upload.kind.mkdir': '待创建的目录',
   'upload.state.pending': '等待上传', 'upload.state.uploading': '上传中', 'upload.state.done': '已完成',
   'upload.state.dead': '上传失败', 'upload.state.cancelling': '停止中', 'upload.state.cancelled': '已停止', 'upload.state.purging': '清理中',
   'action.pin': '固定', 'action.unpin': '取消固定', 'action.warm': '预热',

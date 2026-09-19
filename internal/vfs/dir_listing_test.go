@@ -230,3 +230,40 @@ func TestDirectoryCommitFailureUsesConservativeNotificationFallback(t *testing.T
 		t.Fatal("failed transaction published new entry")
 	}
 }
+
+// TestLocalOnlyDirIsServedFromMeta: a directory that has not been created on
+// the backend yet has nothing there to list. Its children are whatever the
+// tree holds, however stale its listing state looks, and asking the backend
+// about a `cloudfs-local:` id would only fail.
+func TestLocalOnlyDirIsServedFromMeta(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	if _, err := e.fs.ReadDirPath(ctx, "/ali"); err != nil {
+		t.Fatal(err)
+	}
+	parent := e.nodeOf(t, "/ali")
+	dir, err := e.store.Insert(ctx, meta.Node{
+		ParentIno: parent.Ino, Name: "staged", Kind: provider.KindDir, Mode: 0o755,
+		Remote: "ali", RemoteID: localRemoteID("dir-1"), Version: localVersion("dir-1"), Dirty: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Insert(ctx, meta.Node{ParentIno: dir.Ino, Name: "child", Kind: provider.KindFile, Remote: "ali", Dirty: true}); err != nil {
+		t.Fatal(err)
+	}
+	lists := e.fake.Calls("List")
+	if err := e.fs.Refresh(ctx, dir.Ino); err != nil {
+		t.Fatalf("refreshing a pending directory: %v", err)
+	}
+	kids, err := e.fs.ReadDirPath(ctx, "/ali/staged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kids) != 1 || kids[0].Name != "child" {
+		t.Fatalf("pending directory lost its child: %+v", kids)
+	}
+	if got := e.fake.Calls("List") - lists; got != 0 {
+		t.Fatalf("a pending directory was listed %d times on the backend, want 0", got)
+	}
+}

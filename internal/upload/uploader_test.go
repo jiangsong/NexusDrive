@@ -32,6 +32,8 @@ type fixture struct {
 	// served is what Providers hands back for "ali"; it is the fake
 	// unless a test wraps it to answer differently.
 	served provider.Provider
+	// inos hands each queued directory its own inode number.
+	inos uint64
 }
 
 // setProvider swaps what the uploader gets for the "ali" remote, so a

@@ -370,6 +370,7 @@ func (f *FS) commitWrite(ctx context.Context, h *Handle, w *writeState) error {
 			return err
 		}
 		p.journaled = true
+		f.retargetIfParentLanded(ctx, p.upload.ID, w.parentIno, p.upload.RemoteParentID)
 	}
 	// Earlier snapshots of the same file that have not started uploading are
 	// replaced by this one. Per inode rather than per handle: the kernel
@@ -692,7 +693,14 @@ func (f *FS) WriteFile(ctx context.Context, p string, data []byte, appendMode bo
 	return f.StatPath(ctx, p)
 }
 
-// Mkdir creates a directory on the remote and in the tree.
+// Mkdir creates a directory. On a writeback mount it is a local commit the
+// way close() is: the directory is in the tree and usable at once, and a
+// queued row creates it on the backend — copying a source tree in no longer
+// pays a round trip per directory. Until the row lands the node carries a
+// local-only id, and everything written into the directory addresses that
+// id; the queue holds those rows back until the directory exists and then
+// points them at the real one. A strict mount creates the directory on the
+// backend before returning, as it does for file content.
 func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error) {
 	m, _, err := f.MountForIno(ctx, parent)
 	if err != nil {
@@ -709,6 +717,12 @@ func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error
 	} else if !errors.Is(err, ErrNotFound) {
 		return Attr{}, err
 	}
+	if m.Mode == config.ModeWriteback && f.journal != nil {
+		return f.mkdirQueued(ctx, m, parent, name)
+	}
+	if err := f.ensureRemoteDir(ctx, parent); err != nil {
+		return Attr{}, err
+	}
 	parentNode, err := f.meta.Get(ctx, parent)
 	if err != nil {
 		return Attr{}, err
@@ -723,7 +737,12 @@ func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error
 	}
 	node := nodeFromEntry(m.Remote, e, f.opt.AttrTTL)
 	node.ParentIno = parent
-	node, err = f.meta.Upsert(ctx, node)
+	// Born complete: the directory is empty, and the first lookup inside it
+	// must not list an empty directory on the backend.
+	node, err = f.meta.InsertCompleteDir(ctx, node)
+	if errors.Is(err, meta.ErrExists) {
+		return Attr{}, ErrExists
+	}
 	if err != nil {
 		return Attr{}, err
 	}
@@ -731,6 +750,150 @@ func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error
 	f.invalidateFrom(ctx, parent)
 	f.changedEntry(ctx, parent, name, false, KindMkdir)
 	return f.attrOf(ctx, node), nil
+}
+
+// mkdirQueued commits a directory locally and queues its creation, in the
+// order a file commit uses: the node first (a row needs an inode to bind
+// to), then the durable row, then the node's local identity, then the
+// publication gate that lets workers take the row. A crash between any two
+// steps leaves something recovery knows how to finish or discard.
+func (f *FS) mkdirQueued(ctx context.Context, m Mount, parent uint64, name string) (Attr, error) {
+	parentID, err := f.dirRemoteID(ctx, parent)
+	if err != nil {
+		return Attr{}, err
+	}
+	if parentID == "" {
+		parentID = m.RootID
+	}
+	now := f.now()
+	node := meta.Node{
+		ParentIno: parent, Name: name, Kind: provider.KindDir, Mode: 0o755,
+		Remote: m.Remote, MTime: now, FetchedAt: now, TTL: f.opt.AttrTTL, Dirty: true,
+	}
+	node, err = f.meta.InsertCompleteDir(ctx, node)
+	if errors.Is(err, meta.ErrExists) {
+		return Attr{}, ErrExists
+	}
+	if err != nil {
+		return Attr{}, err
+	}
+	u := journal.Upload{
+		ID: journal.NewID(), Kind: journal.KindMkdir, Remote: m.Remote,
+		RemoteParentID: parentID, Name: name, Ino: node.Ino, NeedsPublish: true,
+	}
+	binding, err := f.uploadBinding(ctx, m)
+	if err != nil {
+		return Attr{}, err
+	}
+	applyUploadBinding(&u, binding)
+	if err := f.journal.Commit(ctx, u); err != nil {
+		_ = f.meta.Remove(ctx, node.Ino)
+		return Attr{}, err
+	}
+	node.RemoteID = localRemoteID(u.ID)
+	node.Version = localVersion(u.ID)
+	update := f.meta.UpdateByIno
+	if f.journal.Durability() == journal.DurabilityPower {
+		update = f.meta.PublishByIno
+	}
+	if err := update(ctx, node); err != nil {
+		return Attr{}, err
+	}
+	if err := f.journal.MarkPublished(ctx, u.ID); err != nil {
+		return Attr{}, err
+	}
+	f.retargetIfParentLanded(ctx, u.ID, parent, parentID)
+	_ = f.meta.ClearAbsent(ctx, parent)
+	f.invalidateFrom(ctx, parent)
+	f.changedEntry(ctx, parent, name, false, KindMkdir)
+	return f.attrOf(ctx, node), nil
+}
+
+// ensureRemoteDir creates on the backend, now, every queued directory on
+// the path to ino, top-down, and returns once ino has a real id. It is the
+// price an operation that needs a real id synchronously pays — a move of a
+// backend entry into a queued directory, a server-side copy into one, a
+// strict mount's mkdir under one. The queue's worker would get there on its
+// own; this runs the rows in the caller's thread instead of waiting for it,
+// and waits only for a row a worker has already taken.
+func (f *FS) ensureRemoteDir(ctx context.Context, ino uint64) error {
+	var chain []meta.Node // queued ancestors, bottom-up, ino first
+	for cur := ino; ; {
+		n, err := f.meta.Get(ctx, cur)
+		if err != nil {
+			return err
+		}
+		if !IsLocalOnly(n.RemoteID) {
+			break
+		}
+		chain = append(chain, n)
+		cur = n.ParentIno
+	}
+	if len(chain) == 0 {
+		return nil
+	}
+	if f.journal == nil || f.uploader == nil {
+		return errors.New("vfs: a queued directory needs the upload queue to be created")
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		rowID, _ := LocalUploadID(chain[i].RemoteID)
+		row, err := f.journal.ClaimID(ctx, rowID)
+		if err == nil {
+			f.uploader.RunOne(ctx, row)
+		} else if !errors.Is(err, journal.ErrInFlight) {
+			return err
+		}
+		if err := f.awaitUpload(ctx, rowID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// awaitUpload waits for a row to leave the queue without driving the queue
+// itself: the row is running on this thread or on a worker, and taking other
+// rows along would make a rename wait for unrelated uploads.
+func (f *FS) awaitUpload(ctx context.Context, uploadID string) error {
+	for {
+		u, err := f.journal.Get(ctx, uploadID)
+		if err != nil {
+			return err
+		}
+		switch u.State {
+		case journal.StateDone:
+			return nil
+		case journal.StateDead:
+			return fmt.Errorf("vfs: creating the directory failed: %s", u.LastError)
+		case journal.StateCancelling, journal.StateCancelled:
+			return journal.ErrCancelled
+		case journal.StatePurging:
+			return journal.ErrUploadPurging
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// retargetIfParentLanded closes the gap between reading a parent's id and
+// committing a row that addresses it. When the id was a queued directory's
+// local id, that directory may have landed in between — after its landing
+// rewrote the rows it knew about, and before this one existed. The row would
+// never be claimable. The directory's adoption commits its real id before
+// it rewrites its children, so a re-read now sees either the real id (and
+// this row follows it) or the local id (and the rewrite, which has not run
+// yet, will cover this row).
+func (f *FS) retargetIfParentLanded(ctx context.Context, rowID string, parentIno uint64, addressed string) {
+	if !IsLocalOnly(addressed) {
+		return
+	}
+	p, err := f.meta.Get(ctx, parentIno)
+	if err != nil || p.RemoteID == "" || IsLocalOnly(p.RemoteID) {
+		return
+	}
+	_ = f.journal.RetargetParent(ctx, rowID, p.RemoteID)
 }
 
 // Remove deletes a file or an empty directory.
@@ -772,37 +935,21 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 				return err
 			}
 		}
-		// Never uploaded: cancel the queued write rather than asking the
-		// provider to delete an id it does not have.
-		if f.journal != nil {
-			pending, err := f.journal.ByIno(ctx, n.Ino)
-			if err != nil {
-				return err
-			}
-			for _, u := range pending {
-				if u.State == journal.StateUploading {
-					// Already on the wire: let it finish, then have the
-					// uploader delete it from the backend. Dropping the row
-					// here would leave the finished file behind — a delete
-					// that resurrects its target.
-					if err := f.journal.Tombstone(ctx, u.ID); err != nil && !errors.Is(err, journal.ErrNotFound) {
-						return err
-					}
-					continue
-				}
-				err := f.journal.DropPending(ctx, u.ID)
-				if errors.Is(err, journal.ErrInFlight) {
-					// Claimed between our look and our drop: same as above.
-					err = f.journal.Tombstone(ctx, u.ID)
-				}
-				if err != nil && !errors.Is(err, journal.ErrNotFound) {
-					return err
-				}
-			}
+		if err := f.cancelQueued(ctx, n); err != nil {
+			return err
 		}
 	} else if n.RemoteID != "" {
 		if err := m.Provider.Delete(ctx, n.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
 			return mapProviderErr(err)
+		}
+	}
+	if n.IsDir() {
+		// Whatever is queued below a directory that is leaving the tree
+		// has nowhere to land. A file under a queued directory would wait
+		// for a parent that is never created; a file under a backend
+		// directory would be sent to a parent that was just deleted.
+		if err := f.cancelQueuedBelow(ctx, n.Ino); err != nil {
+			return err
 		}
 	}
 	f.cache.Forget(cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version})
@@ -813,6 +960,64 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	f.invalidateFrom(ctx, parent)
 	f.invalidateEntryFrom(ctx, parent, name)
 	f.changedEntry(ctx, parent, name, n.IsDir(), KindRemove)
+	return nil
+}
+
+// cancelQueued takes a node's queued rows out of the queue: a write or a
+// directory creation that was never sent is dropped rather than asking the
+// backend to delete an id it does not have; one already on the wire is
+// tombstoned so it finishes and is then deleted from the backend — dropping
+// the row would leave the finished entry behind, a delete that resurrects
+// its target.
+func (f *FS) cancelQueued(ctx context.Context, n meta.Node) error {
+	if f.journal == nil {
+		return nil
+	}
+	pending, err := f.journal.ByIno(ctx, n.Ino)
+	if err != nil {
+		return err
+	}
+	for _, u := range pending {
+		if u.State == journal.StateUploading {
+			if err := f.journal.Tombstone(ctx, u.ID); err != nil && !errors.Is(err, journal.ErrNotFound) {
+				return err
+			}
+			continue
+		}
+		err := f.journal.DropPending(ctx, u.ID)
+		if errors.Is(err, journal.ErrInFlight) {
+			// Claimed between our look and our drop: same as above.
+			err = f.journal.Tombstone(ctx, u.ID)
+		}
+		if err != nil && !errors.Is(err, journal.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+// cancelQueuedBelow cancels the queued rows of every local-only node under
+// a directory that is about to leave the tree.
+func (f *FS) cancelQueuedBelow(ctx context.Context, dir uint64) error {
+	if f.journal == nil {
+		return nil
+	}
+	kids, err := f.meta.Children(ctx, dir)
+	if err != nil {
+		return err
+	}
+	for _, k := range kids {
+		if IsLocalOnly(k.RemoteID) {
+			if err := f.cancelQueued(ctx, k); err != nil {
+				return err
+			}
+		}
+		if k.IsDir() {
+			if err := f.cancelQueuedBelow(ctx, k.Ino); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -892,6 +1097,11 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 			if !caps.ServerMove {
 				return provider.ErrUnsupported
 			}
+			// The backend cannot move an entry into a directory it does
+			// not have yet; create the queued directory first.
+			if err := f.ensureRemoteDir(ctx, newParent); err != nil {
+				return err
+			}
 			parentNode, err := f.meta.Get(ctx, newParent)
 			if err != nil {
 				return err
@@ -949,7 +1159,7 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 
 // localIDPrefix marks a node whose only copy is the locally committed blob.
 // Reads resolve it through the cache; the provider is never asked for it.
-const localIDPrefix = "cloudfs-local:"
+const localIDPrefix = journal.LocalIDPrefix
 
 func localRemoteID(uploadID string) string { return localIDPrefix + uploadID }
 func localVersion(uploadID string) string  { return "local-" + uploadID }
@@ -978,8 +1188,11 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 	if err != nil {
 		return err
 	}
+	// A queued directory's local id is a valid destination: the row waits
+	// for the directory the way every row under it does, and follows it to
+	// its real id when it lands.
 	targetParentID := parentNode.RemoteID
-	if targetParentID == "" || IsLocalOnly(targetParentID) {
+	if targetParentID == "" {
 		targetParentID = dst.RootID
 	}
 
@@ -990,6 +1203,7 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 	for _, u := range pending {
 		err := f.journal.Retarget(ctx, u.ID, targetParentID, newName)
 		if err == nil {
+			f.retargetIfParentLanded(ctx, u.ID, newParent, targetParentID)
 			continue
 		}
 		if !errors.Is(err, journal.ErrNotFound) {
@@ -1064,10 +1278,18 @@ func (f *FS) UploadHooks() upload.Hooks {
 			}
 			n, err := f.meta.Get(ctx, u.Ino)
 			if errors.Is(err, meta.ErrNotFound) {
+				if u.IsMkdir() {
+					// The directory is gone locally but the rows queued under
+					// it may not be; they still have somewhere to go.
+					return f.journal.RetargetChildren(ctx, localRemoteID(u.ID), r.Entry.ID)
+				}
 				return nil // deleted while uploading
 			}
 			if err != nil {
 				return err
+			}
+			if u.IsMkdir() {
+				return f.adoptDirectory(ctx, u, r, n)
 			}
 			// Everything below decides what to write from the row just read. A
 			// newer write can commit in between, which is what the seam lets a
@@ -1218,6 +1440,51 @@ func (f *FS) UploadHooks() upload.Hooks {
 			}
 		},
 	}
+}
+
+// adoptDirectory gives a queued directory the id the backend made for it,
+// then points every row queued under its local id at the real one. The
+// order matters twice over: a row committed against the local id while this
+// runs re-reads the parent after committing, and it must find the real id
+// there whenever the rewrite has already passed it by; and a crash between
+// the two is healed by the retry, which finds the directory existing,
+// adopts it again (a no-op) and rewrites again.
+func (f *FS) adoptDirectory(ctx context.Context, u journal.Upload, r upload.Result, n meta.Node) error {
+	if n.IsDir() {
+		n.RemoteID = r.Entry.ID
+		n.Version = r.Entry.Version
+		n.RemoteVersion = r.Entry.Version
+		n.Size = 0
+		if !r.Entry.ModTime.IsZero() {
+			n.MTime = r.Entry.ModTime
+		}
+		n.Dirty = false
+		adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() == journal.DurabilityPower)
+		if err != nil {
+			return err
+		}
+		if err := f.publishFaultAt("directory-adopted"); err != nil {
+			return err
+		}
+		if err := f.journal.RetargetChildren(ctx, localRemoteID(u.ID), r.Entry.ID); err != nil {
+			return err
+		}
+		if err := f.publishFaultAt("directory-children-retargeted"); err != nil {
+			return err
+		}
+		if !adopted {
+			return nil
+		}
+		if r.Merged {
+			// The backend had this directory already, with whatever is in
+			// it; the empty listing the tree holds is not its contents.
+			_ = f.meta.Invalidate(ctx, n.Ino)
+		}
+		f.invalidate(n.Ino)
+		f.changedNode(ctx, n.Ino, false, KindRemote)
+		return nil
+	}
+	return f.journal.RetargetChildren(ctx, localRemoteID(u.ID), r.Entry.ID)
 }
 
 // RepairLost detaches the tree from uploads whose blobs recovery found

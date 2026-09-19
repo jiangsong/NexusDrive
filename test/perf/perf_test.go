@@ -10,6 +10,7 @@ package perf
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -649,4 +650,42 @@ func TestMetadataStatementBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// TestMkdirThenCreateCostsNoListing: a directory this machine just created is
+// empty, and the tree knows it. The first create inside it used to list the
+// empty directory on the backend — a round trip per directory that `cp -r`
+// of a source tree paid hundreds of times.
+func TestMkdirThenCreateCostsNoListing(t *testing.T) {
+	h := newHarness(t, 64<<10, 0, 0)
+	ctx := context.Background()
+	h.fake.Seed("seed.txt", []byte("s"))
+	if _, err := h.fs.ReadDirPath(ctx, "/"); err != nil {
+		t.Fatal(err)
+	}
+	root, err := h.fs.Meta().Resolve(ctx, "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lists := h.fake.Calls("List")
+	a, err := h.fs.Mkdir(ctx, root.Ino, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.fs.Lookup(ctx, a.Ino, "missing"); !errors.Is(err, vfs.ErrNotFound) {
+		t.Fatalf("lookup in a new directory: %v", err)
+	}
+	fh, err := h.fs.Create(ctx, a.Ino, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.fs.Release(ctx, fh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.fs.ReadDirPath(ctx, "/a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.fake.Calls("List") - lists; got != 0 {
+		t.Fatalf("a new directory was listed %d times on the backend, want 0", got)
+	}
 }

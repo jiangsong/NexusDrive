@@ -57,6 +57,12 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 	if f.journal == nil {
 		return Attr{}, fmt.Errorf("vfs: copy requires the write-journal owner: %w", syscall.EBUSY)
 	}
+	// The copy binds its destination to the parent's backend id and checks
+	// it again before landing; a queued directory's local id would never
+	// match. Create the directory first.
+	if err := f.ensureRemoteDir(ctx, parent.Ino); err != nil {
+		return Attr{}, err
+	}
 	name := path.Base(dst)
 	if _, err := f.lookupNode(ctx, parent.Ino, name); err == nil {
 		return Attr{}, ErrExists

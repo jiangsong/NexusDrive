@@ -366,6 +366,15 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
 5. 成功：更新 `nodes.version / hash`；staging blob 切分登记为读缓存块，不重新下载。
 6. 失败：退避重试；超过阈值或终止性错误进入 `dead_letter`，blob 保留；可 `cloudfs uploads retry`，或先 cancel 并等待 cancelled，再以 `drop <id> --confirm` 通过 VFS 丢弃当前本地版本。保留期间挂载点仍读本地版本；取消/清理状态不是远端成功证明。
 7. 冲突：open 时记录远端 `version`；上传前对比（有 delta 用事件，无 delta 重新 `Stat`）；不一致则上传为 `name (conflict 2026-09-02 host).ext`，状态页告警。
+8. **目录也走这条路**（`writeback`）：`mkdir` 插入节点（出生即"完整且为空"，之后在其中的
+   lookup/create 不再 List 远端）→ `INSERT uploads(kind=mkdir)` → 节点取 `cloudfs-local:<row>`
+   本地 id → 返回。在它下面创建的文件/子目录的行以这个本地 id 作 `remote_parent_id`，`Claim`
+   跳过这样的行；目录在远端创建成功后 `AdoptByIno` 换上真实 id，再 `RetargetChildren` 把子行
+   改指真实 id——父先子后由此保证，兄弟目录可并行。改名/删除 pending 目录与 pending 文件
+   走同一套 Retarget/DropPending/Tombstone；需要真实 id 的同步操作（远端条目 Move 进来、
+   server-side copy、`strict` 挂载下的 mkdir）用 `ensureRemoteDir` 自顶向下当场跑完这些行。
+   mkdir 行没有字节可保留，所以不能 cancel/resume/discard，只能 retry 或删掉目录；父行 dead
+   时其下的行在 `Stats.Blocked` 里计数，`flush` 据此立刻报错而不是等到超时。
 
 ```sql
 CREATE TABLE uploads (
@@ -382,6 +391,7 @@ CREATE TABLE uploads (
   last_error       TEXT,
   expected_version TEXT,
   session          TEXT,            -- Provider 的 upload_id 等，JSON
+  kind             TEXT NOT NULL DEFAULT 'file',  -- file | mkdir
   meta_identity    TEXT NOT NULL,   -- 原元数据库身份
   mount_prefix     TEXT NOT NULL,
   mount_root_id    TEXT NOT NULL,
@@ -396,8 +406,8 @@ CREATE TABLE dead_letter (upload_id TEXT PRIMARY KEY, reason TEXT, moved_at INTE
 
 | 模式 | `close()` 返回时机 | `fsync()` | 适用 |
 |---|---|---|---|
-| `writeback`（默认） | 本地 journal 提交后 | 同 close | 日常编辑、agent 写入、IDE |
-| `strict` | 远端上传完成后 | 阻塞到上传完成 | 备份脚本、跨端立刻可见 |
+| `writeback`（默认） | 本地 journal 提交后（`mkdir` 同样） | 同 close | 日常编辑、agent 写入、IDE |
+| `strict` | 远端上传完成后（`mkdir` 等远端创建完成） | 阻塞到上传完成 | 备份脚本、跨端立刻可见 |
 | `readonly` | 拒绝写（`EROFS`） | 无 | 媒体库、被熔断或未授权的账号 |
 
 启动恢复：扫描 `uploads` 中 `pending / uploading`，校验 blob 存在与 hash 一致，重新入队；

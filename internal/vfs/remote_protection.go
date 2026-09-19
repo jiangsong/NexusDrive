@@ -54,8 +54,11 @@ func (f *FS) hasWriter(ino uint64) bool {
 // the remote's version is the only content left to show. Every other
 // local-only node keeps its cache entry, pinned, until its upload is
 // adopted, so protecting it from a listing is still right.
+//
+// A directory waiting to be created remotely has no blob and no cache entry
+// at all; it has nothing to lose and is never a conflict loser.
 func (f *FS) conflictLoser(n meta.Node) bool {
-	if !IsLocalOnly(n.RemoteID) || f.hasWriter(n.Ino) {
+	if !IsLocalOnly(n.RemoteID) || n.IsDir() || f.hasWriter(n.Ino) {
 		return false
 	}
 	_, known := f.cache.Present(cache.FileKey{Remote: n.Remote, RemoteID: n.RemoteID, Version: n.Version})
