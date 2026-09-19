@@ -212,6 +212,8 @@ var zh = map[string]string{
 	"err.search_param":                  "搜索参数 %s 无效",
 	"err.restart_in_progress":           "已经有一次重启在进行中",
 	"err.root_exists":                   "根目录已存在",
+	"err.link_unshareable":              "这个网盘只对带自己凭据的请求提供文件内容，没有可以交给其他程序的直链；在挂载目录里读，或用「预览」「打开页面」",
+	"err.link_not_uploaded":             "文件还没上传到网盘，等上传完成后再取直链",
 	"err.root_rename":                   "根目录不能重命名",
 	"err.service_install_unsupported":   "这个守护进程不能安装服务",
 	"err.service_installed":             "服务已经安装；要重装先卸载",

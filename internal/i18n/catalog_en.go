@@ -213,6 +213,8 @@ var en = map[string]string{
 	"err.search_param":                  "search parameter %s is invalid",
 	"err.restart_in_progress":           "a restart is already in progress",
 	"err.root_exists":                   "the root already exists",
+	"err.link_unshareable":              "this drive serves file contents only to requests carrying its own credential, so there is no link another program could use; read it from the mount, or use Preview / Open page",
+	"err.link_not_uploaded":             "the file has not reached the drive yet; ask for a link once the upload completes",
 	"err.root_rename":                   "the root cannot be renamed",
 	"err.service_install_unsupported":   "this daemon cannot install a service",
 	"err.service_installed":             "the service is already installed; uninstall it first to reinstall",

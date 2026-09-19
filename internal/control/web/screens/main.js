@@ -79,6 +79,7 @@ export function renderMain(host) {
   const link = new URLSearchParams(location.hash.split('?')[1] || '');
   let wanted = link.get('path') || '';
   let cwd = link.get('dir') || (wanted ? wanted.replace(/\/[^/]*$/, '') || '/' : '/');
+  let linkShareable = true;
   let selected = null;
   let selectedRow = null;
   // True once the reader has asked for more than the first page of this
@@ -255,6 +256,12 @@ export function renderMain(host) {
     try {
       const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500'
         + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      // Whether this directory's remote hands out download links at all.
+      // Drive and Box do not (private bytes are served only with the
+      // account's credential), so the inspector leaves the button out
+      // instead of offering one every click refuses. Absent from an older
+      // daemon's reply means "unknown", which keeps the button.
+      linkShareable = page.link_shareable !== false;
       rows.append(...(page.entries || []).map((e) => {
         const tr = el('tr', { 'data-path': e.path, onclick: () => select(e, tr) },
           el('td', {}, el('span', { style: 'display:flex;align-items:center;gap:10px' },
@@ -323,7 +330,7 @@ export function renderMain(host) {
         e.is_dir ? el('button', { onclick: () => warmAll(e) }, iconEl('layers'), t('action.warm.all')) : null,
         el('button', { onclick: () => rename(e) }, t('action.rename')),
         e.is_dir ? null : el('button', { onclick: () => preview(e) }, t('action.preview')),
-        e.is_dir ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
+        e.is_dir || !linkShareable ? null : el('button', { onclick: () => downloadLink(e) }, t('action.link')),
         sessionDirOf(e.path, workspaceRoot()) ? el('button', { onclick: () => fromSession(e) }, iconEl('bot'), t('inspector.fromsession') + ' ' + sessionDirOf(e.path, workspaceRoot()).split('/').pop()) : null,
         // Files and directories alike: the prompt tells a directory to list itself first.
         el('button', { onclick: () => openSendToAgent({ path: e.path }) }, iconEl('bot'), t('action.sendtoagent')),

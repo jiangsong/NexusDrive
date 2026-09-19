@@ -52,6 +52,11 @@ type FSListResponse struct {
 	Entries    []FSEntry `json:"entries"`
 	NextCursor string    `json:"next_cursor,omitempty"`
 	Total      int       `json:"total"`
+	// LinkShareable says whether files under this directory can have a
+	// download link at all (the mount's provider serves bytes to third
+	// parties). Drive, Box and every pool holding one answer no; the page
+	// hides the link button rather than offering a refusal.
+	LinkShareable bool `json:"link_shareable"`
 }
 
 // FSMutation is the body of mkdir, rename and delete.
@@ -221,6 +226,9 @@ func (s *Server) fsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := FSListResponse{Path: p, Entries: make([]FSEntry, 0, len(page.Entries)), Total: page.Total, NextCursor: vfs.NextDirectoryCursor(page)}
+	// A directory that was just listed resolves; a failure here is not one
+	// worth failing the listing for, and "no link" is the safe answer.
+	out.LinkShareable, _ = s.collector.FS.HandsOutLinks(r.Context(), p)
 	for _, a := range page.Entries {
 		e := toEntry(p, a)
 		s.decorateAvailability(r.Context(), &e)
@@ -315,7 +323,18 @@ func (s *Server) fsDownloadURL(w http.ResponseWriter, r *http.Request) {
 	}
 	link, err := s.collector.FS.DownloadURL(r.Context(), p)
 	if err != nil {
-		http.Error(w, err.Error(), fsStatus(err))
+		// Neither is a fault: a Drive or Box file is readable only with the
+		// account's own credential, and a file still in the journal has no
+		// remote yet. Both used to reach the page as the vfs sentence, in
+		// English, naming the pool ("home does not hand out links...").
+		switch {
+		case errors.Is(err, vfs.ErrNoDownloadURL):
+			httpErrorT(w, r, http.StatusUnprocessableEntity, "err.link_unshareable")
+		case errors.Is(err, vfs.ErrNotUploaded):
+			httpErrorT(w, r, http.StatusConflict, "err.link_not_uploaded")
+		default:
+			http.Error(w, err.Error(), fsStatus(err))
+		}
 		return
 	}
 	writeJSON(w, FSLinkResponse{URL: link.URL, ExpiresAt: link.ExpiresAt, Headers: link.Headers})

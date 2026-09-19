@@ -342,3 +342,39 @@ func TestFSRoutesTagTheirChangesAsControlOrigin(t *testing.T) {
 		}
 	}
 }
+
+// TestDownloadURLRefusalIsLocalizedAndTheListingSaysSo: a Drive or Box file
+// is readable only with the account's own credential, so there is no link.
+// That answer used to reach the page as the vfs sentence, in English, naming
+// the pool ("home does not hand out links usable by other processes"). The
+// endpoint now answers in the request's language, and the listing carries
+// the capability so the page can leave the button out.
+func TestDownloadURLRefusalIsLocalizedAndTheListingSaysSo(t *testing.T) {
+	f, p := fsControl(t)
+	s := NewServer(f.coll)
+
+	list := decode[FSListResponse](t, call(t, s, "GET", "/fs/list?path=/docs", ""))
+	if !list.LinkShareable {
+		t.Fatalf("the fake shares links, but the listing says %+v", list)
+	}
+
+	caps := p.Capabilities()
+	caps.LinkShareable = false
+	p.SetCaps(caps)
+
+	list = decode[FSListResponse](t, call(t, s, "GET", "/fs/list?path=/docs", ""))
+	if list.LinkShareable {
+		t.Fatal("the listing still offers links after the provider stopped sharing them")
+	}
+	w := call(t, s, "GET", "/fs/download-url?path=/docs/a&lang=zh", "")
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("download-url: %d %s", w.Code, w.Body.String())
+	}
+	body := strings.TrimSpace(w.Body.String())
+	if strings.Contains(body, "vfs:") || strings.Contains(body, "hand out") {
+		t.Fatalf("the vfs sentence reached the page: %s", body)
+	}
+	if !strings.Contains(body, "直链") {
+		t.Fatalf("not in the request's language: %s", body)
+	}
+}

@@ -541,6 +541,17 @@ func (f *FS) ReadFileRange(ctx context.Context, p string, off, length int64) ([]
 	return buf[:read], nil
 }
 
+// ErrNoDownloadURL says the mount's provider serves file bytes only to
+// requests carrying its own credential, so there is no link another process
+// could use (Drive, Box; a pool inherits the answer from its members).
+// ErrNotUploaded says the file exists only in the local journal so far.
+// Both are sentinels rather than sentences because the control server and
+// the MCP tools put them in front of people, in their language.
+var (
+	ErrNoDownloadURL = errors.New("vfs: this remote does not hand out links usable by other processes")
+	ErrNotUploaded   = errors.New("vfs: the file has not been uploaded yet")
+)
+
 // DownloadURL returns a direct link for a path, so a caller can fetch a large
 // file without routing the bytes through cloudfs. It fails for files the
 // provider will not serve to third parties, and for files not yet uploaded.
@@ -553,20 +564,36 @@ func (f *FS) DownloadURL(ctx context.Context, p string) (provider.Link, error) {
 		return provider.Link{}, ErrIsDir
 	}
 	if IsLocalOnly(n.RemoteID) {
-		return provider.Link{}, fmt.Errorf("vfs: %s has not been uploaded yet", p)
+		return provider.Link{}, fmt.Errorf("%w: %s", ErrNotUploaded, p)
 	}
 	m, _, err := f.MountForIno(ctx, n.Ino)
 	if err != nil {
 		return provider.Link{}, err
 	}
 	if !m.Provider.Capabilities().LinkShareable {
-		return provider.Link{}, fmt.Errorf("vfs: %s does not hand out links usable by other processes", m.Remote)
+		return provider.Link{}, fmt.Errorf("%w: %s", ErrNoDownloadURL, m.Remote)
 	}
 	link, err := m.Provider.DownloadURL(ctx, n.RemoteID)
 	if err != nil {
 		return provider.Link{}, mapProviderErr(err)
 	}
 	return link, nil
+}
+
+// HandsOutLinks reports whether DownloadURL can ever succeed under p: the
+// mount's provider serves bytes to third parties. The console asks it per
+// directory so it can leave the "download link" button out instead of
+// offering one that every click refuses.
+func (f *FS) HandsOutLinks(ctx context.Context, p string) (bool, error) {
+	n, err := f.resolve(ctx, p)
+	if err != nil {
+		return false, err
+	}
+	m, _, err := f.MountForIno(ctx, n.Ino)
+	if err != nil {
+		return false, err
+	}
+	return m.Provider.Capabilities().LinkShareable, nil
 }
 
 // Prefetch pulls a whole file into the cache. `cloudfs pin` and the MCP pin
