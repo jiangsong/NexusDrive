@@ -25,3 +25,37 @@ export function pageFailureMode(cursor) {
 export function pageCursor(value) {
   return typeof value === 'string' ? value : '';
 }
+
+// latestOnly guards a loader whose fetch is awaited between clearing the
+// table and filling it. Called again while a fetch is in flight, the loader
+// used to clear the table a second time and then both fetches appended their
+// rows: a burst of change events during a copy — one per file written under
+// the directory — drew the same 500 names two, three, four times over. Each
+// call takes a ticket; `current(ticket)` says whether that call is still the
+// newest, and a stale one paints nothing.
+export function latestOnly() {
+  let seq = 0;
+  return {
+    take: () => ++seq,
+    current: (ticket) => ticket === seq,
+  };
+}
+
+// coalesce turns a burst of calls into one, `wait` ms after the first of
+// them; calls that arrive while that run is pending are absorbed by it, and a
+// call after it fires starts the next. A directory being copied into raises
+// a change event per file; reloading the listing for each one is the request
+// storm the daemon saw — hundreds of /fs/list calls, each decorating 500
+// entries — while the listing on screen changed once. It fires from the
+// first call rather than the last so a copy that runs for minutes still
+// refreshes the listing every `wait`, not only when it ends. The timer
+// functions are parameters so the behaviour can be run without a clock.
+export function coalesce(fn, wait, { setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  let timer = null;
+  const call = () => {
+    if (timer) return;
+    timer = setTimer(() => { timer = null; fn(); }, wait);
+  };
+  call.cancel = () => { if (timer) clearTimer(timer); timer = null; };
+  return call;
+}

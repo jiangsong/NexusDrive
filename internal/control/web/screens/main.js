@@ -1,7 +1,7 @@
 import { api } from '/ui/api.js';
 import { el, fill, iconEl, bytes, toast, confirmDelete, promptText, showPanel, moreRow, copyBtn } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
-import { pageCursor, pageFailureMode } from '/ui/paged.js';
+import { pageCursor, pageFailureMode, latestOnly, coalesce } from '/ui/paged.js';
 import { linkExpiry } from '/ui/expiry.js';
 import { openAddDrive } from '/ui/add_drive.js';
 import { openConnection } from '/ui/connection.js';
@@ -85,6 +85,10 @@ export function renderMain(host) {
   // True once the reader has asked for more than the first page of this
   // directory.
   let paged = false;
+  // Only the newest load paints. Two change events used to start two loads
+  // that each cleared the table and then each appended their page: every
+  // row drawn twice, three times, for as long as a copy ran.
+  const loads = latestOnly();
   const state = { remotes: [], config: null };
 
   const sidebar = el('div', { style: 'width:264px;flex-shrink:0;border-right:1px solid var(--border);background:var(--sidebar);display:flex;flex-direction:column' });
@@ -236,6 +240,7 @@ export function renderMain(host) {
     // A cursor is a string the daemon issued; anything else means "the first
     // page", never "encode this object into &cursor=".
     cursor = pageCursor(cursor);
+    const ticket = loads.take();
     // True once the reader has asked for more than the first page: a change
     // event must not then reload the directory from the top and take the
     // pages they walked to with it.
@@ -256,6 +261,7 @@ export function renderMain(host) {
     try {
       const page = await api.get('/fs/list?path=' + encodeURIComponent(cwd) + '&limit=500'
         + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      if (!loads.current(ticket)) return;
       // Whether this directory's remote hands out download links at all.
       // Drive and Box do not (private bytes are served only with the
       // account's credential), so the inspector leaves the button out
@@ -280,6 +286,7 @@ export function renderMain(host) {
       // directory and leaves the list alone when there is no heat table.
       decorateHeat(rows, cwd, { api });
     } catch (e) {
+      if (!loads.current(ticket)) return;
       // A failed continuation must not take the pages already on screen with
       // it: the rows being read cost nothing to keep.
       const failed = el('tr', {}, el('td', { colspan: '4' }, e.message));
@@ -499,9 +506,14 @@ export function renderMain(host) {
   // An upload finishing is not a reason to throw away the page the reader
   // walked to: reloading from the top is what a directory of more than 500
   // entries looked like snapping back to its first page mid-read.
+  // A copy into this directory raises one change event per file, and the
+  // subtree test below matches every one of them. Reloading per event was
+  // hundreds of /fs/list calls for a listing that changed once; a burst is
+  // now one reload, and a copy that runs for minutes refreshes every 400 ms.
+  const reload = coalesce(() => { if (!paged) load(); }, 400);
   const off = onFsChange((c) => {
     if (paged) return;
-    if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) load();
+    if (c.rescan || (c.paths || []).some((p) => p === cwd || p.startsWith(cwd + '/'))) reload();
   });
   loadAccounts();
   renderInspector();
@@ -511,5 +523,5 @@ export function renderMain(host) {
   searchBox.value = link.get('q') || '';
   if (link.get('mode') === 'content' || link.get('mode') === 'semantic') { writeSearchMode(link.get('mode')); search.refresh(); }
   load().then(() => searchBox.value && search.run());
-  return () => { off(); unsubscribeHealth(); search.dispose(); };
+  return () => { off(); reload.cancel(); unsubscribeHealth(); search.dispose(); };
 }
