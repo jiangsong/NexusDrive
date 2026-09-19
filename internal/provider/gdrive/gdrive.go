@@ -918,10 +918,9 @@ func (p *Provider) UploadPart(ctx context.Context, s provider.UploadSession, idx
 	h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+n-1, size))
 	// A resumable session URI already carries its own credential, and the
 	// session is not retried on an ambiguous failure: a replayed chunk at a
-	// stale offset would corrupt the object.
-	// UNVERIFIED: that PUTs to the session URI need no Authorization header
-	// follows the published protocol but has not been confirmed against a real
-	// account; if a live run returns 401 here, add the bearer token.
+	// stale offset would corrupt the object. Verified on a real account
+	// (2026-09-19): a 20 MiB file in 8 MiB parts, PUT to the session URI with
+	// no Authorization header, landed with the local md5.
 	resp, err := p.client.Do(ctx, httpx.Request{
 		Method: http.MethodPut, URL: sessionURI, Class: ratelimit.Upload, Header: h,
 		Body: bytes.NewReader(content), Stream: true,

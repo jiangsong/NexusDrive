@@ -1,5 +1,40 @@
 # CloudFS 待办清单
 
+## 2026-09-19 Google Drive 真实账号验收与向导引导
+
+- **[x] Google Drive 真实账号验收通过**：两个账号（同一 BYO Desktop 客户端）经控制台授权、
+  建 replicas=2 的池、挂载 `~/CloudFS`。授权、配额、单次/resumable 上传、覆盖、改名、删除、
+  delta 发现远端新增、冷读全部与 Drive 端 `md5Checksum` 对上；细节与仍未观察到的项见
+  `docs/providers.md` Google Drive 一节。`gdrive.go` 的 resumable session 那条 `UNVERIFIED`
+  已按验证结果改写。观察到的两点行为：Drive 直接新增的文件被 adopt 后只有一份副本，要等
+  10 分钟一次的 `ScanOnce` 或手工 `cloudfs pool repair` 才补齐（设计如此，见
+  `pool/repair.go` 的 `scanInterval`）；本机没有钥匙串，凭据落到 `secretfile:` 后端。
+- **[x] 安装向导中途没有回头路**：向导只在连接页**一个网盘都没有**时出现，用侧栏「添加网盘」
+  加了第一个之后入口消失，剩下的授权/建池/重启三步没有任何指引，`cloudfs setup` 进程就那么
+  挂着。现在：壳层在守护进程没挂载任何目录时于每个页面顶部画一行「安装向导 · 第 N 步，
+  共 6 步 · 该做什么 · 继续安装」（`app.js` + `setup_plan.js#setupProgress`，纯函数、7 个用例）；
+  连接设置面板的"还没有挂载点"后面加「继续安装向导」链接；`cloudfs setup` 直接打开 `#/setup`。
+- **[x] 连接设置的「代理出口」改为下拉**：原来是文本框，要求用户记住出口名，且占位符
+  "留空表示直连"是错的——空值的语义是按 `proxy.rules` 路由，对海外网盘就是内置规则指向的
+  第一个非直连出口。现在从 `GET /proxy/config` 列出「按规则（海外网盘默认走 X）/ 直连 /
+  各分组 / 各出口」，已保存但配置里不存在的名字保留并标注（`screens/proxy_choice.js`，5 个用例）。
+- **[x] 弹窗关不掉**：「历史」「热度建议」两个弹窗既没有关闭按钮，也没传 `onEscape`，按 Esc
+  直接抛 TypeError，只能刷新页面。关闭方式统一收进 `ui.js#openPanel`：标题栏右上角 ×、Esc、
+  点击遮罩（mousedown 与 click 都落在遮罩上才算，拖选到外面松手不关）三条路都走同一个
+  dismiss，`onEscape` 只是"取消意味着什么"的钩子，不传就直接关。`backdrop: false` 供一次性
+  令牌面板选退，误点不会丢令牌。无头 Chrome 走 CDP 对历史与建议两个面板各验证了三条路。
+- **[x] 「直链」按钮对 Google Drive 只会报一句英文**：`/fs/download-url` 把 vfs 的句子
+  `home does not hand out links usable by other processes` 原样给页面——不翻译、还点名的是
+  池而不是网盘。根因是 Drive/Box 的私有内容只对带凭据的请求可读（`Caps.LinkShareable=false`，
+  池随成员），这个功能对它们本来就不存在。现在：vfs 抛 `ErrNoDownloadURL` / `ErrNotUploaded`
+  两个哨兵，控制面映射成本地化的 422 / 409（`err.link_unshareable`、`err.link_not_uploaded`）；
+  `/fs/list` 多返回 `link_shareable`，检查器对不能出直链的目录直接不画这个按钮。回归：
+  `internal/control/fs_test.go#TestDownloadURLRefusalIsLocalizedAndTheListingSaysSo`。
+- **[ ] 只有一个网盘的用户走不完向导**：第 1 步要求至少两个网盘（池需要冗余），只想挂载
+  单个网盘的人只能用 `cloudfs config mount` 命令行，而向导横幅会一直催他"继续安装"。
+  应当允许单网盘走 replicas=1 的池，或在第 1 步给出"只挂载这一个"的出口。
+  验收：一个已授权的 remote、无池，向导能走到「重启并挂载」并让 `/mounts` 出现该 remote。
+
 ## 2026-09-18 扩展属性与浏览器配置补齐
 
 - **[x] Finder 复制失败（`无法完成此操作，因为你没有访问一些项目的许可`）**：根因是

@@ -76,7 +76,14 @@ delta 过期会换基线并让目录 freshness 全局失效。预认证下载/up
 写入路径会先查同名子项：命中就更新该文件（多段或 resumable 都走 `PATCH`），否则创建，避免
 自己制造出上面那种同名冲突。`changes` feed 提供 upsert/delete，页令牌失效换基线。私有内容
 只对带凭据的请求可读，所以 `DownloadURL` 返回 `ErrUnsupported`、`Caps.LinkShareable` 为假。
-`cloudfs config auth` 已可用浏览器完成授权，真实账号验收尚未完成。
+
+**真实账号验收（2026-09-19，两个 Google 账号组成 replicas=2 的池，经 socks5 出口）**：控制台
+BYO 客户端（Desktop 类型）浏览器授权 → refresh token 落到 secretfile；`About.storageQuota`
+（5 TiB）；`mkdir`、45 B 与 3 MiB 的单次上传、20 MiB 的 resumable 上传（8 MiB 分片，session
+URI 不带 Authorization）——Drive 端 `md5Checksum` 与本地一致；shell 两次重定向覆盖只留下
+第二份内容；改名、删除在两个成员上都落地；在 Drive 里直接新增的文件 33–69 s 内出现在挂载点
+（delta feed），4 MiB 冷读经修订钉住的 Range 下载 md5 一致。尚未在真机观察的：修订被清理后的
+回退、`orderBy` 跨页一致性、403 的 reason 字符串、公开分享链接（代码里仍标 `UNVERIFIED`）。
 
 **Box**：Box 的文件与文件夹是两套独立编号，同一个数字可以既是文件又是文件夹，且端点不同。
 provider ID 因此带类型前缀（`f:12345` / `d:12345`），根是 `d:0`；上层只把它当不透明 ID。
