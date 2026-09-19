@@ -185,6 +185,10 @@ input::placeholder { color: var(--dim); }
 .sheet { width: min(560px, calc(100% - 32px)); border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; }
 .sheet.danger { border-color: var(--danger-border); background: var(--danger-bg); }
 .sheet h3 { margin: 0 0 12px; }
+.sheet-head { display: flex; align-items: flex-start; gap: 12px; }
+.sheet-head h3 { flex-grow: 1; min-width: 0; overflow-wrap: anywhere; }
+.sheet-close { flex-shrink: 0; width: 30px; height: 30px; padding: 0; margin: -6px -8px 0 0; display: inline-flex; align-items: center; justify-content: center; background: transparent; border-color: transparent; color: var(--muted); }
+.sheet-close:hover, .sheet-close:focus-visible { color: var(--text); border-color: var(--border); }
 .row { display: flex; gap: 9px; }
 .grow { flex-grow: 1; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -202,6 +206,13 @@ textarea {
 .banner.warn { border-color: var(--warn); background: #16120b; color: var(--warn-text); }
 .banner.ok { border-color: var(--ok); background: #0d1a12; }
 .banner a { color: inherit; text-decoration: underline; }
+/* The setup line sits between the title bar and the body, full width, and
+   takes no room at all once it has nothing to say. */
+.setup-banner-host:empty { display: none; }
+.setup-banner-host { padding: 8px 14px 0; }
+.setup-banner { display: flex; align-items: center; gap: 12px; }
+.setup-banner .grow { flex-grow: 1; }
+.setup-banner a.btn { text-decoration: none; }
 .warn-text { color: var(--warn-text); font-weight: 600; }
 pre.snippet { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #121a25; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
 .plain-token { padding: 8px 12px; border: 1px solid var(--accent-border); border-radius: var(--radius-sm); background: #121a25; overflow-wrap: anywhere; font-size: 14px; user-select: all; }

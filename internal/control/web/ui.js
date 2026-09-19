@@ -160,22 +160,47 @@ export function showPanel({ title, content, closeLabel, width = 560 }) {
 }
 
 // openPanel is the shared shell: scrim, dialog semantics, focus trap, focus
-// restore, Escape. Everything modal in the app goes through it — the sheets
-// below, and the two screens that render their own body into it.
-export function openPanel({ title, content, footer, width = 480, danger = false, onEscape }) {
+// restore, and the three ways out — Escape, the × in the header, a click on
+// the backdrop. Everything modal in the app goes through it — the sheets
+// below, and the screens that render their own body into it.
+//
+// The ways out live here and not in the callers because they used to, and
+// two panels (history, heat suggestions) shipped with none: no button, and
+// an `onEscape` that was never passed, so Escape threw instead of closing.
+// A panel that cannot be closed is not a panel someone can recover from.
+// `onEscape` is now the *dismiss* hook — what a cancel means for this panel
+// (resolve false, cancel a pending authorization) — and every way out calls
+// it; a caller with nothing to say leaves it out and the panel just closes.
+// `backdrop: false` keeps a stray click outside the sheet from dismissing
+// it. Escape and the × still do, since both are deliberate — it is for a
+// panel whose dismissal loses something, like a token shown once.
+export function openPanel({ title, content, footer, width = 480, danger = false, onEscape, backdrop = true }) {
   const opener = document.activeElement;
   const app = document.getElementById('app');
+  let close;
+  const dismiss = () => { if (onEscape) onEscape(); else close(); };
+  const x = el('button', { class: 'sheet-close', type: 'button', 'aria-label': t('panel.close'), title: t('panel.close') }, iconEl('close'));
+  x.addEventListener('click', dismiss);
   const sheet = el('div', { class: 'sheet' + (danger ? ' danger' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title, style: `width:min(${width}px,calc(100% - 32px))` },
-    el('h3', {}, title), content, footer);
+    el('div', { class: 'sheet-head' }, el('h3', {}, title), x), content, footer);
   const scrim = el('div', { class: 'scrim' }, sheet);
-  const close = (result) => {
+  close = (result) => {
     scrim.remove();
     releasePage();
     if (opener && opener.focus) opener.focus();
     return result;
   };
+  // A click on the backdrop, not a drag that merely ends on it: a selection
+  // started inside the sheet and released outside must not throw the sheet
+  // away, so both halves of the click have to land on the scrim itself.
+  let pressedScrim = false;
+  scrim.addEventListener('mousedown', (e) => { pressedScrim = e.target === scrim; });
+  scrim.addEventListener('click', (e) => {
+    if (backdrop && e.target === scrim && pressedScrim) dismiss();
+    pressedScrim = false;
+  });
   scrim.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); onEscape(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); dismiss(); return; }
     if (e.key !== 'Tab') return;
     const focusable = [...sheet.querySelectorAll('a[href],button,input,select,textarea')].filter((n) => !n.disabled && n.getClientRects().length);
     if (!focusable.length) return;
@@ -185,8 +210,11 @@ export function openPanel({ title, content, footer, width = 480, danger = false,
   });
   document.getElementById('modal-root').append(scrim);
   if (app) app.inert = true;
-  const first = sheet.querySelector('input,select,textarea,button');
-  if (first) first.focus();
+  // Focus lands inside the content, not on the × — that is the control
+  // someone opened the panel for. A read-only panel has nothing else, and
+  // the × is what keeps the keyboard inside the dialog so Escape reaches it.
+  const first = [...sheet.querySelectorAll('input,select,textarea,button')].find((n) => n !== x) || x;
+  first.focus();
   return close;
 }
 

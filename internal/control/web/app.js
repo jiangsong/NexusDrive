@@ -2,6 +2,8 @@ import { get, set, subscribe } from '/ui/store.js';
 import { events } from '/ui/api.js';
 import { start as startRouter, currentTag, navItems, routes } from '/ui/router.js';
 import { el, fill, iconEl } from '/ui/ui.js';
+import { api } from '/ui/api.js';
+import { setupProgress } from '/ui/setup_plan.js';
 import { t, locale, setLocale, LOCALES } from '/ui/i18n.js';
 import { renderMain } from '/ui/screens/main.js';
 import { renderPool } from '/ui/screens/pool.js';
@@ -104,6 +106,50 @@ function nav(activeTag) {
     }));
 }
 
+// The setup banner: one line above every screen while nothing is mounted,
+// naming the wizard step still ahead and linking to it. The wizard used to be
+// offered only from the connections screen and only while it listed no drive,
+// so the first drive added from the sidebar hid the only way back into a flow
+// that still had three steps to go. What the line says comes from the same
+// three reads the wizard resumes from — the tab remembers nothing — and it is
+// refreshed on every navigation and whenever the window comes back into
+// focus, which is when the terminal command or the OAuth tab just finished.
+// A status tick with a served mount hides it at once without another fetch.
+let bannerEl = null;
+let bannerSeq = 0;
+async function refreshSetupBanner() {
+  if (!bannerEl) return;
+  // The wizard is where the line points; drawing it on the wizard's own
+  // screen would be a link to the page someone is looking at.
+  if (currentTag() === 'setup-view') { fill(bannerEl); return; }
+  const seq = ++bannerSeq;
+  const [accounts, pools, mounts] = await Promise.all([
+    api.get('/accounts').catch(() => null),
+    api.get('/pool/status').catch(() => null),
+    api.get('/mounts').catch(() => null),
+  ]);
+  // A slower fetch from a screen already left must not overwrite the answer
+  // for the screen now showing.
+  if (seq !== bannerSeq || !bannerEl) return;
+  paintSetupBanner(setupProgress({ accounts, pools, mounts, served: servedMounts() }));
+}
+function servedMounts() {
+  const status = get().status;
+  return status ? status.mounts : null;
+}
+function paintSetupBanner(progress) {
+  if (!bannerEl) return;
+  if (!progress.show) { fill(bannerEl); return; }
+  fill(bannerEl,
+    el('div', { class: 'banner warn setup-banner', role: 'status' },
+      el('span', { class: 'eyebrow' }, t('setup.banner.step', String(progress.step + 1), String(TOTAL_STEPS))),
+      el('span', { class: 'grow' }, t(progress.key, ...progress.args)),
+      el('a', { class: 'btn primary', href: '#/setup' }, t('setup.banner.continue'))));
+}
+// The wizard's own count, so the banner's "step 2 of 6" is the wizard's step
+// 2 and not a second numbering.
+const TOTAL_STEPS = 6;
+
 let disposeScreen = null;
 let titlebarEl = null;
 function render() {
@@ -112,8 +158,11 @@ function render() {
   const status = get().status;
   if (disposeScreen) { disposeScreen(); disposeScreen = null; }
   titlebarEl = titlebar(status);
+  bannerEl = el('div', { class: 'setup-banner-host' });
+  refreshSetupBanner();
   fill(app,
     titlebarEl,
+    bannerEl,
     el('div', { class: 'body' },
       nav(tag),
       (() => {
@@ -190,7 +239,13 @@ function deadDeliveryChanged(ev) {
   set({ status: { ...status, triggers: { ...triggers, dead: (triggers.dead || 0) + 1 } } });
 }
 
-subscribe(() => refreshTitlebar());
+subscribe(() => {
+  refreshTitlebar();
+  // The one transition a tick can answer on its own: the daemon came back
+  // serving a mount, so the wizard is over.
+  if (bannerEl && bannerEl.childElementCount && (servedMounts() || []).length) fill(bannerEl);
+});
+window.addEventListener('focus', () => refreshSetupBanner());
 startRouter(() => render()); // performs the initial render
 events({
   onStatus: (s) => set({ status: s, health: healthOf(s), connected: true }),

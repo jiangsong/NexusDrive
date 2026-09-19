@@ -167,3 +167,46 @@ export function nextAuthTarget(drives) {
   if (existing) return existing.name;
   return unauthorized.length ? unauthorized[0].name : null;
 }
+
+// setupProgress is what the shell says, on every screen, while the wizard is
+// unfinished — decided the same way planSetup is, from the server.
+//
+// The wizard was only ever offered from one place: the connections screen,
+// and only while it listed no drive at all. The first drive someone added
+// through the sidebar's own "add" button made that offer vanish, and with it
+// every pointer to the three steps still ahead (connect, pool, restart). What
+// they were left with was a settings panel saying "the configuration declares
+// no mount point" and a `cloudfs setup` process that would sit there for as
+// long as the tab stayed open. Nothing was wrong on the server; the person had
+// simply been shown the door out of the flow and not the way back in.
+//
+// So the answer is a line the shell draws above every screen for as long as
+// the daemon is not serving a mount, naming the step to go to, with the wizard
+// as the link. Returns { show, step, key, args }: show is false the moment a
+// mount is served — someone who mounts one drive with `cloudfs config mount`
+// and never builds a pool has finished, whatever planSetup thinks about
+// redundancy — and on the wizard's own screen, which is the caller's to hide.
+//
+// `served` is the daemon's own list of mounts in service (`mounts` from
+// /status); `mounts` is what the configuration declares (/mounts). The two
+// differ on purpose between a pool being built and the restart that serves
+// it, and that gap is the one step the wizard cannot see from the connections
+// screen: the restart. A declared mount that nothing serves is that step.
+export function setupProgress({ accounts, pools, mounts, served, intent } = {}) {
+  if (listOf(served, 'mounts').length) return { show: false, step: STEP_FINISH, key: '', args: [] };
+  const declared = listOf(mounts, 'mounts');
+  if (declared.length) {
+    return { show: true, step: STEP_FINISH, key: 'setup.banner.restart', args: [declared[0].path || ''] };
+  }
+  const plan = planSetup({ accounts, pools, mounts, intent });
+  if (plan.step === STEP_CONNECT) {
+    const target = nextAuthTarget(plan.drives) || '';
+    return { show: true, step: STEP_CONNECT, key: 'setup.banner.connect', args: [target] };
+  }
+  if (plan.step === STEP_REDUNDANCY || plan.step === STEP_FINISH) {
+    // A pool with no declared mount is a pool nothing will ever serve; the
+    // wizard's redundancy and location steps are where a mount gets named.
+    return { show: true, step: STEP_REDUNDANCY, key: 'setup.banner.pool', args: [] };
+  }
+  return { show: true, step: STEP_WELCOME, key: 'setup.banner.drives', args: [] };
+}

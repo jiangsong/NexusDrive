@@ -49,6 +49,9 @@ export function openTokenReveal({ token, snippets = {}, addCommands = {} }) {
       title: t('tokens.reveal.title'), width: 620, content,
       footer: el('div', { class: 'row', style: 'margin-top:16px;justify-content:flex-end' }, done),
       onEscape: discard,
+      // The token is shown once. A click that misses the copy button must
+      // not be the click that throws it away.
+      backdrop: false,
     });
     done.addEventListener('click', discard);
   });

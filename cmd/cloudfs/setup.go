@@ -178,7 +178,11 @@ func cmdSetup(ctx context.Context, args []string) error {
 	}
 	defer running.Close()
 
-	url := "http://" + controlTCP + "/"
+	// The wizard's own route, not the console root: the root lands on the
+	// connections screen, which offers the wizard only while it lists no
+	// drive, so someone who added their first drive from that screen's own
+	// button was out of the flow with three steps still to go.
+	url := "http://" + controlTCP + "/#/setup"
 	fmt.Printf("setup is open at %s\n", url)
 	fmt.Println("  add your drives there, then let it restart the daemon to mount them")
 	if !f.bools["no-open"] {

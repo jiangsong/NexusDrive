@@ -14,17 +14,20 @@ import { api, ApiError } from '/ui/api.js';
 import { el, fill, toast, confirmDelete, openPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { startAuthorization } from '/ui/auth_step.js';
+import { proxyChoices } from '/ui/screens/proxy_choice.js';
 
 const MODES = ['writeback', 'strict', 'readonly'];
 
 export async function openConnection(name, opts = {}) {
-  let detail, mountCfg;
+  let detail, mountCfg, proxyCfg;
   try {
-    // Neither read depends on the other, and the panel needs both before it
-    // can draw anything.
-    [detail, mountCfg] = await Promise.all([
+    // None of the reads depends on another, and the panel needs all of them
+    // before it can draw anything. The proxy section only feeds the outbound
+    // choices; without it the field still offers "rules" and "direct".
+    [detail, mountCfg, proxyCfg] = await Promise.all([
       api.get('/accounts/' + encodeURIComponent(name)),
       api.get('/mounts').catch(() => ({ mounts: [] })),
+      api.get('/proxy/config').catch(() => null),
     ]);
   } catch (e) {
     toast(e instanceof ApiError ? e.message : String(e), 'bad');
@@ -52,17 +55,21 @@ export async function openConnection(name, opts = {}) {
   render();
 
   async function reload() {
-    // Neither read depends on the other, and the panel needs both before it
-    // can draw anything.
-    [detail, mountCfg] = await Promise.all([
+    [detail, mountCfg, proxyCfg] = await Promise.all([
       api.get('/accounts/' + encodeURIComponent(name)),
       api.get('/mounts').catch(() => ({ mounts: [] })),
+      api.get('/proxy/config').catch(() => null),
     ]);
     render();
   }
 
   function render() {
-    const proxyInput = el('input', { type: 'text', value: detail.proxy || '', placeholder: t('conn.proxy.ph'), autocomplete: 'off', spellcheck: 'false' });
+    // A select over what the configuration offers, not a box to type a name
+    // into: the names live on the proxy page, and an empty value means
+    // "follow the rules", which for an overseas drive is the proxy, not direct.
+    const proxyInput = el('select', {},
+      ...proxyChoices(proxyCfg, detail.proxy || '').map((c) =>
+        el('option', { value: c.value, selected: c.value === (detail.proxy || '') }, t(c.key, ...c.args))));
     const qps = detail.qps || {};
     const meta = numberInput(qps.meta);
     const down = numberInput(qps.download);
@@ -140,6 +147,7 @@ export async function openConnection(name, opts = {}) {
 
       section(t('conn.settings'),
         labeled(t('conn.proxy'), proxyInput),
+        el('div', { class: 'dim', style: 'font-size:11.5px' }, t('conn.proxy.hint')),
         el('div', { style: 'display:grid;grid-template-columns:repeat(4,1fr);gap:10px' },
           labeled(t('conn.qps.meta'), meta), labeled(t('conn.qps.download'), down), labeled(t('conn.qps.upload'), up),
           labeled(t('conn.qps.transfer'), xfer)),
@@ -182,7 +190,10 @@ export async function openConnection(name, opts = {}) {
       paths.length
         ? el('div', { class: 'row', style: 'gap:9px;align-items:center;border-top:1px solid var(--hairline);padding-top:10px' },
           pathSel, prefixInput, modeSel, add)
-        : el('div', { class: 'dim', style: 'font-size:12px' }, t('conn.mounts.nopath')));
+        : el('div', { class: 'dim', style: 'font-size:12px' }, t('conn.mounts.nopath'), ' ',
+          // The wizard is the flow that names a mount; a panel that only
+          // says "there is none" leaves someone to find it.
+          el('a', { href: '#/setup', onclick: () => close() }, t('conn.mounts.wizard'))));
   }
 
   async function applyPatch(patch, btn) {
