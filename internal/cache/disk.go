@@ -35,14 +35,15 @@ func (c *Cache) ReserveDisk(dir string, n int64) (func(), error) {
 		if n > math.MaxInt64-reserved {
 			return nil, ErrNoSpace
 		}
-		if c.opt.MinFree == 0 {
+		minFree := c.minFree.Load()
+		if minFree == 0 {
 			break
 		}
 		free, err := c.opt.FreeSpace(dir)
 		if err != nil {
 			return nil, fmt.Errorf("cache: check write free space: %w", err)
 		}
-		if free >= c.opt.MinFree && n <= free-c.opt.MinFree && reserved <= free-c.opt.MinFree-n {
+		if free >= minFree && n <= free-minFree && reserved <= free-minFree-n {
 			break
 		}
 		if !c.evictOne() {

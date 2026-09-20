@@ -154,6 +154,11 @@ func (s Stats) HitRatio() float64 {
 
 // Cache stores fixed-size blocks on disk. It is safe for concurrent use.
 type Cache struct {
+	// maxBytes and minFree are the budget: Options.MaxBytes and
+	// Options.MinFree as configured, or as SetBudget changed them since.
+	// Atomics because the admission paths read them without c.mu.
+	maxBytes atomic.Int64
+	minFree  atomic.Int64
 	// hydrateWant is the set of complete files waiting to be merged, and
 	// hydrateTimer the single janitor that merges them.
 	hydrateWant  map[string]FileKey
@@ -239,6 +244,7 @@ func New(opt Options) (*Cache, error) {
 		}
 	}
 	c := &Cache{opt: opt, blocks: map[blockID]*blockMeta{}, files: map[string]*fileState{}, objects: map[diskIdentity]*wholeObject{}, parts: map[string]*wholePart{}, orphanTemps: map[string]int64{}}
+	c.SetBudget(opt.MaxBytes, opt.MinFree)
 	if opt.Busy != nil {
 		c.SetBusy(opt.Busy)
 	}
@@ -253,6 +259,24 @@ func (c *Cache) BlockSize() int64 { return c.opt.BlockSize }
 
 // Dir returns the cache root.
 func (c *Cache) Dir() string { return c.opt.Dir }
+
+// Budget reports the byte cap and the disk headroom the cache keeps.
+func (c *Cache) Budget() (maxBytes, minFree int64) { return c.maxBytes.Load(), c.minFree.Load() }
+
+// SetBudget changes the byte cap (0 = unlimited) and the disk headroom (0 =
+// none) for every admission from now on. Nothing is evicted here: the next
+// admission makes room against the new figures, and a lower headroom lets
+// writes a full disk was refusing through at once.
+func (c *Cache) SetBudget(maxBytes, minFree int64) {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	if minFree < 0 {
+		minFree = 0
+	}
+	c.maxBytes.Store(maxBytes)
+	c.minFree.Store(minFree)
+}
 
 // StagingDir returns the directory for in-progress writes.
 func (c *Cache) StagingDir() string { return filepath.Join(c.opt.Dir, "staging") }
@@ -1181,14 +1205,15 @@ func (c *Cache) makeRoomFor(need int64, entries int, diskNeed int64, exclude *bl
 	if expire {
 		c.lastExpire = now
 	}
-	checkFree := c.opt.MinFree > 0 && (diskNeed > 0 || now.Sub(c.lastFreeCheck) >= housekeepEvery || c.bytes+c.wholeBytes+c.partBytes-c.bytesAtFreeCheck >= freeCheckBytes)
+	minFree, maxBytes := c.minFree.Load(), c.maxBytes.Load()
+	checkFree := minFree > 0 && (diskNeed > 0 || now.Sub(c.lastFreeCheck) >= housekeepEvery || c.bytes+c.wholeBytes+c.partBytes-c.bytesAtFreeCheck >= freeCheckBytes)
 	c.mu.Unlock()
 	if expire {
 		c.evictExpiredExcept(exclude)
 	}
 	for {
 		c.mu.Lock()
-		overBytes := c.opt.MaxBytes > 0 && c.bytes+c.wholeBytes+c.partBytes+c.orphanBytes+c.reservedBytes+c.detachedFlushBytes+need > c.opt.MaxBytes
+		overBytes := maxBytes > 0 && c.bytes+c.wholeBytes+c.partBytes+c.orphanBytes+c.reservedBytes+c.detachedFlushBytes+need > maxBytes
 		overObjects := c.opt.MaxBlocks > 0 && len(c.blocks)+len(c.objects)+len(c.parts)+len(c.orphanTemps)+c.reservedEntries+c.detachedFlushEntries+entries > c.opt.MaxBlocks
 		c.mu.Unlock()
 		if !overBytes && !overObjects {
@@ -1207,7 +1232,7 @@ func (c *Cache) makeRoomFor(need int64, entries int, diskNeed int64, exclude *bl
 			c.mu.Lock()
 			reserved := c.reservedBytes + c.writeReserved + c.wb.pending + c.detachedFlushBytes
 			c.mu.Unlock()
-			if free >= c.opt.MinFree && diskNeed <= free-c.opt.MinFree && reserved <= free-c.opt.MinFree-diskNeed {
+			if free >= minFree && diskNeed <= free-minFree && reserved <= free-minFree-diskNeed {
 				break
 			}
 			if !c.evictOneExcept(exclude) {

@@ -87,6 +87,7 @@ func (s *Server) routes() []route {
 		{pattern: "/status", handler: s.status, open: true},
 		{pattern: "/metrics", handler: s.metrics, open: true},
 		{pattern: "/cache/drop", handler: s.dropCaches},
+		{pattern: "/cache/config", handler: s.cacheConfig},
 		{pattern: "/cache/", handler: s.manageCache, probe: "/cache/gc"},
 		{pattern: "/uploads", handler: s.uploads},
 		{pattern: "/uploads/", handler: s.uploads, probe: "/uploads/retry"},

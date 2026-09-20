@@ -188,6 +188,7 @@ var zh = map[string]string{
 	"err.no_filesystem":                 "这个守护进程没有挂载文件系统",
 	"err.remote_mounted":                "网盘 %q 仍挂载在 %s；请先解除该挂载",
 	"err.remote_pool_member":            "网盘 %q 仍是存储池 %q 的成员；请先迁出并从池中移除，再删除连接",
+	"cache.budget_negative":             "缓存预算不能是负数",
 	"proxy.saved_not_applied":           "已保存，但运行中的守护进程没能应用它：%s",
 	"err.proxy_addr_credential":         "出口 %q 的地址里带用户名或密码；代理凭据在配置文件里设置，不经过这个接口",
 	"err.proxy_duplicate_outbound":      "有两个出口都叫 %q；名字必须唯一",

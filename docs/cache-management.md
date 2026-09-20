@@ -17,6 +17,16 @@ warm 默认递归全部目录，深度 0 只列当前目录。
 要求 `X-CloudFS-Control: 1`，拒绝浏览器 Origin 与非本地主机名。MCP 同时提供 pin/unpin，
 沿用工具服务的路径允许列表；固定缓存不修改远端文件，因此不受远端只读模式禁止。
 
+## 预算（上限与磁盘留白）
+
+`cache.max_size` 是缓存占用上限（0 = 无上限），`cache.min_free` 是缓存所在文件系统至少
+保留的空闲空间（默认 5 GiB，0 = 不留）。写入先落本地 staging，可用空间低于 `min_free`
+时 `write()` 直接返回 `ENOSPC`，而不是把系统盘写满——控制台 `#/storage` 的"可用磁盘"卡片
+在这时变红并说明原因。两个值可在同一页"调整预算"里改：`GET/PUT /cache/config`
+（JSON 字段 `max_bytes`、`min_free`，字节数）先写进配置文件（保留其余 YAML 不动），再经
+`cache.SetBudget` 对运行中的守护进程立刻生效；返回的 `applied` 说明是否已生效。状态文档
+`cache.max_bytes`/`cache.min_free` 报告的是运行中的值，不是启动时的配置。（2026-09-20）
+
 ## 固定规则
 
 - 文件规则精确匹配路径，目录规则递归匹配子树；`/work` 不会误匹配 `/workshop`。

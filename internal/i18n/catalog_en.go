@@ -189,6 +189,7 @@ var en = map[string]string{
 	"err.no_filesystem":                 "no filesystem is mounted on this daemon",
 	"err.remote_mounted":                "remote %q is still mounted at %s; remove that layout first",
 	"err.remote_pool_member":            "remote %q is still a member of pool %q; drain and remove it from the pool first",
+	"cache.budget_negative":             "the cache budget must not be negative",
 	"proxy.saved_not_applied":           "saved, but the running daemon could not apply it: %s",
 	"err.proxy_addr_credential":         "outbound %q carries a username or password; proxy credentials are set in the configuration file, not through this API",
 	"err.proxy_duplicate_outbound":      "two outbounds are both named %q; names have to be unique",

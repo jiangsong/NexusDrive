@@ -81,6 +81,7 @@ type CacheStatus struct {
 	Bytes              int64   `json:"bytes"`
 	BytesHuman         string  `json:"bytes_human"`
 	MaxBytes           int64   `json:"max_bytes"`
+	MinFree            int64   `json:"min_free"`
 	HitRatio           float64 `json:"hit_ratio"`
 	Hits               int64   `json:"hits"`
 	Misses             int64   `json:"misses"`
@@ -181,9 +182,8 @@ type Collector struct {
 	Cache    *cache.Cache
 	Proxy    *proxy.Manager
 	Limiters *ratelimit.Registry
-	// CacheMaxBytes and CacheFree describe the configured budget.
-	CacheMaxBytes int64
-	FreeSpace     func(string) (int64, error)
+	// FreeSpace measures what the cache filesystem has free.
+	FreeSpace func(string) (int64, error)
 	// Remotes lists the configured remote names, for limiter reporting.
 	Remotes []string
 	// CallStats maps remote name to its provider call counter.
@@ -351,9 +351,12 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 
 	if c.Cache != nil {
 		cs := c.Cache.Stats()
+		// The live budget, not the configured one: the console can change
+		// it while the daemon runs.
+		maxBytes, minFree := c.Cache.Budget()
 		s.Cache = CacheStatus{
 			Blocks: cs.Blocks, Bytes: cs.Bytes, BytesHuman: humanBytes(cs.Bytes),
-			MaxBytes: c.CacheMaxBytes, HitRatio: cs.HitRatio(), Hits: cs.Hits,
+			MaxBytes: maxBytes, MinFree: minFree, HitRatio: cs.HitRatio(), Hits: cs.Hits,
 			Misses: cs.Misses, Evictions: cs.Evictions,
 			HydratedFiles: cs.HydratedFiles, PinnedBlocks: cs.PinnedBlocks,
 			WholeBytes: cs.WholeBytes, ReservedBytes: cs.ReservedBytes, WriteReservedBytes: cs.WriteReservedBytes, LeasedBytes: cs.LeasedBytes, OrphanBytes: cs.OrphanBytes,

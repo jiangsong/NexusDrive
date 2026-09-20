@@ -632,7 +632,6 @@ func (d *Daemon) Collector() *control.Collector {
 		CancelUpload:  cancelUpload,
 		ResumeUpload:  d.FS.ResumeUpload,
 		DiscardUpload: d.FS.DiscardUpload,
-		CacheMaxBytes: int64(d.Config.Cache.MaxSize),
 		FreeSpace:     cache.FreeSpace,
 	}
 	// A nil manager has to stay a nil interface: the export routes answer 503

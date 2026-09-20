@@ -1,5 +1,5 @@
 import { api } from '/ui/api.js';
-import { el, fill, bytes, toast } from '/ui/ui.js';
+import { el, fill, bytes, toast, openForm } from '/ui/ui.js';
 import { t, locale } from '/ui/i18n.js';
 import { get, subscribe } from '/ui/store.js';
 
@@ -29,6 +29,20 @@ export function renderStorage(host) {
         : t('storage.coverage.detail', never ? t('storage.coverage.never') : new Date(m.last_crawl).toLocaleString(locale())));
   }
 
+  // The free-disk card is where a full disk explains itself: the reserve
+  // the cache keeps, and — when the disk is already under it — that every
+  // write is being refused with ENOSPC right now, next to the button that
+  // changes the reserve.
+  function freeCard(c) {
+    const refusing = c.min_free > 0 && c.free_bytes > 0 && c.free_bytes < c.min_free;
+    const reserve = c.min_free > 0 ? t('storage.free.reserve', bytes(c.min_free)) : t('storage.free.noreserve');
+    return el('div', { class: 'panel pad' },
+      el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:9px' }, t('storage.free')),
+      el('div', { style: 'font-size:28px;font-weight:720;letter-spacing:-.03em' + (refusing ? ';color:var(--bad)' : '') }, bytes(c.free_bytes)),
+      el('div', { class: refusing ? 'detail warn-text' : 'detail', style: 'font-size:13px;margin-top:12px' },
+        refusing ? t('storage.free.refusing', bytes(c.min_free)) : reserve));
+  }
+
   function refreshCards() {
     const st = get().status || {};
     const c = st.cache || {};
@@ -36,8 +50,37 @@ export function renderStorage(host) {
       card(t('storage.used'), c.bytes_human || '0 B', c.max_bytes ? t('storage.limit', bytes(c.max_bytes)) : t('storage.nolimit')),
       card(t('storage.hit'), Math.round((c.hit_ratio || 0) * 100) + '%', t('storage.reads', (c.hits || 0).toLocaleString())),
       card(t('storage.evictions'), String(c.evictions || 0), t('storage.evictions.note')),
-      card(t('storage.free'), bytes(c.free_bytes), t('storage.free.note')),
+      freeCard(c),
       coverageCard(st));
+  }
+
+  // The budget is edited in GiB: that is the unit the numbers are ever
+  // quoted in, and a byte count nobody can read invites a typo that sets
+  // the reserve to a few kilobytes. 0 is meaningful for both fields and
+  // the form says what it means.
+  const GiB = 1024 * 1024 * 1024;
+  const gib = (n) => (n ? String(Math.round((n / GiB) * 100) / 100) : '0');
+  async function editBudget() {
+    let current;
+    try { current = await api.get('/cache/config'); } catch (e) { toast(e.message, 'bad'); return; }
+    const max = el('input', { type: 'text', inputmode: 'decimal', value: gib(current.max_bytes), autocomplete: 'off' });
+    const min = el('input', { type: 'text', inputmode: 'decimal', value: gib(current.min_free), autocomplete: 'off' });
+    const parse = (v) => { const n = Number(String(v.value).trim().replace(',', '.')); return Number.isFinite(n) && n >= 0 ? Math.round(n * GiB) : NaN; };
+    const ok = await openForm({
+      title: t('storage.budget.title'),
+      rows: [[t('storage.budget.max'), max], [t('storage.budget.minfree'), min]],
+      note: el('div', { class: 'detail', style: 'font-size:12px' },
+        el('div', {}, t('storage.budget.free', bytes(current.free_bytes), current.dir || '')),
+        el('div', { style: 'margin-top:6px' }, t('storage.budget.help'))),
+      confirmLabel: t('storage.budget.save'),
+      validate: () => (Number.isNaN(parse(max)) || Number.isNaN(parse(min))) ? t('storage.budget.invalid') : '',
+    });
+    if (!ok) return;
+    try {
+      const r = await api.put('/cache/config', { max_bytes: parse(max), min_free: parse(min) });
+      toast(r.applied ? t('storage.budget.applied') : t('storage.budget.saved'));
+      refreshCards();
+    } catch (e) { toast(e.message, 'bad'); }
   }
 
   async function loadPins() {
@@ -71,6 +114,7 @@ export function renderStorage(host) {
     el('div', { class: 'pad', style: 'display:flex;align-items:end;justify-content:space-between' },
       el('div', {}, el('div', { class: 'eyebrow' }, t('storage.eyebrow')), el('h2', { class: 'section', style: 'margin:6px 0 0' }, t('storage.title'))),
       el('div', { class: 'row', style: 'gap:9px' },
+        el('button', { onclick: editBudget }, t('storage.budget')),
         el('button', { onclick: dropCaches }, t('storage.drop')),
         el('button', { onclick: gc }, t('storage.gc')))),
     cards,

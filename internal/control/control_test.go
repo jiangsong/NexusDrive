@@ -60,8 +60,7 @@ func newFixture(t *testing.T) *fixture {
 	f.coll = &Collector{
 		Version: "test", Started: time.Now().Add(-90 * time.Second),
 		Journal: j, Cache: ca, Limiters: reg, Remotes: []string{"ali", "gdrive"},
-		CacheMaxBytes: 1 << 20,
-		FreeSpace:     func(string) (int64, error) { return 100 << 30, nil },
+		FreeSpace: func(string) (int64, error) { return 100 << 30, nil },
 	}
 	return f
 }
