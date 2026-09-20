@@ -109,6 +109,9 @@ type UploadStatus struct {
 	QueuedBytes   int64  `json:"queued_bytes"`
 	OldestAge     string `json:"oldest_age,omitempty"`
 	OldestAgeNS   int64  `json:"oldest_age_ns"`
+	// Batch is the overall progress of the current burst of work; see
+	// UploadBatch.
+	Batch UploadBatch `json:"batch"`
 }
 
 // MetaStatus reports the metadata cache.
@@ -192,6 +195,10 @@ type Collector struct {
 	// and returns how many files were dropped. Benchmarks use it to get a
 	// cold start without restarting the daemon.
 	DropCaches func(ctx context.Context) (int, error)
+	// UploadTotals reports how many rows the uploader has finished since
+	// the daemon started and their bytes; nil when there is no uploader.
+	UploadTotals func() (files, bytes int64)
+	batch        uploadBatchTracker
 	// FlushUploads waits for delayed and in-flight uploads, without starting
 	// extra workers or bypassing the provider's backoff policy.
 	FlushUploads  func(ctx context.Context) (journal.Stats, error)
@@ -377,6 +384,10 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 			}
 			if js.OldestAge > 0 {
 				s.Uploads.OldestAge = js.OldestAge.Round(time.Second).String()
+			}
+			if c.UploadTotals != nil {
+				files, bytes := c.UploadTotals()
+				s.Uploads.Batch = c.batch.observe(now(), js.Pending+js.Uploading, js.Bytes, files, bytes)
 			}
 		}
 	}

@@ -303,6 +303,12 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
   `INDEXED BY` 显式指定，验收 `TestClaimStaysCheapWithAQueueOfDeletes`、
   `TestClaimWalksBlockedRowsWithoutHoldingTheWriteLock`）；以及 TTL 过期后 rm -rf/cp -r 的
   每个目录都重新 List，见 DESIGN "delta feed 覆盖的列举不看 TTL"。
+- **[x] 传输页只有行列表、每秒整表刷新（2026-09-20）**：状态文档新增 `uploads.batch`
+  （`control.uploadBatchTracker`：队列从空变非空即开一"批"，总量 = 仍在队列的 + 批内已完成的，
+  按文件数和字节数各一份；uploader 暴露单调的 `Totals()`），页面顶部一条总进度：文件数、
+  字节、最近 10 s 速率、预计剩余、失败数；批完成后保持满条直到下一批。表格只在队列形状
+  变化时重取（≤ 1 次/2 s），行按 id 复用节点，不再闪。上传中的行加一条扫动条。
+  验收：`TestUploadBatchFollowsOneBurstOfWork`、`_tests/transfer_progress.test.mjs`。
 - **[x] 重启时 stale 挂载没被 detach（2026-09-20）**：`prepareMountPoint` 只 `stat`，而内核在
   attr timeout 内用缓存回答 stat，于是判定挂载点正常，随后 fusefs `open` 才报 ENOTCONN 退出；
   留着一个 cwd 在挂载内的 shell 重启就会撞上（这个会话自己撞了一次）。改为 stat + open 探测。

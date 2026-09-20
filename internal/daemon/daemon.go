@@ -609,7 +609,9 @@ func (d *Daemon) Collector() *control.Collector {
 	sort.Strings(remotes)
 	var flush func(context.Context) (journal.Stats, error)
 	var cancelUpload func(context.Context, string) (journal.State, error)
+	var totals func() (int64, int64)
 	if d.Uploader != nil {
+		totals = d.Uploader.Totals
 		flush = d.Uploader.Flush
 		cancelUpload = d.Uploader.Cancel
 	}
@@ -629,6 +631,7 @@ func (d *Daemon) Collector() *control.Collector {
 		CallStats:     d.CallStats,
 		DropCaches:    d.DropCaches,
 		FlushUploads:  flush,
+		UploadTotals:  totals,
 		CancelUpload:  cancelUpload,
 		ResumeUpload:  d.FS.ResumeUpload,
 		DiscardUpload: d.FS.DiscardUpload,

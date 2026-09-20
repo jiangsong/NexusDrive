@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloudfs/internal/journal"
@@ -93,6 +94,10 @@ type Uploader struct {
 	transferMu sync.Mutex
 	transfers  map[string]context.CancelFunc
 	listings   listingMemo
+	// doneFiles and doneBytes count the rows this process finished, ever:
+	// the console's batch progress is the difference between two readings.
+	doneFiles atomic.Int64
+	doneBytes atomic.Int64
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
@@ -246,6 +251,11 @@ func (u *Uploader) drainOnce(ctx context.Context, remote string) (int, error) {
 	return len(claimed), nil
 }
 
+// Totals reports how many rows this process has finished and how many
+// bytes they carried, since it started. Both only grow; a reader keeps
+// the values it saw when a batch began and shows the difference.
+func (u *Uploader) Totals() (files, bytes int64) { return u.doneFiles.Load(), u.doneBytes.Load() }
+
 // RunOne runs a row the caller has already claimed (Journal.ClaimID) to
 // completion, retry or dead letter, on the caller's goroutine. The VFS uses
 // it to create a queued directory when an operation needs its real id now.
@@ -305,6 +315,7 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 	// newer one and leave the backend holding the older content.
 	if done, err := u.opt.Journal.Superseded(ctx, up); err == nil && done {
 		_ = u.opt.Journal.Succeed(ctx, up.ID)
+		u.doneFiles.Add(1)
 		return
 	}
 	// An earlier version of the same file is still going out. Wait for it:
@@ -370,6 +381,8 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 			}
 		}
 		_ = u.opt.Journal.Succeed(ctx, up.ID)
+		u.doneFiles.Add(1)
+		u.doneBytes.Add(up.Size)
 		return
 	}
 	if errors.Is(err, provider.ErrUnavailable) {

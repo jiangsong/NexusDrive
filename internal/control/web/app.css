@@ -169,8 +169,18 @@ input[type=text], input[type=search], select {
 input::placeholder { color: var(--dim); }
 
 .progress { height: 6px; border-radius: 3px; background: #1b2635; overflow: hidden; }
-.progress > span { display: block; height: 100%; background: var(--ok); }
+.progress > span { display: block; height: 100%; background: var(--ok); transition: width .6s ease; }
 .progress.warn > span { background: var(--warn); }
+/* A bar that is moving: a lighter band sweeps across it, so a transfer
+   whose numbers change slowly still reads as alive. */
+.progress.active > span { position: relative; overflow: hidden; }
+.progress.active > span::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,.28) 50%, transparent 100%);
+  background-size: 200% 100%; animation: progress-sweep 1.6s linear infinite;
+}
+@keyframes progress-sweep { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .progress.active > span::after { animation: none; } }
 
 /* Toasts */
 .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
