@@ -83,15 +83,37 @@ cache:
   max_age: 720h
   policy: # 全局缓存策略默认值；每个 layout.<prefix> 可用自己的 cache 覆盖
     preset: none  # none（默认）| media | photos | code，见下表；显式字段总是赢过 preset
-    # small_file_whole: false   # 小文件是否整取（0KiB..threshold 一次读完），默认 false
-    # small_file_threshold: 4MiB  # 多大以内算"小文件"；必须是 64KiB 的倍数
+    # small_file_whole: false   # 前台读到一个小文件时，一次把整份取下来并装成完整缓存对象，
+                                # 而不是按块取。开启后该文件后续任何位置的读都不再产生远端请求。
+                                # 只作用于「大于一个 block 且不超过 small_file_threshold」的文件；
+                                # 更大的文件仍按块流式读，以免为一次 seek 拉下整部影片。
+                                # 与 dir_readahead 的兄弟预取共用同一把 per-inode singleflight，
+                                # 两者不会对同一个文件重复取
+    # small_file_threshold: 4MiB  # 多大以内算"小文件"；必须是 64KiB 的倍数。
+                                  # 这个值管的是 dir_readahead 的兄弟预取
+    # small_file_whole_threshold: 0 # 只管前台整取的上限；0 = 沿用 small_file_threshold。
+                                  # 两者分开是因为花的是不同的钱：兄弟预取是投机，源码树上
+                                  # 1MiB 就够；前台整取只有在超过 block_size 时才有收益
+                                  # （不到一个块的文件本来就是一次请求），所以
+                                  # small_file_whole 打开时，实际生效的整取上限必须大于
+                                  # block_size，否则启动即报错，而不是留一个什么都不做的开关
     # dir_readahead: 32           # readdir 时预取多少个后续文件；0 = 关闭
     # readahead_max: 64MiB        # 顺序预读窗口上限；必须 >= block_size
     # readahead_request: 0        # 一次合并读请求覆盖多少字节；0 = 按 provider 能力自动推算
     # readahead_lead: 8s          # 预读提前量（尚未消费，供后续任务用）
 
 journal:
-  durability: power     # power：close() 等本地 fsync 完成才返回（默认）
+  durability: barrier   # barrier（默认）：每次提交一次设备刷新，且刷在写入日志行之后，
+                        #   所以这一次同时覆盖暂存数据、rename 和那一行。实测 macOS 上
+                        #   约 5.6 ms/小文件。依赖「设备刷新会持久化此前已下发的写」这个
+                        #   顺序性质——F_FULLFSYNC 就是这么实现的，但不是 POSIX 保证。
+                        # power：暂存文件与 objects 目录各刷一次设备，两次都在写入日志行
+                        #   之前，所以不依赖上面那个顺序假设。代价是约 9.72 ms/小文件。
+                        #   注意：macOS 上这一档并不比 barrier 更强——SQLite 只在
+                        #   PRAGMA fullfsync 打开时才发 F_FULLFSYNC，本仓库没有打开，
+                        #   所以日志行本身两档都只走普通 fsync；barrier 那一次设备刷新
+                        #   反而覆盖了它。详见 TODO.md T-62。Linux 上 fsync(2) 本就刷
+                        #   设备缓存，两档开销相同，只有顺序不同。
                         # crash：不 fsync；进程崩溃不丢，掉电可能丢最后几秒并报为死信
 
 proxy:
@@ -130,7 +152,10 @@ remotes:
   # config auth 打开浏览器完成授权
   # Box 每次刷新都会轮换 refresh_token，务必让 config auth 写进安全存储
 
-  p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1, transfer: 4 }, max_conns: 2 }
+  p115: { type: pan115, qps: { meta: 1, download: 2, upload: 1, transfer: 4 }, max_conns: 2,
+          upload_workers: 2 }
+  # upload_workers 覆盖该网盘的并行上传数（0..256）；0 或省略表示用驱动自己的
+  # Caps.UploadParallel。LAN 上的 SFTP/SMB 可以调高，风控严的网盘调到 1~2
   # max_conns 覆盖该网盘的 Caps.MaxConnsPerHost（同时限制传输层的连接数）；
   # 115 是非官方接口，调低比驱动自带的默认值更保守，能进一步降低风控概率
   # qps.transfer 单独限制 CDN 字节流的 ranged GET，不再挤占 download 桶；
@@ -145,7 +170,9 @@ mounts:
       # cache.policy 的 preset 可选 none/media/photos/code：
       #   media  → readahead_max 128MiB, readahead_request 16MiB, dir_readahead 0, 未设 dir_ttl 时默认 24h
       #   photos → dir_readahead 64,     small_file_threshold 8MiB, readahead_max 16MiB
-      #   code   → dir_readahead 128,    small_file_threshold 1MiB, 未设 dir_ttl 时默认 1m
+      #   code   → dir_readahead 128,    small_file_threshold 1MiB, small_file_whole 开,
+      #            small_file_whole_threshold 8MiB（必须大于 block_size 才会真的生效）,
+      #            未设 dir_ttl 时默认 1m
       # layout.<prefix>.cache 里的字段覆盖 cache.policy 的全局默认，两边都可以单独指定 preset
 
 mcp:
@@ -263,8 +290,26 @@ cloudfs uploads retry <upload-id>          # 不给 id 则重试当前全部死�
 cloudfs uploads cancel <upload-id>         # 持久停止后续尝试并保留本地内容，不撤销远端操作
 cloudfs uploads resume <upload-id> --confirm # 校验保留内容后发起新尝试，接受远端重放风险
 cloudfs uploads drop <upload-id> --confirm # 先 cancel 并等待 cancelled；永久丢弃本地版本，不撤销远端操作
-cloudfs uploads flush --timeout 30m        # 等待延迟重试和正在上传的任务结束
+cloudfs uploads flush --timeout 30m        # 等待延迟重试和正在上传的任务结束（等待期间实时刷新进度行）
+cloudfs uploads watch                      # 跟踪队列直到排空；有死信则退出码非零
+cloudfs status --watch                     # 先打完整状态，再跟踪上传队列
 ```
+
+**往挂载点里拷贝是两段的**：`cp` 返回时数据只是本地持久化（已 fsync 进日志），上传在后台继续。
+实测 3434 个文件前台 37 秒、后台约 20 分钟。前台那 37 秒也不是白花的：`journal.durability=power`
+下每个文件都要一次 `F_FULLFSYNC`（本机实测 4.07 ms，普通 `fsync(2)` 只要 74 µs），串行拷贝小文件
+约 9.72 ms 一个——这是"close() 返回即不怕断电"的价钱，不是开销。进度条跟踪的是慢的那一半，
+`cloudfs uploads watch` 就是为这后半段准备的：
+
+```
+uploading  42.3%  1.2 GiB/2.8 GiB  431/1024 files  12.4 MiB/s  ETA 2m10s
+```
+
+它只读 `/status`，可以同时开多个，中断它不会影响上传。进度按字节算（没有字节的批次按文件数算），
+和控制台的进度条同一套算法。注意它跟踪的是**整个上传队列**：同时跑两个拷贝会合成一条进度，
+队列里没有区分来源的信息。守护进程重启后重新计数，此时进度行会标注"queued before the restart"。
+死信（`Dead > 0`）或整条队列卡在失败的目录创建后面时，watch 会以非零退出码结束，
+所以 `cp -r ... && cloudfs uploads watch` 能在脚本里当成真正的完成判定。
 
 `flush` 不绕过限流/退避，不提交仍打开的文件句柄；死信仍存在时返回失败。
 在线等待被取消不会停止 daemon 的上传工作。离线 flush 被取消会关闭该次启动的上传器，
@@ -435,6 +480,9 @@ cloudfs cache stats
 cloudfs cache gc
 ```
 
+**要在网盘上跑 `git status`、构建、`grep -r` 这类命令，先 pin 那棵子树。** 它们是乱序读整棵树的，
+而目录顺序读才有兄弟预取（`cache.policy.dir_readahead`）；不 pin 的话每个文件都是一次远端请求。
+
 这些命令优先管理运行中的服务；离线执行前必须取得存储所有权，不会在另一个服务的
 缓存上启动第二套管理栈。pin 在重启时恢复防淘汰保护，并由后台补齐缺失内容；下载失败
 保留固定意图和已缓存块，重试只补缺块。空间不足返回错误，不会边淘汰已固定内容边报告成功。
@@ -514,11 +562,12 @@ sessions list [--state active|finished|expired|rolled_back] | show <id> | finish
 sessions rollback <id> --dry-run | --confirm [--json]
                           撤销会话经 MCP 写工具做的修改：--dry-run 只打印将恢复/跳过/冲突三组，--confirm 执行；需要运行中的 daemon
 strm <virtual-path> --out <dir> [--prune] 通过运行中的 WebDAV 生成媒体库 .strm
-status [--json]           缓存、上传队列、代理、限流状态
+status [--json] [--watch] 缓存、上传队列、代理、限流状态；--watch 打完快照后继续跟踪上传队列直到排空
 ui | open [--print]       在浏览器打开桌面式控制台（需 control.metrics）
 doctor [--fix] [--json]   环境与本地状态诊断
 cache stats | gc | pins   查看缓存、回收未固定内容或列出固定规则
-uploads list | retry | cancel | resume | drop | flush
+uploads list | watch | retry | cancel | resume | drop | flush
+                          watch 跟踪整个队列直到排空；有死信或有卡住的行时退出码非零
 find [query] [--ext go,md] [--size >1m] [--after 2026-09-01] [--type dir|file] [--sort name|size|mtime|path] [--path /sub] [--limit N] [--all] [--json]
                           在本地文件名索引里搜索（Everything 式语法，见下文）；--all 先列举整棵树
 index status [--path P] [--json]   内容索引概况（文档 / 分块 / 队列 / 预算）；--path 看单个路径是否覆盖、已索引还是失败
@@ -622,7 +671,7 @@ VFS 元数据缓存。例如 `cloudfs strm /media/Films --out /srv/emby/Films`�
 | M3 | 共享 HTTP 层（代理 + 限流 + 熔断）、WebDAV / OpenList 驱动 | 完成 |
 | M3 | 阿里云盘 / 百度 / 115 / 夸克 / 天翼 / 123 驱动 | 实现与模拟测试已有，真实账号待验收 |
 | M1 | 国外网盘与通用协议：S3 / Dropbox / OneDrive / Google Drive / Box / SFTP / WebDAV / SMB | 全部已接入，真实账号与真实 SMB 服务器待验收 |
-| M4 | MCP 服务：29 个工具、资源列举/读取/订阅、允许列表、只读模式、客户端安装 | 复制准备和上传管理已接入；长期负载及上传/Copy 远端对账仍待补，见 docs/mcp.md |
+| M4 | MCP 服务：54 个工具（全能力装配时；记忆 / 索引 / 导出 / 会话等按装配条件注册）、资源列举/读取/订阅、允许列表、只读模式、客户端安装 | 复制准备和上传管理已接入；长期负载及上传/Copy 远端对账仍待补，见 docs/mcp.md |
 | M5 | pin/hydrate、2Q 淘汰、背压、metrics、doctor、status | 主体已实现，内核及大规模验收待补 |
 | M6 | macOS（macFUSE）平台适配、systemd/launchd 用户服务定义 | 实现完成，挂载/重启待真机验证 |
 

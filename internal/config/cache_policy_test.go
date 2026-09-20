@@ -32,8 +32,17 @@ func TestResolveCachePolicyPresetDefaults(t *testing.T) {
 			SmallFileThreshold: 8 << 20, DirReadahead: 64, ReadaheadMax: 16 << 20,
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
+		// code is the one preset that turns SmallFileWhole on: the tools that
+		// read a source tree jump rather than sweep, so the sibling prefetch
+		// never arms for them and a file's tail would cost a second request.
+		// The two thresholds differ on purpose: the megabyte is what the
+		// speculative prefetch spends on a guess, the 8MiB is the bound on a
+		// foreground whole-file fetch, which only pays above block_size.
 		{"code", ResolvedCachePolicy{
-			SmallFileThreshold: 1 << 20, DirReadahead: 128, ReadaheadMax: 0,
+			SmallFileWhole:          true,
+			SmallFileThreshold:      1 << 20,
+			SmallFileWholeThreshold: 8 << 20,
+			DirReadahead:            128, ReadaheadMax: 0,
 			ReadaheadRequest: 0, ReadaheadLead: 8 * time.Second,
 		}},
 	}
@@ -96,6 +105,25 @@ func TestResolveCachePolicyLayoutOwnPreset(t *testing.T) {
 	}
 }
 
+// TestCodePresetCanActuallyFetchWhole: the preset turns small_file_whole on,
+// and vfs declines to take a file that fits in one block, so the preset's
+// whole-file bound has to be above the default block size or the knob it turns
+// on does nothing at all. It was 1MiB against a 4MiB block.
+func TestCodePresetCanActuallyFetchWhole(t *testing.T) {
+	const defaultBlockSize = 4 << 20
+	got, err := ResolveCachePolicy(CachePolicy{Preset: "code"}, nil, defaultBlockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SmallFileWhole {
+		t.Fatal("the code preset stopped turning small_file_whole on")
+	}
+	if int64(got.SmallFileWholeThreshold) <= defaultBlockSize {
+		t.Fatalf("the code preset bounds whole-file fetches at %s, which is not above the default block size (%d): the foreground fetch can never fire",
+			got.SmallFileWholeThreshold, defaultBlockSize)
+	}
+}
+
 func TestResolveCachePolicyValidationErrors(t *testing.T) {
 	cases := map[string]struct {
 		global    CachePolicy
@@ -116,6 +144,26 @@ func TestResolveCachePolicyValidationErrors(t *testing.T) {
 			global:    CachePolicy{ReadaheadMax: mustSize(nil, "1MiB")},
 			blockSize: 4 << 20,
 		},
+		"whole_threshold not multiple of 64KiB": {
+			global:    CachePolicy{SmallFileWholeThreshold: mustSize(nil, "100KiB")},
+			blockSize: 4 << 20,
+		},
+		// vfs leaves a file that fits in one block to the ordinary path, which
+		// already fetches it in one request, so a whole-file bound at or below
+		// block_size can never fire. Refusing it beats resolving a knob that
+		// silently does nothing — which is what the code preset's 1MiB
+		// threshold did against the 4MiB default block size.
+		"small_file_whole bounded at block_size": {
+			global:    CachePolicy{SmallFileWhole: boolPtr(true), SmallFileThreshold: mustSize(nil, "4MiB")},
+			blockSize: 4 << 20,
+		},
+		"small_file_whole bounded below block_size": {
+			global: CachePolicy{
+				SmallFileWhole:          boolPtr(true),
+				SmallFileWholeThreshold: mustSize(nil, "1MiB"),
+			},
+			blockSize: 4 << 20,
+		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -125,6 +173,8 @@ func TestResolveCachePolicyValidationErrors(t *testing.T) {
 		})
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func mustSize(t *testing.T, s string) Size {
 	v, err := ParseSize(s)
@@ -143,6 +193,7 @@ cache:
   policy:
     preset: media
     small_file_whole: true
+    small_file_whole_threshold: 8MiB
     dir_readahead: 10
     readahead_lead: 3s
 remotes:

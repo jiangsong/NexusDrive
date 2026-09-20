@@ -44,12 +44,13 @@ func buildMounts(m config.Mount, providers map[string]provider.Provider, binding
 			Prefix: prefix, Remote: l.Remote, RootID: root, AccountBinding: bindings[l.Remote], Provider: p,
 			Mode: l.Mode, DirTTL: l.DirTTL, Pin: l.Pin,
 			Policy: vfs.CachePolicy{
-				SmallFileWhole:     resolved.SmallFileWhole,
-				SmallFileThreshold: int64(resolved.SmallFileThreshold),
-				DirReadahead:       resolved.DirReadahead,
-				ReadaheadMax:       int64(resolved.ReadaheadMax),
-				ReadaheadRequest:   int64(resolved.ReadaheadRequest),
-				ReadaheadLead:      resolved.ReadaheadLead,
+				SmallFileWhole:          resolved.SmallFileWhole,
+				SmallFileThreshold:      int64(resolved.SmallFileThreshold),
+				SmallFileWholeThreshold: int64(resolved.SmallFileWholeThreshold),
+				DirReadahead:            resolved.DirReadahead,
+				ReadaheadMax:            int64(resolved.ReadaheadMax),
+				ReadaheadRequest:        int64(resolved.ReadaheadRequest),
+				ReadaheadLead:           resolved.ReadaheadLead,
 			},
 		})
 	}

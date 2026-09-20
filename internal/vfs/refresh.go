@@ -172,11 +172,21 @@ func (r *Refresher) PollOnce(ctx context.Context, m Mount) (applied int, err err
 	r.polls++
 	r.appliedMu.Unlock()
 
+	// One scan of the upload queue for the whole batch. Every event that
+	// touches a node consults this set, and a feed can deliver hundreds of
+	// them at once while a large copy sits queued.
+	var queued map[uint64]bool
+	if len(events) > 0 {
+		queued, err = r.fs.queuedUploadInos(ctx)
+		if err != nil {
+			return 0, err
+		}
+	}
 	for _, e := range events {
 		if ctx.Err() != nil {
 			return applied, ctx.Err()
 		}
-		n, err := r.apply(ctx, m, e)
+		n, err := r.applyEvent(ctx, m, e, queued)
 		if err != nil {
 			// Stop before advancing the cursor so the failed event is retried.
 			return applied, err
@@ -196,9 +206,21 @@ func (r *Refresher) PollOnce(ctx context.Context, m Mount) (applied int, err err
 	return applied, nil
 }
 
-// apply folds one change event into the local tree. It reports whether
-// anything changed.
+// apply folds one change event into the local tree, loading the upload queue
+// snapshot for that one event. A batch uses applyEvent with a snapshot of its
+// own instead.
 func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool, error) {
+	queued, err := r.fs.queuedUploadInos(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.applyEvent(ctx, m, e, queued)
+}
+
+// applyEvent folds one change event into the local tree. It reports whether
+// anything changed. queued is the batch's snapshot of the inodes whose upload
+// has not gone out yet; see applyRemoteNodeWith.
+func (r *Refresher) applyEvent(ctx context.Context, m Mount, e provider.Change, queued map[uint64]bool) (bool, error) {
 	store := r.fs.meta
 
 	// Find the local node for the remote id, if we have one cached at all.
@@ -213,7 +235,7 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 		}
 		// A local write that has not been uploaded must not be destroyed by a
 		// delete event for the version it was based on.
-		_, applied, err := r.fs.applyRemoteNode(ctx, local, nil)
+		_, applied, err := r.fs.applyRemoteNodeWith(ctx, queued, local, nil)
 		if err != nil {
 			if !errors.Is(err, meta.ErrNodeChanged) {
 				r.fs.listingNotificationFallback(local.ParentIno)
@@ -276,7 +298,7 @@ func (r *Refresher) apply(ctx context.Context, m Mount, e provider.Change) (bool
 	updated.Ino = local.Ino
 	updated.ParentIno = local.ParentIno
 	updated.Name = local.Name // a rename arrives as a listing change, not here
-	updated, applied, err := r.fs.applyRemoteNode(ctx, local, &updated)
+	updated, applied, err := r.fs.applyRemoteNodeWith(ctx, queued, local, &updated)
 	if err != nil {
 		if !errors.Is(err, meta.ErrNodeChanged) {
 			r.fs.listingNotificationFallback(local.ParentIno)

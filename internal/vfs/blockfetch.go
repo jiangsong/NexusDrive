@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,9 @@ func (f *FS) fetchBlock(ctx context.Context, h *Handle, key cache.FileKey, idx i
 		// had.
 		return nil, fmt.Errorf("%w: %q", errLocalOnlyGone, h.Node.Name)
 	}
+	if block, ok, err := f.fetchWholeSmallFile(ctx, h, key, idx); ok {
+		return block, err
+	}
 	// Not pooled: the cache keeps this buffer as the block's in-memory
 	// copy while readers copy out of it, so it has no safe moment to be
 	// recycled.
@@ -81,6 +85,80 @@ func (f *FS) fetchBlock(ctx context.Context, h *Handle, key cache.FileKey, idx i
 		return nil, err
 	}
 	return buf, nil
+}
+
+// fetchWholeSmallFile serves a block by fetching the entire file in one
+// request and installing it as a complete cache object. It reports whether it
+// took the read; a false means the caller fetches the one block as usual.
+//
+// This is what the small_file_whole policy buys. Block-at-a-time is right for
+// a file a reader streams or seeks around in, but for a small file every
+// block after the first is a separate round trip for bytes the drive would
+// have sent in the first response. An agent reading scattered source files
+// one at a time never arms the sibling prefetch in read_dir_ahead.go, so this
+// is the only path that helps it.
+//
+// Files no larger than one block are left alone: the ordinary path already
+// brings those down in a single request, and routing them through here would
+// only add a whole-object write. The bound above is SmallFileWholeThreshold
+// and not SmallFileThreshold for that reason — the latter is what the
+// speculative sibling prefetch will spend on a guess, and a source tree sets
+// it well below the block size, which would leave nothing for this path to
+// take. Config refuses the combination that would make this dead (see
+// ResolveCachePolicy), so a threshold that arrives here is above the block
+// size.
+//
+// The fetch is shared with the sibling prefetch through dirAheadFlight, keyed
+// by inode, so a foreground read and a speculative one never ask the drive
+// for the same file twice. Losing that race is not an error: the caller falls
+// back to its block, which the other fetch will usually have cached by then.
+func (f *FS) fetchWholeSmallFile(ctx context.Context, h *Handle, key cache.FileKey, idx int64) ([]byte, bool, error) {
+	policy := h.Mount.Policy
+	size := h.Node.Size
+	bs := f.cache.BlockSize()
+	threshold := policy.SmallFileWholeThreshold
+	if threshold <= 0 {
+		threshold = policy.SmallFileThreshold
+	}
+	if !policy.SmallFileWhole || threshold <= 0 {
+		return nil, false, nil
+	}
+	if size <= bs || size > threshold {
+		return nil, false, nil
+	}
+	done := make(chan struct{})
+	if _, loaded := f.dirAheadFlight.LoadOrStore(h.Ino, done); loaded {
+		return nil, false, nil
+	}
+	defer func() {
+		f.dirAheadFlight.Delete(h.Ino)
+		close(done)
+	}()
+
+	// Bounded by the policy's threshold, which is why holding the file in
+	// memory for the length of one read is acceptable here and is not in
+	// the streaming prefetch.
+	buf := make([]byte, size)
+	read, err := f.readRange(ctx, h, 0, buf)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := shortRead(int64(read), size, 0, size); err != nil {
+		return nil, false, err
+	}
+	buf = buf[:read]
+	// A cache that cannot take the file still served the read: the bytes are
+	// already here, and the next read pays for itself rather than failing.
+	_ = f.cache.PutWhole(key, bytes.NewReader(buf), int64(len(buf)))
+	off := idx * bs
+	if off >= int64(len(buf)) {
+		return nil, true, io.EOF
+	}
+	end := off + bs
+	if end > int64(len(buf)) {
+		end = int64(len(buf))
+	}
+	return buf[off:end], true, nil
 }
 
 // fetchBlockRun fetches a contiguous stretch of blocks with a single range

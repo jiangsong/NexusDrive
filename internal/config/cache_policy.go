@@ -29,7 +29,16 @@ type CachePolicy struct {
 	Preset             string `yaml:"preset"`
 	SmallFileWhole     *bool  `yaml:"small_file_whole"`
 	SmallFileThreshold Size   `yaml:"small_file_threshold"` // default 4MiB
-	DirReadahead       *int   `yaml:"dir_readahead"`        // files ahead; default 32; 0 = off
+	// SmallFileWholeThreshold bounds the foreground whole-file fetch alone.
+	// It exists because the two consumers of SmallFileThreshold want opposite
+	// things from it. The sibling prefetch wants it small: it is speculative,
+	// and a source tree is worth prefetching a megabyte at a time. The
+	// foreground fetch only ever pays off above cache.block_size — a file that
+	// fits in one block is already one request, and vfs declines to take it
+	// whole — so a threshold at or below the block size turns that half of
+	// small_file_whole off entirely. 0 means "use SmallFileThreshold".
+	SmallFileWholeThreshold Size `yaml:"small_file_whole_threshold"`
+	DirReadahead            *int `yaml:"dir_readahead"` // files ahead; default 32; 0 = off
 	// ReadaheadMax and ReadaheadRequest: 0 means "not configured"; vfs then
 	// falls back to Options.ReadAheadBlocks / Options.ReadaheadRequest,
 	// whose own defaults are effectively 64MiB (16 blocks * the 4MiB default
@@ -51,12 +60,16 @@ type CachePolicy struct {
 // CachePolicy. Every other field always resolves to a concrete value (there
 // is no competing vfs.Options fallback for them to accidentally shadow).
 type ResolvedCachePolicy struct {
-	SmallFileWhole     bool
-	SmallFileThreshold Size
-	DirReadahead       int
-	ReadaheadMax       Size
-	ReadaheadRequest   Size
-	ReadaheadLead      time.Duration
+	SmallFileWhole bool
+	// SmallFileThreshold bounds the sibling prefetch; SmallFileWholeThreshold
+	// bounds the foreground whole-file fetch and keeps the "0 = fall back to
+	// SmallFileThreshold" meaning from CachePolicy, which vfs resolves.
+	SmallFileThreshold      Size
+	SmallFileWholeThreshold Size
+	DirReadahead            int
+	ReadaheadMax            Size
+	ReadaheadRequest        Size
+	ReadaheadLead           time.Duration
 }
 
 // knownCachePresets are the only legal values of CachePolicy.Preset.
@@ -90,6 +103,19 @@ func presetCachePolicy(preset string) ResolvedCachePolicy {
 	case "code":
 		r.DirReadahead = 128
 		r.SmallFileThreshold = 1 << 20
+		// Source trees are read by tools that jump: git walks its index,
+		// a build follows imports, an agent opens the three files a symbol
+		// appears in. None of that arms the sibling prefetch, which needs
+		// three reads in listing order, so without this every such file is
+		// fetched a block at a time and its tail costs a second request.
+		r.SmallFileWhole = true
+		// Above the 4MiB default block size, or the foreground fetch never
+		// fires: below it the ordinary path already brings the file down in
+		// one request. The megabyte above stays where it is — it is what the
+		// speculative sibling prefetch is willing to spend on a guess, and
+		// that is a different question from what a read the user is waiting
+		// on may take whole.
+		r.SmallFileWholeThreshold = 8 << 20
 	}
 	return r
 }
@@ -117,6 +143,9 @@ func applyExplicitCachePolicy(r ResolvedCachePolicy, p CachePolicy) ResolvedCach
 	}
 	if p.SmallFileThreshold != 0 {
 		r.SmallFileThreshold = p.SmallFileThreshold
+	}
+	if p.SmallFileWholeThreshold != 0 {
+		r.SmallFileWholeThreshold = p.SmallFileWholeThreshold
 	}
 	if p.DirReadahead != nil {
 		r.DirReadahead = *p.DirReadahead
@@ -161,6 +190,22 @@ func ResolveCachePolicy(global CachePolicy, layout *CachePolicy, blockSize int64
 	}
 	if r.SmallFileThreshold != 0 && r.SmallFileThreshold%(64<<10) != 0 {
 		return ResolvedCachePolicy{}, fmt.Errorf("config: cache small_file_threshold must be a multiple of 64KiB, got %s", r.SmallFileThreshold)
+	}
+	if r.SmallFileWholeThreshold != 0 && r.SmallFileWholeThreshold%(64<<10) != 0 {
+		return ResolvedCachePolicy{}, fmt.Errorf("config: cache small_file_whole_threshold must be a multiple of 64KiB, got %s", r.SmallFileWholeThreshold)
+	}
+	// A whole-file fetch bounded at or below the block size can never fire:
+	// vfs leaves a file that fits in one block to the ordinary path, which
+	// already brings it down in a single request. Saying so here is better
+	// than a knob that resolves cleanly and then does nothing.
+	if r.SmallFileWhole && blockSize > 0 {
+		whole := r.SmallFileWholeThreshold
+		if whole == 0 {
+			whole = r.SmallFileThreshold
+		}
+		if int64(whole) <= blockSize {
+			return ResolvedCachePolicy{}, fmt.Errorf("config: cache small_file_whole needs a whole-file threshold above block_size (%d), got %s — set small_file_whole_threshold", blockSize, whole)
+		}
 	}
 	if r.ReadaheadRequest != 0 && blockSize > 0 && int64(r.ReadaheadRequest)%blockSize != 0 {
 		return ResolvedCachePolicy{}, fmt.Errorf("config: cache readahead_request must be a positive multiple of block_size (%d), got %s", blockSize, r.ReadaheadRequest)

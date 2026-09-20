@@ -13,8 +13,8 @@ import (
 	"cloudfs/internal/agent"
 	"cloudfs/internal/config"
 	"cloudfs/internal/hooks"
-	"cloudfs/internal/secrets"
 	"cloudfs/internal/memory"
+	"cloudfs/internal/secrets"
 )
 
 // The agent-client hooks (docs/agent-first-design.md §7, TODO.md T-54)
@@ -134,7 +134,15 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var parts []string
-	parts = append(parts, fmt.Sprintf("cloudfs: this directory is inside the CloudFS mount at %s (cloud storage mounted locally). A file you have not read yet is downloaded on first read and counts against the provider's rate limit, so read what you need rather than whole trees; a write is durable locally at once and uploads in the background.", resp.Mount))
+	// What a read costs here is the one thing an agent cannot guess, and
+	// the answer is the opposite of the obvious one: the sibling prefetch
+	// (internal/vfs/read_dir_ahead.go) arms after three reads that walk a
+	// directory forward and pulls the small files ahead into the cache, so
+	// a whole directory taken in order is nearly free while the same files
+	// read out of order cost a request each. Pinning is the first step
+	// before a shell command that reads a tree in no particular order.
+	parts = append(parts, fmt.Sprintf("cloudfs: this directory is inside the CloudFS mount at %s (cloud storage mounted locally). Reading a directory's files in name order is nearly free — after three reads in order the small files ahead are fetched for you — while reads scattered across a tree cost one download each; a write is durable locally at once and uploads in the background.", resp.Mount))
+	parts = append(parts, "Before a command that reads a whole tree in no particular order (git status, a build, grep), pin it once — `cloudfs pin <path>`, or the pin tool — and its reads become local.")
 	if len(cfg.MCP.Allow) > 0 {
 		parts = append(parts, fmt.Sprintf("Agents may change files under: %s (mount-relative).", strings.Join(cfg.MCP.Allow, ", ")))
 	}

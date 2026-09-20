@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloudfs/internal/provider"
@@ -177,6 +178,37 @@ type Journal struct {
 	objectMu      sync.Mutex
 	stagedObjects map[string]string // staging ID -> object path
 	stagedRefs    map[string]int    // object path -> live staging owners
+
+	// stagingSyncs, objectSyncs and writeTxs count what the write path spends
+	// on durability, and they stay three numbers rather than one because the
+	// two kinds cost two orders of magnitude apart. The first two are
+	// os.File.Sync, which on darwin is F_FULLFSYNC — a device cache flush, 4.1
+	// to 4.8 ms measured here. The third is a SQLite transaction at
+	// synchronous=FULL, 70 to 90 us, because the driver issues a plain fsync(2)
+	// unless PRAGMA fullfsync is set and nothing in this tree sets it (see Open).
+	// Summing them would hide a 50x difference. A budget on a close() counts
+	// them rather than timing it. See DurabilityStats.
+	stagingSyncs atomic.Int64
+	objectSyncs  atomic.Int64
+	writeTxs     atomic.Int64
+	// deviceFlushes counts the subset of the two sync counters that asked the
+	// drive to empty its write cache, which on darwin costs fifty-five times
+	// what handing it the bytes does. Kept apart for that reason: summing
+	// them would hide the only number that moves close(2)'s cost.
+	deviceFlushes atomic.Int64
+	// onDeviceFlush observes flushes from a test, so the ordering each
+	// durability level promises is asserted rather than described.
+	onDeviceFlush func()
+	// queuedInoScans counts scans of the upload queue for the set of inodes
+	// with bytes still waiting. Every node a listing or a change feed touches
+	// consults that set, so what matters is how often the set is built, not
+	// how often it is read — which is what a regression test asserts on.
+	queuedInoScans atomic.Int64
+	// flushFault fails the objects flush from a test. A flush that fails
+	// after the rows are committed is the one case where what the committer
+	// may do next is sharply constrained, and a disk error is not otherwise
+	// reachable from a test.
+	flushFault func() error
 }
 
 // Options configures Open.
@@ -200,6 +232,24 @@ const (
 	// are fsynced before close() returns; a power loss loses nothing that
 	// was acknowledged.
 	DurabilityPower Durability = "power"
+	// DurabilityBarrier is the default: one device flush per commit, spent
+	// after the row is written so that it covers the staging data, the rename
+	// into objects/ and the row itself.
+	//
+	// It is both faster and a stronger promise than power, because power
+	// spends its two flushes *before* the row insert and so never covers the
+	// row at all — SQLite issues a plain fsync unless PRAGMA fullfsync is set,
+	// and nothing here sets it (TODO.md T-62). On this project's development
+	// machine a serial small-file copy costs 9.72 ms per file under power and
+	// about 5.6 ms under barrier.
+	//
+	// What it rests on: a device cache flush persists everything already
+	// issued to that device, which is how F_FULLFSYNC is implemented but is
+	// not a POSIX guarantee, and APFS does not contract its issue ordering.
+	// A drive that lies about its cache defeats it — as it defeats power.
+	// Outside darwin there is no cheaper "issue without flushing" call, so
+	// barrier costs what power costs there and only the ordering differs.
+	DurabilityBarrier Durability = "barrier"
 	// DurabilityCrash: nothing is fsynced on the write path. The data sits
 	// in the kernel's page cache, so a daemon crash or kill -9 loses
 	// nothing; a power loss may lose the last seconds of writes, and
@@ -240,11 +290,36 @@ func Open(opt Options) (*Journal, error) {
 		}
 	}
 	if opt.Durability == "" {
-		opt.Durability = DurabilityPower
+		// barrier, not power: it is faster and keeps a stronger promise than
+		// power actually kept, because its one flush lands after the row
+		// insert and so covers the row. See DurabilityBarrier.
+		opt.Durability = DurabilityBarrier
 	}
 	// synchronous=FULL: an acknowledged close must survive a power loss.
 	// In crash mode NORMAL is enough: WAL with NORMAL is consistent after a
 	// crash and only the last transactions may be lost after a power cut.
+	//
+	// UNVERIFIED: on macOS that promise is stronger than what is delivered.
+	// SQLite only issues F_FULLFSYNC when PRAGMA fullfsync is on, and nothing
+	// in this tree sets it, so these commits get a plain fsync(2) — which on
+	// APFS does not flush the device write cache. The staging file and the
+	// objects directory beside them do get F_FULLFSYNC, through os.File.Sync.
+	// So under power the payload bytes are device-durable and the row naming
+	// them is not. Measurement consistent with this: the three SQLite fsyncs
+	// on the close path cost about 70 us between them, against 4.07 ms for one
+	// real device flush on the same disk. Turning fullfsync on would add that
+	// 4 ms to every commit, so it is a durability-contract decision rather
+	// than a fix; see TODO.md T-62. Not an issue on Linux, where fsync(2)
+	// flushes the device cache.
+	//
+	// The driver half of this is no longer guesswork: modernc.org/sqlite's
+	// generated darwin build compiles HAVE_FULLFSYNC=1 and reaches
+	// fcntl(F_FULLFSYNC) only when the pager passes SQLITE_SYNC_FULL, which
+	// PRAGMA fullfsync alone sets; opened through the DSN above, the connection
+	// reports fullfsync=0 and checkpoint_fullfsync=0 with synchronous=2. What
+	// stays UNVERIFIED is the consequence: that a plain fsync(2) on APFS really
+	// does leave an acknowledged row behind in the device cache. To verify,
+	// pull power mid-write on real hardware.
 	sync := "FULL"
 	if opt.Durability == DurabilityCrash {
 		sync = "NORMAL"
@@ -575,6 +650,7 @@ func (j *Journal) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("journal: begin: %w", err)
 	}
+	j.writeTxs.Add(1)
 	if err := fn(tx); err != nil {
 		tx.Rollback()
 		return err
@@ -1034,6 +1110,35 @@ func (j *Journal) ByIno(ctx context.Context, ino uint64) ([]Upload, error) {
 	return j.list(ctx, `WHERE ino = ? AND state IN (?, ?, ?, ?, ?) ORDER BY created_at`,
 		ino, string(StatePending), string(StateUploading), string(StateCancelling), string(StateCancelled), string(StatePurging))
 }
+
+// QueuedInos returns the inodes whose bytes are still in the journal waiting
+// to go out. A directory listing uses it to keep those nodes: the backend
+// cannot have told the listing about a file it has never received, so without
+// this the listing prunes the node and orphans the upload row.
+func (j *Journal) QueuedInos(ctx context.Context) (map[uint64]bool, error) {
+	j.queuedInoScans.Add(1)
+	rows, err := j.db.QueryContext(ctx,
+		`SELECT DISTINCT ino FROM uploads WHERE ino != 0 AND state IN (?, ?)`,
+		string(StatePending), string(StateUploading))
+	if err != nil {
+		return nil, fmt.Errorf("journal: queued inodes: %w", err)
+	}
+	defer rows.Close()
+	out := map[uint64]bool{}
+	for rows.Next() {
+		var ino uint64
+		if err := rows.Scan(&ino); err != nil {
+			return nil, fmt.Errorf("journal: queued inodes: %w", err)
+		}
+		out[ino] = true
+	}
+	return out, rows.Err()
+}
+
+// QueuedInoScans counts how many times the queue has been scanned for that
+// set. A caller that applies a batch of remote changes builds it once for the
+// batch; one scan per changed node is the regression this counts.
+func (j *Journal) QueuedInoScans() int64 { return j.queuedInoScans.Load() }
 
 // Retarget changes where a queued upload will land. Renaming or moving a file
 // that has not been uploaded yet must move the pending write with it, not

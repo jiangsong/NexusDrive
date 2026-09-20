@@ -367,8 +367,9 @@ mounts:
       /code:   {remote: home, cache: {preset: code}}     # dir_readahead 128, threshold 1MiB, dir_ttl 1m
 ```
 
-- `config.CachePolicy{Preset, SmallFileWhole *bool, SmallFileThreshold, DirReadahead, ReadaheadMax, ReadaheadRequest, ReadaheadLead}`；`Cache.Policy` 是全局默认，`Layout.Cache *CachePolicy` 是覆盖（`pin` / `dir_ttl` 留在原处）。显式键覆盖 preset。校验：threshold 为 64 KiB 倍数、`readahead_request` 为 `block_size` 倍数、preset 名已知。
-- `vfs.Mount.Policy`（解析后的值，无指针）由 `daemon.buildMounts` 按 preset → 全局 → layout 合并；消费方：`maybeReadAhead`（max / request / lead）、`noteFileRead` / `topUp`（dir_readahead / threshold）、`fetchBlock`（`small_file_whole` → `PutWhole`）。
+- `config.CachePolicy{Preset, SmallFileWhole *bool, SmallFileThreshold, SmallFileWholeThreshold, DirReadahead, ReadaheadMax, ReadaheadRequest, ReadaheadLead}`；`Cache.Policy` 是全局默认，`Layout.Cache *CachePolicy` 是覆盖（`pin` / `dir_ttl` 留在原处）。显式键覆盖 preset。校验：两个 threshold 都是 64 KiB 倍数、`readahead_request` 为 `block_size` 倍数、preset 名已知、`small_file_whole` 打开时生效的整取上限必须 > `block_size`。
+- 两个 threshold 分开：`small_file_threshold` 管 `dir_readahead` 的投机兄弟预取（`code` preset 1MiB），`small_file_whole_threshold`（0 = 沿用前者）管前台整取（`code` preset 8MiB）。前台整取对不足一个块的文件无收益，vfs 直接跳过，所以上限不高于 `block_size` 时整个开关等于没开——`code` preset 原先的 1MiB 配 4MiB 默认块就是这种情况，现在由校验拦住。
+- `vfs.Mount.Policy`（解析后的值，无指针）由 `daemon.buildMounts` 按 preset → 全局 → layout 合并；消费方：`maybeReadAhead`（max / request / lead）、`noteFileRead` / `topUp`（dir_readahead / threshold）、`fetchBlock` → `fetchWholeSmallFile`（`small_file_whole` + `small_file_whole_threshold` → `PutWhole`，2026-09-20 补齐，此前该键被解析但无人读）。
 - 环境变量（仅全局）：`CLOUDFS_READAHEAD_BLOCKS`（保留）、`CLOUDFS_DIR_READAHEAD`、`CLOUDFS_SMALL_FILE_THRESHOLD`、`CLOUDFS_READAHEAD_REQUEST`。
 - 测试：`config_test.go` 的 preset 解析与校验错误；`internal/vfs` 里两个不同策略的 mount 得到不同窗口（fake 加延迟，3 次顺序读后计 `ReadRange`：media 窗口 > code 窗口）。
 

@@ -81,7 +81,13 @@ type Mount struct {
 type CachePolicy struct {
 	SmallFileWhole     bool
 	SmallFileThreshold int64
-	DirReadahead       int
+	// SmallFileWholeThreshold bounds the foreground whole-file fetch
+	// (blockfetch.go) instead of the sibling prefetch. Zero means "use
+	// SmallFileThreshold". They are separate because the foreground fetch is
+	// only worth taking above the cache block size, while the speculative
+	// prefetch wants a much smaller bound on what it is willing to guess.
+	SmallFileWholeThreshold int64
+	DirReadahead            int
 	// ReadaheadMax caps the sequential prefetch window in bytes for this
 	// mount. Zero means "use Options.ReadAheadBlocks instead"; see
 	// (*FS).maybeReadAhead.
@@ -173,7 +179,13 @@ type FS struct {
 
 	mu      sync.Mutex
 	handles map[uint64]*Handle
-	nextFH  uint64
+	// writeHandleIndex is the open write handles by inode (inode -> FH ->
+	// handle), maintained wherever handles is. Every GETATTR asks whether
+	// the inode it is about has bytes staged but not published, and almost
+	// every answer is no; finding that out by walking the process's whole
+	// handle table made one lstat cost the table.
+	writeHandleIndex map[uint64]map[uint64]*Handle
+	nextFH           uint64
 	// Remote publication cannot race a writer's initial node lookup and
 	// registration. Never hold this gate during provider directory IO.
 	remotePublishMu sync.RWMutex
@@ -189,9 +201,27 @@ type FS struct {
 	crawl crawlState
 	// fgIO counts the reads and writes the kernel is waiting on, so
 	// background work can stand aside.
-	fgIO     atomic.Int64
-	journal  *journal.Journal
-	uploader *upload.Uploader
+	fgIO atomic.Int64
+	// mdIO counts the metadata requests outstanding — lookups, stats and
+	// listings a caller is waiting on. It is deliberately a second counter
+	// rather than more of fgIO: what keys off fgIO alone is quiet on the
+	// data path (the block cache and the staging disk), and folding
+	// metadata into it would move those triggers as a side effect. Both
+	// are foreground for the purposes of Busy, which is what background
+	// sweeps stand aside for: a flood of lookups spends the same SQLite
+	// file and the same provider budget that a crawl or a hydration would.
+	mdIO atomic.Int64
+	// pendingSizeScans counts the open write handles pendingSize has looked
+	// at. A stat of a file nobody is writing must not look at any, and that
+	// is what the test asserts; nothing in production reads it.
+	pendingSizeScans atomic.Int64
+	// pathQueries counts the recursive path resolutions this VFS has asked
+	// the metadata store for (pathOf's misses). The hot paths must answer
+	// from the memo instead, and the tests assert the count rather than a
+	// duration.
+	pathQueries atomic.Int64
+	journal     *journal.Journal
+	uploader    *upload.Uploader
 
 	// singleflight for directory listings and block fetches
 	dirFlight flight[uint64, *directoryRefresh]
@@ -525,13 +555,39 @@ func (f *FS) attrAt(ctx context.Context, n meta.Node, p string) Attr {
 	// file unpinned, which made a "pinned" column in any adapter a lie.
 	if f.hasPins.Load() {
 		if p == "" {
-			p, _ = f.meta.Path(ctx, n.Ino)
+			p = f.pathOfNode(ctx, n)
 		}
 		if p != "" {
 			a.Pinned = f.pathPinned(p)
 		}
 	}
 	return a
+}
+
+// pathOfNode is a node's virtual path, built from its parent's memoised path
+// instead of a recursive query of its own. Every LOOKUP and every GETATTR
+// reaches here once a pin rule exists — which is the workflow agents are
+// told to use — and the entries of one directory all share the parent whose
+// path dirListing has already resolved, so a directory's worth of them costs
+// one resolution between them rather than one each.
+func (f *FS) pathOfNode(ctx context.Context, n meta.Node) string {
+	if n.Ino == meta.RootIno {
+		return "/"
+	}
+	if n.ParentIno != 0 && n.Name != "" {
+		dir, err := f.pathOf(ctx, n.ParentIno)
+		if err != nil {
+			return ""
+		}
+		return path.Join(dir, n.Name)
+	}
+	// A node whose row the caller did not read in full: ask for the whole
+	// path, memoised like any other.
+	p, err := f.pathOf(ctx, n.Ino)
+	if err != nil {
+		return ""
+	}
+	return p
 }
 
 // HandleAttr returns the attributes of the node behind an open handle, as
@@ -547,6 +603,8 @@ func (f *FS) HandleAttr(ctx context.Context, h *Handle) Attr {
 // Stat returns attributes for an inode, refreshing from the provider when the
 // cached copy is stale.
 func (f *FS) Stat(ctx context.Context, ino uint64) (Attr, error) {
+	f.mdIO.Add(1)
+	defer f.mdIO.Add(-1)
 	n, err := f.meta.Get(ctx, ino)
 	if errors.Is(err, meta.ErrNotFound) {
 		return Attr{}, ErrNotFound
@@ -566,16 +624,14 @@ func (f *FS) Stat(ctx context.Context, ino uint64) (Attr, error) {
 }
 
 // pendingSize returns the largest staged size among open write handles for an
-// inode, and whether any exist.
+// inode, and whether any exist. An inode with no write handle open costs the
+// index lookup and nothing else: this runs on every stat.
 func (f *FS) pendingSize(ino uint64) (int64, bool) {
-	f.mu.Lock()
-	handles := make([]*Handle, 0, len(f.handles))
-	for _, h := range f.handles {
-		if h.Ino == ino {
-			handles = append(handles, h)
-		}
+	handles := f.writeHandlesFor(ino)
+	if len(handles) == 0 {
+		return 0, false
 	}
-	f.mu.Unlock()
+	f.pendingSizeScans.Add(int64(len(handles)))
 
 	var size int64
 	var found bool
@@ -595,9 +651,60 @@ func (f *FS) pendingSize(ino uint64) (int64, bool) {
 	return size, found
 }
 
+// registerHandleLocked publishes an open handle. Requires f.mu. A write
+// handle joins the per-inode index as well, which is what lets a stat of any
+// other inode cost nothing; h.writer is fixed for the life of the handle
+// (Release marks it closed rather than dropping it), so membership never
+// changes after this.
+func (f *FS) registerHandleLocked(h *Handle) {
+	f.handles[h.FH] = h
+	if h.writer == nil {
+		return
+	}
+	if f.writeHandleIndex == nil {
+		f.writeHandleIndex = map[uint64]map[uint64]*Handle{}
+	}
+	byFH := f.writeHandleIndex[h.Ino]
+	if byFH == nil {
+		byFH = map[uint64]*Handle{}
+		f.writeHandleIndex[h.Ino] = byFH
+	}
+	byFH[h.FH] = h
+}
+
+// retireHandleLocked takes a handle back out of both maps. Requires f.mu.
+func (f *FS) retireHandleLocked(h *Handle) {
+	delete(f.handles, h.FH)
+	byFH, ok := f.writeHandleIndex[h.Ino]
+	if !ok {
+		return
+	}
+	delete(byFH, h.FH)
+	if len(byFH) == 0 {
+		delete(f.writeHandleIndex, h.Ino)
+	}
+}
+
+// writeHandlesFor snapshots the open write handles of one inode.
+func (f *FS) writeHandlesFor(ino uint64) []*Handle {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	byFH := f.writeHandleIndex[ino]
+	if len(byFH) == 0 {
+		return nil
+	}
+	out := make([]*Handle, 0, len(byFH))
+	for _, h := range byFH {
+		out = append(out, h)
+	}
+	return out
+}
+
 // StatPath resolves a path and returns its attributes, listing parents as
 // needed so an uncached path still resolves.
 func (f *FS) StatPath(ctx context.Context, p string) (Attr, error) {
+	f.mdIO.Add(1)
+	defer f.mdIO.Add(-1)
 	n, err := f.resolve(ctx, p)
 	if err != nil {
 		return Attr{}, err
@@ -641,6 +748,8 @@ func (f *FS) resolve(ctx context.Context, p string) (meta.Node, error) {
 
 // Lookup returns one child by name.
 func (f *FS) Lookup(ctx context.Context, parent uint64, name string) (Attr, error) {
+	f.mdIO.Add(1)
+	defer f.mdIO.Add(-1)
 	n, err := f.lookupNode(ctx, parent, name)
 	if err != nil {
 		return Attr{}, err
@@ -677,6 +786,8 @@ func (f *FS) lookupNode(ctx context.Context, parent uint64, name string) (meta.N
 // ReadDir lists a directory, refreshing from the provider when the cached
 // listing is stale. A fresh listing costs zero provider calls.
 func (f *FS) ReadDir(ctx context.Context, ino uint64) ([]Attr, error) {
+	f.mdIO.Add(1)
+	defer f.mdIO.Add(-1)
 	nodes, err := f.readDirRefresh(ctx, ino, false)
 	if err != nil {
 		return nil, err
@@ -703,6 +814,8 @@ func (f *FS) ReadDir(ctx context.Context, ino uint64) ([]Attr, error) {
 
 // ReadDirPath lists by path.
 func (f *FS) ReadDirPath(ctx context.Context, p string) ([]Attr, error) {
+	f.mdIO.Add(1)
+	defer f.mdIO.Add(-1)
 	n, err := f.resolve(ctx, p)
 	if err != nil {
 		return nil, err
@@ -918,7 +1031,18 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 	// A node that lost a conflict is the exception to both rules: its
 	// content already went to the drive under a conflict name, and the
 	// listing is what brings the remote's version back to it.
+	// Loaded once, before the commit: protect runs per node inside the
+	// metadata writer transaction, so it must not query another database.
+	queued, err := f.queuedUploadInos(ctx)
+	if err != nil {
+		return err
+	}
 	protect := func(n meta.Node) bool {
+		// The bytes are still in the journal. Whatever the cache holds, this
+		// is a pending write and not a conflict that already landed.
+		if queued[n.Ino] {
+			return true
+		}
 		if f.conflictLoser(n) {
 			return f.isMountDir(n.Ino)
 		}
@@ -994,6 +1118,16 @@ func (f *FS) listingNotificationFallback(ino uint64) {
 // SetInvalidateAll installs an asynchronous, coalescing kernel-cache fallback
 // for large or unreadable change batches. It must not block a FUSE request.
 func (f *FS) SetInvalidateAll(fn func()) { f.invalidateAllFn.Store(&fn) }
+
+// queuedUploadInos is the set of inodes whose upload has not gone out yet.
+// An empty set is the right answer for a VFS with no journal: it owns no
+// queued bytes to protect.
+func (f *FS) queuedUploadInos(ctx context.Context) (map[uint64]bool, error) {
+	if f.journal == nil {
+		return nil, nil
+	}
+	return f.journal.QueuedInos(ctx)
+}
 
 // localOnlyNode reports whether a node exists only on this machine: its
 // upload has not completed, or it was just created and has not even been
@@ -1110,12 +1244,20 @@ func (f *FS) pathOf(ctx context.Context, ino uint64) (string, error) {
 	if v, ok := m.Load(ino); ok {
 		return v.(string), nil
 	}
-	p, err := f.meta.Path(ctx, ino)
+	p, err := f.metaPath(ctx, ino)
 	if err != nil {
 		return "", err
 	}
 	m.Store(ino, p)
 	return p, nil
+}
+
+// metaPath is the recursive path query, counted. It walks to the root, so a
+// call per filesystem operation is a real cost and the tests assert how many
+// of them an operation makes.
+func (f *FS) metaPath(ctx context.Context, ino uint64) (string, error) {
+	f.pathQueries.Add(1)
+	return f.meta.Path(ctx, ino)
 }
 
 // dropPaths forgets every cached path and directory id; called after a
@@ -1283,45 +1425,121 @@ func (f *FS) Refresh(ctx context.Context, ino uint64) error {
 
 // Warm recursively lists a subtree so later lookups are local. depth < 0 means
 // unlimited. It respects the provider rate limiter through normal List calls.
+//
+// Sibling directories are listed side by side, up to warmFanout at once: a
+// listing is a provider round trip, and a caller who asked to warm a wide
+// tree — `cloudfs warm`, the control plane, the MCP warm tool — should pay
+// the slowest listing of each level, not the sum of them.
 func (f *FS) Warm(ctx context.Context, p string, depth int) (dirs int, err error) {
 	n, err := f.resolve(ctx, p)
 	if err != nil {
 		return 0, err
 	}
-	return f.warmNode(ctx, n, depth)
+	// The walk stops at the first error, and cancelling releases whatever
+	// is still listing: a caller who gave up should not leave a tree's
+	// worth of provider calls running behind it.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := &warmWalk{fs: f, cancel: cancel, sem: make(chan struct{}, warmFanout)}
+	w.sem <- struct{}{} // this goroutine is one of the listers
+	w.node(ctx, n, depth)
+	<-w.sem
+	return int(w.dirs.Load()), w.firstErr()
 }
 
-func (f *FS) warmNode(ctx context.Context, n meta.Node, depth int) (int, error) {
+// warmFanout is how many directories one Warm lists at once. It matches the
+// listing prefetcher's fan-out (prefetchFanout): meta serves listings
+// through eight slots of its own and the provider limiter bounds the rate
+// besides, so more in flight than that would only queue deeper and make a
+// cancellation slower to take effect.
+const warmFanout = prefetchFanout
+
+// warmWalk is the state one Warm shares across the goroutines walking it.
+type warmWalk struct {
+	fs     *FS
+	cancel context.CancelFunc
+	// sem holds one token per goroutine allowed to be walking. A goroutine
+	// that cannot take one walks the child itself instead of waiting for a
+	// token: waiting on a descendant while holding one is how a bounded
+	// recursive fan-out deadlocks.
+	sem  chan struct{}
+	dirs atomic.Int64
+
+	mu  sync.Mutex
+	err error
+}
+
+// fail keeps the first error and ends the rest of the walk. Every later
+// error is a consequence of that cancellation, so only the first is kept.
+func (w *warmWalk) fail(err error) {
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.err == nil {
+		w.err = err
+	}
+	w.mu.Unlock()
+	w.cancel()
+}
+
+func (w *warmWalk) firstErr() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
+}
+
+// node lists one directory and fans its subdirectories out. The caller
+// holds the token this call walks under.
+func (w *warmWalk) node(ctx context.Context, n meta.Node, depth int) {
 	if !n.IsDir() {
-		return 0, nil
+		return
 	}
-	kids, err := f.readDirRefresh(ctx, n.Ino, false)
+	if err := ctx.Err(); err != nil {
+		w.fail(err)
+		return
+	}
+	kids, err := w.fs.readDirRefresh(ctx, n.Ino, false)
 	if err != nil {
-		return 0, err
+		w.fail(err)
+		return
 	}
-	count := 1
+	w.dirs.Add(1)
 	if depth == 0 {
-		return count, nil
+		return
 	}
+	var wg sync.WaitGroup
 	for _, k := range kids {
-		if ctx.Err() != nil {
-			return count, ctx.Err()
-		}
 		if !k.IsDir() {
 			continue
 		}
-		c, err := f.warmNode(ctx, k, depth-1)
-		count += c
-		if err != nil {
-			return count, err
+		if err := ctx.Err(); err != nil {
+			w.fail(err)
+			break
+		}
+		select {
+		case w.sem <- struct{}{}:
+			wg.Add(1)
+			go func(k meta.Node) {
+				defer func() { <-w.sem; wg.Done() }()
+				w.node(ctx, k, depth-1)
+			}(k)
+		default:
+			w.node(ctx, k, depth-1)
 		}
 	}
-	return count, nil
+	wg.Wait()
 }
 
 // Busy reports whether the kernel is waiting on us. Background work in the
 // layers below asks before spending disk or provider bandwidth on itself.
-func (f *FS) Busy() bool { return f.fgIO.Load() > 0 }
+func (f *FS) Busy() bool { return f.busyIO() > 0 }
+
+// busyIO is the foreground pressure background work stands aside for: the
+// data path and the metadata path together. A tool walking a tree makes
+// almost no reads and a great many lookups, and it is queued behind the
+// same database and the same rate limiter either way.
+func (f *FS) busyIO() int64 { return f.fgIO.Load() + f.mdIO.Load() }
 
 // DropCaches empties the block cache and marks every directory stale, so the
 // next access of anything pays the cold-path cost again. It returns how many

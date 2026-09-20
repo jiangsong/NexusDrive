@@ -66,7 +66,30 @@ func (f *FS) conflictLoser(n meta.Node) bool {
 }
 
 func (f *FS) applyRemoteNode(ctx context.Context, old meta.Node, next *meta.Node) (meta.Node, bool, error) {
+	// Removing a directory walks its subtree, so a child whose upload has not
+	// gone out yet can be reached from here too. Load the queued set before
+	// the transaction: protect runs per node inside the metadata writer.
+	queued, err := f.queuedUploadInos(ctx)
+	if err != nil {
+		return meta.Node{}, false, err
+	}
+	return f.applyRemoteNodeWith(ctx, queued, old, next)
+}
+
+// applyRemoteNodeWith is applyRemoteNode with the queued set already in hand.
+// A caller that applies a batch of changes — the delta feed walks one event at
+// a time — loads the set once for the whole batch rather than paying a scan of
+// the upload queue, and a map the size of it, per node. The snapshot is the
+// same one a directory listing commits against, and it ages the same way: an
+// upload queued after it was taken is still held by protectRemoteNode, which
+// runs live on every node.
+func (f *FS) applyRemoteNodeWith(ctx context.Context, queued map[uint64]bool, old meta.Node, next *meta.Node) (meta.Node, bool, error) {
+	protect := func(n meta.Node) bool {
+		// The bytes are still in the journal, so this is a pending write
+		// whatever the cache holds.
+		return queued[n.Ino] || f.protectRemoteNode(n)
+	}
 	f.remotePublishMu.Lock()
 	defer f.remotePublishMu.Unlock()
-	return f.meta.ApplyRemoteNode(ctx, old, next, f.protectRemoteNode)
+	return f.meta.ApplyRemoteNode(ctx, old, next, protect)
 }
