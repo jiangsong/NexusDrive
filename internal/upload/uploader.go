@@ -92,6 +92,7 @@ type Uploader struct {
 	opt        Options
 	transferMu sync.Mutex
 	transfers  map[string]context.CancelFunc
+	listings   listingMemo
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
@@ -456,6 +457,9 @@ func (u *Uploader) runOne(ctx context.Context, p provider.Provider, up journal.U
 	if up.IsMkdir() {
 		return u.mkdirOne(ctx, p, up)
 	}
+	if up.IsDelete() {
+		return u.deleteOne(ctx, p, up)
+	}
 	caps := p.Capabilities()
 	name := up.Name
 
@@ -586,12 +590,70 @@ func (u *Uploader) runOne(ctx context.Context, p provider.Provider, up journal.U
 		return Result{}, err
 	}
 	u.succeeded(up.Remote, ratelimit.Upload)
+	u.listings.put(up.Remote, up.RemoteParentID, entry)
 	r := Result{UploadID: up.ID, Entry: entry}
 	if name != up.Name {
 		r.ConflictName = name
 	}
 	return r, nil
 }
+
+// deleteOne removes a queued delete's target: one Delete, charged to the
+// metadata bucket like the drivers charge it. A target the backend no
+// longer has is a success the first attempt did not live to hear, or
+// another client's doing; either way there is nothing left to remove.
+//
+// A directory is listed first and refused when anything is in it. What was
+// under it here went out as its own delete rows, and Claim held this row
+// back until those had run; whatever the listing still shows arrived from
+// elsewhere and is not this row's to remove. The refusal is permanent: the
+// tree brings the directory back, and the person who removed it decides.
+func (u *Uploader) deleteOne(ctx context.Context, p provider.Provider, up journal.Upload) (Result, error) {
+	if up.Kind == journal.KindRmdir {
+		if err := u.waitLimit(ctx, up.Remote, ratelimit.Meta); err != nil {
+			return Result{}, err
+		}
+		// Page until something turns up or the listing ends: a backend
+		// may hand back an empty page with a cursor.
+		for cursor := ""; ; {
+			entries, next, err := p.List(ctx, up.RemoteID, cursor)
+			if errors.Is(err, provider.ErrNotFound) {
+				break // gone already
+			}
+			if err != nil {
+				return Result{}, err
+			}
+			if len(entries) > 0 {
+				return Result{}, fmt.Errorf("%w: directory %q has entries on the backend", errDirectoryNotEmpty, up.Name)
+			}
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+	}
+	if err := u.waitLimit(ctx, up.Remote, ratelimit.Meta); err != nil {
+		return Result{}, err
+	}
+	err := u.opt.Policy.Do(ctx, func() error {
+		err := p.Delete(ctx, up.RemoteID)
+		if errors.Is(err, provider.ErrNotFound) {
+			return nil
+		}
+		return err
+	}, func(err error, _ retry.Class, _ time.Duration) { u.throttled(up.Remote, ratelimit.Meta, err) })
+	if err != nil {
+		return Result{}, err
+	}
+	u.succeeded(up.Remote, ratelimit.Meta)
+	u.listings.forget(up.Remote, up.RemoteParentID)
+	return Result{UploadID: up.ID}, nil
+}
+
+// errDirectoryNotEmpty is the refusal of a queued rmdir whose target has
+// gained entries on the backend since it was removed here. It is a conflict
+// — the backend moved under the removal — and like one it is not retried.
+var errDirectoryNotEmpty = fmt.Errorf("upload: directory is not empty: %w", provider.ErrConflict)
 
 // mkdirOne creates a queued directory: one call, no session, no bytes. The
 // metadata bucket is the one a directory creation draws on (the drivers
@@ -687,6 +749,7 @@ func (u *Uploader) putWhole(ctx context.Context, sp provider.SinglePutter, up jo
 		return Result{}, err
 	}
 	u.succeeded(up.Remote, ratelimit.Upload)
+	u.listings.put(up.Remote, up.RemoteParentID, entry)
 	r := Result{UploadID: up.ID, Entry: entry}
 	if name != up.Name {
 		r.ConflictName = name
@@ -778,23 +841,37 @@ func (u *Uploader) remoteChanged(ctx context.Context, p provider.Provider, up jo
 	// The whole directory, not its first page: a file past the first page
 	// of a large directory would otherwise always look unchanged, and a
 	// rewrite of it would silently overwrite someone else's edit.
+	//
+	// The listing is remembered for a moment (listingMemo): a copy of a
+	// tree rewrites a directory's files one after another, and each of
+	// them asking the backend for the same listing doubled the traffic of
+	// the copy. Our own uploads keep the memo current; what someone else
+	// does inside the window is a race this check already had, since the
+	// write it compares against was opened minutes before.
+	if entry, found, ok := u.listings.get(up.Remote, up.RemoteParentID, up.Name, u.opt.Now()); ok {
+		return found && entry.Version != "" && entry.Version != expected, nil
+	}
+	var all []provider.Entry
 	cursor := ""
 	for {
 		entries, next, err := p.List(ctx, up.RemoteParentID, cursor)
 		if err != nil {
 			return false, err
 		}
-		for _, e := range entries {
-			if e.Name == up.Name {
-				return e.Version != "" && e.Version != expected, nil
-			}
-		}
+		all = append(all, entries...)
 		if next == "" {
-			// The file is gone; recreating it is not a conflict.
-			return false, nil
+			break
 		}
 		cursor = next
 	}
+	u.listings.remember(up.Remote, up.RemoteParentID, all, u.opt.Now())
+	for _, e := range all {
+		if e.Name == up.Name {
+			return e.Version != "" && e.Version != expected, nil
+		}
+	}
+	// The file is gone; recreating it is not a conflict.
+	return false, nil
 }
 
 // conflictName renders "notes.md" as "notes (conflict 2026-09-02 host).md".

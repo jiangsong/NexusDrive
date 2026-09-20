@@ -77,8 +77,8 @@ type upload struct {
 // Fake is the in-memory provider.
 type Fake struct {
 	shares map[string]string
-	name string
-	caps provider.Caps
+	name   string
+	caps   provider.Caps
 
 	mu      sync.Mutex
 	nodes   map[string]*node
@@ -966,10 +966,22 @@ var _ provider.ChangeLister = (*Fake)(nil)
 
 func init() {
 	provider.Register("fake", func(name string, cfg map[string]any) (provider.Provider, error) {
+		var f *Fake
 		if key, _ := cfg["shared"].(string); key != "" {
-			return Shared(key, name), nil
+			f = Shared(key, name)
+		} else {
+			f = New(name)
 		}
-		return New(name), nil
+		// `latency: 300ms` makes a mount behave like a distant backend, which
+		// is what a manual smoke test of a cp -r needs to show anything.
+		if v, _ := cfg["latency"].(string); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, fmt.Errorf("fake: latency: %w", err)
+			}
+			f.SetFaults(func(fl *Faults) { fl.Latency = d })
+		}
+		return f, nil
 	})
 }
 

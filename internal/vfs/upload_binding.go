@@ -69,7 +69,15 @@ func (f *FS) validateUploadBinding(ctx context.Context, u journal.Upload) error 
 			break
 		}
 	}
-	if !found || recorded.Mode == config.ModeReadonly || u.Ino == 0 {
+	if !found || recorded.Mode == config.ModeReadonly {
+		return ErrUploadBindingChanged
+	}
+	if u.IsDelete() {
+		// The node is gone by design; the mount and account fence above
+		// is all a delete has to prove.
+		return nil
+	}
+	if u.Ino == 0 {
 		return ErrUploadBindingChanged
 	}
 	n, err := f.meta.Get(ctx, u.Ino)

@@ -375,6 +375,20 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
    server-side copy、`strict` 挂载下的 mkdir）用 `ensureRemoteDir` 自顶向下当场跑完这些行。
    mkdir 行没有字节可保留，所以不能 cancel/resume/discard，只能 retry 或删掉目录；父行 dead
    时其下的行在 `Stats.Blocked` 里计数，`flush` 据此立刻报错而不是等到超时。
+9. **删除也是本地提交**（`writeback`，2026-09-19）：`unlink`/`rmdir` 对后端已有的条目
+   `INSERT uploads(kind=delete|rmdir, remote_id=<后端 id>, ino=0)` → 删本地节点 → 返回；
+   后端由队列删。vfs 内存里维护一份"待删 id"索引（`queuedDeletes`，启动时从 journal 重建），
+   目录列举把命中的远端条目直接跳过，所以 TTL 过期或 delta 标脏后的重新列举不会把名字带
+   回来。排序规则在 `Claim` 里：同目录同名的 file/mkdir 行在任何未完成的 delete 行之后
+   （Drive 是按名字 PATCH 已有文件的，先上传再删等于删掉新内容；编辑器"写临时文件再改名
+   覆盖"的场景里 delete 行比写行**晚**入队，所以这条规则不看 rowid）；rmdir 行在其目录下
+   所有 delete 行之后。rmdir 落地前先 List 一次，非空（别的客户端放进来的东西）即以冲突
+   dead 掉并让父目录重新列举，目录随之回到树里。`rename` 覆盖已有目标时目标的删除仍同步
+   执行（远端 rename 拒绝覆盖，队列来不及）；PathIDs 后端移动目录前先把其下排队的 delete
+   当场跑完（它们记的是路径）。`strict` 挂载保持同步删除。
+   `Remove`/`Rename` 的远端调用都在 `copyPublishMu` 之外：这把锁是所有 open 的准入门，
+   之前同步删除持锁 2 s 一次，`rm -rf` 期间整个挂载点的 open 全部排队（`grep -r` 卡住
+   两分钟、`cp -r` 覆盖每个文件 2–4 s 就是这个）。
 
 ```sql
 CREATE TABLE uploads (
@@ -792,7 +806,16 @@ sshfs 与本地磁盘上，数字见 `docs/perf-report.html`。这一轮测试�
   一个事务加一次目录 fsync；`close()` 仍在自己的行落盘后才返回。不超过一个分片的文件
   经 `SinglePutter` 一次请求上传。上传并发按 `Caps.UploadParallel`，配置可覆盖。
   删除与在途上传竞争时给行打墓碑，上传完成后由 uploader 删除后端文件。
-  冲突判定以节点当前的 `RemoteVersion` 为准，自己的上一次上传不算冲突。
+  冲突判定以节点当前的 `RemoteVersion` 为准，自己的上一次上传不算冲突；判定所需的父目录
+  列举在 uploader 里按目录记 10 s（`listingMemo`），自己落地的条目回填进去，删除则整目录
+  作废——`cp -r` 覆盖一个目录时冲突检查只列举一次而不是每个文件一次。
+- **delta feed 覆盖的列举不看 TTL**（2026-09-20）：`vfs.feedCoverage` 按 remote 记录变更
+  feed 连续无断档被拉取的时间段（首次成功 poll 起，到最近一次成功 poll 止；poll 失败或游标
+  reset 即清零重来）。在这段时间内取到的完整目录列举，只要 feed 仍在活跃（距上次成功 poll
+  不超过两个轮询间隔），`dirListing` 直接本地作答，不管 `dir_ttl`——目录若有变化，事件早已
+  到达。TTL 因此只对没有 feed、或 feed 停摆的后端起作用。此前 `cp -r`/`rm -rf` 一棵半小时前
+  拷过去的树，每个目录都要重新 List 一次（真实 Drive 池上 255 个目录 ≈ 8 分钟前台时间）。
+  验收：`TestDeltaFeedKeepsListingsWarmPastTTL`。
 - **元数据**（§4.3 补充）：`PutDir` 批量写入，FTS 索引延后合并；内核通过
   `FOPEN_CACHE_DIR` 缓存目录流，本地改动由内核自行失效，后端与其他适配层（MCP、控制面）
   的改动经 `OnInvalidate` 失效。失效通知必须用**内核自己的 nodeid**：go-fuse 按 lookup 顺序

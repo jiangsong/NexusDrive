@@ -177,7 +177,12 @@ type FS struct {
 	// Remote publication cannot race a writer's initial node lookup and
 	// registration. Never hold this gate during provider directory IO.
 	remotePublishMu sync.RWMutex
-	writers         map[uint64]int // protected by mu; retained through close commit
+	// deleting indexes the queued deletes; see queuedDeletes.
+	deleting queuedDeletes
+	// feed says which listings the change feed keeps current; see
+	// feedCoverage.
+	feed    feedCoverage
+	writers map[uint64]int // protected by mu; retained through close commit
 
 	prefetch *prefetcher
 	// crawl is the background directory crawler (crawl.go).
@@ -754,7 +759,7 @@ func (f *FS) dirListing(ctx context.Context, ino uint64, force, want bool) ([]me
 	if err != nil {
 		return nil, err
 	}
-	if !force && st.Fresh(f.now(), ttl) {
+	if !force && (st.Fresh(f.now(), ttl) || hasMount && f.feed.covers(m.Remote, st, f.now())) {
 		if !want {
 			return nil, nil
 		}
@@ -881,6 +886,11 @@ func (f *FS) fetchDir(ctx context.Context, m Mount, ino uint64, dirNode meta.Nod
 	visit := func(e provider.Entry) error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if f.deleting.has(m.Remote, e.ID) {
+			// Removed here, not yet on the backend: the listing must not
+			// bring it back.
+			return nil
 		}
 		children = append(children, nodeFromEntry(m.Remote, e, f.opt.AttrTTL))
 		if len(children) == meta.DirListingBatch {

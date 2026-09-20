@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 13
+const schemaVersion = 14
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -166,4 +166,10 @@ END;`,
 CREATE TRIGGER nodes_xattr_delete AFTER DELETE ON nodes BEGIN
   DELETE FROM xattrs WHERE ino=old.ino;
 END;`,
+	// v13 -> v14: since when the change feed has covered a remote without a
+	// gap (unix seconds; 0 = not covered). A listing taken after this
+	// instant is kept current by the feed and needs no TTL; the value
+	// outlives the process because the cursor does — the first poll after a
+	// restart delivers what happened while the daemon was down.
+	`ALTER TABLE remote_cursor ADD COLUMN covered_since INTEGER NOT NULL DEFAULT 0;`,
 }

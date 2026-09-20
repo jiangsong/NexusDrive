@@ -23,8 +23,10 @@ import (
 // sessions: persisted sessions can contain signed URLs and temporary keys.
 type UploadItem struct {
 	ID string `json:"id"`
-	// Kind is "file" for a queued write and "mkdir" for a queued directory
-	// creation.
+	// Kind is "file" for a queued write, "mkdir" for a queued directory
+	// creation, "delete" for a queued file removal and "rmdir" for a queued
+	// directory removal. The removals have no path: the tree let go of the
+	// entry when the row was queued.
 	Kind         journal.Kind  `json:"kind"`
 	Remote       string        `json:"remote"`
 	Name         string        `json:"name"`

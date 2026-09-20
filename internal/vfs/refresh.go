@@ -121,12 +121,22 @@ func (r *Refresher) poll(ctx context.Context, m Mount) {
 
 // PollOnce fetches and applies one batch of changes for a mount. It returns
 // how many events were applied. Tests and `cloudfs status` drive it directly.
-func (r *Refresher) PollOnce(ctx context.Context, m Mount) (int, error) {
+func (r *Refresher) PollOnce(ctx context.Context, m Mount) (applied int, err error) {
 	lister, ok := m.Provider.(provider.ChangeLister)
 	if !ok {
 		return 0, fmt.Errorf("vfs: remote %q has no change feed", m.Remote)
 	}
+	// What the feed has covered decides which listings need no TTL; a poll
+	// that fails, or resets the cursor, ends the covered stretch.
+	began := r.fs.now()
+	covered := true
 	store := r.fs.meta
+	defer func() {
+		stored := func() time.Time { t, _ := store.FeedCoveredSince(ctx, m.Remote); return t }
+		if since, changed := r.fs.feed.polled(m.Remote, began, r.interval, err == nil && covered, stored); changed {
+			_ = store.SetFeedCoveredSince(ctx, m.Remote, since)
+		}
+	}()
 	cursor, err := store.Cursor(ctx, m.Remote)
 	if err != nil {
 		return 0, err
@@ -151,6 +161,7 @@ func (r *Refresher) PollOnce(ctx context.Context, m Mount) (int, error) {
 		r.appliedMu.Lock()
 		r.polls++
 		r.appliedMu.Unlock()
+		covered = false
 		return 0, nil
 	}
 	if err != nil {
@@ -161,7 +172,6 @@ func (r *Refresher) PollOnce(ctx context.Context, m Mount) (int, error) {
 	r.polls++
 	r.appliedMu.Unlock()
 
-	applied := 0
 	for _, e := range events {
 		if ctx.Err() != nil {
 			return applied, ctx.Err()

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +33,15 @@ type harness struct {
 	fake  *fakeprovider.Fake
 	up    *upload.Uploader
 	cache *cache.Cache
+	// skew is added to the wall clock every layer of the harness reads,
+	// so a test can age every listing past its TTL without waiting.
+	skew atomic.Int64
 }
+
+func (h *harness) now() time.Time { return time.Now().Add(time.Duration(h.skew.Load())) }
+
+// advance ages the harness's clock by d.
+func (h *harness) advance(d time.Duration) { h.skew.Add(int64(d)) }
 
 func newHarness(t *testing.T, blockSize int64, readAhead, prefetchDepth int) *harness {
 	return newHarnessOpt(t, blockSize, readAhead, prefetchDepth, 0)
@@ -50,19 +59,21 @@ func newHarnessOpt(t *testing.T, blockSize int64, readAhead, prefetchDepth int, 
 // filled in here; everything else is the caller's.
 func newHarnessCache(t *testing.T, cacheOpt cache.Options, readAhead, prefetchDepth int, readaheadRequest int64) *harness {
 	t.Helper()
+	h := &harness{}
 	dir := t.TempDir()
-	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{})
+	store, err := meta.Open(filepath.Join(dir, "meta.db"), meta.Options{Now: h.now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
 	cacheOpt.Dir = filepath.Join(dir, "cache")
+	cacheOpt.Now = h.now
 	ca, err := cache.New(cacheOpt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ca.Close() })
-	j, err := journal.Open(journal.Options{Dir: filepath.Join(dir, "journal")})
+	j, err := journal.Open(journal.Options{Dir: filepath.Join(dir, "journal"), Now: h.now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +81,7 @@ func newHarnessCache(t *testing.T, cacheOpt cache.Options, readAhead, prefetchDe
 
 	fake := fakeprovider.New("ali")
 	fsys, err := vfs.New(vfs.Options{
-		Meta: store, Cache: ca,
+		Meta: store, Cache: ca, Now: h.now,
 		AttrTTL: time.Hour, DefaultDirTTL: time.Hour, NegativeTTL: time.Minute,
 		ReadAheadBlocks: readAhead, PrefetchDepth: prefetchDepth,
 		ReadaheadRequest: readaheadRequest,
@@ -88,12 +99,14 @@ func newHarnessCache(t *testing.T, cacheOpt cache.Options, readAhead, prefetchDe
 		Providers: func(string) (provider.Provider, bool) { return fake, true },
 		Policy:    retry.Policy{Backoff: retry.Backoff{Base: time.Millisecond, Max: time.Millisecond}, MaxAttempts: 2},
 		Hooks:     fsys.UploadHooks(),
+		Now:       h.now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fsys.SetWriteBackend(j, up)
-	return &harness{fs: fsys, fake: fake, up: up, cache: ca}
+	h.fs, h.fake, h.up, h.cache = fsys, fake, up, ca
+	return h
 }
 
 // seedTree builds dirs × filesPerDir files.

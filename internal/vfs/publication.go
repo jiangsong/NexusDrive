@@ -23,6 +23,9 @@ func (f *FS) RecoverPublications(ctx context.Context, j *journal.Journal) error 
 		return err
 	}
 	for _, u := range rows {
+		if u.IsDelete() {
+			continue // nothing local to publish; the row runs as it is
+		}
 		stopped := u.State == journal.StateCancelled || u.State == journal.StateCancelling
 		if !stopped && u.State != journal.StatePending && u.State != journal.StateUploading {
 			continue

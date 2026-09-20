@@ -284,6 +284,34 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
 - **[x] 删除与上传竞争（T-00）**：journal 增加 `tombstone`，`Remove` 对
   `uploading` 状态的行打墓碑而不是丢弃，uploader 完成后删除后端文件并丢行。
   回归测试：`TestTombstonedUploadIsDeletedAfterLanding`。
+- **[x] 同步删除拖慢整个挂载点（2026-09-19 真实 Drive 池实测）**：`rm -rf` 一棵 840 文件 /
+  255 目录的树，每个 unlink 经代理一次 `Delete` 2.3 s、每个 rmdir 再加一次 List，
+  且 `Remove` 全程持 `copyPublishMu`——所有 open 的准入门——于是同时进行的 `cp -r`
+  覆盖每个文件 open 卡 2–4 s，`grep -r` 卡两分钟。三处修复：(1) writeback 挂载下
+  unlink/rmdir 改为本地提交，journal 加 `kind=delete|rmdir` 行（schema v15 加 `remote_id`
+  列），`Claim` 让同名写行排在 delete 行之后、rmdir 排在其子 delete 之后，rmdir 落地前
+  List 一次非空即冲突 dead；vfs 用 `queuedDeletes` 索引让列举跳过待删条目，重启从 journal
+  重建。(2) `Remove`/`Rename` 的远端调用移到 `copyPublishMu` 之外，rmdir 的空目录判断
+  在已完整的本地列举上做。(3) uploader 冲突检查的父目录列举按目录记 10 s（`listingMemo`），
+  `cp -r` 覆盖一个目录只列举一次。验收：`TestRemoveTreeCostsNoForegroundCalls`（前台
+  0 次远端调用，后台 N+M 次 delete + M 次 List）、`TestRewritingADirectoryListsItOnce`、
+  `TestOpenIsNotBlockedByARemoteDelete`、`TestListingDoesNotResurrectAQueuedDelete`、
+  `TestWriteWaitsForOlderDeleteOfTheSameName`、`TestRmdirRefusedRemotelyBringsTheDirectoryBack`。
+  实验室复现时又抓到两处：`Claim` 里的 delete 排序检查原本是 ORDER BY 前对每个候选行做
+  NOT EXISTS 全表扫（几千行队列时一次 Claim 数秒，且在写事务里，前台 commit 全部排队），
+  改为写事务外按 rowid 走索引（`uploads_due`、`uploads_by_parent_name`、`uploads_by_ino`，
+  `INDEXED BY` 显式指定，验收 `TestClaimStaysCheapWithAQueueOfDeletes`、
+  `TestClaimWalksBlockedRowsWithoutHoldingTheWriteLock`）；以及 TTL 过期后 rm -rf/cp -r 的
+  每个目录都重新 List，见 DESIGN "delta feed 覆盖的列举不看 TTL"。
+- **[x] 重启时 stale 挂载没被 detach（2026-09-20）**：`prepareMountPoint` 只 `stat`，而内核在
+  attr timeout 内用缓存回答 stat，于是判定挂载点正常，随后 fusefs `open` 才报 ENOTCONN 退出；
+  留着一个 cwd 在挂载内的 shell 重启就会撞上（这个会话自己撞了一次）。改为 stat + open 探测。
+  实验室复现（cwd 占用 → SIGINT → 重启）验证 detach 成功。
+- **[x] 本机磁盘 99% 满时 `cp` 报 ENOSPC 而界面没说为什么（2026-09-20）**：`min_free`
+  保护线（默认 5 GiB）起作用是对的，但只有 metrics 能看出来。控制台 `#/storage` 现在在可用
+  空间低于留白时把卡片标红并解释，"调整预算"可改 `max_size`/`min_free`：`PUT /cache/config`
+  写配置文件 + `cache.SetBudget` 立刻生效（预算改为 atomic，`Options` 只是初值）。验收：
+  `TestCacheConfigSavesAndAppliesTheBudget`、`TestSetCacheBudgetRewritesOnlyTheTwoKeys`。
 - **[x] 自己的上一次上传被当成冲突**：`Hooks.RemoteVersion` 让 uploader 用节点当前的
   `RemoteVersion`（被我们自己的上一次上传更新过）做比较；连续两次保存不再生成
   conflict 副本。回归测试：`TestOwnEarlierUploadIsNotAConflict`。

@@ -44,6 +44,16 @@ const (
 	// KindMkdir creates the directory Name under RemoteParentID. It carries
 	// no blob; Size is 0.
 	KindMkdir Kind = "mkdir"
+	// KindDelete removes the file RemoteID from the backend. Name and
+	// RemoteParentID say where it was, which is what orders it before a
+	// later write of the same name. It has no node: the tree forgot the
+	// file when the row was queued, so Ino is 0.
+	KindDelete Kind = "delete"
+	// KindRmdir removes the directory RemoteID. It waits for the deletes
+	// queued under it, and the backend is asked to confirm the directory is
+	// empty before it goes: what another client put there since is not
+	// this row's to remove.
+	KindRmdir Kind = "rmdir"
 )
 
 // LocalIDPrefix marks a remote id that names a queued row rather than
@@ -79,8 +89,11 @@ type Upload struct {
 	// resumed upload continues instead of restarting.
 	Session map[string]string
 	// Ino links the upload back to the metadata node so the tree can be
-	// updated when it completes.
-	Ino       uint64
+	// updated when it completes. A delete has none.
+	Ino uint64
+	// RemoteID is the backend id a delete row removes. Empty for the other
+	// kinds, whose target does not exist yet.
+	RemoteID  string
 	CreatedAt time.Time
 	// Tombstone marks an upload whose file was deleted locally while the
 	// transfer was already in flight. It must finish — a half-written remote
@@ -103,6 +116,10 @@ type Upload struct {
 // IsMkdir reports whether the row creates a directory rather than sending
 // a file.
 func (u Upload) IsMkdir() bool { return u.Kind == KindMkdir }
+
+// IsDelete reports whether the row removes something from the backend — a
+// file or a directory — rather than putting something there.
+func (u Upload) IsDelete() bool { return u.Kind == KindDelete || u.Kind == KindRmdir }
 
 // Part is one uploaded chunk.
 type Part struct {
@@ -148,6 +165,7 @@ type Journal struct {
 	legacyUploadBinding bool // read-only inspection of pre-v11 upload rows
 	legacyCopyAdmin     bool // read-only inspection of pre-v6 copy records
 	legacyKind          bool // read-only inspection of pre-v14 rows: all files
+	legacyRemoteID      bool // read-only inspection of pre-v15 rows: nothing to delete
 	copyMu              sync.Mutex
 	copyOpen            map[string]bool
 	copyRetryFault      func()             // test boundary after prefix validation, before CAS
@@ -297,7 +315,7 @@ func OpenReadOnly(dir string) (*Journal, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Journal{db: db, dir: dir, now: time.Now, legacyPublication: version < 4, legacyUploadBinding: version < 11, legacyCopyAdmin: version < 6, legacyKind: version < 14}, nil
+	return &Journal{db: db, dir: dir, now: time.Now, legacyPublication: version < 4, legacyUploadBinding: version < 11, legacyCopyAdmin: version < 6, legacyKind: version < 14, legacyRemoteID: version < 15}, nil
 }
 
 // Close releases the database and the ownership lock.
@@ -344,7 +362,8 @@ CREATE TABLE IF NOT EXISTS uploads (
   mount_root_id    TEXT NOT NULL DEFAULT '',
   account_binding  TEXT NOT NULL DEFAULT '',
   done_at          INTEGER NOT NULL DEFAULT 0,
-  kind             TEXT NOT NULL DEFAULT 'file'
+  kind             TEXT NOT NULL DEFAULT 'file',
+  remote_id        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS uploads_state ON uploads(state, next_retry_at);
 
@@ -394,7 +413,7 @@ CREATE TABLE IF NOT EXISTS upload_resume_history (
 //	the provider rather than a guess.
 //
 // 14: kind distinguishes queued directory creations from file uploads.
-const journalSchemaVersion = 14
+const journalSchemaVersion = 15
 
 func (j *Journal) migrate() error {
 	if _, err := j.db.Exec(journalSchema); err != nil {
@@ -474,6 +493,8 @@ func (j *Journal) migrate() error {
 			"done_at INTEGER NOT NULL DEFAULT 0",
 			// v14: queued directory creations. Every earlier row is a file.
 			"kind TEXT NOT NULL DEFAULT 'file'",
+			// v15: queued deletes name what they remove.
+			"remote_id TEXT NOT NULL DEFAULT ''",
 		} {
 			if _, err := j.db.Exec(`ALTER TABLE uploads ADD COLUMN ` + column); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 				return fmt.Errorf("journal: migrate upload binding: %w", err)
@@ -482,6 +503,22 @@ func (j *Journal) migrate() error {
 		if _, err := j.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, journalSchemaVersion)); err != nil {
 			return fmt.Errorf("journal: set user_version: %w", err)
 		}
+	}
+	// After the columns it covers exist on a database from before them.
+	// Claim probes it for the delete rows that hold a row back.
+	if _, err := j.db.Exec(`CREATE INDEX IF NOT EXISTS uploads_by_parent_name ON uploads(remote, kind, remote_parent_id, name)`); err != nil {
+		return fmt.Errorf("journal: migrate delete ordering index: %w", err)
+	}
+	// Claim walks a remote's pending rows in rowid order; an index whose
+	// trailing key is the rowid lets it stop at the first page instead of
+	// sorting the whole queue each time.
+	if _, err := j.db.Exec(`CREATE INDEX IF NOT EXISTS uploads_due ON uploads(remote, state, needs_publish)`); err != nil {
+		return fmt.Errorf("journal: migrate claim index: %w", err)
+	}
+	// Every commit, unlink and worker asks about one inode's rows; with
+	// thousands queued, each such question scanned the table.
+	if _, err := j.db.Exec(`CREATE INDEX IF NOT EXISTS uploads_by_ino ON uploads(ino)`); err != nil {
+		return fmt.Errorf("journal: migrate inode index: %w", err)
 	}
 	return nil
 }
@@ -555,7 +592,7 @@ func (j *Journal) releaseStagedObject(id, blob string) {
 
 const legacyUploadCols = `id, remote, remote_parent_id, name, blob_path, size, hashes, state,
                     attempt, next_retry_at, last_error, expected_version, session, ino, created_at, tombstone`
-const uploadCols = legacyUploadCols + `, needs_publish, meta_identity, mount_prefix, mount_root_id, account_binding, kind`
+const uploadCols = legacyUploadCols + `, needs_publish, meta_identity, mount_prefix, mount_root_id, account_binding, kind, remote_id`
 
 func (j *Journal) readUploadCols() string {
 	cols := legacyUploadCols
@@ -570,9 +607,14 @@ func (j *Journal) readUploadCols() string {
 		cols += `, meta_identity, mount_prefix, mount_root_id, account_binding`
 	}
 	if j.legacyKind {
-		return cols + `, 'file'`
+		cols += `, 'file'`
+	} else {
+		cols += `, kind`
 	}
-	return cols + `, kind`
+	if j.legacyRemoteID {
+		return cols + `, ''`
+	}
+	return cols + `, remote_id`
 }
 
 func scanUpload(sc interface{ Scan(...any) error }) (Upload, error) {
@@ -583,7 +625,7 @@ func scanUpload(sc interface{ Scan(...any) error }) (Upload, error) {
 	var kind string
 	err := sc.Scan(&u.ID, &u.Remote, &u.RemoteParentID, &u.Name, &u.BlobPath, &u.Size, &hashes,
 		&state, &u.Attempt, &nextRetry, &u.LastError, &u.ExpectedVersion, &session, &u.Ino, &created, &tomb, &unpublished,
-		&u.MetaIdentity, &u.MountPrefix, &u.MountRootID, &u.AccountBinding, &kind)
+		&u.MetaIdentity, &u.MountPrefix, &u.MountRootID, &u.AccountBinding, &kind, &u.RemoteID)
 	if err != nil {
 		return Upload{}, err
 	}
@@ -623,39 +665,96 @@ func (j *Journal) Get(ctx context.Context, id string) (Upload, error) {
 // directory is itself still queued (RemoteParentID carries LocalIDPrefix) is
 // not due: the backend has no such parent to put it in. It becomes due when
 // the directory lands and RetargetChildren rewrites the parent.
+//
+// Deletes order the queue in two more ways, both by name and parent rather
+// than by node, because the node a delete removed is gone. A write or mkdir
+// is not due while a delete of the same name in the same directory is still
+// out: the backends put a file by name, and on one whose ids are paths — or
+// one that patches the existing file in place, which is what Drive does —
+// the write would land on the very file the delete then removes. And a
+// directory's delete is not due while deletes queued under it are still
+// out: the backend is asked to confirm the directory is empty, and children
+// that have not gone yet are not someone else's files.
 func (j *Journal) Claim(ctx context.Context, remote string, n int) ([]Upload, error) {
+	// Finding the candidates is a read, outside the write transaction: it
+	// walks the queue in row order past every row a delete holds back, and
+	// after rm -rf and a copy of the same tree that is hundreds of rows
+	// ahead of the first claimable one. Done inside the transaction, that
+	// walk held the journal's write lock for most of every second, and
+	// every close(2) and unlink on the mount waited behind the workers.
+	// The write transaction only re-checks and takes the rows it was handed.
+	ids, err := j.dueRowids(ctx, remote, n)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
 	var out []Upload
-	err := j.tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.Query(
-			`SELECT `+uploadCols+` FROM uploads
-			 WHERE remote = ? AND state = ? AND next_retry_at <= ? AND needs_publish = 0
-			   AND substr(remote_parent_id, 1, ?) <> ?
-			 ORDER BY rowid LIMIT ?`,
-			remote, string(StatePending), unixMilli(j.now()), len(LocalIDPrefix), LocalIDPrefix, n)
-		if err != nil {
-			return fmt.Errorf("journal: claim: %w", err)
-		}
-		for rows.Next() {
-			u, err := scanUpload(rows)
+	err = j.tx(ctx, func(tx *sql.Tx) error {
+		for _, rowid := range ids {
+			u, err := uploadByRowidTx(tx, rowid)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue // dropped since the read
+			}
 			if err != nil {
-				rows.Close()
+				return err
+			}
+			if u.State != StatePending || u.NeedsPublish || strings.HasPrefix(u.RemoteParentID, LocalIDPrefix) {
+				continue // taken or held back since the read
+			}
+			if blocked, err := heldByDeleteTx(tx, u); err != nil {
+				return err
+			} else if blocked {
+				continue
+			}
+			u.State = StateUploading
+			if _, err := tx.Exec(`UPDATE uploads SET state = ? WHERE id = ?`, string(StateUploading), u.ID); err != nil {
 				return fmt.Errorf("journal: claim: %w", err)
 			}
 			out = append(out, u)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("journal: claim: %w", err)
-		}
-		for i := range out {
-			out[i].State = StateUploading
-			if _, err := tx.Exec(`UPDATE uploads SET state = ? WHERE id = ?`, string(StateUploading), out[i].ID); err != nil {
-				return fmt.Errorf("journal: claim: %w", err)
-			}
-		}
 		return nil
 	})
 	return out, err
+}
+
+// dueRowids lists, oldest first, up to n rows a worker for remote could
+// take now. The delete ordering is applied in the query (see
+// heldByDeleteTx for what it says), as index probes on uploads_by_parent_name
+// for each row the walk visits; uploads_due hands the rows over in rowid
+// order so the walk stops at the n-th claimable one. The indexes are named:
+// without statistics the planner chose the state index for the probes and
+// a sort for the walk, and a claim past 1500 held-back rows took seconds.
+func (j *Journal) dueRowids(ctx context.Context, remote string, n int) ([]int64, error) {
+	rows, err := j.db.QueryContext(ctx,
+		`SELECT u.rowid FROM uploads AS u INDEXED BY uploads_due
+		 WHERE u.remote = ? AND u.state = ? AND u.needs_publish = 0 AND u.next_retry_at <= ?
+		   AND substr(u.remote_parent_id, 1, ?) <> ?
+		   AND NOT EXISTS (
+		     SELECT 1 FROM uploads AS d INDEXED BY uploads_by_parent_name
+		      WHERE d.remote = u.remote AND d.kind IN (?, ?) AND d.remote_parent_id = u.remote_parent_id AND d.name = u.name
+		        AND d.state IN (?, ?) AND d.id <> u.id AND (u.kind NOT IN (?, ?) OR d.rowid < u.rowid))
+		   AND NOT (u.kind = ? AND EXISTS (
+		     SELECT 1 FROM uploads AS d INDEXED BY uploads_by_parent_name
+		      WHERE d.remote = u.remote AND d.kind IN (?, ?) AND d.remote_parent_id = u.remote_id AND d.state IN (?, ?)))
+		 ORDER BY u.rowid LIMIT ?`,
+		remote, string(StatePending), unixMilli(j.now()), len(LocalIDPrefix), LocalIDPrefix,
+		string(KindDelete), string(KindRmdir), string(StatePending), string(StateUploading), string(KindDelete), string(KindRmdir),
+		string(KindRmdir), string(KindDelete), string(KindRmdir), string(StatePending), string(StateUploading), n)
+	if err != nil {
+		return nil, fmt.Errorf("journal: claim: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("journal: claim: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("journal: claim: %w", err)
+	}
+	return out, nil
 }
 
 // ClaimID takes one specific row, if it is due, and marks it uploading. The
@@ -678,6 +777,11 @@ func (j *Journal) ClaimID(ctx context.Context, id string) (Upload, error) {
 		if u.State != StatePending || u.NeedsPublish || strings.HasPrefix(u.RemoteParentID, LocalIDPrefix) {
 			return ErrNotFound
 		}
+		if blocked, err := heldByDeleteTx(tx, u); err != nil {
+			return err
+		} else if blocked {
+			return ErrNotFound
+		}
 		if _, err := tx.Exec(`UPDATE uploads SET state = ? WHERE id = ?`, string(StateUploading), id); err != nil {
 			return fmt.Errorf("journal: claim: %w", err)
 		}
@@ -686,6 +790,69 @@ func (j *Journal) ClaimID(ctx context.Context, id string) (Upload, error) {
 		return nil
 	})
 	return out, err
+}
+
+func uploadByRowidTx(tx *sql.Tx, rowid int64) (Upload, error) {
+	u, err := scanUpload(tx.QueryRow(`SELECT `+uploadCols+` FROM uploads WHERE rowid = ?`, rowid))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Upload{}, err
+	}
+	if err != nil {
+		return Upload{}, fmt.Errorf("journal: claim: %w", err)
+	}
+	return u, nil
+}
+
+// heldByDeleteTx reports whether an unfinished delete row holds u back:
+// one for the same name in the same directory, or, when u is itself a
+// directory's delete, one queued under that directory. See Claim. Both are
+// probes of uploads_by_parent_name.
+//
+// The same-name rule is not by row order: the delete is sometimes the
+// younger row. An editor saves by writing a temporary file and renaming it
+// over the original, and the write was queued before the rename removed the
+// original — but the original still has to go first, or the write patches
+// the file the delete then removes. A delete for a name is only ever queued
+// for a node the backend has, and a queued write of that name is a node the
+// backend does not have, so the two never describe the same file and the
+// delete is always the one to go first. Two deletes of one name — the
+// backend grew another file by that name after the first was removed here
+// — keep their order.
+func heldByDeleteTx(tx *sql.Tx, u Upload) (bool, error) {
+	var held int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM uploads INDEXED BY uploads_by_parent_name
+		  WHERE remote = ? AND kind IN (?, ?) AND remote_parent_id = ? AND name = ?
+		    AND state IN (?, ?) AND id <> ? AND (? OR rowid < (SELECT rowid FROM uploads WHERE id = ?))`,
+		u.Remote, string(KindDelete), string(KindRmdir), u.RemoteParentID, u.Name,
+		string(StatePending), string(StateUploading), u.ID, !u.IsDelete(), u.ID).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("journal: claim: %w", err)
+	}
+	if held > 0 {
+		return true, nil
+	}
+	if u.Kind != KindRmdir {
+		return false, nil
+	}
+	err = tx.QueryRow(
+		`SELECT COUNT(*) FROM uploads INDEXED BY uploads_by_parent_name
+		  WHERE remote = ? AND kind IN (?, ?) AND remote_parent_id = ? AND state IN (?, ?)`,
+		u.Remote, string(KindDelete), string(KindRmdir), u.RemoteID,
+		string(StatePending), string(StateUploading)).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("journal: claim: %w", err)
+	}
+	return held > 0, nil
+}
+
+// QueuedDeletes lists the delete rows still to run, for the tree to know
+// which backend entries a listing must not bring back. A dead one is not
+// among them: its target is staying on the backend, and the next listing
+// should say so.
+func (j *Journal) QueuedDeletes(ctx context.Context) ([]Upload, error) {
+	return j.list(ctx, `WHERE kind IN (?, ?) AND state IN (?, ?)`,
+		string(KindDelete), string(KindRmdir), string(StatePending), string(StateUploading))
 }
 
 // Superseded reports whether a newer upload of the same file has been
@@ -1404,7 +1571,7 @@ func (j *Journal) Recover(ctx context.Context) (Recovery, error) {
 		return rec, err
 	}
 	for _, u := range rows {
-		if cause := j.verifyBlob(u); cause != nil && !u.IsMkdir() {
+		if cause := j.verifyBlob(u); cause != nil && !u.IsMkdir() && !u.IsDelete() {
 			if ferr := j.Fail(ctx, u.ID, cause); ferr != nil {
 				return rec, ferr
 			}

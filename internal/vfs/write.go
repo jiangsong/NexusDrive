@@ -58,6 +58,11 @@ type pendingCommit struct {
 func (f *FS) SetWriteBackend(j *journal.Journal, u *upload.Uploader) {
 	f.journal = j
 	f.uploader = u
+	if j != nil {
+		// The deletes still queued from before: their targets must stay
+		// out of listings until they run.
+		_ = f.loadQueuedDeletes(context.Background(), j)
+	}
 }
 
 // Journal exposes the write journal (status, doctor).
@@ -897,13 +902,14 @@ func (f *FS) retargetIfParentLanded(ctx context.Context, rowID string, parentIno
 }
 
 // Remove deletes a file or an empty directory.
+//
+// On a writeback mount it is a local commit like close() and mkdir: the
+// name is gone when the call returns, and a queued row removes the entry
+// from the backend. On a strict mount the backend goes first, and that
+// round trip runs outside the admission gate: every open on the mount
+// passes through the gate, and a delete held it for the whole of a slow
+// backend's reply, which stalled every other file for those seconds.
 func (f *FS) Remove(ctx context.Context, parent uint64, name string, recursive bool) error {
-	f.copyPublishMu.Lock()
-	defer f.copyPublishMu.Unlock()
-	return f.remove(ctx, parent, name, recursive)
-}
-
-func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive bool) error {
 	m, _, err := f.MountForIno(ctx, parent)
 	if err != nil {
 		return err
@@ -914,20 +920,71 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	if err := f.requireOwner(); err != nil {
 		return err
 	}
+	// The lookup and rmdir's emptiness check come first, outside the gate:
+	// either can need the backend — a name the tree has not cached, a
+	// directory whose listing a delta poll marked stale — and remove itself
+	// then finds everything local.
 	n, err := f.lookupNode(ctx, parent, name)
 	if err != nil {
 		return err
 	}
 	if n.IsDir() && !recursive {
-		kids, err := f.readDirRefresh(ctx, n.Ino, false)
-		if err != nil {
+		if err := f.requireEmptyDir(ctx, n, !f.queuesDeletes(m)); err != nil {
 			return err
 		}
-		if len(kids) > 0 {
-			return ErrNotEmpty
+	}
+	if f.queuesDeletes(m) {
+		f.copyPublishMu.Lock()
+		defer f.copyPublishMu.Unlock()
+		return f.remove(ctx, m, parent, name, recursive, removeQueued, n.Ino)
+	}
+	if !IsLocalOnly(n.RemoteID) && n.RemoteID != "" {
+		if err := m.Provider.Delete(ctx, n.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
+			return mapProviderErr(err)
 		}
 	}
-	if IsLocalOnly(n.RemoteID) {
+	f.copyPublishMu.Lock()
+	defer f.copyPublishMu.Unlock()
+	return f.remove(ctx, m, parent, name, recursive, removeDone, n.Ino)
+}
+
+// removeMode says what remove does about the backend's copy.
+type removeMode int
+
+const (
+	// removeQueued commits a delete row; the queue removes the entry.
+	removeQueued removeMode = iota
+	// removeNow asks the backend in this thread, under the gate. The
+	// rename of a queued write uses it on a strict mount for the name it
+	// is about to reuse.
+	removeNow
+	// removeDone: the backend was already asked, before the gate was
+	// taken. Only the local side is left. Rename uses it for the name it
+	// is about to reuse: the backend refuses to clobber, so the target
+	// must be gone before the rename is sent, and that round trip is made
+	// before the gate like Remove's.
+	removeDone
+)
+
+// remove takes the name out of the tree. Caller holds copyPublishMu. ino,
+// when set, is the node the caller looked up before taking the gate: a
+// different node under the name now means the name moved on in between,
+// and it is left alone.
+func (f *FS) remove(ctx context.Context, m Mount, parent uint64, name string, recursive bool, mode removeMode, ino uint64) error {
+	n, err := f.lookupNode(ctx, parent, name)
+	if err != nil {
+		return err
+	}
+	if ino != 0 && n.Ino != ino {
+		return nil
+	}
+	if n.IsDir() && !recursive {
+		if err := f.requireEmptyDir(ctx, n, mode != removeQueued); err != nil {
+			return err
+		}
+	}
+	switch {
+	case IsLocalOnly(n.RemoteID):
 		if pending, err := f.copyAwaitingSubmit(ctx, n); err != nil {
 			return err
 		} else if pending {
@@ -938,9 +995,29 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 		if err := f.cancelQueued(ctx, n); err != nil {
 			return err
 		}
-	} else if n.RemoteID != "" {
+	case n.RemoteID == "" || mode == removeDone:
+	case mode == removeNow:
 		if err := m.Provider.Delete(ctx, n.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
 			return mapProviderErr(err)
+		}
+	default:
+		if n.IsDir() {
+			// What the backend has under the directory goes first: its
+			// row is held back until theirs have run, and the backend is
+			// asked to confirm the directory is empty before it goes.
+			if err := f.queueDeletesBelow(ctx, m, n); err != nil {
+				return err
+			}
+		}
+		parentID, err := f.dirRemoteID(ctx, parent)
+		if err != nil {
+			return err
+		}
+		if parentID == "" {
+			parentID = m.RootID
+		}
+		if err := f.queueDelete(ctx, m, n, parentID); err != nil {
+			return err
 		}
 	}
 	if n.IsDir() {
@@ -960,6 +1037,32 @@ func (f *FS) remove(ctx context.Context, parent uint64, name string, recursive b
 	f.invalidateFrom(ctx, parent)
 	f.invalidateEntryFrom(ctx, parent, name)
 	f.changedEntry(ctx, parent, name, n.IsDir(), KindRemove)
+	return nil
+}
+
+// requireEmptyDir is rmdir's check. The tree's own listing answers when it
+// is complete — whatever its age: rm -rf has just unlinked everything
+// through this tree, and asking the backend again for each directory was a
+// round trip per directory on the foreground path. A queued rmdir has the
+// backend confirm before the directory goes; a synchronous one (askBackend)
+// has no second chance and lists when the listing is not fresh.
+func (f *FS) requireEmptyDir(ctx context.Context, n meta.Node, askBackend bool) error {
+	var kids []meta.Node
+	st, err := f.meta.DirState(ctx, n.Ino)
+	if err != nil {
+		return err
+	}
+	if st.Complete && !askBackend {
+		kids, err = f.meta.Children(ctx, n.Ino)
+	} else {
+		kids, err = f.readDirRefresh(ctx, n.Ino, false)
+	}
+	if err != nil {
+		return err
+	}
+	if len(kids) > 0 {
+		return ErrNotEmpty
+	}
 	return nil
 }
 
@@ -1023,9 +1126,11 @@ func (f *FS) cancelQueuedBelow(ctx context.Context, dir uint64) error {
 
 // Rename moves a file or directory. Cross-remote moves are refused; the caller
 // should copy instead.
+//
+// The backend's part — moving or renaming the entry — runs outside the
+// admission gate every open passes through; only the tree's part is under
+// it. See Remove.
 func (f *FS) Rename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) error {
-	f.copyPublishMu.Lock()
-	defer f.copyPublishMu.Unlock()
 	if err := f.rename(ctx, oldParent, oldName, newParent, newName); err != nil {
 		return err
 	}
@@ -1067,22 +1172,60 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 		} else if pending {
 			return fmt.Errorf("vfs: copy publication is pending: %w", syscall.EBUSY)
 		}
-		return f.renameLocalOnly(ctx, n, dstMount, newParent, newName, oldParent)
+		f.copyPublishMu.Lock()
+		inFlight, err := f.renameLocalOnly(ctx, n, dstMount, newParent, newName)
+		f.copyPublishMu.Unlock()
+		if err != nil {
+			return err
+		}
+		if inFlight == "" {
+			return nil
+		}
+		// The upload started between the lookup and the retarget, so it
+		// lands under the old name. Wait for it — outside the gate, this
+		// is a remote round trip — then rename the finished file on the
+		// backend. Waiting is what the caller expects: rename(2) either
+		// happens or reports why, it does not half-happen.
+		if err := f.flushUpload(ctx, inFlight, n.Remote); err != nil {
+			return err
+		}
+		fresh, err := f.meta.Get(ctx, n.Ino)
+		if err != nil {
+			return err
+		}
+		if IsLocalOnly(fresh.RemoteID) {
+			return fmt.Errorf("vfs: %s finished uploading but has no remote id yet; retry in a moment", n.Name)
+		}
+		return f.rename(ctx, oldParent, n.Name, newParent, newName)
 	}
 
 	// rename(2) replaces the destination. The remotes refuse to clobber (the
 	// drivers pass "do not overwrite" so nothing is lost silently), so the
-	// decision is made here: remove the target first.
+	// decision is made here: remove the target first — on the backend too,
+	// in this thread, since the rename about to be sent needs it gone.
 	//
 	// This is the one place cloudfs cannot be atomic the way a local rename
 	// is. A failure between the delete and the rename leaves the destination
 	// gone and the source still in place under its old name, so the data the
 	// caller wanted to keep is never the thing that is lost.
 	if victim, err := f.meta.Lookup(ctx, newParent, newName); err == nil && victim.Ino != n.Ino {
-		if err := f.remove(ctx, newParent, newName, true); err != nil && !errors.Is(err, ErrNotFound) {
+		if !IsLocalOnly(victim.RemoteID) && victim.RemoteID != "" {
+			if err := dstMount.Provider.Delete(ctx, victim.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
+				return mapProviderErr(err)
+			}
+		}
+		f.copyPublishMu.Lock()
+		err := f.remove(ctx, dstMount, newParent, newName, true, removeDone, victim.Ino)
+		f.copyPublishMu.Unlock()
+		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	} else if err != nil && !errors.Is(err, meta.ErrNotFound) {
+		return err
+	}
+	// On a backend whose ids are paths, the deletes queued under a
+	// directory name paths the move would take away from under them.
+	if err := f.settleDeletesUnder(ctx, srcMount, n.RemoteID); err != nil {
 		return err
 	}
 
@@ -1136,6 +1279,8 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 	// invalidation runs even on the error paths below — leaving stale
 	// dentries behind is how a failed rename keeps answering with names the
 	// backend no longer has.
+	f.copyPublishMu.Lock()
+	defer f.copyPublishMu.Unlock()
 	defer func() {
 		f.dropPaths()
 		f.invalidateFrom(ctx, oldParent)
@@ -1179,14 +1324,17 @@ func LocalUploadID(remoteID string) (string, bool) {
 
 // renameLocalOnly moves a file whose only copy is the queued write. It
 // retargets the pending upload, replaces any file already at the destination,
-// and updates the tree.
-func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newParent uint64, newName string, oldParent uint64) error {
+// and updates the tree. Caller holds copyPublishMu. When the upload is
+// already on the wire it cannot be retargeted; the row's id comes back as
+// inFlight and nothing has been done — the caller waits for it, without the
+// gate, and renames the finished file instead.
+func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newParent uint64, newName string) (inFlight string, err error) {
 	if f.journal == nil {
-		return errors.New("vfs: no write backend configured")
+		return "", errors.New("vfs: no write backend configured")
 	}
 	parentNode, err := f.meta.Get(ctx, newParent)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// A queued directory's local id is a valid destination: the row waits
 	// for the directory the way every row under it does, and follows it to
@@ -1198,7 +1346,7 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 
 	pending, err := f.journal.ByIno(ctx, n.Ino)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, u := range pending {
 		err := f.journal.Retarget(ctx, u.ID, targetParentID, newName)
@@ -1207,41 +1355,37 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 			continue
 		}
 		if !errors.Is(err, journal.ErrNotFound) {
-			return err
+			return "", err
 		}
-		// The upload started between our snapshot and now, so it will land
-		// under the old name. Wait for it, then fall back to a server-side
-		// rename of the finished file. Waiting is what the caller expects:
-		// rename(2) either happens or reports why, it does not half-happen.
-		if err := f.flushUpload(ctx, u.ID, u.Remote); err != nil {
-			return err
-		}
-		fresh, err := f.meta.Get(ctx, n.Ino)
-		if err != nil {
-			return err
-		}
-		if IsLocalOnly(fresh.RemoteID) {
-			return fmt.Errorf("vfs: %s finished uploading but has no remote id yet; retry in a moment", n.Name)
-		}
-		return f.rename(ctx, oldParent, n.Name, newParent, newName)
+		// The upload started between our snapshot and now. Retargeting a
+		// row on the wire is not possible; the caller waits for it.
+		return u.ID, nil
 	}
 
 	// A file already at the destination is replaced, matching rename(2).
+	// The queued write goes out by name and the queue holds it behind the
+	// victim's delete, so on a writeback mount the victim's removal is a
+	// local commit too: an editor's save-by-rename never waits for the
+	// backend.
 	if victim, err := f.meta.Lookup(ctx, newParent, newName); err == nil && victim.Ino != n.Ino {
-		if err := f.remove(ctx, newParent, newName, true); err != nil && !errors.Is(err, ErrNotFound) {
-			return err
+		mode := removeNow
+		if f.queuesDeletes(dst) {
+			mode = removeQueued
+		}
+		if err := f.remove(ctx, dst, newParent, newName, true, mode, victim.Ino); err != nil && !errors.Is(err, ErrNotFound) {
+			return "", err
 		}
 	} else if err != nil && !errors.Is(err, meta.ErrNotFound) {
-		return err
+		return "", err
 	}
 
 	if err := f.meta.Rename(ctx, n.Ino, newParent, newName); err != nil {
-		return err
+		return "", err
 	}
 	f.dropPaths()
-	f.invalidateFrom(ctx, oldParent)
+	f.invalidateFrom(ctx, n.ParentIno)
 	f.invalidateFrom(ctx, newParent)
-	return nil
+	return "", nil
 }
 
 // UploadHooks builds the callbacks the uploader needs so a completed upload
@@ -1259,6 +1403,12 @@ func (f *FS) UploadHooks() upload.Hooks {
 	return upload.Hooks{
 		Authorize: f.validateUploadBinding,
 		OnSuccess: func(ctx context.Context, u journal.Upload, r upload.Result) error {
+			if u.IsDelete() {
+				// The backend has let go of what the tree let go of
+				// earlier; listings may show whatever is there now.
+				f.deleting.drop(u.Remote, u.RemoteID)
+				return nil
+			}
 			if r.Entry.ID == "" {
 				// The provider acknowledged the upload without describing the
 				// resulting file (some rapid-upload paths do this). Mark the
@@ -1433,6 +1583,19 @@ func (f *FS) UploadHooks() upload.Hooks {
 			return n.RemoteVersion, true
 		},
 		OnDead: func(ctx context.Context, u journal.Upload, cause error) {
+			if u.IsDelete() {
+				// The entry is staying on the backend — a directory that
+				// gained someone else's files, say. The tree should show it
+				// again rather than keep hiding a name the backend has:
+				// stop filtering it and have the parent listed afresh.
+				f.deleting.drop(u.Remote, u.RemoteID)
+				if p, ok := f.nodeForRemoteDir(ctx, u.Remote, u.RemoteParentID); ok {
+					_ = f.meta.Invalidate(ctx, p.Ino)
+					f.invalidate(p.Ino)
+					f.changedNode(ctx, p.Ino, true, KindRemote)
+				}
+				return
+			}
 			// Leave the local node dirty: the data is still on disk and the
 			// operator can requeue it. Status surfaces the failure.
 			if u.Ino != 0 {

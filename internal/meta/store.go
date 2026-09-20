@@ -1368,6 +1368,38 @@ func (s *Store) Cursor(ctx context.Context, remote string) (string, error) {
 	return c, nil
 }
 
+// FeedCoveredSince reports since when the change feed has covered remote
+// without a gap, or the zero time. SetFeedCoveredSince records it; the zero
+// time says the coverage was lost (a failed poll, a cursor reset).
+func (s *Store) FeedCoveredSince(ctx context.Context, remote string) (time.Time, error) {
+	var since int64
+	err := s.db.QueryRowContext(ctx, `SELECT covered_since FROM remote_cursor WHERE remote = ?`, remote).Scan(&since)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && since == 0) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("meta: feed covered since: %w", err)
+	}
+	return time.Unix(since, 0), nil
+}
+
+func (s *Store) SetFeedCoveredSince(ctx context.Context, remote string, since time.Time) error {
+	var v int64
+	if !since.IsZero() {
+		v = since.Unix()
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO remote_cursor (remote, covered_since) VALUES (?,?)
+			 ON CONFLICT(remote) DO UPDATE SET covered_since=excluded.covered_since`,
+			remote, v)
+		if err != nil {
+			return fmt.Errorf("meta: set feed covered since: %w", err)
+		}
+		return nil
+	})
+}
+
 // SetCursor stores the delta cursor for a remote.
 func (s *Store) SetCursor(ctx context.Context, remote, cursor string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
