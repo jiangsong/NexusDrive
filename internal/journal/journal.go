@@ -249,8 +249,15 @@ func Open(opt Options) (*Journal, error) {
 	if opt.Durability == DurabilityCrash {
 		sync = "NORMAL"
 	}
+	// journal_size_limit: a queue of twenty thousand rows under eight
+	// workers keeps a reader on the WAL at almost every instant, so the
+	// automatic checkpoints copy pages back but rarely get to reset the
+	// file, and it grew to nearly a gigabyte beside a 15 MB database. The
+	// limit truncates it the next time a checkpoint does reset it, and
+	// Checkpoint forces such a moment when the queue is quiet.
 	dsn := "file:" + filepath.Join(opt.Dir, "journal.db") +
-		"?_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_txlock=immediate"
+		"?_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")&_pragma=busy_timeout(5000)&_txlock=immediate" +
+		fmt.Sprintf("&_pragma=journal_size_limit(%d)", walSizeLimit)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("journal: %w", err)
@@ -326,6 +333,23 @@ func (j *Journal) Close() error {
 	releaseOwnership(j.lock)
 	j.lock = nil
 	return j.db.Close()
+}
+
+// walSizeLimit is what the write-ahead log is truncated back to after a
+// checkpoint resets it. Big enough that a busy minute never truncates.
+const walSizeLimit = 64 << 20
+
+// Checkpoint folds the write-ahead log back into the database and
+// truncates it, waiting up to busy_timeout for readers to step aside. It
+// reports whether the log was truncated; a queue that is never quiet keeps
+// the log from ever being reset, so the daemon asks at intervals rather
+// than at the one moment that would be convenient.
+func (j *Journal) Checkpoint(ctx context.Context) (bool, error) {
+	var busy, logFrames, checkpointed int
+	if err := j.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return false, fmt.Errorf("journal: checkpoint: %w", err)
+	}
+	return busy == 0, nil
 }
 
 // StagingDir is where in-progress writes are buffered.

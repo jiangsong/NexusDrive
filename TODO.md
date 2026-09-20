@@ -303,6 +303,12 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
   `INDEXED BY` 显式指定，验收 `TestClaimStaysCheapWithAQueueOfDeletes`、
   `TestClaimWalksBlockedRowsWithoutHoldingTheWriteLock`）；以及 TTL 过期后 rm -rf/cp -r 的
   每个目录都重新 List，见 DESIGN "delta feed 覆盖的列举不看 TTL"。
+- **[x] journal WAL 涨到 890 MB（2026-09-20，`~/.cloudfs` 体检时发现）**：20k 行队列 + 8 个
+  worker 让 WAL 上几乎任何时刻都有读者，自动 checkpoint 只能回写不能 reset，文件只增不减
+  （数据库本身 15 MB）。journal 与 meta 的 DSN 加 `journal_size_limit(64MiB)`；journal 新增
+  `Checkpoint()`（TRUNCATE），守护进程启动后（还没有 worker）跑一次，之后每 5 分钟队列为空时
+  跑一次——TRUNCATE 等读者期间会挡住写者，所以不在队列忙时做。验收：
+  `TestCheckpointTruncatesTheWriteAheadLog`（钉住一个读者让 WAL 涨过 8 MB，放开后截断）。
 - **[x] 传输页只有行列表、每秒整表刷新（2026-09-20）**：状态文档新增 `uploads.batch`
   （`control.uploadBatchTracker`：队列从空变非空即开一"批"，总量 = 仍在队列的 + 批内已完成的，
   按文件数和字节数各一份；uploader 暴露单调的 `Totals()`），页面顶部一条总进度：文件数、

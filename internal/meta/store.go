@@ -185,7 +185,8 @@ func Open(dbPath string, opt Options) (*Store, error) {
 			"?_pragma=journal_mode(WAL)&_txlock=immediate" +
 			"&_pragma=synchronous(NORMAL)" +
 			"&_pragma=busy_timeout(5000)" +
-			"&_pragma=foreign_keys(0)"
+			"&_pragma=foreign_keys(0)" +
+			"&_pragma=journal_size_limit(67108864)" // the WAL is truncated back to 64 MiB once a checkpoint resets it
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

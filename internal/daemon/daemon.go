@@ -497,6 +497,12 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 			// dead letter keeps what is left of it.
 			fsys.RepairLost(ctx, j, rec.Lost)
 		}
+		if j.Owner() {
+			// Nothing reads the queue yet: the one moment the write-ahead
+			// log a busy previous run left behind can be folded back and
+			// truncated without waiting on anyone.
+			_, _ = j.Checkpoint(ctx)
+		}
 		if !j.Owner() {
 			// Another process runs this queue. A second uploader would claim
 			// its rows and send them through this process's own backend
@@ -552,6 +558,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		fsys.SetWriteBackend(j, up)
 		if !opt.NoBackground {
 			up.Start(ctx)
+			go checkpointWhenQuiet(ctx, j, 5*time.Minute)
 		}
 		d.closers = append(d.closers, func() error { up.Stop(); return nil })
 	}
@@ -589,6 +596,29 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 }
 
 // Close releases every component in reverse order.
+// checkpointWhenQuiet truncates the journal's write-ahead log every
+// interval, but only while the queue is empty: a truncating checkpoint
+// holds writers off while it waits for readers to leave the old snapshot,
+// and under eight workers that wait is the workers' own close(2)s. Left to
+// itself the log grew to the size of every row ever rewritten; a quiet
+// minute an hour is enough to keep it at the limit.
+func checkpointWhenQuiet(ctx context.Context, j *journal.Journal, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		st, err := j.Stats(ctx)
+		if err != nil || st.Pending+st.Uploading > 0 {
+			continue
+		}
+		_, _ = j.Checkpoint(ctx)
+	}
+}
+
 func (d *Daemon) Close() error {
 	var firstErr error
 	for i := len(d.closers) - 1; i >= 0; i-- {
