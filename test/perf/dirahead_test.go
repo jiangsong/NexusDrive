@@ -67,15 +67,28 @@ func newDirAheadRigBudget(t *testing.T, policy vfs.CachePolicy, writeBehind int6
 // settle waits until the backend has been quiet for a moment, so a
 // prefetch that is still in flight is not counted against the reads that
 // come after it.
+// settleQuietPolls is how many consecutive unchanged readings count as quiet.
+//
+// One repeat is not enough, and that is not a theoretical worry: with every
+// package of this repo running at once, a prefetch goroutine can be starved
+// for longer than the poll interval, so two equal readings mean only that
+// nothing happened in twenty milliseconds — not that nothing is queued. The
+// test then counts the requests that prefetch makes next and fails. It passed
+// alone, in its file, and in its package, and failed only under `./...`.
+const settleQuietPolls = 5
+
 func (r *dirAheadRig) settle(t *testing.T) {
 	t.Helper()
-	last := -1
-	for i := 0; i < 200; i++ {
+	last, quiet := -1, 0
+	for i := 0; i < 600; i++ {
 		n := r.fake.TotalCalls()
 		if n == last {
-			return
+			if quiet++; quiet >= settleQuietPolls {
+				return
+			}
+		} else {
+			last, quiet = n, 0
 		}
-		last = n
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("the backend never went quiet")

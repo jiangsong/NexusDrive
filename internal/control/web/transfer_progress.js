@@ -2,10 +2,27 @@
 // the DOM so it can be tested: what a batch reading means for the bar, and
 // the rate over a short window of readings.
 
+// localPercent is the fallback: the same rule as upload.PercentOf in Go, by
+// bytes when the batch has any and by files otherwise — a batch of directory
+// creations and deletes has no bytes and still has progress — capped just
+// short of 100% while active so a full bar never sits there with files still
+// going out.
+//
+// It is a fallback and not the source: a daemon that sends batch.percent has
+// already worked this out, and the page uses that number so the console, the
+// terminal and the MCP tool cannot drift apart by a digit. This copy stays so
+// that a new console keeps working against an older daemon, and it has to go
+// on producing the same answer — the tests pin both paths at the cap.
+export function localPercent(active, filesTotal, filesDone, bytesTotal, bytesDone) {
+  if (!active && !filesTotal) return 0;
+  if (!active) return 100;
+  const pct = bytesTotal > 0 ? (bytesDone / bytesTotal) * 100 : filesTotal > 0 ? (filesDone / filesTotal) * 100 : 0;
+  return Math.max(0, Math.min(99.5, pct));
+}
+
 // batchProgress reads one UploadBatch from the status document. state is
-// 'idle' (nothing to show), 'active' or 'done'. percent is by bytes when the
-// batch has any, else by files — a batch of directory creations and
-// deletes has no bytes and still has progress. eta is seconds, or null.
+// 'idle' (nothing to show), 'active' or 'done'. percent comes from the
+// daemon when it sends one; eta is seconds, or null.
 export function batchProgress(b, rate) {
   const filesTotal = b.files_total || 0;
   const filesDone = b.files_done || 0;
@@ -13,11 +30,9 @@ export function batchProgress(b, rate) {
   const bytesDone = b.bytes_done || 0;
   if (!b.active && !filesTotal) return { state: 'idle', percent: 0, filesTotal, filesDone, bytesTotal, bytesDone, rate: 0, eta: null };
   const state = b.active ? 'active' : 'done';
-  let percent = 100;
-  if (state === 'active') {
-    percent = bytesTotal > 0 ? (bytesDone / bytesTotal) * 100 : filesTotal > 0 ? (filesDone / filesTotal) * 100 : 0;
-    percent = Math.max(0, Math.min(99.5, percent));
-  }
+  const percent = Number.isFinite(b.percent)
+    ? b.percent
+    : localPercent(b.active, filesTotal, filesDone, bytesTotal, bytesDone);
   let eta = null;
   if (state === 'active' && rate > 0 && bytesTotal > bytesDone) eta = (bytesTotal - bytesDone) / rate;
   return { state, percent, filesTotal, filesDone, bytesTotal, bytesDone, rate: state === 'active' ? rate : 0, eta };

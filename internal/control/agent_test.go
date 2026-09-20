@@ -321,7 +321,12 @@ func TestAgentClientHelpersRoundTrip(t *testing.T) {
 	if _, _, err := CallSession(ctx, sock, "", "nope"); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("unknown session: %v", err)
 	}
-	if _, online, err := CallAudit(ctx, filepath.Join(t.TempDir(), "absent.sock"), "", agent.AuditQuery{}); err != nil || online {
+	// socketPath, not t.TempDir: the offline check needs a path that is merely
+	// absent. A t.TempDir name derived from this test's own name overruns the
+	// 104-byte sun_path limit on macOS, and the dial then fails with EINVAL
+	// rather than the "nothing is listening" errno the offline classification
+	// recognises — a fixture bug that reads as a product one.
+	if _, online, err := CallAudit(ctx, filepath.Join(filepath.Dir(socketPath(t)), "absent.sock"), "", agent.AuditQuery{}); err != nil || online {
 		t.Fatalf("no daemon: online=%v err=%v", online, err)
 	}
 }

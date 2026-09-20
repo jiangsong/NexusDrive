@@ -156,6 +156,31 @@ func (q *Quark) BeginUpload(ctx context.Context, parentID, name string, size int
 	return provider.UploadSession{ID: pre.TaskID, PartSize: partSize, Opaque: opaque}, nil
 }
 
+// ossURL builds the address of an OSS object from an upload session.
+//
+// Quark answers file/upload/pre with the bare zone host ("http://pds.quark.cn")
+// and names the bucket in a separate field. That host has no address of its
+// own: OSS is virtual-hosted here, so only <bucket>.<zone> resolves, and
+// joining the object key onto the zone alone produces a name that fails DNS
+// before a single byte is sent. The scheme is forced to https because the
+// field arrives as plain http and these requests carry the file's contents.
+//
+// UNVERIFIED: that <bucket>.<zone> is the name that resolves. The bare zone
+// failing DNS is observed ("lookup pds.quark.cn: no such host" on every part
+// upload); the subdomain form is inferred from OSS's virtual-hosted style and
+// from the canonical resource Quark signs, which already carries the bucket.
+// Confirm by completing one real chunked upload.
+func ossURL(uploadURL, bucket, objKey string) string {
+	host := uploadURL
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+len("://"):]
+	}
+	if bucket != "" && !strings.HasPrefix(host, bucket+".") {
+		host = bucket + "." + host
+	}
+	return urlJoin("https://"+host, escapePath(objKey))
+}
+
 // UploadPart uploads one part. idx is zero-based; OSS part numbers start at 1.
 //
 // Each part needs its own signature, which only Quark can produce: the driver
@@ -207,7 +232,7 @@ func (q *Quark) UploadPart(ctx context.Context, s provider.UploadSession, idx in
 	// to Quark, and the account cookie must never leave the drive host.
 	resp, err := q.cli.Do(ctx, httpx.Request{
 		Method:  http.MethodPut,
-		URL:     urlJoin(s.Opaque[OpaqueUploadURL], escapePath(s.Opaque[OpaqueObjKey])) + query,
+		URL:     ossURL(s.Opaque[OpaqueUploadURL], s.Opaque[OpaqueBucket], s.Opaque[OpaqueObjKey]) + query,
 		Class:   ratelimit.Upload,
 		Header:  header,
 		Body:    bytes.NewReader(data),
@@ -297,7 +322,7 @@ func (q *Quark) CompleteUpload(ctx context.Context, s provider.UploadSession, pa
 
 	resp, err := q.cli.Do(ctx, httpx.Request{
 		Method:  http.MethodPost,
-		URL:     urlJoin(s.Opaque[OpaqueUploadURL], escapePath(s.Opaque[OpaqueObjKey])) + query,
+		URL:     ossURL(s.Opaque[OpaqueUploadURL], s.Opaque[OpaqueBucket], s.Opaque[OpaqueObjKey]) + query,
 		Class:   ratelimit.Upload,
 		Header:  header,
 		Body:    bytes.NewReader(bodyXML),

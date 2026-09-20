@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -81,8 +82,9 @@ func TestUploadBindingMismatchDeadLettersBeforeProviderIO(t *testing.T) {
 
 func TestLegacyUnboundUploadIsNotAuthorized(t *testing.T) {
 	e := newEnv(t, envOpt{})
+	// Matching the sentinel is the contract; the wrapped text names the fence.
 	err := e.fs.validateUploadBinding(context.Background(), journal.Upload{Remote: "ali"})
-	if err != ErrUploadBindingChanged {
+	if !errors.Is(err, ErrUploadBindingChanged) {
 		t.Fatalf("legacy upload authorization=%v", err)
 	}
 	if e.fake.TotalCalls() != 0 {

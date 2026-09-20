@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -60,6 +61,21 @@ type Root struct {
 	// kernel is the inode → kernel node registry the invalidation
 	// callbacks resolve through (kernel_nodes.go).
 	kernel kernelNodes
+	// entries compensates for a kernel that does not offer CAP_READDIRPLUS
+	// by answering a lookup from the listing its directory was just read
+	// with (entry_cache.go). It is nil — and every call on it a no-op —
+	// when the kernel does answer readdirplus, so on Linux this costs
+	// nothing. MountFS decides once, from the INIT handshake, which is why
+	// it is set after New rather than in it.
+	entries atomic.Pointer[entryCache]
+	// readdirplus records what that handshake said, so a test can assert
+	// the cost of the path this kernel actually takes.
+	readdirplus atomic.Bool
+	// protoMajor and protoMinor are the FUSE protocol version the kernel
+	// agreed to. Some operations have no capability bit and are gated on
+	// the version alone — FUSE_LSEEK is 7.24 — so the raw numbers are kept
+	// rather than a flag per feature.
+	protoMajor, protoMinor atomic.Uint32
 }
 
 // New builds the root node for mounting.
@@ -78,8 +94,14 @@ func New(opt Options) *Root {
 	return &Root{opt: opt, node: 1, passthrough: ok, backings: newBackingRegistry()}
 }
 
-// MountOptions returns the transfer limits and timeouts for go-fuse. Kernel
-// writeback_cache is not enabled; it conflicts with passthrough negotiation.
+// MountOptions returns the transfer limits and timeouts for go-fuse.
+//
+// Kernel writeback_cache is not enabled. On Linux that is a choice: it and
+// passthrough are mutually exclusive in the kernel. On macOS it is not a
+// choice at all, because macFUSE speaks FUSE protocol 7.19 and never offers
+// the capability (it arrived in 7.23); go-fuse can only keep capabilities the
+// kernel proposed in INIT, so no mount option can turn it on. See
+// TestKernelOffersCapabilities for the measurement and TODO.md T-10.
 func (r *Root) MountOptions(name string, debug bool) *fs.Options {
 	o := &fs.Options{
 		AttrTimeout:     &r.opt.AttrTimeout,
@@ -241,16 +263,31 @@ func (n *node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 }
 
 func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// A kernel without CAP_READDIRPLUS sends one of these per directory
+	// entry instead of taking the whole listing in one reply, so answer from
+	// that listing while it is still fresh. This skips nothing FS.Lookup
+	// would have done: it is a meta query and an attribute build, exactly
+	// what produced the listing entry, and the readdirplus path below has
+	// always short-circuited it the same way.
+	if at, ok := n.root.cachedEntry(n.vfsIno(), name); ok {
+		n.root.count(opEntryLookup)
+		return n.replyEntry(ctx, at, out), 0
+	}
 	n.root.count(opLookup)
 	at, err := n.root.opt.FS.Lookup(ctx, n.vfsIno(), name)
 	if err != nil {
 		return nil, errno(err)
 	}
+	return n.replyEntry(ctx, at, out), 0
+}
+
+// replyEntry hands the kernel the inode for an entry and its attributes.
+func (n *node) replyEntry(ctx context.Context, at vfs.Attr, out *fuse.EntryOut) *fs.Inode {
 	inode := n.newInode(ctx, at.Ino, at.IsDir)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)
-	return inode, 0
+	return inode
 }
 
 // OpendirHandle reads the directory once and hands the kernel a handle it
@@ -264,6 +301,15 @@ func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 // It also answers readdirplus lookups from the listing it already holds
 // (fs.FileLookuper). Without that go-fuse asks the node for every entry, and
 // on a 2,041-entry tree those lookups cost more than the listing itself.
+//
+// That path is Linux-only in practice: macFUSE speaks FUSE 7.19 and does not
+// offer CAP_READDIRPLUS (7.21), so on macOS the kernel sends a separate LOOKUP
+// per entry and never reaches dirHandle.Lookup. It also lacks
+// CAP_PARALLEL_DIROPS, so those per-entry lookups are serialised. There the
+// listing built here is handed to Root.entries instead, and node.Lookup
+// answers those per-entry LOOKUPs from it — the same zero-query answer by
+// another route. See TestKernelOffersCapabilities, entry_cache.go and
+// TODO.md T-61.
 //
 // FOPEN_CACHE_DIR is what makes a warm walk cheap: without it every readdir
 // crosses into this process at ~150 µs per entry, against ~7 µs when the
@@ -326,6 +372,10 @@ func (d *dirHandle) load(ctx context.Context) syscall.Errno {
 		return errno(err)
 	}
 	d.entries, d.loaded = entries, true
+	// Where the kernel cannot take the attributes with the entries, the
+	// per-entry LOOKUPs it sends instead are answered from this (fs.Root
+	// .entries; a no-op where it can).
+	d.n.root.cacheListing(d.n.vfsIno(), entries)
 	return 0
 }
 
@@ -366,12 +416,7 @@ func (d *dirHandle) Releasedir(ctx context.Context, releaseFlags uint32) {}
 func (d *dirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if d.idx > 0 && d.idx <= len(d.entries) && d.entries[d.idx-1].Name == name {
 		d.n.root.count(opDirLookup)
-		at := d.entries[d.idx-1]
-		inode := d.n.newInode(ctx, at.Ino, at.IsDir)
-		d.n.root.fillAttr(&out.Attr, at)
-		out.SetEntryTimeout(d.n.root.opt.EntryTimeout)
-		out.SetAttrTimeout(d.n.root.opt.AttrTimeout)
-		return inode, 0
+		return d.n.replyEntry(ctx, d.entries[d.idx-1], out), 0
 	}
 	return d.n.Lookup(ctx, name, out)
 }
@@ -456,11 +501,19 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	n.root.count(opCreate)
 	ctx, cancel := durable(ctx)
 	defer cancel()
+	// Every tree change made through this mount drops what the entry cache
+	// holds for the names it touches. The VFS does not tell us about these:
+	// invalidateEntryFrom skips a request that came from the kernel,
+	// because the kernel drops its own dentry for an operation it performed
+	// itself. The entry cache is a second layer with no such knowledge, so
+	// it is maintained here, at the operation.
+	defer n.root.forgetEntry(n.vfsIno(), name)
 	h, err := n.root.opt.FS.Create(ctx, n.vfsIno(), name)
 	if err != nil {
 		return nil, nil, 0, errno(err)
 	}
 	at := n.root.opt.FS.HandleAttr(ctx, h)
+	n.root.applyBirthMode(ctx, at.Ino, mode, &at)
 	inode := n.newInode(ctx, at.Ino, false)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
@@ -472,10 +525,12 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	n.root.count(opMkdir)
 	ctx, cancel := durable(ctx)
 	defer cancel()
+	defer n.root.forgetEntry(n.vfsIno(), name)
 	at, err := n.root.opt.FS.Mkdir(ctx, n.vfsIno(), name)
 	if err != nil {
 		return nil, errno(err)
 	}
+	n.root.applyBirthMode(ctx, at.Ino, mode, &at)
 	inode := n.newInode(ctx, at.Ino, true)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
@@ -487,6 +542,7 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	n.root.count(opUnlink)
 	ctx, cancel := durable(ctx)
 	defer cancel()
+	defer n.root.forgetEntry(n.vfsIno(), name)
 	return errno(n.root.opt.FS.Remove(ctx, n.vfsIno(), name, false))
 }
 
@@ -494,6 +550,7 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	n.root.count(opRmdir)
 	ctx, cancel := durable(ctx)
 	defer cancel()
+	defer n.root.forgetEntry(n.vfsIno(), name)
 	return errno(n.root.opt.FS.Remove(ctx, n.vfsIno(), name, false))
 }
 
@@ -507,6 +564,8 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 		// a different filesystem: the kernel expects EXDEV.
 		return syscall.EXDEV
 	}
+	defer n.root.forgetEntry(n.vfsIno(), name)
+	defer n.root.forgetEntry(target.vfsIno(), newName)
 	return errno(n.root.opt.FS.Rename(ctx, n.vfsIno(), name, target.vfsIno(), newName))
 }
 
@@ -514,6 +573,9 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	n.root.count(opSetattr)
 	ctx, cancel := durable(ctx)
 	defer cancel()
+	// A size or mode change makes the attributes in any cached listing
+	// entry for this inode wrong, and a lookup answers with attributes.
+	defer n.root.forgetIno(n.vfsIno())
 	if sz, ok := in.GetSize(); ok {
 		f, isFile := fh.(*file)
 		if !isFile {
@@ -528,9 +590,15 @@ func (n *node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 			return errno(err)
 		}
 	}
-	// Mode, owner and times are not propagated to the remotes: cloud drives
-	// have no POSIX permission model. Report the current attributes so the
-	// caller sees a consistent result rather than an error.
+	if mode, ok := in.GetMode(); ok {
+		if err := n.root.opt.FS.Chmod(ctx, n.vfsIno(), mode); err != nil {
+			return errno(err)
+		}
+	}
+	// Owner and times are not propagated to the remotes: cloud drives have no
+	// POSIX model for either. The mode is kept, but locally and only here —
+	// see vfs.Chmod. Report the current attributes so the caller sees a
+	// consistent result rather than an error.
 	at, err := n.root.opt.FS.Stat(ctx, n.vfsIno())
 	if err != nil {
 		return errno(err)
@@ -743,6 +811,10 @@ func isEOF(err error) bool { return errors.Is(err, io.EOF) }
 
 func (f *file) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	f.root.count(opWrite)
+	// The size in a cached listing entry for this file is now the size
+	// before the write; two map operations under a lock are nothing next to
+	// the write itself.
+	f.root.forgetIno(f.handle.Ino)
 	n, err := f.root.opt.FS.Write(ctx, f.handle, data, off)
 	if err != nil {
 		return uint32(n), errno(err)
@@ -823,7 +895,18 @@ func (f *file) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.Errno {
 // cloudfs never reports a file as sparse, so the mapping is trivial: the
 // pure lseekNoHoles does the actual arithmetic and is unit-tested without a
 // mount.
+//
+// This is reachable only where the kernel can forward the request at all.
+// FUSE_LSEEK is protocol 7.24; macFUSE speaks 7.19, so there the kernel
+// refuses SEEK_HOLE and SEEK_DATA itself with ENOTTY and this method is never
+// called — dead code on that platform, exactly like dirHandle.Lookup. Unlike
+// READDIRPLUS there is no capability bit for it: the negotiated minor version
+// is the whole gate. It is kept because on Linux the alternative is `cp`
+// probing a file it is about to copy and getting a refusal instead of an
+// answer, and because lseekNoHoles is platform-independent and tested as
+// such. See lseekForwarded, TestLseekReportsNoHoles and TODO.md T-61.
 func (f *file) Lseek(ctx context.Context, off uint64, whence uint32) (uint64, syscall.Errno) {
+	f.root.count(opLseek)
 	at, err := f.root.opt.FS.Stat(ctx, f.handle.Ino)
 	if err != nil {
 		return 0, errno(err)

@@ -305,6 +305,7 @@ func New(opt Options) (*Server, error) {
 	s.mcp.AddSendingMiddleware(s.subscriptions.send)
 	s.register()
 	s.registerTreeTool()
+	s.registerWarmTool()
 	s.registerHistoryTool()
 	s.registerPullEvents()
 	s.registerHotPaths()
@@ -312,6 +313,7 @@ func New(opt Options) (*Server, error) {
 	s.registerStaleDocs()
 	s.registerCopyTools()
 	s.registerUploadTools()
+	s.registerUploadProgressTool()
 	s.registerExportTools()
 	s.registerSessionTools()
 	s.registerRollbackTool()
@@ -664,6 +666,12 @@ type cacheStatusOutput struct {
 	HitRatio       float64 `json:"hit_ratio"`
 	CacheBytes     int64   `json:"cache_bytes"`
 	PendingUploads int     `json:"pending_uploads"`
+	// The queue's overall progress, because a count of queued rows is the
+	// first thing an agent looks at and "how far along is it" is the second.
+	// upload_progress has the rest; these three make the count legible.
+	UploadFilesDone  int64   `json:"upload_files_done"`
+	UploadFilesTotal int64   `json:"upload_files_total"`
+	UploadPercent    float64 `json:"upload_percent"`
 }
 
 type rootsOutput struct {
@@ -1600,7 +1608,14 @@ func (s *Server) cacheStatus(ctx context.Context, _ *mcp.CallToolRequest, in sta
 			out.PendingUploads = js.Pending + js.Uploading
 		}
 	}
-	return text("%s: %.0f%% cached, %d uploads queued", p, a.Cached*100, out.PendingUploads), out, nil
+	up := s.opt.FS.UploadProgress()
+	out.UploadFilesDone, out.UploadFilesTotal, out.UploadPercent = up.FilesDone, up.FilesTotal, up.Percent()
+	msg := fmt.Sprintf("%s: %.0f%% cached, %d uploads queued", p, a.Cached*100, out.PendingUploads)
+	if up.Active {
+		msg += fmt.Sprintf("; the queue is %.0f%% through its current batch (%d of %d files) — call upload_progress for the rate and an estimate",
+			out.UploadPercent, out.UploadFilesDone, out.UploadFilesTotal)
+	}
+	return text("%s", msg), out, nil
 }
 
 func (s *Server) listRoots(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, rootsOutput, error) {

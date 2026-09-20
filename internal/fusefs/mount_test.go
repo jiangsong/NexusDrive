@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -784,9 +785,15 @@ func TestReadOnlyOpenKeepsKernelCache(t *testing.T) {
 	}
 }
 
-// TestLseekReportsNoHoles exercises FileLseeker through a real mount:
-// SEEK_HOLE from the start of a file with no holes must land exactly on
-// EOF, which is what GNU cp's --sparse=auto probe relies on.
+// TestLseekReportsNoHoles exercises the SEEK_DATA/SEEK_HOLE probe through a
+// real mount.
+//
+// Whether the kernel can forward it at all is decided by the negotiated
+// protocol version, not by a capability bit: FUSE_LSEEK is protocol 7.24, and
+// macFUSE speaks 7.19. So the assertions branch on the version, and both
+// branches say what good looks like — on 7.19 that is a clean, correctly
+// classified refusal that a hole-scanning tool can fall back from, not a wrong
+// offset and not a misleading errno. See TODO.md T-61.
 func TestLseekReportsNoHoles(t *testing.T) {
 	e := newMount(t, "")
 	body := []byte("no holes anywhere in this file")
@@ -799,12 +806,61 @@ func TestLseekReportsNoHoles(t *testing.T) {
 	}
 	defer f.Close()
 
+	major, minor := e.mnt.KernelProtocol()
+	t.Logf("FUSE protocol %d.%d, lseek forwarded: %v", major, minor, lseekForwarded(major, minor))
+	if !lseekForwarded(major, minor) {
+		lseekRefusedByTheKernel(t, e, f, body)
+		return
+	}
+
 	off, err := unix.Seek(int(f.Fd()), 0, unix.SEEK_HOLE)
 	if err != nil {
 		t.Fatalf("SEEK_HOLE: %v", err)
 	}
 	if off != int64(len(body)) {
 		t.Fatalf("SEEK_HOLE from 0 = %d, want %d (EOF, no interior holes)", off, len(body))
+	}
+	if e.mnt.OpStats().Ops["lseek"] == 0 {
+		t.Error("the kernel forwarded no LSEEK, so the answer above did not come from file.Lseek")
+	}
+}
+
+// lseekRefusedByTheKernel is what a caller must get on a kernel older than
+// FUSE 7.24, where the syscall never reaches this process.
+//
+// The refusal has to be ENOTTY specifically. That is the kernel's own "this
+// file descriptor does not do that", and it is what makes GNU cp's
+// --sparse=auto probe, tar and rsync fall back to copying the file whole. A
+// wrong offset would silently truncate a copy; EIO would read as a broken
+// file; ENXIO would claim the probe succeeded and found nothing. It also
+// cannot have come from file.Lseek, which only ever returns 0, ENXIO or
+// EINVAL — and the counter below confirms that directly.
+func lseekRefusedByTheKernel(t *testing.T, e *mountEnv, f *os.File, body []byte) {
+	t.Helper()
+	for _, whence := range []struct {
+		name string
+		val  int
+	}{{"SEEK_HOLE", unix.SEEK_HOLE}, {"SEEK_DATA", unix.SEEK_DATA}} {
+		_, err := unix.Seek(int(f.Fd()), 0, whence.val)
+		if !errors.Is(err, syscall.ENOTTY) {
+			t.Errorf("%s on a pre-7.24 kernel = %v, want ENOTTY: the probe must be refused, and refused as unsupported",
+				whence.name, err)
+		}
+	}
+	if n := e.mnt.OpStats().Ops["lseek"]; n != 0 {
+		t.Errorf("the kernel forwarded %d LSEEK requests on a protocol that has none", n)
+	}
+	// The refusal must leave the descriptor usable: ordinary seeking and a
+	// full read are the fallback path every one of those tools takes.
+	if off, err := unix.Seek(int(f.Fd()), 0, unix.SEEK_END); err != nil || off != int64(len(body)) {
+		t.Fatalf("SEEK_END after the refused probe = %d, %v; want %d", off, err, len(body))
+	}
+	if _, err := unix.Seek(int(f.Fd()), 0, unix.SEEK_SET); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("read after the refused probe = %q, %v", got, err)
 	}
 }
 
@@ -832,10 +888,16 @@ func TestPathThroughAFileIsENOTDIR(t *testing.T) {
 }
 
 // TestWalkCostsOneRequestPerDirectoryAndThenNone pins the request budget of a
-// tree walk. Cold: one opendir per directory and every entry answered from
-// the listing (dir_lookup), never by a per-entry lookup against the metadata
-// store. Warm, inside the entry and attribute timeouts: the kernel answers
-// readdir and stat itself, so nothing but the opendirs reaches this process.
+// tree walk.
+//
+// What good looks like depends on one capability, so the assertions branch on
+// it and not on the operating system. With CAP_READDIRPLUS the kernel takes a
+// directory's entries and their attributes in one reply, and a warm walk it
+// can answer from its own caches costs nothing at all. Without it — macFUSE
+// speaks FUSE 7.19 — the same walk is a LOOKUP and a GETATTR per entry, and
+// the kernel does not honour FOPEN_CACHE_DIR either, so it re-reads every
+// directory. Both are pinned; see walkBudgetWithReaddirplus and
+// walkBudgetWithout, and TODO.md T-61.
 func TestWalkCostsOneRequestPerDirectoryAndThenNone(t *testing.T) {
 	// The warm walk must land inside the kernel's entry timeout, or expired
 	// dentries are re-looked-up and the count says nothing about caching.
@@ -882,7 +944,24 @@ func TestWalkCostsOneRequestPerDirectoryAndThenNone(t *testing.T) {
 			t.Fatalf("walk saw %d entries", n)
 		}
 	})
+	warm := delta(func() { walk() })
+	t.Logf("readdirplus offered: %v", e.mnt.ReaddirplusOffered())
 	t.Logf("cold walk: %v", cold)
+	t.Logf("warm walk: %v", warm)
+	if e.mnt.ReaddirplusOffered() {
+		walkBudgetWithReaddirplus(t, cold, warm, dirs, files)
+		return
+	}
+	walkBudgetWithout(t, cold, warm, dirs, files)
+}
+
+// walkBudgetWithReaddirplus is the budget on a kernel that answers
+// readdirplus. Cold: one opendir per directory and every entry answered from
+// the listing (dir_lookup), never by a per-entry lookup against the metadata
+// store. Warm, inside the entry and attribute timeouts: the kernel answers
+// readdir and stat itself, so nothing but the opendirs reaches this process.
+func walkBudgetWithReaddirplus(t *testing.T, cold, warm map[string]int64, dirs, files int64) {
+	t.Helper()
 	if cold["opendir"] != 1+dirs {
 		t.Errorf("cold walk sent %d opendirs, want %d", cold["opendir"], 1+dirs)
 	}
@@ -890,7 +969,7 @@ func TestWalkCostsOneRequestPerDirectoryAndThenNone(t *testing.T) {
 	// again on a handle it has dropped, which builds one more listing and
 	// still costs nothing per entry, so the count is a floor plus that
 	// allowance; what must hold exactly is where the entries came from.
-	if cold["readdir"] < int64(1+dirs) || cold["readdir"] > int64(2+dirs) {
+	if cold["readdir"] < 1+dirs || cold["readdir"] > 2+dirs {
 		t.Errorf("cold walk built %d listings, want one per directory (%d)", cold["readdir"], 1+dirs)
 	}
 	if cold["lookup"] != 0 {
@@ -899,12 +978,13 @@ func TestWalkCostsOneRequestPerDirectoryAndThenNone(t *testing.T) {
 	if cold["dir_lookup"] != dirs+dirs*files {
 		t.Errorf("cold walk answered %d entries from listings, want %d", cold["dir_lookup"], dirs+dirs*files)
 	}
+	if cold["entry_cache"] != 0 {
+		t.Errorf("the compensating entry cache served %d entries on a kernel that does not need it", cold["entry_cache"])
+	}
 	// The one allowed getattr is the walk's own stat of the mount root.
 	if cold["getattr"] > 1 {
 		t.Errorf("cold walk sent %d getattrs; readdirplus already carried the attributes", cold["getattr"])
 	}
-	warm := delta(func() { walk() })
-	t.Logf("warm walk: %v", warm)
 	for op, n := range warm {
 		switch op {
 		case "opendir":
@@ -922,6 +1002,72 @@ func TestWalkCostsOneRequestPerDirectoryAndThenNone(t *testing.T) {
 				t.Errorf("warm walk sent %d %s requests; the kernel should answer from its caches", n, op)
 			}
 		}
+	}
+}
+
+// walkBudgetWithout is the budget on a kernel that never sends readdirplus,
+// which is macFUSE today. The shape of the walk is genuinely different and
+// this says so rather than skipping:
+//
+//   - Every entry still has to be answered without a metadata query. The
+//     kernel sends a LOOKUP per entry instead of taking them with the
+//     listing, and the entry cache answers those from the listing the
+//     directory was just read with (entry_cache.go). `lookup` — an entry
+//     reaching the VFS on its own — is what must stay near zero; before that
+//     cache existed it was one per entry, serialised, because this kernel
+//     offers no CAP_PARALLEL_DIROPS either.
+//   - A GETATTR per entry is not recoverable here. readdirplus is what
+//     carries attributes with the entries; the kernel asks for them
+//     separately and there is no reply that can pre-empt it. They are
+//     metadata-store reads, not provider calls, so the budget bounds them
+//     rather than forbidding them.
+//   - FOPEN_CACHE_DIR is not honoured, so the warm walk re-reads every
+//     directory. That is why `readdir` is not zero when warm.
+func walkBudgetWithout(t *testing.T, cold, warm map[string]int64, dirs, files int64) {
+	t.Helper()
+	entries := dirs + dirs*files
+	for _, w := range []struct {
+		name  string
+		stats map[string]int64
+	}{{"cold", cold}, {"warm", warm}} {
+		if got := w.stats["opendir"]; got != 1+dirs {
+			t.Errorf("%s walk sent %d opendirs, want %d", w.name, got, 1+dirs)
+		}
+		// Every directory is listed again because the kernel will not keep
+		// the stream; one listing per directory is still the floor, with the
+		// same one-extra allowance as the readdirplus branch.
+		if got := w.stats["readdir"]; got < 1+dirs || got > 2+dirs {
+			t.Errorf("%s walk built %d listings, want one per directory (%d)", w.name, got, 1+dirs)
+		}
+		if got := w.stats["dir_lookup"]; got != 0 {
+			t.Errorf("%s walk answered %d entries through dirHandle.Lookup, which this kernel never reaches", w.name, got)
+		}
+		// A few names are asked about outside a listing burst — the mount
+		// root above all. The regression this guards is one per entry.
+		if got := w.stats["lookup"]; got > 1+dirs {
+			t.Errorf("%s walk sent %d per-entry lookups to the VFS, want at most %d; the listing was already in hand",
+				w.name, got, 1+dirs)
+		}
+		// Two per entry is the measured cost of answering attributes one at
+		// a time (see TODO.md T-61); more than that means something else started
+		// asking.
+		if got := w.stats["getattr"]; got > 3*entries {
+			t.Errorf("%s walk sent %d getattrs over %d entries; without readdirplus the kernel asks per entry, but not this often",
+				w.name, got, entries)
+		}
+	}
+	// The cold walk is where the entry cache earns its place: the kernel asks
+	// about every entry it listed, and every one of those is answered from
+	// the listing rather than from the metadata store.
+	if cold["entry_cache"] < entries-int64(1+dirs) {
+		t.Errorf("cold walk answered only %d of %d entries from the listing", cold["entry_cache"], entries)
+	}
+	// Warm, the kernel's own dentry cache answers most of them before they
+	// reach this process at all; whatever does reach it must still not
+	// become a metadata query.
+	if warm["entry_cache"]+warm["lookup"] > entries {
+		t.Errorf("warm walk resolved %d names through this process over %d entries",
+			warm["entry_cache"]+warm["lookup"], entries)
 	}
 }
 

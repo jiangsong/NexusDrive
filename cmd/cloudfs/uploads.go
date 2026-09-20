@@ -33,6 +33,12 @@ func runUploads(ctx context.Context, args []string, out io.Writer) error {
 	if action == "" {
 		action = "list"
 	}
+	// watch is not a control-plane action at all: it reads /status, which
+	// every daemon already serves. Nothing to add to the API surface, and
+	// nothing a second watcher can disturb.
+	if action == "watch" {
+		return runUploadsWatch(ctx, f, out)
+	}
 	if action != "list" && action != "retry" && action != "flush" && action != "drop" && action != "cancel" && action != "resume" {
 		return fmt.Errorf("uploads: unknown subcommand %q", action)
 	}
@@ -76,7 +82,17 @@ func runUploads(ctx context.Context, args []string, out io.Writer) error {
 
 	// Online management must not instantiate a second provider/cache
 	// stack or touch the owner's journal through another process.
-	result, online, err := control.CallUploads(ctx, cfg.Control.Socket, cfg.Control.Metrics, q)
+	//
+	// A flush blocks for as long as the queue takes — up to the half hour
+	// its default timeout allows — so it draws the same progress line a
+	// watch does rather than sitting silent.
+	var result control.UploadResponse
+	var online bool
+	if action == "flush" && !f.bools["json"] {
+		result, online, err = flushWithProgress(ctx, cfg.Control.Socket, cfg.Control.Metrics, q, out)
+	} else {
+		result, online, err = control.CallUploads(ctx, cfg.Control.Socket, cfg.Control.Metrics, q)
+	}
 	if err != nil {
 		return err
 	}

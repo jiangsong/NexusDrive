@@ -2,7 +2,7 @@ package meta
 
 // schemaVersion is bumped whenever migrations are appended. The store applies
 // every migration above the recorded version inside one transaction.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // migrations[i] upgrades the database from version i to i+1.
 var migrations = []string{
@@ -172,4 +172,16 @@ END;`,
 	// outlives the process because the cursor does — the first poll after a
 	// restart delivers what happened while the daemon was down.
 	`ALTER TABLE remote_cursor ADD COLUMN covered_since INTEGER NOT NULL DEFAULT 0;`,
+	// v14 -> v15: mode_set marks a node whose permission bits a caller chose
+	// rather than the default fillMode hands out.
+	//
+	// No provider reports a POSIX mode, so every listing carries the default
+	// and a refresh would otherwise drag it back over whatever chmod(2) set —
+	// an executable script on the mount would lose its exec bit the next time
+	// its directory went stale, which is what makes git see a mode-only diff
+	// on a checkout that nothing touched. The local database is the only
+	// source of permissions here, so a node that has one keeps it until it is
+	// deleted; the inode goes with the node, and the replacement starts over
+	// at the default.
+	`ALTER TABLE nodes ADD COLUMN mode_set INTEGER NOT NULL DEFAULT 0;`,
 }

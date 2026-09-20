@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -9,22 +11,33 @@ import (
 	"cloudfs/internal/vfs"
 )
 
-const triggerConfig = baseConfig + `
+// triggerConfig builds the rule with a resolved path to true(1). The binary
+// lives in /bin on Linux and in /usr/bin on macOS, and a rule that names a
+// path the host does not have fails the exec three times over and looks like
+// a broken engine rather than a broken fixture.
+func triggerConfig(t *testing.T) string {
+	t.Helper()
+	bin, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("true(1) not on PATH: %v", err)
+	}
+	return baseConfig + fmt.Sprintf(`
 triggers:
   - name: inbox
     paths: ["/demo/inbox/**"]
     origins: [kernel, remote]
     debounce: 10ms
     action:
-      exec: { command: ["/bin/true"], timeout: 5s }
-`
+      exec: { command: [%q], timeout: 5s }
+`, bin)
+}
 
 // TestTriggerEngineRunsOnlyInTheOwner: the engine exists in the process
 // that owns agent.db and runs background work, never in a second process
 // beside it and never for a one-shot command; and it is wired to the real
 // change stream, so a write on the VFS leaves a delivery row.
 func TestTriggerEngineRunsOnlyInTheOwner(t *testing.T) {
-	cfg, _ := writeConfig(t, triggerConfig)
+	cfg, _ := writeConfig(t, triggerConfig(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	owner, err := Open(ctx, Options{Config: cfg, Version: "test"})
@@ -91,7 +104,7 @@ func TestTriggerEngineRunsOnlyInTheOwner(t *testing.T) {
 // TestNoBackgroundSkipsTheTriggerEngine: an offline management command
 // must not start running other people's commands.
 func TestNoBackgroundSkipsTheTriggerEngine(t *testing.T) {
-	cfg, _ := writeConfig(t, triggerConfig)
+	cfg, _ := writeConfig(t, triggerConfig(t))
 	d, err := Open(context.Background(), Options{Config: cfg, Version: "test", NoBackground: true})
 	if err != nil {
 		t.Fatal(err)

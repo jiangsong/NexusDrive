@@ -25,30 +25,47 @@ func TestNeverOpenedDirectoryBecomesSearchable(t *testing.T) {
 	s := newStackWith(t, "writeback", stackOptions{extraYAML: crawlYAML})
 	s.fake.Seed("archive/2019/never-opened-51c9.txt", []byte("x"))
 	h := control.NewServer(s.d.Collector()).Handler()
-	deadline := time.Now().Add(10 * time.Second)
+	// A minute, not ten seconds. The claim is that a directory nobody opened
+	// becomes searchable on its own; how long that takes is not part of it.
+	// The crawler waits for the mount to fall quiet and then yields to any
+	// foreground work, so under a loaded machine — the whole repo's packages
+	// at once — a ten-second bound was a bet rather than an assertion, and it
+	// lost about one run in three. (Verified pre-existing: it failed the same
+	// way on an unmodified HEAD.)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		w := uiCall(t, h, "GET", "/search?q=51c9", "")
 		if strings.Contains(w.Body.String(), `"/archive/2019/never-opened-51c9.txt"`) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("not searchable within 10s: %s", w.Body.String())
+			t.Fatalf("not searchable within 60s: %s", w.Body.String())
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if b, err := os.ReadFile(filepath.Join(s.dir, "archive/2019/never-opened-51c9.txt")); err != nil || string(b) != "x" {
 		t.Fatalf("the crawled file is not readable through the mount: %v", err)
 	}
+	// The crawl counter needs its own wait. The loop above proved the name
+	// reached the index; the counter is published separately and lags it, so
+	// reading it once is a race that only loses when the machine is busy —
+	// which is to say, under `./...` and never alone.
 	var st struct {
 		Crawl struct {
 			Listed int64 `json:"listed"`
 		} `json:"crawl"`
 	}
-	if err := json.Unmarshal(uiCall(t, h, "GET", "/status", "").Body.Bytes(), &st); err != nil {
-		t.Fatal(err)
-	}
-	if st.Crawl.Listed < 3 {
-		t.Fatalf("status.crawl does not reflect the pass: %+v", st)
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if err := json.Unmarshal(uiCall(t, h, "GET", "/status", "").Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		if st.Crawl.Listed >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status.crawl does not reflect the pass within 10s: %+v", st)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

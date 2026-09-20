@@ -242,13 +242,13 @@ func (f *FS) crawlLoop(ctx context.Context, m *crawlManager) {
 	}
 }
 
-// crawlWaitQuiet blocks until fgIO has been zero for IdleAfter without a
-// break. It reports false when the manager was stopped meanwhile.
+// crawlWaitQuiet blocks until foreground IO has been zero for IdleAfter
+// without a break. It reports false when the manager was stopped meanwhile.
 func (f *FS) crawlWaitQuiet(ctx context.Context, m *crawlManager) bool {
 	var quietSince time.Time
 	for {
 		now := time.Now()
-		if f.fgIO.Load() == 0 {
+		if f.busyIO() == 0 {
 			if quietSince.IsZero() {
 				quietSince = now
 			}
@@ -367,7 +367,7 @@ func (f *FS) crawlDirs(ctx context.Context, opt CrawlOptions, stop <-chan struct
 				return errCrawlStopped
 			default:
 			}
-			if f.fgIO.Load() > 0 {
+			if f.busyIO() > 0 {
 				f.updateCrawl(func(p *CrawlProgress) { p.Paused = "busy" })
 				if f.yieldToForeground(stop, opt.YieldMax) {
 					f.updateCrawl(func(p *CrawlProgress) { p.Yields++ })
@@ -448,12 +448,13 @@ func crawlExcluded(patterns []string, p string) bool {
 	return false
 }
 
-// yieldToForeground blocks while foreground reads or writes are in flight,
-// for at most limit. It reports whether it waited at all. The prefetcher and
-// the crawler share it: both spend a provider round trip and a metadata
-// write transaction that the kernel's request is queued behind.
+// yieldToForeground blocks while foreground reads, writes or metadata
+// requests are in flight, for at most limit. It reports whether it waited at
+// all. The prefetcher and the crawler share it: both spend a provider round
+// trip and a metadata write transaction that the kernel's request is queued
+// behind.
 func (f *FS) yieldToForeground(stop <-chan struct{}, limit time.Duration) bool {
-	if f.fgIO.Load() == 0 {
+	if f.busyIO() == 0 {
 		return false
 	}
 	deadline := time.Now().Add(limit)
@@ -461,7 +462,7 @@ func (f *FS) yieldToForeground(stop <-chan struct{}, limit time.Duration) bool {
 	// wake-ups: starting background listing a few tens of milliseconds late
 	// is free, and up to nine of these can be waiting at once.
 	for wait := time.Millisecond; ; {
-		if f.fgIO.Load() == 0 {
+		if f.busyIO() == 0 {
 			return true
 		}
 		select {

@@ -235,7 +235,8 @@ grep -rn 'UNVERIFIED:' internal/provider/
 | gdrive | About.storageQuota（无上限账号报告为未知） | 无限制 |
 | webdav | RFC 4331 quota-available/used-bytes，服务器不支持则未知 | 禁 `\`，255 字节 |
 | aliyun | `getSpaceInfo`（UNVERIFIED） | 禁 `\`（UNVERIFIED） |
-| baidu / pan115 / pan123 / quark / tianyi | 未实现（放置不按空间优先，可配 `capacity`） | Windows 类禁字符集（UNVERIFIED） |
+| quark | `/1/clouddrive/member` 的 `total_capacity` / `use_capacity`（UNVERIFIED：端点、字段名与单位都未在真实账号上验证） | Windows 类禁字符集（UNVERIFIED） |
+| baidu / pan115 / pan123 / tianyi | 未实现（放置不按空间优先，可配 `capacity`） | Windows 类禁字符集（UNVERIFIED） |
 | onedrive | 未实现 | 大小写不敏感，禁 `<>:"|?*\`，保留名，不能以点/空格结尾 |
 | smb | 未实现 | 大小写不敏感，Windows 保留名与禁字符 |
 | dropbox | `/2/users/get_space_usage`，individual 配额取 `allocation.allocated`；team 空间形状不同、当前读不了，一律报告为未知（不猜测，UNVERIFIED） | 大小写不敏感，不能以点/空格结尾 |

@@ -180,7 +180,7 @@ func TestSearchEmptyWithGapSuggestsWarm(t *testing.T) {
 	if len(out.Hits) != 0 || out.Coverage.Known <= out.Coverage.Listed {
 		t.Fatalf("premise: %+v", out)
 	}
-	if !strings.Contains(out.Next, "directory_tree") || !strings.Contains(out.Next, "search again") {
+	if !strings.Contains(out.Next, "warm") || !strings.Contains(out.Next, "search again") {
 		t.Fatalf("next = %q", out.Next)
 	}
 	// Once the tree is listed the same query finds the file and next is empty.

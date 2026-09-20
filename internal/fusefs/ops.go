@@ -16,7 +16,8 @@ const (
 	opSetattr
 	opOpendir
 	opReaddir
-	opDirLookup // readdirplus entry served from the directory listing
+	opDirLookup   // readdirplus entry served from the directory listing
+	opEntryLookup // LOOKUP served from the listing its directory was read with
 	opOpen
 	opCreate
 	opMkdir
@@ -31,13 +32,14 @@ const (
 	opGetxattr
 	opStatfs
 	opCopyFileRange
+	opLseek
 	nOps
 )
 
 var opNames = [nOps]string{
-	"lookup", "getattr", "setattr", "opendir", "readdir", "dir_lookup", "open", "create",
+	"lookup", "getattr", "setattr", "opendir", "readdir", "dir_lookup", "entry_cache", "open", "create",
 	"mkdir", "unlink", "rmdir", "rename", "read", "write", "flush", "fsync", "release",
-	"getxattr", "statfs", "copy_file_range",
+	"getxattr", "statfs", "copy_file_range", "lseek",
 }
 
 // readBucketEdges are the upper bounds of the READ size histogram, in bytes.

@@ -627,7 +627,7 @@ func TestMetadataStatementBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	budget("lookup miss (fresh listing)", 5, 0, func() {
+	budget("lookup miss (fresh listing)", 3, 0, func() {
 		if _, err := h.fs.Lookup(ctx, dir.Ino, "nope.txt"); err == nil {
 			t.Fatal("expected a miss")
 		}
@@ -643,7 +643,7 @@ func TestMetadataStatementBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	budget("create + write + close", 7, 2, func() {
+	budget("create + write + close", 6, 2, func() {
 		fh, err := h.fs.Create(ctx, dir.Ino, "new.txt")
 		if err != nil {
 			t.Fatal(err)
@@ -658,7 +658,7 @@ func TestMetadataStatementBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	budget("readdir of a cached directory", 4, 0, func() {
+	budget("readdir of a cached directory", 2, 0, func() {
 		if _, err := h.fs.ReadDir(ctx, dir.Ino); err != nil {
 			t.Fatal(err)
 		}

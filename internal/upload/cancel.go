@@ -60,8 +60,12 @@ func (u *Uploader) registerTransfer(ctx context.Context, up journal.Upload) (con
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	u.transfers[up.ID] = cancel
+	// Registration and release are paired exactly once per transfer, which
+	// makes this the one place that can say how many bytes are moving now.
+	u.inflightBytes.Add(up.Size)
 	return ctx, func() {
 		cancel()
+		u.inflightBytes.Add(-up.Size)
 		u.transferMu.Lock()
 		defer u.transferMu.Unlock()
 		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

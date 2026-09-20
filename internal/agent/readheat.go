@@ -222,16 +222,70 @@ type ReadObserver struct {
 	store *Store
 	now   func() time.Time
 
-	mu      sync.Mutex
-	last    map[readKey]time.Time
-	pending map[readKey]ReadSample
+	mu         sync.Mutex
+	resolve    PathResolver
+	last       map[readKey]time.Time
+	pending    map[readKey]ReadSample
+	lastIno    map[inoKey]time.Time
+	pendingIno map[inoKey]inoSample
 }
 
 type readKey struct{ path, kind string }
 
+// inoKey debounces an inode's reads per kind of reader, the way readKey
+// does for the callers that already hold a path.
+type inoKey struct {
+	ino  uint64
+	kind string
+}
+
+type inoSample struct {
+	ts    time.Time
+	count int
+}
+
+// PathResolver turns an inode into its path within the mount. Resolving
+// one is a recursive walk to the root of the metadata tree, which is why
+// ObserveIno defers it to Flush.
+type PathResolver func(ctx context.Context, ino uint64) (string, error)
+
 // NewReadObserver makes an observer over store.
 func NewReadObserver(store *Store) *ReadObserver {
-	return &ReadObserver{store: store, now: store.now, last: map[readKey]time.Time{}, pending: map[readKey]ReadSample{}}
+	return &ReadObserver{store: store, now: store.now, last: map[readKey]time.Time{}, pending: map[readKey]ReadSample{},
+		lastIno: map[inoKey]time.Time{}, pendingIno: map[inoKey]inoSample{}}
+}
+
+// SetPathResolver installs what ObserveIno's inodes are resolved with. It
+// belongs to the daemon, the one place that knows both the metadata store
+// and this observer; without it ObserveIno has no way to name what it
+// heard and records nothing.
+func (o *ReadObserver) SetPathResolver(fn PathResolver) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.resolve = fn
+}
+
+// ObserveIno records one read of ino by kind, debounced, without naming
+// the file: the path is resolved by Flush. It is the form the VFS read
+// observer uses, where the work happens on a foreground read.
+func (o *ReadObserver) ObserveIno(ino uint64, kind string) {
+	if ino == 0 || kind == "" {
+		return
+	}
+	k := inoKey{ino, kind}
+	now := o.now()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.resolve == nil {
+		return
+	}
+	if t, ok := o.lastIno[k]; ok && now.Sub(t) < readDebounce {
+		return
+	}
+	o.lastIno[k] = now
+	s := o.pendingIno[k]
+	s.ts, s.count = now, s.count+1
+	o.pendingIno[k] = s
 }
 
 // Observe records one read of path by kind, debounced.
@@ -256,25 +310,44 @@ func (o *ReadObserver) Observe(path, kind string) {
 func (o *ReadObserver) Pending() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return len(o.pending)
+	return len(o.pending) + len(o.pendingIno)
 }
 
 // Flush writes the pending samples and drops debounce entries older
-// than the window.
+// than the window. The inodes observed since the last flush are resolved
+// to paths here, off the read path. An inode renamed in between is
+// counted under the name it has now, because heat follows the file
+// rather than the name it was read by; one deleted in between resolves
+// to nothing and is dropped, because a path that no longer exists cannot
+// be hot and would only be a row nothing can ever match again.
 func (o *ReadObserver) Flush(ctx context.Context) error {
 	o.mu.Lock()
-	batch := make([]ReadSample, 0, len(o.pending))
+	batch := make([]ReadSample, 0, len(o.pending)+len(o.pendingIno))
 	for _, s := range o.pending {
 		batch = append(batch, s)
 	}
+	inos, resolve := o.pendingIno, o.resolve
 	o.pending = map[readKey]ReadSample{}
+	o.pendingIno = map[inoKey]inoSample{}
 	now := o.now()
 	for k, t := range o.last {
 		if now.Sub(t) >= readDebounce {
 			delete(o.last, k)
 		}
 	}
+	for k, t := range o.lastIno {
+		if now.Sub(t) >= readDebounce {
+			delete(o.lastIno, k)
+		}
+	}
 	o.mu.Unlock()
+	for k, s := range inos {
+		p, err := resolve(ctx, k.ino)
+		if err != nil || p == "" {
+			continue
+		}
+		batch = append(batch, ReadSample{Path: p, ActorKind: k.kind, TS: s.ts, Count: s.count})
+	}
 	return o.store.BumpReadHeat(ctx, batch)
 }
 

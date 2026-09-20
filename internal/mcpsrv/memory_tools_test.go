@@ -220,6 +220,31 @@ func TestMemorySearchWithoutAnIndexSaysSo(t *testing.T) {
 	}
 }
 
+// searchUntil calls memory_search until it returns want hits, or fails.
+//
+// Extraction into the index is asynchronous, so every assertion about a
+// document's searchability has to wait for that document. Waiting once at the
+// top of a test is not enough: a later query that is the first to touch a
+// different file starts the wait over, and asking it a single time is a race
+// that only shows up when the machine is loaded — which is to say, in a full
+// package run and never in isolation.
+func searchUntil(t *testing.T, e *memEnv, args map[string]any, want int, out *memory.SearchResult) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if res := e.call(t, "memory_search", args, out); res.IsError {
+			t.Fatal(errText(res))
+		}
+		if len(out.Hits) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("memory_search %v returned %d hits, want %d, after 3s: %+v", args, len(out.Hits), want, *out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestMemorySearchFindsAFreshFact(t *testing.T) {
 	if testx.RaceEnabled {
 		t.Skip("the three-second bound is a timing assertion")
@@ -247,19 +272,7 @@ func TestMemorySearchFindsAFreshFact(t *testing.T) {
 		t.Fatal(errText(res))
 	}
 	var out memory.SearchResult
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if res := e.call(t, "memory_search", map[string]any{"query": "needle 7f3a"}, &out); res.IsError {
-			t.Fatal(errText(res))
-		}
-		if len(out.Hits) == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("a fresh fact was not searchable within 3s: %+v", out)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	searchUntil(t, e, map[string]any{"query": "needle 7f3a"}, 2, &out)
 	seen := map[string]string{}
 	for _, h := range out.Hits {
 		seen[h.Agent] = h.Name
@@ -273,8 +286,12 @@ func TestMemorySearchFindsAFreshFact(t *testing.T) {
 	if len(out.Hits) != 1 || out.Hits[0].Agent != "test" {
 		t.Fatalf("own facts only: %+v", out)
 	}
-	e.call(t, "memory_search", map[string]any{"query": "needle 7f3a", "agent": "codex", "include_shared": false}, &out)
-	if len(out.Hits) != 1 || out.Hits[0].Name != "other" {
+	// This one needs its own wait: it is the first query to reach other.md,
+	// and the loop above only proved style.md and team.md had been extracted.
+	// Asking once here is why this test failed about one full-package run in
+	// four while passing every time in isolation.
+	searchUntil(t, e, map[string]any{"query": "needle 7f3a", "agent": "codex", "include_shared": false}, 1, &out)
+	if out.Hits[0].Name != "other" {
 		t.Fatalf("another agent by name: %+v", out)
 	}
 	// index_status names the rule as builtin.

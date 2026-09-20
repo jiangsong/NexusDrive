@@ -118,6 +118,15 @@ type Store struct {
 	// test can put a budget on what one FUSE operation may cost.
 	queries atomic.Int64
 	writeTx atomic.Int64
+
+	// durableTxs counts the subset of writeTx that ran at synchronous=FULL.
+	// Those are the only ones that flush the disk, and their pragmas go
+	// through conn.ExecContext rather than prep, so queries cannot see them.
+	durableTxs atomic.Int64
+
+	// prepares counts statements actually handed to SQLite to parse, so a
+	// test can tell a cached query from one re-parsed on every call.
+	prepares atomic.Int64
 }
 
 type absentKey struct {
@@ -130,6 +139,10 @@ func (s *Store) QueryStats() (queries, writeTx int64) {
 	return s.queries.Load(), s.writeTx.Load()
 }
 
+// DurableTxStats reports how many write transactions committed at
+// synchronous=FULL, which is what a publication costs in disk flushes.
+func (s *Store) DurableTxStats() int64 { return s.durableTxs.Load() }
+
 // prep returns a prepared statement for q, preparing it on first use.
 func (s *Store) prep(ctx context.Context, q string) (*sql.Stmt, error) {
 	if st, ok := s.stmts.Load(q); ok {
@@ -139,6 +152,7 @@ func (s *Store) prep(ctx context.Context, q string) (*sql.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.prepares.Add(1)
 	if prev, loaded := s.stmts.LoadOrStore(q, st); loaded {
 		st.Close()
 		return prev.(*sql.Stmt), nil
@@ -165,6 +179,9 @@ type Options struct {
 	// NoIndexMaintenance disables automatic index flushing, including Close.
 	// Targeted offline administration must not process unrelated pending names.
 	NoIndexMaintenance bool
+	// IndexInterval overrides how often pending names are folded into the FTS
+	// index; zero uses indexInterval. Tests shorten it to watch several ticks.
+	IndexInterval time.Duration
 }
 
 // Open opens (creating if needed) the metadata database at dbPath and applies
@@ -208,7 +225,7 @@ func Open(dbPath string, opt Options) (*Store, error) {
 		return nil, err
 	}
 	if !opt.NoIndexMaintenance {
-		s.startIndexer()
+		s.startIndexer(opt.IndexInterval)
 	}
 	return s, nil
 }
@@ -353,9 +370,11 @@ func (s *Store) Lookup(ctx context.Context, parent uint64, name string) (Node, e
 // ByRemoteID finds a node by the provider's own id. The delta refresher needs
 // it because a change feed identifies files by remote id, not by path.
 func (s *Store) ByRemoteID(ctx context.Context, remote, remoteID string) (Node, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT `+nodeCols+` FROM nodes WHERE remote = ? AND remote_id = ? LIMIT 1`, remote, remoteID)
-	n, err := scanNode(row)
+	st, err := s.prep(ctx, `SELECT `+nodeCols+` FROM nodes WHERE remote = ? AND remote_id = ? LIMIT 1`)
+	if err != nil {
+		return Node{}, fmt.Errorf("meta: by_remote_id %s/%s: %w", remote, remoteID, err)
+	}
+	n, err := scanNode(st.QueryRowContext(ctx, remote, remoteID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}
@@ -369,7 +388,11 @@ func (s *Store) ByRemoteID(ctx context.Context, remote, remoteID string) (Node, 
 // mounted at several prefixes, so retention cannot use ByRemoteID's first hit.
 func (s *Store) Aliases(ctx context.Context, remote, remoteID string) ([]Node, error) {
 	s.queries.Add(1)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes WHERE remote = ? AND remote_id = ?`, remote, remoteID)
+	st, err := s.prep(ctx, `SELECT `+nodeCols+` FROM nodes WHERE remote = ? AND remote_id = ?`)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := st.QueryContext(ctx, remote, remoteID)
 	if err != nil {
 		return nil, err
 	}
@@ -389,8 +412,11 @@ func (s *Store) Aliases(ctx context.Context, remote, remoteID string) ([]Node, e
 func (s *Store) Children(ctx context.Context, dir uint64) ([]Node, error) {
 	s.childrenScans.Add(1)
 	s.queries.Add(1)
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+nodeCols+` FROM nodes WHERE parent_ino = ? AND ino != ? ORDER BY name`, dir, RootIno)
+	st, err := s.prep(ctx, `SELECT `+nodeCols+` FROM nodes WHERE parent_ino = ? AND ino != ? ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("meta: children %d: %w", dir, err)
+	}
+	rows, err := st.QueryContext(ctx, dir, RootIno)
 	if err != nil {
 		return nil, fmt.Errorf("meta: children %d: %w", dir, err)
 	}
@@ -413,9 +439,11 @@ func (s *Store) Children(ctx context.Context, dir uint64) ([]Node, error) {
 // also have no remote id, are not dirty and are not listed.
 func (s *Store) UncommittedDirs(ctx context.Context) ([]Node, error) {
 	s.queries.Add(1)
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+nodeCols+` FROM nodes WHERE kind = ? AND remote_id = '' AND dirty = 1 AND ino != ?`,
-		int(provider.KindDir), RootIno)
+	st, err := s.prep(ctx, `SELECT `+nodeCols+` FROM nodes WHERE kind = ? AND remote_id = '' AND dirty = 1 AND ino != ?`)
+	if err != nil {
+		return nil, fmt.Errorf("meta: uncommitted dirs: %w", err)
+	}
+	rows, err := st.QueryContext(ctx, int(provider.KindDir), RootIno)
 	if err != nil {
 		return nil, fmt.Errorf("meta: uncommitted dirs: %w", err)
 	}
@@ -665,7 +693,7 @@ func (s *Store) upsertNodeTx(ctx context.Context, tx *sql.Tx, n Node) (uint64, e
 	switch {
 	case err == nil:
 		upd, err := s.txStmt(ctx, tx,
-			`UPDATE nodes SET kind=?, size=?, mtime_ns=?, mode=?, remote=?, remote_id=?,
+			`UPDATE nodes SET kind=?, size=?, mtime_ns=?, mode=CASE WHEN mode_set=1 THEN mode ELSE ? END, remote=?, remote_id=?,
 			   version=?, remote_version=?, hash_type=?, hash=?, fetched_at=?, ttl_s=?, dirty=?
 			 WHERE ino = ?`)
 		if err != nil {
@@ -958,7 +986,7 @@ func (s *Store) PutDirChanged(ctx context.Context, dir uint64, children []Node, 
 		}
 
 		update, err := tx.Prepare(
-			`UPDATE nodes SET kind=?, size=?, mtime_ns=?, mode=?, remote=?, remote_id=?,
+			`UPDATE nodes SET kind=?, size=?, mtime_ns=?, mode=CASE WHEN mode_set=1 THEN mode ELSE ? END, remote=?, remote_id=?,
 			   version=?, remote_version=?, hash_type=?, hash=?, fetched_at=?, ttl_s=?, dirty=0
 			 WHERE ino = ?`)
 		if err != nil {

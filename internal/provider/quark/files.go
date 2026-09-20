@@ -412,3 +412,25 @@ func escapePath(p string) string {
 	u := url.URL{Path: p}
 	return u.EscapedPath()
 }
+
+// Quota implements provider.Quotaer from the account's member record. A pool
+// ranks members by free space and the connections page shows the account's
+// capacity, so a driver that cannot answer leaves both blank.
+//
+// UNVERIFIED: the endpoint (/member), the two query flags the web client is
+// remembered to send, and the field names total_capacity / use_capacity, plus
+// that both are bytes. Confirm against a live account before removing this
+// note; a wrong shape reads as Total 0, which callers already treat as unknown.
+func (q *Quark) Quota(ctx context.Context) (provider.Quota, error) {
+	params := commonParams()
+	params.Set("fetch_subscribe", "true")
+	params.Set("_ch", "home")
+	var out struct {
+		Total int64 `json:"total_capacity"`
+		Used  int64 `json:"use_capacity"`
+	}
+	if _, err := q.getJSON(ctx, q.apiURL("/member", params), ratelimit.Meta, &out); err != nil {
+		return provider.Quota{}, err
+	}
+	return provider.Quota{Total: out.Total, Used: out.Used}, nil
+}

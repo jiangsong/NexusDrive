@@ -153,10 +153,11 @@ func TestToolsAreRegistered(t *testing.T) {
 	}
 	want := []string{
 		"list_directory", "directory_tree", "stat", "stat_many", "read_text", "read_range",
-		"search", "cache_status", "list_roots", "get_download_url",
+		"search", "warm", "cache_status", "list_roots", "get_download_url",
 		"write_file", "edit_file", "create_directory", "move", "copy", "delete", "pin", "unpin",
 		"list_copy_jobs", "get_copy_job", "retry_copy_job", "cancel_copy_job", "forget_copy_job",
 		"list_uploads", "get_upload", "retry_upload", "cancel_upload", "resume_upload", "discard_upload", "flush_uploads",
+		"upload_progress",
 		"share", "stale_docs",
 	}
 	for _, w := range want {

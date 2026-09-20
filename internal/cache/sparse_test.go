@@ -396,7 +396,10 @@ func TestSmallFilesKeepTheBlockLayout(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	if _, ok := c.HydratedPath(small); !ok {
-		t.Fatal("a small file is still merged by the hydration janitor")
+		// "Keeps the block layout" is about the sparse/whole split above, not
+		// about hydration: a small file is still the janitor's business, and
+		// the one merge copy at the end is the layout's whole cost model.
+		t.Fatal("a small file was never merged by the hydration janitor")
 	}
 }
 

@@ -220,9 +220,26 @@ func TestGuardExitsBeforeSpawningOutsideAMount(t *testing.T) {
 	if got := run(outside, withBin, "CLAUDE_PROJECT_DIR="+inside); got != "REACHED" {
 		t.Fatalf("project dir: %q", got)
 	}
+	// Both configured mounts survive the round trip. The count is not fixed:
+	// WriteMounts also records the symlink-resolved form of any mount that
+	// exists, because the guard compares getcwd(2)'s resolved $PWD — see
+	// TestMountsRegistryRecordsTheResolvedPathToo. "/other/mount" does not
+	// exist here, so it contributes only itself.
 	mounts, err := ReadMounts(MountsPath(home))
-	if err != nil || len(mounts) != 2 || mounts[0] != "/other/mount" {
-		t.Fatalf("registry: %v %v", mounts, err)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	for _, want := range []string{"/other/mount", mount} {
+		found := false
+		for _, m := range mounts {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("registry lost %q: %v", want, mounts)
+		}
 	}
 }
 

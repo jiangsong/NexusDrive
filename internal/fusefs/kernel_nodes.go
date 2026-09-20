@@ -109,6 +109,10 @@ var _ fs.NodeOnForgetter = (*node)(nil)
 // attributes, the page cache of a file, the directory stream of a
 // directory. It is a no-op for an inode the kernel does not hold.
 func (r *Root) notifyContent(ino uint64) {
+	// The entry cache holds attributes taken from a listing and, when ino is
+	// a directory, that listing itself. Whatever made the kernel's copy
+	// stale makes ours stale, and ours is consulted first.
+	r.forgetIno(ino)
 	for _, n := range r.kernel.live(ino) {
 		_ = n.NotifyContent(0, -1)
 	}
@@ -116,6 +120,9 @@ func (r *Root) notifyContent(ino uint64) {
 
 // notifyEntry drops the kernel's dentry for name under parent.
 func (r *Root) notifyEntry(parent uint64, name string) {
+	// Same reason, for one name: a file removed or added behind the
+	// kernel's back must not keep answering from the listing either.
+	r.forgetEntry(parent, name)
 	for _, n := range r.kernel.live(parent) {
 		_ = n.NotifyEntry(name)
 	}

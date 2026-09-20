@@ -301,7 +301,8 @@ CREATE TABLE nodes (
   kind       INTEGER NOT NULL,          -- 0 file, 1 dir
   size       INTEGER NOT NULL DEFAULT 0,
   mtime_ns   INTEGER NOT NULL,
-  mode       INTEGER NOT NULL,
+  mode       INTEGER NOT NULL,          -- 权限位；无远端提供，默认 0644 / 0755
+  mode_set   INTEGER NOT NULL DEFAULT 0,-- 1 = 本地 chmod/create 设过，刷新不覆盖
   remote     TEXT    NOT NULL,
   remote_id  TEXT    NOT NULL,
   version    TEXT,                      -- ETag / cTag / updated_at 等
@@ -337,6 +338,7 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
 | 负缓存 | `.git`、`.DS_Store`、`node_modules` 等探测命中 `absent` 表；该目录任何创建操作清空 |
 | 写直达 | 本地变更先更新 SQLite 并标 `dirty`，同时 `notify_inval`；内核 `entry_timeout / attr_timeout` 设 30 s |
 | 持久化 | 重启后目录树可直接用；避免冷启动刷新风暴 |
+| 权限位 | 没有任何网盘能存 POSIX 权限，所以 `mode` 只活在本地：`chmod(2)` 与 `open(2)`/`mkdir(2)` 带进来的 mode 写 `nodes.mode` 并置 `mode_set=1`。远端刷新（目录列举、delta feed）一律携带默认值，三条写回语句都用 `CASE WHEN mode_set=1` 跳过已设过的节点——否则可执行脚本会在目录 TTL 过期后丢掉 exec 位，git 随即报出没人改过的 mode-only diff。代价是权限不跨机器：`meta.db` 可整体重建，重建后回落默认。uid/gid 仍不建模，`chown` 是 no-op |
 | 搜索 | 文件名 trigram FTS 子串匹配（1／2 字符走短倒排），父链在查询期拼路径，工作预算 + `Complete`；`cloudfs find`、控制面 `/search` 与 MCP `search` 共用。Everything 式语法（`meta/query.go`，页面侧 `search_query.js` 同一张表）：裸词 AND、引号字面量、`*`/`?` 通配转 GLOB、`ext:`/`size:`/`dm:`/`type:`/`path:` 过滤在 `bounded` CTE 之前进 SQL；`sort=name/size/mtime/path` 只排已收集的命中（`Complete=false` 时不是全局顺序）。只覆盖已列举的目录：`meta.Coverage{listed, known}` 随 `/search`、`status` 与 MCP 返回；后台爬取器 `vfs/crawl.go`（`search.crawl`，默认关）在前台空闲时按 `dir_state.complete=0` 补列、风控后休眠，`warm --all` 与界面"索引整棵树"跑同一实现（T-44） |
 
 ### 4.4 数据缓存层 BlockCache
@@ -517,7 +519,7 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 ### 4.8 控制面与可观测性
 
-- CLI：`config add | auth | list`、`mount | umount`、`service install | uninstall | status`、`ui | open`、`pin | unpin`、`warm`、`uploads list | retry | drop`、`cache stats | gc`、`proxy test`、`status`、`doctor [--fix]`、`mcp --stdio | --http`。
+- CLI：`config add | auth | list`、`mount | umount`、`service install | uninstall | status`、`ui | open`、`pin | unpin`、`warm`、`uploads list | watch | retry | drop`、`cache stats | gc`、`proxy test`、`status [--watch]`、`doctor [--fix]`、`mcp --stdio | --http`。
 - 控制 API：Unix socket（默认）+ 可选 `127.0.0.1` HTTP；`/healthz`、`/readyz`、`/metrics`（Prometheus）、`/status`（JSON）。
 - 图形控制面端点（供内嵌 Web 应用与桌面壳使用，守卫同上，非 GET 需 `X-CloudFS-Control`，只接受回环 Host 与同源 Origin）：
   文件树 `GET /fs/list|stat|preview|download-url`、`POST /fs/mkdir|rename|delete`；`GET /search`；诊断 `POST /doctor/run|fix`；
@@ -530,6 +532,34 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
   凭据边界：任何 `IsSecretField` 键在 `POST /accounts` 与 `PATCH` 上一律 400 并指向 `cloudfs config auth`，秘密值不回显、不落盘、不经浏览器；
   `/fs/download-url` 是唯一有意返回签名 URL 的端点（no-store、不落日志）。桌面壳的 `CLOUDFS_CONTROL_UI=<loopback:port>` 让 `mount` 额外开一个带 UI 的回环 TCP 面（仍受 `Start` 的回环校验约束）。
 - 上传管理（已接线）：`GET /uploads?limit=200&cursor=<id>`、`POST /uploads/retry`（JSON `{"id":"..."}` 或 `{"all":true}`）、`POST /uploads/flush`（JSON `{}`）。POST 要求 `Content-Type: application/json` 和 `X-CloudFS-Control: 1`，不提供 CORS；本地原生客户端使用 `Host: cloudfs`。列表不暴露上传 session 和 blob 路径。
+- 上传整体进度（batch）的归属层是 `internal/upload`，不是控制面。`Uploader` 的 supervisor
+  tick（复用它已有的 `Journal.Remotes` 结果）采样一次队列，算出"这一批"的进度：队列从非空
+  到再次空为一批，`Seq` 每开一批 +1，`Rate`/`ETA` 用与 `internal/export` 完全相同的 10s EWMA
+  `rateMeter`。队列空且没有在跑的批次时**完全不查** `journal.Stats`（那条递归 CTE 不便宜），
+  所以空闲守护进程不因此多花一分钱。批次开始与排空各打一条 `slog.Info`——这是此前整个
+  `internal/upload` 都没有的完成信号。
+  `vfs.FS.UploadProgress()` 只是透传（不是回调注入），`control.Collector.UploadProgress`
+  是注入的函数，`cmd/cloudfs`、`mcpsrv`、控制台和 `/metrics` 都读同一份快照，不再各自推导。
+  - 批次在**连续第二次**读到空队列时才收尾：worker 先把行标成 done、再加计数器，只看一次
+    会让 3434 个文件的拷贝以"3433 / 3433"收场。
+  - 重启会清零计数：`journal.Stats.Done` 不单调（done 行会被裁剪），拿它当分母会让进度条
+    倒退，所以重启后发现队列非空只标 `Resumed`，并在每个界面上说明"自重启起计"。
+  - 两个并发拷贝会合并成一批——队列里没有记录来源的列，不引入写路径的 provenance 列就
+    修不了。因此所有新文案一律说"上传队列"，绝不说"你的拷贝"。
+  - 百分比只有一份实现：`upload.PercentOf`（有字节按字节、没有按文件数，进行中封顶
+    99.5%）。守护进程把算好的数放进 `batch.percent`，控制台与 CLI 都优先用服务端这个值；
+    `transfer_progress.js` 里那份同样的公式只作为**旧守护进程**的回退保留（新控制台配
+    旧守护进程不能白屏），CLI 同理（它可能比守护进程旧或新）。两条路径在封顶用例上由
+    Go 与 JS 两侧的测试分别钉住——一个浏览器和一个终端对同一批次差一位数，正是这套
+    东西要消灭的那类分歧。
+  - 暴露面：`/status` 的 `uploads.batch`（前 7 个 JSON 键是与
+    `web/transfer_progress.js` 的既有契约，有测试钉住；新增 `percent`/`seq`/`resumed`/
+    `rate`/`eta_seconds`/`files_done_total`/`bytes_done_total`）、`uploads.blocked`、
+    `uploads.in_flight_bytes`；`cloudfs status [--watch]`、`cloudfs uploads watch`
+    （纯 `/status` 读取，不新增控制面动作，排空后死信非零则退出码非零）；MCP
+    `upload_progress` 与 `cache_status` 的三个进度字段；Prometheus
+    `cloudfs_upload_batch_*` 系列 gauge 与 `cloudfs_uploads_completed_{files,bytes}_total`
+    两个 counter——counter 只能喂进程累计值，喂批次增量会在每次换批时倒退。
 - `uploads flush` 与内部 `DrainAll` 语义不同：前者等已提交队列（包括延迟和在途）排空，并对死信、取消及未完成清理报错；后者只处理当前到期任务。在线 flush 不启动额外 worker，连接取消仅结束等待。CLI 默认等待上限 30 分钟，`--timeout` 可调整。
 - 上传取消：`uploads cancel <id>` 与 `POST /uploads/cancel`（JSON `{"id":"..."}`）
   先保存停止意图，再中断 worker。pending/dead 可直接进入 cancelled，活动请求先
@@ -764,7 +794,7 @@ webdav:
 | M2 写路径 | staging 与流式哈希、写日志、上传队列（秒传 / 分片续传 / 会话恢复）、writeback 与 strict、冲突副本、崩溃恢复 | 完成 |
 | M3 网络层与驱动 | 共享 httpx 客户端（代理路由 + 限流 + 熔断 + 分类）、出口组与健康检查、WebDAV / OpenList 驱动 | 完成 |
 | M3 国内驱动 | 阿里云盘、百度、115、夸克、天翼、123 | 完成，部分 API 细节待真实账号验证 |
-| M4 MCP | 29 个工具、Resources 读取/订阅、允许列表、只读模式、stdio 与 Streamable HTTP、客户端安装命令 | 主体完成，长期负载与规模验收待补 |
+| M4 MCP | 54 个工具（全能力装配时；按 `Options` 条件注册：记忆 6、索引 5、导出 4、会话 3 + 回滚 1、`hot_paths` 1、`history` 1、`pull_events` 1 缺对应装配即不注册）、Resources 读取/订阅、允许列表、只读模式、stdio 与 Streamable HTTP、客户端安装命令 | 主体完成，长期负载与规模验收待补 |
 | M5 加固 | pin / hydrate、metrics、status、doctor 与 --fix、CLI 全套命令、守护进程装配 | 完成 |
 | M6 macOS | macFUSE 平台选项与检测 | 完成，待真机验证 |
 | M7 通用协议 | SFTP 驱动、代理层原始 TCP 拨号（direct / socks5 / HTTP CONNECT）、后端调用计数器 | 完成 |
@@ -927,7 +957,7 @@ sshfs 与本地磁盘上，数字见 `docs/perf-report.html`。这一轮测试�
 |---|---|---|
 | 单元 | 各 `internal/*` 包的 `_test.go` | MetaStore TTL / 负缓存 / 索引、块缓存位图与淘汰、日志状态机、限流 AIMD、代理规则匹配、错误分类 |
 | 驱动 | `internal/provider/*/` | 每个驱动用 `httptest` 回放真实响应形状，断言请求路径、必需 header、分页、秒传、分片、错误码映射 |
-| 语义 | `test/conformance` | 同一组操作分别跑在 cloudfs 挂载与本地目录上并逐项比对：创建 / 读写 / seek / append / truncate / rename / readdir / ENOENT / 空文件 / 大文件；硬链接、符号链接、chmod 的差异被显式断言 |
+| 语义 | `test/conformance` | 同一组操作分别跑在 cloudfs 挂载与本地目录上并逐项比对：创建 / 读写 / seek / append / truncate / rename / readdir / ENOENT / 空文件 / 大文件；硬链接、符号链接、chown 的差异被显式断言，chmod 则正向比对权限位与本地目录一致 |
 | 可靠性 | `test/chaos` | 设计文档第 5 节矩阵：断网重试、kill -9 恢复、429 降速、风控熔断、缓存满降级、冲突副本、死信与重排、链接过期、并发写、只读拒绝 |
 | 性能 | `test/perf` | 上表的调用次数基线，外加两个 benchmark |
 | 端到端 | `test/e2e` | 配置文件 → 守护进程 → 真实 FUSE 挂载 + 真实 MCP 会话：终端与 agent 互相看得见对方的写入、崩溃恢复、只读双向拒绝、status 与 metrics 反映真实工作、`grep -r` 零远端调用 |

@@ -74,6 +74,7 @@ func MountFS(opt MountOptions) (*Mount, error) {
 	if err := server.WaitMount(); err != nil {
 		return nil, fmt.Errorf("fusefs: wait for mount %s: %w", opt.Path, err)
 	}
+	root.adoptKernelCapabilities(server.KernelSettings())
 	m := &Mount{server: server, root: root, rootNode: rootNode, path: opt.Path, done: raw.done}
 	// Kernel cache invalidation: when the VFS changes the tree, tell the
 	// kernel so a long attribute timeout and a cached directory stream stay
@@ -91,6 +92,50 @@ func MountFS(opt MountOptions) (*Mount, error) {
 		})
 	})
 	return m, nil
+}
+
+// adoptKernelCapabilities reads the INIT handshake and turns on the paths that
+// compensate for what this kernel did not offer.
+//
+// The gate is the capability, never the operating system. macFUSE is what
+// lacks CAP_READDIRPLUS today (FUSE 7.19; the capability arrived in 7.21), but
+// "macOS" is not the invariant — a macFUSE that catches up, or Fuse-T, or a
+// Linux kernel too old for it, each decide this for themselves, and the
+// handshake is the only place that knows. go-fuse can only keep a capability
+// the kernel proposed, so what INIT says is final.
+//
+// It runs after WaitMount, when the handshake has completed, which is why the
+// state it sets is atomic: the serving goroutine is already accepting
+// requests. A request that arrives first simply takes the uncompensated path.
+// Settings this cannot read at all are treated as "not offered": the
+// compensation is safe either way, and being wrong the other way is silent
+// cost.
+func (r *Root) adoptKernelCapabilities(settings *fuse.InitIn) {
+	offered := settings != nil && settings.Flags64()&fuse.CAP_READDIRPLUS != 0
+	r.readdirplus.Store(offered)
+	if !offered {
+		r.entries.Store(newEntryCache(r.opt.EntryTimeout))
+	}
+	if settings != nil {
+		r.protoMajor.Store(settings.Major)
+		r.protoMinor.Store(settings.Minor)
+	}
+}
+
+// KernelProtocol is the FUSE protocol version negotiated at INIT, or 0.0 if
+// the handshake could not be read. Operations that have no capability bit are
+// gated on it.
+func (m *Mount) KernelProtocol() (major, minor uint32) {
+	return m.root.protoMajor.Load(), m.root.protoMinor.Load()
+}
+
+// lseekForwarded reports whether a kernel speaking this protocol version can
+// forward SEEK_DATA and SEEK_HOLE to the daemon at all. FUSE_LSEEK was added
+// in protocol 7.24; below that the kernel answers the syscall itself with
+// ENOTTY and file.Lseek is never reached. There is no INIT capability bit for
+// it, so the version is the only thing to test.
+func lseekForwarded(major, minor uint32) bool {
+	return major > 7 || (major == 7 && minor >= 24)
 }
 
 // At most one full invalidation runs at a time. A request arriving during a
@@ -190,11 +235,21 @@ func (m *Mount) InvalidateEntryFunc() func(parent uint64, name string) {
 // timeouts the kernel would keep answering lookups by itself. It returns the
 // number of entries invalidated.
 func (m *Mount) DropKernelCaches() int {
+	// The listing entry cache is the other half of "answer without asking".
+	// A cold measurement that left it standing would measure a warm mount.
+	m.root.forgetEntries()
 	if m.rootNode == nil {
 		return 0
 	}
 	return dropInode(&m.rootNode.Inode)
 }
+
+// ReaddirplusOffered reports whether the kernel offered CAP_READDIRPLUS at
+// INIT — that is, whether it takes a directory's entries and their attributes
+// in one reply or sends a LOOKUP per entry. The cost of a tree walk differs by
+// an order of magnitude between the two, so a benchmark has to say which one
+// it measured.
+func (m *Mount) ReaddirplusOffered() bool { return m.root.readdirplus.Load() }
 
 func dropInode(in *fs.Inode) int {
 	n := 0

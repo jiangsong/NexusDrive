@@ -19,6 +19,7 @@ import (
 	"cloudfs/internal/net/ratelimit"
 	"cloudfs/internal/pool"
 	"cloudfs/internal/provider"
+	"cloudfs/internal/upload"
 	"cloudfs/internal/vfs"
 )
 
@@ -109,9 +110,77 @@ type UploadStatus struct {
 	QueuedBytes   int64  `json:"queued_bytes"`
 	OldestAge     string `json:"oldest_age,omitempty"`
 	OldestAgeNS   int64  `json:"oldest_age_ns"`
+	// Blocked counts queued rows that cannot run: they wait on a directory
+	// creation that is dead, cancelled or gone. The journal has counted them
+	// for the flush path all along; nothing showed the number, so a queue
+	// that was busy and going nowhere looked exactly like a slow one.
+	Blocked int `json:"blocked"`
+	// InFlightBytes is the size of the rows being transferred right now.
+	InFlightBytes int64 `json:"in_flight_bytes"`
 	// Batch is the overall progress of the current burst of work; see
 	// UploadBatch.
 	Batch UploadBatch `json:"batch"`
+}
+
+// UploadBatch is upload.Progress on the wire: the burst of work the queue is
+// currently getting through, from the moment it stopped being empty to the
+// moment it is empty again.
+//
+// The first seven fields are a published contract with
+// internal/control/web/transfer_progress.js, which reads them off the status
+// document by name; upload_batch_keys_test.go pins them. The rest were added
+// afterwards and the page ignores what it does not know.
+//
+// The arithmetic lives in internal/upload, beside the counters it is made of.
+// This is only the rendering: times as RFC 3339, the estimate in seconds.
+type UploadBatch struct {
+	Active     bool   `json:"active"`
+	StartedAt  string `json:"started_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	FilesTotal int64  `json:"files_total"`
+	FilesDone  int64  `json:"files_done"`
+	BytesTotal int64  `json:"bytes_total"`
+	BytesDone  int64  `json:"bytes_done"`
+	// Percent is how far along the batch is, computed once by the daemon
+	// (upload.PercentOf) rather than by each reader from the four numbers
+	// above. The console prefers it and keeps its own formula only as a
+	// fallback for an older daemon: two hand-written copies of one formula
+	// drift, and a browser and a terminal disagreeing by a digit about the
+	// same batch is the failure this whole surface exists to remove.
+	Percent float64 `json:"percent"`
+	// Seq changes when a new burst begins, so a reader following the queue
+	// knows the figures it holds belong to a batch that has ended.
+	Seq int64 `json:"seq"`
+	// Resumed marks a batch that was already queued when the daemon started:
+	// its done counts run from the restart, not from the copy.
+	Resumed bool `json:"resumed,omitempty"`
+	// Rate is bytes per second and ETASeconds what is left at that rate.
+	// Both are zero on a batch that is not moving bytes.
+	Rate       float64 `json:"rate,omitempty"`
+	ETASeconds float64 `json:"eta_seconds,omitempty"`
+	// FilesDoneTotal and BytesDoneTotal are the daemon's lifetime counts.
+	// The Prometheus completion counters are fed from these and never from
+	// the batch delta, which returns to zero at every boundary.
+	FilesDoneTotal int64 `json:"files_done_total"`
+	BytesDoneTotal int64 `json:"bytes_done_total"`
+}
+
+// uploadBatchOf renders one progress sample for the wire.
+func uploadBatchOf(p upload.Progress) UploadBatch {
+	b := UploadBatch{
+		Active: p.Active, Seq: p.Seq, Resumed: p.Resumed, Percent: p.Percent(),
+		FilesTotal: p.FilesTotal, FilesDone: p.FilesDone,
+		BytesTotal: p.BytesTotal, BytesDone: p.BytesDone,
+		Rate: p.Rate, ETASeconds: p.ETA.Seconds(),
+		FilesDoneTotal: p.FilesDoneTotal, BytesDoneTotal: p.BytesDoneTotal,
+	}
+	if !p.StartedAt.IsZero() {
+		b.StartedAt = p.StartedAt.UTC().Format(time.RFC3339)
+	}
+	if !p.FinishedAt.IsZero() {
+		b.FinishedAt = p.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	return b
 }
 
 // MetaStatus reports the metadata cache.
@@ -195,10 +264,14 @@ type Collector struct {
 	// and returns how many files were dropped. Benchmarks use it to get a
 	// cold start without restarting the daemon.
 	DropCaches func(ctx context.Context) (int, error)
-	// UploadTotals reports how many rows the uploader has finished since
-	// the daemon started and their bytes; nil when there is no uploader.
-	UploadTotals func() (files, bytes int64)
-	batch        uploadBatchTracker
+	// UploadProgress reports the upload queue's overall progress — the
+	// uploader's own last sample, which costs no query. nil when there is no
+	// uploader, and the batch is then empty rather than invented here.
+	//
+	// It stays an injected function rather than a reach through FS so that a
+	// CLI or metrics test can stand a collector up with no filesystem behind
+	// it, which is most of what this package's tests do.
+	UploadProgress func() upload.Progress
 	// FlushUploads waits for delayed and in-flight uploads, without starting
 	// extra workers or bypassing the provider's backoff policy.
 	FlushUploads  func(ctx context.Context) (journal.Stats, error)
@@ -381,14 +454,22 @@ func (c *Collector) Collect(ctx context.Context, lang i18n.Lang) Status {
 				Pending: js.Pending, Uploading: js.Uploading, Dead: js.Dead, Done: js.Done,
 				Cancelling: js.Cancelling, Cancelled: js.Cancelled, Purging: js.Purging, RetainedBytes: js.RetainedBytes,
 				QueuedBytes: js.Bytes, OldestAgeNS: int64(js.OldestAge),
+				// From this reading rather than from the batch sample, so the
+				// counts on one page agree with each other.
+				Blocked: js.Blocked,
 			}
 			if js.OldestAge > 0 {
 				s.Uploads.OldestAge = js.OldestAge.Round(time.Second).String()
 			}
-			if c.UploadTotals != nil {
-				files, bytes := c.UploadTotals()
-				s.Uploads.Batch = c.batch.observe(now(), js.Pending+js.Uploading, js.Bytes, files, bytes)
-			}
+		}
+	}
+	if c.UploadProgress != nil {
+		p := c.UploadProgress()
+		s.Uploads.Batch = uploadBatchOf(p)
+		s.Uploads.InFlightBytes = p.InFlightBytes
+		if c.Journal == nil {
+			// No queue reading of our own: the sample is all there is.
+			s.Uploads.Blocked = p.Blocked
 		}
 	}
 
@@ -468,6 +549,9 @@ func warnings(s *Status, lang i18n.Lang) {
 	if s.Uploads.Dead > 0 {
 		add("status.dead", s.Uploads.Dead)
 	}
+	if s.Uploads.Blocked > 0 {
+		add("status.upload_blocked", s.Uploads.Blocked)
+	}
 	for _, r := range s.Remotes {
 		if r.BreakerOpen {
 			add("status.breaker_open", r.Remote, r.BreakerUntil)
@@ -487,6 +571,18 @@ func warnings(s *Status, lang i18n.Lang) {
 			add("status.proxy_unhealthy", p.Name, p.Error)
 		}
 	}
+	// An upload batch in flight is deliberately NOT a warning. A copy into the
+	// mount returns long before its bytes do, so a batch is the most ordinary
+	// state this filesystem has; listing it here would put a warning on every
+	// healthy copy and teach people that the warning list is noise. Warnings
+	// are for what is wrong — a queue that cannot move (status.blocked above),
+	// dead letters, a tripped breaker.
+	//
+	// The batch still has to be discoverable, and it is: `cloudfs status`
+	// prints it as a line of its own and `cloudfs uploads watch` follows it,
+	// the console draws it on #/transfers, and the agent turn-start hook says
+	// it in a sentence. Those surfaces describe a state; this one raises an
+	// alarm, and the two should not be confused.
 }
 
 // humanBytes renders a byte count at the largest unit that keeps it readable.

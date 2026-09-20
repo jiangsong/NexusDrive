@@ -69,16 +69,28 @@ func TestKernelWriteLandsInChanges(t *testing.T) {
 	if len(hist.Entries) == 0 || hist.Entries[0].Origin != "kernel" || hist.Entries[0].SessionID != "" || !hist.Entries[0].Reliable {
 		t.Fatalf("history after a terminal write: %+v", hist.Entries)
 	}
-	var ev e2eEvents
-	if res := s.callTool(t, "pull_events", map[string]any{}, &ev); res.IsError {
-		t.Fatal(toolText(res))
-	}
+	// pull_events needs its own wait. The loop above proved the write reached
+	// history; it proves nothing about the events cursor, and under a loaded
+	// machine — every package of this repo at once — the two do not arrive
+	// together. Accumulate rather than re-read: the cursor advances, so an
+	// event returned by an earlier call is not returned again by a later one.
+	var seen []string
 	found := false
-	for _, e := range ev.Events {
-		found = found || (e.Path == "/x.md" && e.Origin == "kernel")
+	for deadline := time.Now().Add(5 * time.Second); !found && time.Now().Before(deadline); {
+		var ev e2eEvents
+		if res := s.callTool(t, "pull_events", map[string]any{}, &ev); res.IsError {
+			t.Fatal(toolText(res))
+		}
+		for _, e := range ev.Events {
+			seen = append(seen, e.Origin+" "+e.Path)
+			found = found || (e.Path == "/x.md" && e.Origin == "kernel")
+		}
+		if !found {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	if !found {
-		t.Fatalf("pull_events did not return the terminal write: %+v", ev.Events)
+		t.Fatalf("pull_events did not return the terminal write within 5s; saw %v", seen)
 	}
 	var st e2eStat
 	if res := s.callTool(t, "stat", map[string]any{"path": "/x.md"}, &st); res.IsError {

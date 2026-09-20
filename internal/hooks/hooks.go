@@ -154,13 +154,28 @@ func MountsPath(home string) string {
 func WriteMounts(path string, mounts []string) error {
 	seen := map[string]bool{}
 	var lines []string
-	for _, m := range mounts {
-		m = filepath.Clean(m)
+	add := func(m string) {
 		if m == "" || m == "." || strings.ContainsAny(m, "\n\r") || seen[m] {
-			continue
+			return
 		}
 		seen[m] = true
 		lines = append(lines, m)
+	}
+	for _, m := range mounts {
+		m = filepath.Clean(m)
+		add(m)
+		// Also record the path with symlinks resolved. The guard compares the
+		// shell's $PWD, which a fresh shell takes from getcwd(2) and is
+		// therefore fully resolved, against these lines; a mount configured
+		// through a symlink would never match and the guard would exit 0 —
+		// silently disabling every hook, with nothing to show for it. macOS
+		// makes this the common case rather than the exotic one, since /var
+		// and /tmp are symlinks into /private. Resolving here rather than in
+		// the guard keeps the guard pure shell, which is what lets it cost no
+		// process outside a mount.
+		if resolved, err := filepath.EvalSymlinks(m); err == nil {
+			add(filepath.Clean(resolved))
+		}
 	}
 	sort.Strings(lines)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

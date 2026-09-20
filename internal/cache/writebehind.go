@@ -85,6 +85,7 @@ func (c *Cache) Close() error {
 	c.sweepAllClaims()
 	c.hydrateWG.Wait()
 	c.closeParts()
+	c.closeReadFDs()
 	return nil
 }
 

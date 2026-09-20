@@ -67,9 +67,11 @@ type Options struct {
 	// makes is bounded by this size.
 	WholeLayoutMin int64
 
-	// Busy reports that the foreground is waiting on IO. Hydration copies a
-	// whole file at once, so it asks before starting and again as it goes,
-	// and defers rather than competing with a read the kernel is waiting on.
+	// Busy reports that the foreground is waiting on IO. Whether a given file
+	// may be merged is decided per file, from how long its own blocks have
+	// gone untouched (see hydrateDue); this only rate-limits how many files
+	// one pass merges while the mount is under load, so a burst does not put
+	// a queue of whole-file copies in front of it.
 	Busy func() bool
 	// WriteBehind bounds the bytes of fetched blocks held in memory while
 	// the background writers put them on disk (0 = 256 MiB).
@@ -78,6 +80,9 @@ type Options struct {
 	Now func() time.Time
 	// FreeSpace reports free bytes on the cache filesystem; nil uses statfs.
 	FreeSpace func(dir string) (int64, error)
+	// Open opens a cache file on the read path; nil uses os.Open. It is the
+	// seam tests count descriptor churn through.
+	Open func(name string) (*os.File, error)
 }
 
 // ErrNoSpace is returned when the cache cannot admit data without violating
@@ -106,8 +111,11 @@ type blockMeta struct {
 	// f is the block file, kept open while the block is partial: a random
 	// reader hits the same block file for every sub-block it fetches, and
 	// opening and closing it around each 16 KiB read and write was a third
-	// of the miss path.
+	// of the miss path. PutRange writes through it, so it is read-write and
+	// distinct from read, which serves whole blocks; see readfd.go.
 	f *os.File
+	// read is the read-only descriptor kept for a whole block on disk.
+	read readFD
 	// sidecarHave and sidecarAt record what the on-disk sidecar last said;
 	// it is rewritten every few sub-blocks, not on every one.
 	sidecarHave int
@@ -161,7 +169,7 @@ type Cache struct {
 	minFree  atomic.Int64
 	// hydrateWant is the set of complete files waiting to be merged, and
 	// hydrateTimer the single janitor that merges them.
-	hydrateWant  map[string]FileKey
+	hydrateWant  map[string]hydrateWish
 	hydrateTimer *time.Timer
 	busyFn       atomic.Pointer[func() bool]
 	// lagging counts partial blocks holding more than their sidecar claims,
@@ -173,11 +181,23 @@ type Cache struct {
 	wb         writeBehind
 	// openPartials counts blockMeta.f descriptors currently held.
 	openPartials int
+	// readOpen and readOpenWhole are the blocks and hydrated objects holding a
+	// kept read descriptor, bounded by maxOpenReads / maxOpenWholeReads; see
+	// readfd.go.
+	readOpen      map[blockID]*blockMeta
+	readOpenWhole map[diskIdentity]*wholeObject
 	// makeRoom housekeeping throttles; see makeRoom.
 	lastExpire       time.Time
 	lastFreeCheck    time.Time
 	bytesAtFreeCheck int64
-	opt              Options
+	// ReserveDisk's own free-space throttle; see ReserveDisk. It is separate
+	// from the three above because journal reservations name their own staging
+	// directory, which need not be the cache filesystem.
+	diskCheckAt    time.Time
+	diskCheckDir   string
+	diskFreeAt     int64
+	diskSinceCheck int64
+	opt            Options
 
 	mu        sync.Mutex
 	blocks    map[blockID]*blockMeta
@@ -275,7 +295,13 @@ func (c *Cache) SetBudget(maxBytes, minFree int64) {
 		minFree = 0
 	}
 	c.maxBytes.Store(maxBytes)
-	c.minFree.Store(minFree)
+	if c.minFree.Swap(minFree) != minFree {
+		// ReserveDisk's remembered free-space reading was judged against the
+		// old headroom; a new one has to be measured, not inferred.
+		c.mu.Lock()
+		c.diskCheckAt, c.diskCheckDir = time.Time{}, ""
+		c.mu.Unlock()
+	}
 }
 
 // StagingDir returns the directory for in-progress writes.
@@ -632,24 +658,36 @@ func (c *Cache) readBlock(k FileKey, idx, off int64, dst []byte, fileSize int64)
 		// Blocks merged into the hydrated file are addressed by their offset
 		// in the whole file.
 		base, _ := c.BlockRange(idx, fileSize)
-		whole, err := c.OpenWhole(k)
-		if err != nil {
-			return 0, err
-		}
-		defer whole.Close()
-		n, err := whole.ReadAt(dst, base+off)
+		n, err := c.readWhole(k, base+off, dst)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return 0, err
 		}
 		return n, nil
 	}
-	f, err := os.Open(path)
+	// A whole block on disk, read through the descriptor kept for it; see
+	// readfd.go for why keeping one is safe and where it is given up.
+	id := blockID{fh, idx}
+	if f := c.borrowBlockRead(id, meta); f != nil {
+		n, err := f.ReadAt(dst, at)
+		c.releaseBlockRead(meta)
+		if err != nil && !errors.Is(err, io.EOF) {
+			c.forget(fh, idx, present)
+			return 0, err
+		}
+		return n, nil
+	}
+	f, err := c.open(path)
 	if err != nil {
 		c.forget(fh, idx, present)
 		return 0, err
 	}
-	defer f.Close()
+	kept := c.keepBlockRead(id, meta, f)
 	n, err := f.ReadAt(dst, at)
+	if kept {
+		c.releaseBlockRead(meta)
+	} else {
+		f.Close()
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		c.forget(fh, idx, present)
 		return 0, err
@@ -755,27 +793,53 @@ func (c *Cache) put(k FileKey, idx int64, data []byte, fileSize int64) error {
 	return nil
 }
 
-// defaultHydrateAfter is how long a complete file must go unread before its
+// defaultHydrateAfter is how long a complete file must go untouched before its
 // blocks are merged. Merging is a whole-file copy, so it is worth doing only
-// once the mount has really gone quiet, and a couple of seconds is not quiet:
+// once that file has really gone quiet, and a couple of seconds is not quiet:
 // a build, a directory walk, or a benchmark phase all pause for longer than
 // that between reads, and the copy then lands on top of the next burst.
 const defaultHydrateAfter = 10 * time.Second
 
+// hydrateWhileBusy caps how many files one pass merges while the mount has
+// foreground IO outstanding. The per-file quiet window (hydrateStateLocked)
+// already says the copy interrupts no reader of the file it merges, so the cap
+// is about disk bandwidth and nothing else: a burst can leave dozens of files
+// individually idle at the same moment, and copying all of them at once is the
+// storm the old mount-wide check prevented by never merging at all. A quiet
+// mount drains the whole queue in one pass as before.
+const hydrateWhileBusy = 4
+
+// hydrateDelay is HydrateAfter, or the default when it is unset.
+func (c *Cache) hydrateDelay() time.Duration {
+	if d := c.opt.HydrateAfter; d > 0 {
+		return d
+	}
+	return defaultHydrateAfter
+}
+
+// hydrateWish is a file waiting to be merged, and the moment it started
+// waiting. Anything that touches the file after that restarts its wait, which
+// is how "untouched for HydrateAfter" is enforced without a second clock: the
+// janitor's timer supplies the interval, this stamp supplies the "untouched".
+type hydrateWish struct {
+	key   FileKey
+	since time.Time
+}
+
 // scheduleHydrate puts a complete file in line to have its blocks merged
-// once the mount has gone unread for HydrateAfter.
+// once that file has gone untouched for HydrateAfter.
 //
-// One timer serves the whole queue rather than one per file: a mount that
-// keeps reading defers hydration indefinitely, and a timer per complete file
-// re-arming forever is thousands of wakeups a second on a large cache, all of
-// them taking the lock the read path needs.
+// One timer serves the whole queue rather than one per file: a file that keeps
+// being read defers its own hydration indefinitely, and a timer per complete
+// file re-arming forever is thousands of wakeups a second on a large cache,
+// all of them taking the lock the read path needs.
 func (c *Cache) scheduleHydrate(k FileKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.hydrateWant == nil {
-		c.hydrateWant = map[string]FileKey{}
+		c.hydrateWant = map[string]hydrateWish{}
 	}
-	c.hydrateWant[k.hash()] = k
+	c.hydrateWant[k.hash()] = hydrateWish{key: k, since: c.opt.Now()}
 	c.armHydrateLocked()
 }
 
@@ -785,39 +849,109 @@ func (c *Cache) armHydrateLocked() {
 	if c.hydrateTimer != nil || c.wb.closed || len(c.hydrateWant) == 0 {
 		return
 	}
-	delay := c.opt.HydrateAfter
-	if delay <= 0 {
-		delay = defaultHydrateAfter
-	}
-	c.hydrateTimer = time.AfterFunc(delay, c.hydrateDue)
+	c.hydrateTimer = time.AfterFunc(c.hydrateDelay(), c.hydrateDue)
 }
 
-// hydrateDue merges whatever is queued, unless the foreground is reading — in
-// which case it simply comes back later. Nothing is dropped: a file waits as
-// long as the mount stays busy, costing only the read amplification of
-// staying in blocks.
+// hydrateDue merges the queued files that have gone quiet, and leaves the rest
+// queued for the next pass.
+//
+// Readiness is asked of each file, not of the mount. Waiting for the whole
+// mount to fall idle sounds right and is not: a burst of reads keeps the
+// foreground counter above zero continuously for far longer than HydrateAfter,
+// so nothing merged until the burst was over, and every read in it kept paying
+// the block layout's cost — one open per block, and no passthrough file for
+// the kernel. A file nothing has touched since it was queued is one this copy
+// cannot land on top of, whatever the rest of the mount is doing. The
+// mount-wide signal survives only as the rate limit hydrateWhileBusy.
+//
+// A file that can never be merged — incomplete again after an eviction, or
+// already hydrated — leaves the queue, so the janitor does not re-arm for it
+// forever.
 func (c *Cache) hydrateDue() {
 	c.mu.Lock()
 	c.hydrateTimer = nil
-	if c.busy() {
-		c.armHydrateLocked()
-		c.mu.Unlock()
-		return
+	var want []FileKey
+	waiting := map[string]hydrateWish{}
+	for fh, w := range c.hydrateWant {
+		switch ready, keep := c.hydrateStateLocked(fh, w.since); {
+		case ready:
+			want = append(want, w.key)
+		case keep:
+			// Its wait restarts: whatever touched it has to stop for a whole
+			// interval before the file is merged.
+			waiting[fh] = hydrateWish{key: w.key, since: c.opt.Now()}
+		}
 	}
-	want := make([]FileKey, 0, len(c.hydrateWant))
-	for _, k := range c.hydrateWant {
-		want = append(want, k)
-	}
-	c.hydrateWant = map[string]FileKey{}
+	c.hydrateWant = waiting
+	c.armHydrateLocked()
 	c.mu.Unlock()
 
-	for _, k := range want {
-		if c.busy() {
-			c.scheduleHydrate(k) // the rest wait for the next quiet moment
+	for i, k := range want {
+		if i >= hydrateWhileBusy && c.busy() {
+			// Idle in itself, but the mount is not: the rest go in the next
+			// pass rather than queueing the disk behind a burst.
+			c.scheduleHydrate(k)
 			continue
 		}
 		_ = c.Hydrate(k)
 	}
+}
+
+// hydrateStateLocked reports whether a queued file can be merged now, and
+// whether it is worth keeping in the queue if not. since is when the file
+// started waiting. c.mu must be held.
+//
+// Idleness is read from the blocks' own lastAccess, which both reads (locate,
+// locateRange) and writes (put, PutRange) already maintain, rather than from a
+// per-file timestamp some future read path could forget to update. The walk
+// covers this file's blocks, not the cache's.
+func (c *Cache) hydrateStateLocked(fh string, since time.Time) (ready, keep bool) {
+	fs := c.files[fh]
+	if fs == nil || fs.hydrated || fs.part != nil {
+		// Merged already, or in the sparse layout, which publishes itself.
+		return false, false
+	}
+	total := c.BlockCount(fs.size)
+	if total == 0 || int64(len(fs.present)) != total {
+		// Evicted back to incomplete: nothing will make this file mergeable
+		// again except a fresh fill, which queues it anew.
+		return false, false
+	}
+	if fs.busy > 0 {
+		return false, true
+	}
+	for idx := range fs.present {
+		m := c.blocks[blockID{fh, idx}]
+		if m == nil {
+			return false, false
+		}
+		if m.mem != nil || m.partial != nil {
+			// Not all on disk yet; Hydrate reads the block files.
+			return false, true
+		}
+		if m.lastAccess.After(since) {
+			return false, true
+		}
+	}
+	return true, false
+}
+
+// readSince reports whether any block of a file has been touched since t.
+// locate and locateRange stamp lastAccess on every read, so this is how the
+// cache sees a reader arrive for a file it is in the middle of merging.
+func (c *Cache) readSince(fh string, t time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fs := c.files[fh]
+	if fs == nil {
+		return false
+	}
+	for idx := range fs.present {
+		if m := c.blocks[blockID{fh, idx}]; m != nil && m.lastAccess.After(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // busy reports whether the foreground is waiting on IO.
@@ -880,6 +1014,7 @@ func (c *Cache) Hydrate(k FileKey) error {
 	}
 	fs.busy++
 	c.hydrateWG.Add(1)
+	startedAt := c.opt.Now()
 	c.mu.Unlock()
 	// During conversion both representations exist. Reserve the temporary
 	// copy, and protect its source blocks before choosing eviction victims.
@@ -923,7 +1058,12 @@ func (c *Cache) Hydrate(k FileKey) error {
 		if closed {
 			return errors.New("cache: closed during hydration")
 		}
-		if c.busy() {
+		if c.readSince(fh, startedAt) {
+			// A reader arrived for this file after the copy began; finishing
+			// would put a whole-file write in front of it. This asks about
+			// the file being merged rather than about the mount, for the
+			// reason hydrateDue gives: during a burst the mount is never idle,
+			// and yielding to that meant the copy never finished at all.
 			c.scheduleHydrate(k)
 			return nil
 		}
@@ -1341,6 +1481,9 @@ func (c *Cache) dropBlockLocked(id blockID) {
 			m.f = nil
 			c.openPartials--
 		}
+		// The block file is being unlinked or renamed over; nothing may keep
+		// reading it afterwards through a descriptor that names it.
+		c.retireBlockReadLocked(id, m)
 		if m.mem != nil {
 			if m.flushing {
 				m.flushDetached = true

@@ -13,6 +13,7 @@ import (
 // finish; ordinary directory-cache updates keep their NORMAL policy.
 func (s *Store) durableTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	s.writeTx.Add(1)
+	s.durableTxs.Add(1)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	conn, err := s.db.Conn(ctx)

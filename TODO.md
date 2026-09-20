@@ -1,5 +1,308 @@
 # CloudFS 待办清单
 
+## 2026-09-20 挂载点 IO：先清白送的那批
+
+三种负载压在同一个挂载点上——`cp -r` 写入、后台上传的进度不可见、agent 在挂载里跑
+`git diff` / `ls` / `wc -l` 的读取突发。勘察后发现一批「已经建好但是死的 / 够不着 / 没人消费」
+的东西，零风险，先清。完整队列见本次会话的计划文件。
+
+- **[x] macFUSE 能力实测定案**：见上方 T-10（已关闭）与新建的 T-61。协议 7.19，
+  `READDIRPLUS` / `WRITEBACK_CACHE` / `PARALLEL_DIROPS` / `ASYNC_READ` / `BIG_WRITES` /
+  `SPLICE_*` / `PASSTHROUGH` 全部协商不到。新增 `internal/fusefs/kernel_caps_test.go`
+  记录握手结果，并改掉 `fs.go` 里两处把「Linux 限定的冲突」写成普适结论的注释。
+- **[x] read_heat 的递归 CTE 白跑在读路径上**：`noteRead` 触发的观测器过去在
+  `daemon.go:461` 内联跑 `meta.Path`（递归 CTE），读 N 个新文件就是 N 次。
+  而 read_heat 除仪表盘外无任何消费者（预取纯位置驱动、淘汰只看 pinned/busy/lastAccess）。
+  改为 `ReadObserver.ObserveIno` 只记 inode，路径解析推迟到 30 秒的 flush。
+  实测 200 文件：**200 → 0**。重命名按 flush 时的名字归属，删除的丢弃，两条都写进注释。
+  回归：`test/perf/read_heat_path_test.go`、`internal/daemon/read_heat_test.go`。
+- **[x] FTS indexer 空闲时每 500ms 开一个写事务**：`_txlock=immediate` 让它成为
+  `BEGIN IMMEDIATE`，每秒两次抢 `writeMu`，哪怕 `name_index_pending` 是空的。
+  改为先用预编译的只读探测。探测特意与 flush 用**同一个 join**而不是「表非空」——
+  否则一条孤儿 pending 行会让每个 tick 都说「有活」而事务搬不动任何东西，等于把要修的 bug
+  重新装上。实测 20 个空 tick：**19 → 0**。附带消掉一个潜伏 flake：那个无条件写事务
+  过去可能落进 `TestMetadataStatementBudget` 的测量窗口，给 writeTx 增量 +1。
+- **[x] 四个热读查询没走预编译缓存**：`Children` / `ByRemoteID` / `Aliases` /
+  `UncommittedDirs` 过去用 `s.db.QueryContext` 直接执行，每次 readdir 重新解析 SQL。
+- **[x] `warm` 没有 MCP 工具**：而 MCP server 的说明文字（`server.go:646-649`、`:1456`）
+  一直在指导 agent 去 warm。新增 `internal/mcpsrv/warm.go`。同时把 `warmNode` 从纯串行
+  改成有界扇出（8，与 listing prefetcher 同源，因为下层 `meta` 只有 8 个 listing slot）。
+  递归扇出的死锁点已处理：拿不到令牌的 goroutine 自己走该子目录，绝不持令牌等后代。
+- **[x] turn-class 引导写反了**：hook 原文劝 agent「read what you need rather than whole
+  trees」，而 `read_dir_ahead.go` 的机制是同目录内连续 3 次升序读之后兄弟小文件近乎免费，
+  跳着读才每个都要下载。同一处反向建议也存在于 MCP `initialize` 的说明
+  （`internal/i18n/catalog_en.go` 的 `agent.instructions.intro`），两个 catalog 一并修。
+  另补「无序读一棵子树前先 pin」——pin 的机制一直完整，只是从没有文档这么说过。
+- **[x] `small_file_whole` 是个死旋钮**：被解析、被 resolve、被搬进 `vfs.CachePolicy`、
+  在 `vfs.go:82` 上声明，而 `internal/vfs` 里没有任何代码读它；`docs/pool-v2.md:371`
+  还把 `fetchBlock` 写成它的消费方。已按该文档的原意接上：新增
+  `fetchWholeSmallFile`（`internal/vfs/blockfetch.go`），只作用于「大于一个 block 且
+  不超过 `small_file_threshold`」的文件，与兄弟预取共用同一把 per-inode singleflight。
+  回归 `test/perf/small_file_whole_test.go` 三例（整取 / 关闭时的对照 / 超阈值不整取）。
+- **[x] `test/perf` 预算收紧**（三轮实测零抖动）：lookup miss `5 → 3`、
+  create+write+close `7 → 6`、readdir `4 → 2`。三处余量都早于本次改动。
+- **[x] 两个让 macOS 测试套件长期发红的夹具 bug**（在 detached worktree 的 HEAD 上确认，
+  与 POSIX mode 在飞的改动无关）：`internal/daemon/trigger_test.go` 硬编码 `/bin/true`
+  （macOS 只有 `/usr/bin/true`，表现为 trigger 重试三次全失败、像引擎坏了），改用
+  `exec.LookPath`；`internal/control/agent_test.go` 用 `t.TempDir()` 拼「不存在的 socket」，
+  106 字节超过 macOS `sun_path` 的 104 上限，dial 返回 `EINVAL` 而非离线分类认识的 errno，
+  改用同包早已存在的 `socketPath(t)`。
+- **[x] agent hook 的 guard 在挂载点经过 symlink 时静默失效**（既有 bug，在 HEAD 上复现）。
+  `internal/hooks/hooks.go` 的 `Guard()` 拿 `$PWD` 逐级上溯去匹配 mounts 注册表。
+  而 hook 启动时环境里没有继承的 `PWD`，shell 就从 `getcwd(2)` 取——那是**符号链接全部解析后**
+  的物理路径；注册表里存的却是配置时写的原样路径。两者不等就 `exit 0`，
+  **于是所有 agent hook 永不触发，而且毫无提示**——`exit 0` 和「你不在挂载点里」长得一模一样。
+  macOS 上这是常态而非边角：`/var` 与 `/tmp` 都是指向 `/private` 的软链。
+  修法是在能看见文件系统的那一层解决：`WriteMounts` 同时写入 `filepath.EvalSymlinks` 的结果，
+  guard 保持纯 shell（它「不在挂载点里就不启动任何进程」的性质正来源于此）。
+  回归 `internal/hooks/mounts_symlink_test.go` 两例：注册表含解析后的形式；
+  以及端到端——清掉 `PWD` 跑真实 guard，要求它认出经软链到达的挂载点。
+  原有的 `TestGuardExitsBeforeSpawningOutsideAMount` 在 macOS 上一直是红的，正是这条。
+
+### 2026-09-20 第二批：热路径开销、macOS 补偿、传输可见性
+
+Tier 1 清完之后按 payoff 排的第二批，五路并行（按包划分，互不重叠）。全部 failing-test-first。
+
+- **[x] `pendingSize` 每次 `Stat` 扫全进程的打开句柄**（`internal/vfs`）。每个 FUSE GETATTR 都付，
+  `git diff` lstat 3000 个文件就是 3000 次 O(打开句柄数) 的全局锁扫描；splice 读路径每次读还要再付一次。
+  回归 `TestStatDoesNotScanEveryOpenHandle` + `TestStatSeesABytesWrittenButNotPublished`（保证语义不变：
+  有待写字节的 inode 仍报更大的 size）。
+- **[x] 有 pin 时 `Lookup` / `Stat` 每次构建属性跑一次递归 CTE**（`internal/vfs`）。绕开了本就存在的
+  `pathOf` 记忆化。pin 是现在推荐给 agent 的第一步，所以这条几乎必然触发。
+  **注意不含 readdir**：`ReadDir` / `ReadDirPath` 早就把目录路径解析一次后传给 `attrAt`
+  （`vfs.go:804`、`:827`），每次 readdir 只一次 CTE。付 N 次的是 `Lookup` 与 `Stat`——
+  经 `attrOf` 走空路径参数那条（`vfs.go:529`），而 fusefs 对每个目录项调的正是它们。
+  改后 `attrAt` 把节点自己的 `Name` 接在**记忆化的父目录**路径后面，于是记忆只需要对目录正确，
+  也不会因为 stat 一堆文件而给每个文件攒一条。
+  回归 `TestAttrsDoNotResolvePathsWithACTEWhenPinned`：24 次 lookup + 24 次 stat，递归路径查询 48 → ≤1。
+  一个语义差异：`HandleAttr` 传的是快照节点，所以句柄打开期间文件被改名时，
+  `Pinned` 取自快照里的名字而非实时路径——这与 `HandleAttr` 文档写明的「句柄最后看到的样子」
+  一致，且只影响这一个标志位。
+- **[x] `fgIO` 对元数据风暴失明**（`internal/vfs`）。它只被 read/write 抬起，于是 `git diff` 刷
+  LOOKUP 的全程系统看来是空闲的，后台 crawler / 目录 prefetcher / hydration 全在满速抢同一个
+  SQLite 和同一个限流器。改为单独计数再并入 `Busy()`——刻意不与 `fgIO` 共用，因为 hydration
+  依赖的是「读写安静」而非「元数据安静」。回归 `TestMetadataStormMarksTheFilesystemBusy`。
+- **[x] `awaitDirReadAhead` 可阻塞前台读 30 秒**（`internal/vfs`）。预取本为加速，卡 30 秒是反效果。
+  回归 `TestForegroundReadIsNotHeldByAStuckPrefetch`。
+- **[x] macOS 无 READDIRPLUS 的补偿 entry 缓存**（`internal/fusefs`，见 T-61）。按
+  `!CAP_READDIRPLUS` 门控而非 `runtime.GOOS`——能力位才是真正的不变量。七例回归，其中
+  `TestEntryCacheTTLIsBoundedByTheKernelEntryTimeout` 把分层关系钉死（补偿缓存不得比内核
+  自己的 dentry 缓存活得久），`TestNilEntryCacheIsInert` 保证 Linux 侧零开销，
+  `TestListingCacheDoesNotOutliveAChangeMadeThroughTheVFS` 是可见性守卫。
+- **[x] `ReserveDisk` 每次 `WriteAt` 在全局锁下 `statfs(2)`**（`internal/cache`）。darwin 上
+  `MaxWrite` 只有 64 KiB，一个 10 MB 文件就是约 160 次串行系统调用压在同一把准入锁上——
+  混合树里大文件的写入流因此饿死并发的小文件 create。照搬同包 `makeRoomFor` 已有的
+  1 s / 32 MiB 摊销。五例回归，含 `TestDiskReservationDoesNotReuseAnotherVolumesFreeSpace`
+  （staging 与 cache 可能不在同一文件系统上，摊销估计不能串用）。
+- **[x] 读缓存块每次读都 `os.Open`+`ReadAt`+`Close`**（`internal/cache`）。FUSE 路径靠每句柄
+  租一个 fd 绕过，MCP 的 `ReadFileRange` 没有。加了有界 fd 复用，七例回归全部围绕失效：
+  块淘汰、hydration 替换、硬链接遗忘、关闭退还，确保描述符不会比它命名的文件活得久。
+- **[x] hydration 在 burst 期间永不触发**（`internal/cache`）。原条件要求整个挂载安静 10 秒，
+  几百次读的 burst 里根本等不到，于是整场 burst 的「已缓存」读都在付上一条的代价。
+  第一版改动把策略往两个方向都改错了（既有的 `TestSparseLayoutWritesTheFileOnce` 与
+  `TestSmallFilesKeepTheBlockLayout` 同时失败），重做后六例回归，明确区分「该文件自己在忙」
+  与「整个挂载在忙」。
+- **[x] 传输进度只存在于浏览器里**（`internal/upload` / `control` / `cmd/cloudfs` / `mcpsrv`）。
+  batch 模型从 `internal/control` 下沉到 `internal/upload`（计数器本就在那），Go 侧补上
+  10 s EWMA 速率与 ETA（照抄 export 路径已在跑的实现），`cloudfs uploads watch` 与
+  `status --watch` 照 `export --wait` 的结构写，MCP 加 `upload_progress`。
+  七个 JSON key 一字未改，控制台不受影响。uploader 首次有了完成信号（两条 slog）。
+  十一例 + 七例回归，含 `TestAnIdleQueueIsNotQueried`（空闲 daemon 不额外查询）、
+  `TestLifetimeTotalsNeverDecreaseAcrossBatches`（Prometheus counter 不倒退）、
+  `TestUploadsWatchExitsNonZeroWhenUploadsDied`（`cp -r ... && cloudfs uploads watch`
+  不能在有死信时报成功）。
+
+### 2026-09-20 写路径成本实测：两次 `F_FULLFSYNC` 就是全部
+
+`test/perf/durability_cost_diag_test.go`（`//go:build diag`，不进常规构建；
+跑法 `./gow test -tags diag ./test/perf/ -run TestDurabilityCostDiag -v`）。
+300 次串行的 create+write+close，10 KiB/文件：
+
+```
+power  9.724 ms/文件
+crash  1.544 ms/文件      比值 6.30x，差 8.18 ms
+```
+
+同机裸盘对照（300 次 create+write+sync+close）：
+
+```
+不 sync                  72 µs/文件
+fsync（裸 syscall）       74 µs/文件
+F_FULLFSYNC（os.Sync）  4071 µs/文件
+```
+
+**两次 `F_FULLFSYNC` × 4.07 ms = 8.14 ms，就是 power/crash 那 8.18 ms 的全部。**
+`power` 里另外三次 SQLite WAL fsync（journal 的 `synchronous=FULL` 插入、
+`meta.PublishByIno` 的 durable 事务、`MarkPublished`）加起来约 70 µs——因为
+**全仓从未设置 `PRAGMA fullfsync`**，SQLite 走的是便宜那种 fsync，在 APFS 上不刷设备缓存。
+
+| flush | 成本 | 归属 |
+|---|---|---|
+| staging `F_FULLFSYNC`（`staging.go:342`） | 4.07 ms | 每文件 |
+| objects 目录 `F_FULLFSYNC`（`group.go:189`） | 4.07 ms | 每批次（目录行本可免，见本次改动） |
+| journal WAL fsync | ~0.07 ms | 每批次 |
+| `meta.PublishByIno` WAL fsync | ~0.07 ms | 每文件 |
+| `MarkPublished` WAL fsync | ~0.07 ms | 每文件 |
+
+**据此取消「把 meta 持久化屏障改成批量 barrier」那一项**：它能回收的是 9.72 ms 里的
+约 0.07 ms（0.7%），代价是改动 `power` 的承诺语义、新增两个配置项、补掉电 chaos 测试。
+比例不成立。`meta` 的 `durableTx` 计数器仍然保留，作为这项成本悄悄长回来的护栏。
+
+**同理降级「批量化 `MarkPublished`」**。原本的理由是省一次 fsync——实测那是 0.07 ms。
+剩下的理由只有减少写事务与 `writeMu` 争用，而 `cp -r` 是单线程的（`group.go:26-32` 的注释
+已写明单独一次提交不等窗口，所以它的批次恒为 1），吃不到这个好处。留作日后并发写者出现时再说。
+
+**唯一能真正移动这个数字的是减少 `F_FULLFSYNC` 的次数**，也就是原计划列为「高风险、不做」
+的那条。现在有了数字：少一次 = 每文件 9.72 → 约 5.65 ms。是否要为此新增一档
+`journal.durability = barrier`，属于 durability 契约变更，未擅自决定。
+
+附带证伪一个直觉：目录里没有待落盘的条目时 `F_FULLFSYNC` **并不会变便宜**
+（早期一次 0.29 ms 的读数无法复现，重复测均为 4.4–4.6 ms）——它刷的是设备缓存，不是这个目录。
+
+**本轮改动后复跑（2026-09-20 晚，全部 Tier 1/2 落地之后）**：
+
+```
+power  10.03 ms/文件   （改动前 9.724，噪声内未动）
+crash   1.146 ms/文件  （改动前 1.544，−26%）
+```
+
+本轮砍掉的本地开销——`ReserveDisk` 的 statfs 摊销、`Truncate(0)` 的流式哈希、
+预编译查询、read_heat 的 CTE、目录批次免 fsync——**全部只在 `crash` 下显形**。
+`power` 被两次 `F_FULLFSYNC` 完全压住，26% 的改进被淹没在噪声里。
+这正是「只有减少设备刷新次数才能移动 `power` 的数字」的直接证据。
+
+**这个诊断留在仓库里**，因为「每文件 9.72 ms」是往后任何写路径改动唯一的对照基准，
+而它无法用 `test/perf` 的调用计数表达。`//go:build diag` 把它挡在常规构建之外，
+所以 `./gow build ./...` / `vet` / `test` 都看不到它，只有显式带 `-tags diag` 才跑。
+改写路径之前先跑一遍，比事后猜为什么没变快便宜得多。
+
+### [ ] T-65 `mkdirQueued` 的回滚删节点但不失效路径记忆（既有，良性）
+
+- **证据**：`internal/vfs/write.go` 的 `mkdirQueued` 在插入节点后若提交失败会把它删掉，
+  但不调 `dropPaths()`。这是本次审计 `attrAt` 改走 `pathOf` 记忆化时逐条核对出来的唯一缺口
+  ——其余每一条能改变 inode 路径的操作（rename ×2、removal ×4、delta feed ×2、
+  listing 重整、`DropCaches`）都调了。
+- **为什么良性**：被删的 ino 已经死了，没有任何东西会去解析它，所以记忆里留下的条目
+  不可能产生错误的路径，只是一条永不命中的垃圾。
+- **为什么仍然记下来**：它是唯一的例外，而「唯一的例外」正是下一个人改这块代码时
+  会踩的那块砖。真要收就是一行。
+
+### [ ] T-64 `FS.Space` 的 TTL miss 没有 singleflight，STATFS 风暴会扇出成配额调用
+
+- **证据**：`internal/vfs/statfs.go` 的 `Space` 在 `spaceTTL` 过期后**先放掉锁再去取数**
+  （`:47` 解锁，`:51-63` 遍历 mounts 调 `provider.QuotaOf`，`:64` 才重新加锁写回）。
+  同一瞬间的 N 个并发 miss 因此各自跑完整个循环，扇出 N × remotes 次远端 `Quota`。
+- **为什么不是理论问题**：T-61 的 statfs 归因实测到，macOS 在**挂载后头 2 秒会发一波 ~60 次
+  STATFS**（`diskarbitrationd` / Spotlight 之类给新卷做体检，期间我们自己没有任何 IO）。
+  那一波正好落在缓存最冷的时刻。每次 OPENDIR 也各带一次 STATFS，所以并发遍历同样能撞上。
+- **后果**：打在限流的配额 API 上，可能触发 429 或风控，而这是一个纯粹的展示用数字。
+- **方向**：用仓库里已有的 `internal/vfs/flight.go`（`blockFlight` / `subFlight` 用的那把
+  singleflight）把 miss 合并成一次；TTL 语义不变。
+- **验收**：并发 N 次 `Space` 撞上同一个冷 TTL，fakeprovider 的 `Quota` 调用计数为 1 而不是 N；
+  `test/perf` 的断言方式（调用计数，非墙钟）。
+
+### [x] T-63 整套跑时随机红、单跑必过（既有；2026-09-20 全部修完）
+
+- **证据（2026-09-20）**：整套 `./gow test ./test/e2e/` 连跑三次，**每次红的是不同的测试**——
+  `TestStatusAndMetricsReflectRealWork`、`TestKernelWriteLandsInChanges`、
+  `TestNeverOpenedDirectoryBecomesSearchable`。把任意一条单独 `-run` 出来跑三遍，全过。
+- **不是本轮改动引入的**：在 detached worktree 的 HEAD 上跑同一套，第一轮
+  `TestNeverOpenedDirectoryBecomesSearchable` 同样失败、第二轮通过。
+  （本轮确实动过后台让路的条件——`Busy()` 现在也反映元数据活动，见上方第二批——
+  所以特意做了这次对照；结论是无关。）
+- **为什么值得修而不是容忍**：随机发红的套件会让人养成「e2e 红了再跑一遍」的习惯，
+  真回归就是这样被漏掉的。本次会话里 `internal/fusefs` 的遍历测试、
+  `internal/hooks` 的 guard 测试、两个夹具 bug，全都是长期发红被当成环境问题的例子，
+  其中 guard 那条底下压着一个真 bug。
+- **同族的一条已修（2026-09-20）**：`internal/mcpsrv` 的 `TestMemorySearchFindsAFreshFact`
+  约每四次整包跑红一次，单跑必过，失败形态是 `{Hits:[] Pending:3}`。
+  原因正是这一族的典型：测试开头那次 `memory_search` 有 3 秒轮询，
+  但后面查 `agent: "codex"` 的那次**只调用一次、不等待**——而它是第一个触及 `other.md` 的查询，
+  开头的轮询只证明了 `style.md` 和 `team.md` 已抽取完。抽出 `searchUntil` helper，两处都用。
+  整包连跑 4 次全绿。**抽取是异步的，所以每一条关于「某文档可被搜到」的断言都得等那个文档；
+  在测试开头等一次是不够的。**
+- **这是一个可命名的形态，不只是若干条独立的 flake**：**「开头等一次，然后断言另一个东西」**。
+  预热轮询证明了路径 A 就绪，紧接着的断言却是关于路径 B 的——而 B 从来没人等过。
+  单跑必过（机器闲，B 也早就好了），整包跑随机红。
+  **`test/perf` 已排除**：那里的调用计数断言结构上是同一形状（先热身坐实一条路径，
+  再对另一条断言次数，后台多一次调用就超预算），所以专门压了 `-count=3`（375 s）——全过。
+  目前不成立，不必动；但改动那些热身逻辑时值得记得这个形状。
+- **四条全部修完（2026-09-20），`./gow test ./...` 连跑两次全绿**：
+  1. `internal/mcpsrv` `TestMemorySearchFindsAFreshFact` —— 见上，抽 `searchUntil`。
+  2. `test/perf` `TestDirectoryReadaheadStopsOnListingChange` —— 根因在共用的 `settle` helper：
+     它**只要连续两次读数相同就认定安静**。全仓并发时后台预取 goroutine 可能被饿超过 20ms
+     的轮询间隔，于是两次相等——而工作还排着。改为要求连续 5 次（`settleQuietPolls`）。
+     这一条修的是 helper，所以该文件里每个测试都跟着稳了。
+  3. `test/e2e` `TestKernelWriteLandsInChanges` —— 同一形态：`history` 有 5 秒轮询，
+     紧接着的 `pull_events` 只调一次。注意它是**游标式**的，所以补的轮询必须跨调用累积，
+     不能指望某一次拿全。
+  4. `test/e2e` `TestNeverOpenedDirectoryBecomesSearchable` —— 这一条不是形态问题而是
+     **耐心不够**：断言是「没人打开过的目录也能被搜到」，而爬虫先等挂载安静、再对前台让路，
+     10 秒上限在满载机器上是赌注不是断言。放宽到 60 秒，断言本身一字未改。
+     （排除过一个怀疑：`busyIO()` 现在含元数据活动，而该测试每 200ms 轮一次 `/search`、
+     `idle_after` 恰好也是 200ms——但 `FS.Search` 不抬 `mdIO`，不构成饿死。）
+- **方向**：这一族的共同点是都在等后台工作（变更流传播、搜索爬取、状态收敛）到达某个状态，
+  等待条件多半是固定次数的轮询或固定睡眠。整套跑时机器负载高，就超时。
+  改成对可观测量轮询到条件成立（带足够长的上限），而不是等固定时长。
+- **验收**：整套 `./gow test ./test/e2e/` 连跑 5 次全绿；单条仍可独立跑。
+
+### [x] T-66 新增 `journal.durability = barrier` 并设为默认（2026-09-20）
+
+- **动机**：T-62 的实测把 `power` 放在了一个尴尬位置——它的两次 `F_FULLFSYNC` 都发生在
+  **写入日志行之前**，所以那一行从未被任何设备刷新覆盖。也就是说 `power` 既慢又弱。
+- **做法**：`barrier` 把暂存文件的同步降为裸 `fsync(2)`（把字节交给设备，不等它刷缓存），
+  并把 objects 目录那一次 `F_FULLFSYNC` **挪到行插入之后**——这一次同时覆盖暂存数据、
+  rename 和日志行三者。
+- **实测（同机，300 次串行 create+write+close，10 KiB/文件）**：
+
+  | 档位 | 设备刷新/文件 | 日志行是否被覆盖 | 耗时 |
+  |---|---|---|---|
+  | `power` | 2（都在行之前） | **否** | 9.508 ms |
+  | `barrier` | **1**（在行之后） | **是** | **5.654 ms** |
+  | `crash` | 0 | 否 | 1.256 ms |
+
+  `barrier − crash = 4.398 ms` ≈ 一次 `F_FULLFSYNC`（4.07 ms）加开销，与设计吻合。
+- **默认改为 `barrier`**：它在两个轴上都优于原默认。`power` 的实现**一字未动**——
+  改变 `power` 的含义是另一个决定，`TestPowerStillFlushesBeforeTheRow` 守着它的顺序。
+- **它依赖什么**：「设备刷新会持久化此前已下发到该设备的写」。这是 `F_FULLFSYNC` 的实现方式，
+  但不是 POSIX 保证，APFS 也未对下发顺序作出契约。文档里直说了。
+- **平台差异**：darwin 之外 `fsync(2)` 本就刷设备缓存，没有更便宜的「只下发」调用，
+  所以 `barrier` 在 Linux 上与 `power` 等价开销，只有顺序不同（`separateDeviceFlush` 常量）。
+- **失败语义的取舍**：`power` 的刷新在插入前，失败则不留行；`barrier` 在插入后，
+  失败则行仍在、close(2) 报错而文件照常上传——**虚假错误而非丢数据**，两者中安全的那个方向。
+  `TestCommitDoesNotAcknowledgeFailedDirectorySync` 现在按档位各断言一次。
+- **meta 发布不降级**：`barrier` 与 `power` 一样走 `PublishByIno`。日志行是持久真相、
+  `RecoverPublications` 能据此重建——但关掉这扇门的 `MarkPublished` 自己带 fsync，
+  发布若比它弱，掉电后可能出现「已标记发布、节点却没了」，恢复不会重放。
+- 回归：`internal/journal/barrier_test.go` 六例（刷新计数、两档各自的顺序、默认值、
+  WAL 仍为 FULL）。诊断 `-tags diag` 已扩成三档对照。
+
+### [~] T-62 macOS 上 `power` 的承诺强于实际交付 —— 降级为文档问题
+
+- **证据**：`internal/journal/journal.go:255` 把 `synchronous=FULL` 注释为
+  "an acknowledged close must survive a power loss"。但全仓没有 `PRAGMA fullfsync`，
+  macOS 上 SQLite 因此只发普通 `fsync(2)`，APFS 不会刷设备写缓存；
+  而紧挨着的 staging 文件（`staging.go:342`）与 objects 目录（`group.go:189`）
+  走 `os.File.Sync`，在 darwin 上**是** `F_FULLFSYNC`，真正落到设备。
+- **后果**：`power` 模式在 macOS 上自相矛盾——载荷字节是设备持久的，
+  指向它们的 journal 行不是。
+- **2026-09-20 处置：代码不动，只把边界说清楚。** 打开 `fullfsync` 会给每次提交加一次
+  4 ms 的刷新，是契约变更而非 bug 修复；而真正需要「日志行也落到设备」的人，
+  现在有 T-66 的 `barrier` 可选——它用**更少**的刷新做到了这件 `power` 没做到的事。
+  所以 `power` 保持原样，注释与 README 写明它在 macOS 上的实际边界，
+  `journal.go` 的 `UNVERIFIED:` 标记保留（仍未验证的那半是「APFS 上的普通 `fsync(2)`
+  是否真把已 ack 的行留在设备缓存里」，只能真机拔电验证）。
+- Linux 上不适用（`fsync(2)` 本就刷设备缓存）。
+- **仍然开着的部分**：若哪天决定 `power` 必须字面成立，做法是把它的两次刷新也挪到行之后
+  （即 `barrier` 的顺序）再加一次，或干脆打开 `fullfsync`。两条都需要先定义 `power` 承诺什么。
+
+- **[x] `code` preset 默认开 `small_file_whole`**（2026-09-20）。该 preset 正是为源码树而设
+  （`DirReadahead` 128、`SmallFileThreshold` 1MiB），而读源码树的工具是**跳着读**的——
+  git 走 index、构建跟 import、agent 打开某符号出现的那三个文件，没有一种会触发
+  需要「同目录内连续三次升序读」才 arm 的兄弟预取。不开的话这些文件都按块取，
+  尾部还要再来一次请求。1 MiB 以内，整取比判断要不要整取更便宜。
+  期望值更新在 `internal/config/cache_policy_test.go` 的 `TestResolveCachePolicyPresetDefaults`。
+
 ## 2026-09-19 Google Drive 真实账号验收与向导引导
 
 - **[x] Google Drive 真实账号验收通过**：两个账号（同一 BYO Desktop 客户端）经控制台授权、
@@ -1277,9 +1580,172 @@ content's size back"）。`internal/fusefs` 连续 6 次 `-count=3` 全绿，基
   - 目录改名后，其子树的搜索结果路径立刻正确。
   - 2 字符查询在 10 万节点的库上不做全表扫描（用 `EXPLAIN QUERY PLAN` 断言）。
 
-### [~] T-10 writeback_cache 与 splice 未启用
+### [x] T-10 writeback_cache 与 splice 未启用 → macFUSE 协议 7.19，两者都协商不到
 
-- **2026-09-05 核对**：不能把 writeback_cache 与 passthrough 视作可同时打开的独立开关，内核初始化限制这两种能力组合。go-fuse 也会自动探测部分 splice 能力，需检查真正的协商与数据路径，而非仅 grep 挂载选项。此项保持待验收。
+- **2026-09-20 实测定案**：在 macFUSE 上实际读 FUSE INIT 握手（`internal/fusefs/kernel_caps_test.go`
+  的 `TestKernelOffersCapabilities`，经 `fuse.Server.KernelSettings()` 读内核发来的 `InitIn`）：
+
+  ```
+  FUSE implementation: macFUSE
+  protocol version: 7.19
+  raw flags: 0x00000000ef800008
+  offered (2): [ATOMIC_O_TRUNC CACHE_SYMLINKS]
+  ```
+
+  go-fuse 认识的 35 个能力位里，macFUSE **只提供 2 个**。关键的全部缺席：
+
+  | 能力 | 内核引入版本 | macFUSE 7.19 |
+  |---|---|---|
+  | `READDIRPLUS` | 7.21 | 否 |
+  | `WRITEBACK_CACHE` | 7.23 | 否 |
+  | `PARALLEL_DIROPS` | 7.25 | 否 |
+  | `ASYNC_READ` | — | 否 |
+  | `BIG_WRITES` / `MAX_PAGES` | — | 否 |
+  | `PASSTHROUGH` | 7.40 | 否 |
+  | `SPLICE_READ` / `SPLICE_WRITE` / `SPLICE_MOVE` | — | 否 |
+
+  （`0xef800008` 的高 8 位是 macFUSE 自有的扩展位——`fuse/types.go:303` 注明 bits 24..31 在
+  Linux 与 mac 上含义不同——与本条无关。）
+
+- **因此 writeback_cache 在 macOS 上不是「要不要开」的问题，而是开不了。**
+  go-fuse `fuse/opcode.go:113-117` 的 `kernelFlags &= (固定集合 | ExtraCapabilities)` 只能*保留*
+  内核在 INIT 里主动提供的位；内核没发的位，用户态无法从 `ExtraCapabilities` 凭空打开。
+- **同时作废的一个前提**：`internal/fusefs/fs.go:81-82` 原注释说 writeback_cache「与 passthrough 协商冲突」。
+  该冲突是 Linux 限定的——`platform_darwin.go` 的 `PassthroughAvailable()` 无条件返回 false，
+  macOS 上根本没有 passthrough 可放弃。注释已按实测改写。
+- **splice**：同样协商不到（三个 SPLICE 位全无），且 go-fuse 在 darwin 上 `canSplice = false`。
+  Linux 侧的 splice 另立新条，不再挂在本条下。
+- **结论**：本条在 macOS 上**关闭**，不再作为待办。Linux 侧的 writeback_cache / splice 决策
+  移交 T-61（下方新建）。
+
+### [x] T-61 macOS 无 READDIRPLUS / PARALLEL_DIROPS 的补偿路径
+
+- **2026-09-20 已实现**（`internal/fusefs/entry_cache.go` + 测试 `entry_cache_test.go`）。落地情况见本条末尾
+  「实现与实测」。以下保留原始分析与实测数据。
+
+- **证据**：T-10 的实测（macFUSE 协议 7.19）。
+- **三条独立的后果**（前两条叠加在遍历成本上，第三条是另一类：功能整个不可达）：
+  1. 无 `READDIRPLUS` ⇒ `internal/fusefs/fs.go:273-284` 的 `OpendirHandle` 让 `dirHandle` 实现
+     `fs.FileLookuper`（`fs.go:366-377`）以零查询回答 readdirplus 的每个 entry——**这段在 macOS 上从未执行过**。
+     内核改为对每个目录项发一个独立的 `node.Lookup`，各自一次 `meta.Lookup`。
+  2. 无 `PARALLEL_DIROPS` ⇒ 同一目录内的 LOOKUP 被内核**串行化**。
+  3. 协议 < 7.24 ⇒ 没有 `FUSE_LSEEK`，SEEK_HOLE / SEEK_DATA 被内核以 ENOTTY 直接回绝，
+     `file.Lseek` 不可达。这一条**没有能力位可查**，只能看协商出来的 minor 版本；详见下方专节。
+- **前两条合起来**：macOS 上 `ls -l` 一个 200 项目录 = 200 次串行 FUSE 往返。Linux 上是 1 次 readdirplus 批次。
+  这是 agent shell burst（`git diff` / `ls` / glob）在 macOS 上最大的单项成本。
+- **实测（2026-09-20，macFUSE，`TestWalkCostsOneRequestPerDirectoryAndThenNone`，5 目录 × 20 文件 = 105 项）**：
+
+  | | 冷遍历 | 热遍历 | 该测试期望（Linux） |
+  |---|---|---|---|
+  | `dir_lookup` | **0** | 0 | 105 |
+  | `lookup` | **105** | 0 | 0 |
+  | `getattr` | **272** | **112** | ≤ 1 |
+  | `readdir` | 6 | **6** | 冷 6 / 热 0 |
+  | `statfs` | 55 | 6 | 0 |
+  | `opendir` | 6 | 6 | 6 |
+
+  两点超出原判断：
+  1. `getattr` 冷 272 ≈ 每项 2.6 次。readdirplus 本应把属性随 entry 一起带回，没有它内核只能逐个补 GETATTR。
+  2. **热遍历并不免费**：`FOPEN_CACHE_DIR | FOPEN_KEEP_CACHE`（`internal/fusefs/fs.go` `OpendirHandle`）
+     在 macOS 上没能让内核自己回答，`readdir` 仍是 6、`getattr` 仍是 112。
+     `fs.go` 注释里"warm walk 每项 ~7µs 由内核回答"的结论只在 Linux 成立。
+     `statfs` 的 55 / 6 次尚未归因，需单独查（macOS 的 `getattrlist` 路径可疑）。
+     —— 已归因，见下方「实现与实测」第三个发现；`getattrlist` 这个怀疑是错的。
+
+- **该测试当时在 macOS 上是红的**（已修，见下方：按能力分支，两条路各有一组真实断言），
+  且没有平台门控——它断言的是 Linux 专有行为。
+  修 T-61 时一并决定：按平台分支断言，还是在 `!CAP_READDIRPLUS` 时跳过并另立一组 macOS 期望值。
+  在此之前，macOS 上跑 `./gow test ./internal/fusefs/` 看到这条失败属于已知。
+- **方向**（已按此实现）：在 `Root` 上加一个短时效的 entry 缓存，由最近一次 `dirHandle.load` 的 listing 填充，
+  让随后的 `node.Lookup` 命中它而不是回到 `meta.Lookup`。注意这与内核自己的 dentry 缓存
+  （`EntryTimeout` 30s，`fs.go:67-76`）是两层，不要重复失效逻辑；`dropPaths` / `invalidateListing`
+  已有的失效点是正确的挂载位置。
+- **验收**：
+  - 冷态 `ls -l` 一个 200 项目录，`opLookup` 计数从 200 降到接近 0，`meta` 查询数同比例下降。
+  - 目录内容变更后，下一次 `ls -l` 仍然看到新内容（缓存不得延长可见性窗口）。
+  - Linux 上行为不变：该路径只在 `!CAP_READDIRPLUS` 时启用。
+
+#### 实现与实测（2026-09-20）
+
+- **能力门控，不是平台门控**：`MountFS` 在 `server.WaitMount()` 之后调用
+  `Root.adoptKernelCapabilities(server.KernelSettings())`（`internal/fusefs/mount.go`），
+  按 INIT 握手里有没有 `CAP_READDIRPLUS` 决定是否装上补偿缓存，并把结论存进
+  `Root.readdirplus`（`Mount.ReaddirplusOffered()` 对外）。写死 `runtime.GOOS == "darwin"`
+  是错的：macFUSE 哪天升到 7.21、或者换 Fuse-T、或者 Linux 内核太老，答案都只有握手知道。
+  两个状态字段都是 atomic —— 握手结束时 `server.Serve()` 已在收请求了；抢在前面的那几个请求
+  走未补偿路径，仅此而已。握手读不到时按「没提供」处理（多做一层缓存是安全的，少做是白花钱）。
+- **缓存形态**（`internal/fusefs/entry_cache.go`）：按目录整批存 `dirHandle.load` 已经
+  建好的那份 listing（`parent ino → name → vfs.Attr`），`node.Lookup` 先问它。
+  命中记在新的 `entry_cache` 计数器上，`lookup` 因此恢复了「真的落到 VFS」的语义。
+  另有 `childIno → (parent, name)` 反向索引，让「只知道 inode 变了」的失效点也能精确命中。
+- **TTL 取 `min(1s, 挂载的 EntryTimeout)`**：它只需要覆盖一次 readdir 之后那一串 LOOKUP
+  （毫秒级），并且**永远不比内核自己的 dentry 缓存活得久**——这是「不得延长可见性窗口」的结构性保证。
+- **上界**：64 个目录 / 8192 条 entry，超出按最旧的 listing 整批淘汰（走完的目录正是最没用的那个）；
+  单次 listing 超过总预算则直接不收，不为它清空全部。十万文件的遍历不会让它涨。
+- **失效挂载点**（每处都是独立必要的，逐一验证过：注掉任一处都有测试变红）：
+  1. `Root.notifyEntry`（`kernel_nodes.go`）→ `dropEntry`。这是 vfs `invalidateEntryFrom` /
+     `invalidateListing` 的落点：让内核丢 dentry 的同一个事件，必须先让这一层丢，否则内核丢完回头
+     问我们，我们回答的正是刚被淘汰的那条。
+  2. `Root.notifyContent`（同上）→ `dropIno`。目录 inode 失效 = 整份 listing 作废；文件 inode 失效 =
+     那条 entry 带的 size/mtime 作废（lookup 的回复里带属性）。
+  3. `Mount.DropKernelCaches` → `clear`。它的职责就是把热挂载变回冷挂载；留着第二层缓存会让
+     "冷"测量变成谎言（`TestDropCachesMakesTheMountColdAgain` 正是靠它）。
+  4. **内核自己发起的树变更**，在 `fs.go` 的 `Create` / `Mkdir` / `Unlink` / `Rmdir` / `Rename` /
+     `Setattr` / `Write` 与 `copy_range.go` 的 `CopyFileRange` 里就地失效。vfs 这边
+     `invalidateFrom` / `invalidateEntryFrom` 对 `fromKernel(ctx)` 的请求**故意跳过**（内核会丢自己的
+     dentry），所以这一层拿不到通知，只能在动作发生处自己维护。
+- **实测（同一台机器、同一组用例，macFUSE）**：
+
+  | | 改之前 | 改之后 |
+  |---|---|---|
+  | 冷 `ls -l` 200 项目录：`lookup` | 201 | **1** |
+  | 同上：`entry_cache` | — | **200** |
+  | 冷遍历 105 项：`lookup` | 105 | **0** |
+  | 同上：`entry_cache` | — | **105** |
+
+  连跑 5 次零抖动。`getattr`（冷 ~280、热 112）没有变化，也**不可能**靠这个缓存降下来：
+  属性是 readdirplus 才能随 entry 带回的，内核单独来问 GETATTR 时没有任何回复能抢在它前面。
+  那是 `meta` 读，不是远端调用，所以新的断言给上界而不是禁止。
+- **`TestWalkCostsOneRequestPerDirectoryAndThenNone` 改为按能力分支**（不是按平台，也不是 skip）：
+  `walkBudgetWithReaddirplus` 保留原来的 Linux 预算；`walkBudgetWithout` 是 macFUSE 这条路的真实预算——
+  `dir_lookup` 必须为 0（这条路根本到不了 `dirHandle.Lookup`）、冷遍历每项都由 `entry_cache` 回答、
+  `lookup` 上界 1+目录数、`readdir` 冷热都是每目录一次（`FOPEN_CACHE_DIR` 不被 macFUSE 认）、
+  `getattr` 给 3×entry 的上界。新增回归：`TestLookupAfterReaddirIsAnsweredFromTheListing`（冷 `ls -l` 200 项）
+  与 `TestListingCacheDoesNotOutliveAChangeMadeThroughTheVFS`（守卫，判定时刻固定在 listing 仍新鲜的瞬间，
+  所以 TTL 到期不能替失效逻辑背书），外加 5 个不需要挂载的 `entryCache` 单元测试。
+- **`statfs` 归因（本条第三个发现）**：不是每项一次，也与 `getattrlist` 无关。实测拆开看：
+  **① 每次 OPENDIR 恰好一次 STATFS**（连开同一目录 3 次 = 3 次，遍历 6 个目录 = 6 次，与热遍历的 6 对上）；
+  **② 挂载后头 2 秒有一波 ~60 次的探测，期间完全没有我们发起的 IO**——是 macOS 系统守护进程
+  （`diskarbitrationd` / Spotlight / `fseventsd` 之类）在给新卷做体检，之后再静置 2 秒是 0 次。
+  冷遍历的 55～73 次就是这波探测正好落在挂载后的冷窗口里，数字随机器负载浮动（多次实测 52～73）。
+  代价上可以接受：`node.Statfs` 走 `vfs.FS.Space`，那里有 1 分钟 TTL（`internal/vfs/statfs.go` `spaceTTL`），
+  所以这一波最多换来一次 provider `Quota`。**未修，只记录**；真要收，该收的是 `Space` 在 TTL miss
+  时的并发放大（没有 singleflight，同一瞬间的并发 miss 会各自打一次），那属于 `internal/vfs`。
+#### 7.19 的第三个后果：`lseek`（SEEK_HOLE / SEEK_DATA）—— 已按同一标准处理
+
+- **现象**：`TestLseekReportsNoHoles` 在 macOS 上红，报 `inappropriate ioctl for device`（ENOTTY）。
+  已在 HEAD 的 detached worktree 上确认，与本条的 entry cache 改动无关，是本来就红的。
+- **成因与前两条同源，但门控方式不同**：`FUSE_LSEEK` 是协议 **7.24** 才加的，macFUSE 是 7.19，
+  内核根本没法把 SEEK_HOLE / SEEK_DATA 转发给守护进程，于是自己用 ENOTTY 回绝。
+  **注意它没有 INIT 能力位**——不像 `READDIRPLUS` 可以查 `CAP_*`，这里唯一能判的就是协商出来的
+  minor 版本。因此新增 `Mount.KernelProtocol()`（`Root.protoMajor/protoMinor`，同样在
+  `adoptKernelCapabilities` 里从 `KernelSettings()` 记下）与 `lseekForwarded(major, minor)`。
+- **`file.Lseek` 在 macOS 上确实是死代码**，和 `dirHandle.Lookup` 一样。**但保留**，理由有二：
+  Linux 上它是有用的（`cp --sparse=auto` / tar / rsync 复制前的 hole 探测，没有它拿到的是拒绝而不是答案），
+  且纯函数 `lseekNoHoles` 与平台无关、已由 `lseek_test.go` 在所有平台覆盖。`fs.go` 的方法注释已写明
+  「7.24 才转发、macOS 上不可达」，下一个人不必重查。
+- **全仓检索确认没有别的依赖**：`grep -rn 'Lseek|SEEK_HOLE|SEEK_DATA'` 在 `internal/fusefs` 之外零命中，
+  没有生产路径假设这个 handler 可达。
+- **测试改为按协议版本分支**（不是平台，也不是裸 skip），两条路各断言「好」是什么样：
+  - ≥ 7.24：SEEK_HOLE 从 0 落在 EOF（原断言），**且** `lseek` 计数 > 0——证明答案真的来自 `file.Lseek`。
+  - < 7.24：SEEK_HOLE 与 SEEK_DATA 都必须是 **ENOTTY**，不能是别的。这个具体性是有意义的：
+    ENOTTY 正是让 cp / tar / rsync 回退到整文件拷贝的那个信号；返回错的 offset 会让拷贝悄悄截断，
+    EIO 会被读成文件损坏，ENXIO 会被读成「探测成功且没有洞」。同时断言 `lseek` 计数 **为 0**
+    （handler 不可达这件事本身被断言了），以及回绝之后 fd 仍然可用——`SEEK_END` 给出正确大小、
+    整文件仍能读完，也就是那几个工具的回退路径是通的。
+  - 为此给 `opCounters` 加了 `lseek` 计数（与本次新增的 `entry_cache` 一并）。
+  - 反向验证：把 `lseekForwarded` 的阈值临时改成 `minor >= 19`，该用例立刻以原来的
+    `inappropriate ioctl for device` 变红——分支选择本身是被测的，不是摆设。
 
 - **证据**：`internal/fusefs/fs.go:66-72` 的 `MountOptions` 只设了
   `FsName / Name / Debug / DisableXAttrs / EnableLocks`；
@@ -3454,6 +3920,51 @@ P0、P1 全部零远端调用，`test/perf` 的 provider 调用次数基线一�
   守住，另加 `TestReconcileFollowsContentMovedIntoAndOutOfAPinnedDirectory` 双向验证。
   顺带：`meta.Aliases` 此前不计入 `QueryStats`，所以这条成本在计数器里是隐形的，已补上。
 - **[ ] pin 的真机验收**：macOS/Linux 内核挂载仍待环境验收。详细行为见 `docs/cache-management.md`。
+
+### [x] T-59 权限位在挂载盘上不持久，git 反复看到 mode-only diff（2026-09-20，新发现）
+
+- **症状**：挂载盘里的 git 仓库 `git status` 报 6 个脚本被改，`git diff` 只有
+  `old mode 100755 / new mode 100644`，内容零变化。根因不在 git：`internal/fusefs/fs.go`
+  的 `Setattr` 把 mode 直接丢弃，`Create`/`Mkdir` 拿到内核传来的 mode 也不用，所有文件
+  经 `fillAttr` 一律回落 0644。
+- **为什么只做 chmod 不够**：git checkout 走 `open(path, O_WRONLY|O_CREATE|O_EXCL, mode)`，
+  执行位在创建时就带进来而不是事后 chmod，所以 CREATE / MKDIR 两条路同样要收 mode。
+- **做法（本地元数据库，不写远端）**：`nodes` 加 `mode_set`（migration v14→v15），
+  `meta.SetMode` 写 mode 并置位；三条会写回 mode 的语句（`upsertNodeTx`、`PutDirChanged`、
+  `mergeStaged`）改成 `mode=CASE WHEN mode_set=1 THEN mode ELSE ? END`，目录刷新与 delta
+  feed 因此都不覆盖本地设过的权限。`vfs.Chmod` 复用 xattr 的只读子树守卫（`xattrWritable`
+  更名 `localAttrWritable`，两者是同一条规则）；`fusefs` 的 `Setattr` 接 `in.GetMode()`，
+  `Create`/`Mkdir` 经 `applyBirthMode` 记录出生 mode——节点此时已存在，所以记录失败只写
+  日志、不让一个已经成功的 create 失败。
+- **只存权限位**：挂载带 `nosuid`，存 setuid/setgid/sticky 只会让 ls(1) 报一个内核不认的权限。
+- **验收**：`internal/meta/posix_mode_test.go`（SetMode 持久；三条刷新路径各一条保留断言，
+  每条都验证过移除 `CASE WHEN` 即失败）、`internal/vfs/posix_mode_test.go`（Stat 可见、
+  目录 TTL 过期刷新后保留、只读挂载 `ErrReadOnly`）、`internal/fusefs/posix_mode_test.go`
+  （真实挂载下 chmod / create / mkdir 三条内核路径）、`test/conformance` 的
+  `TestDeliberateDifferencesAreExplicit` 由"chmod 是 no-op"改为正向比对权限位与本地目录
+  一致，chown 仍是否定断言。
+- **已知边界**：权限不跨机器。`meta.db` 是缓存、可整体重建，重建后回落默认；要跨端得把
+  mode 写进远端元数据（s3 的 `x-amz-meta-mode`、gdrive 的 `appProperties`），那需要 `Caps`
+  新增能力位与 `provider.Entry.Mode` 字段，另开条目。
+
+### [ ] T-60 `meta.db` 没有上界：冷节点永不驱逐（2026-09-20，新发现）
+
+- **证据**：`internal/meta` 里唯一回收空间的是 `store.go` 的 `Vacuum`，只为
+  `cloudfs doctor --fix` 回收已删除行，不驱逐活节点。访问过的路径永久留在 `nodes`、
+  `name_index`（trigram FTS）与两条索引里，只增不减。而 `docs/DESIGN.md` 自己写明
+  `meta.db` 不是真相源、可整体重建——既然可重建，它就该像块缓存那样有预算。
+- **量级**：现有规模基线只到 100 万节点（`test/perf/search_scale_test.go`，200 目录 ×
+  5000 文件）。按当前 schema 行宽约 200–250 B 估，10 亿节点是 220 GB 表 + 约 115 GB 两条
+  索引 + FTS 倒排（保守 2–4 倍名字体积），合计 400–500 GB 起，已超过多数人给缓存盘的
+  预算；而 `1169533` 新做的磁盘预算与保留只管块缓存，`meta.db` 不在其中。
+- **方向**：不是换存储引擎，更不是分布式元数据——那会把"单机守护进程"变成要运维的集群，
+  与产品定位冲突。正确解是给 meta 一个大小预算 + 按 `fetched_at` LRU 驱逐冷子树（pin 覆盖
+  的除外），驱逐后再访问重新 list。注意 `meta` 存的是**访问过的路径数**，不是远端对象数：
+  懒加载 + TTL + 负缓存 + delta 本来就不枚举整个 bucket，所以 1e9 是 bucket 规模而非表规模。
+- **前置**：先补 1e7 / 1e8 的 SQLite 实测上限（用 `test/fakeprovider` 合成树），有数据再
+  定预算默认值。
+- **验收（待定）**：预算生效后 `nodes` 行数有上界；驱逐过的子树再访问结果与驱逐前一致；
+  pin 子树不被驱逐；驱逐本身不产生远端调用。
 
 ### 原阶段计划（需结合以上进展使用）
 

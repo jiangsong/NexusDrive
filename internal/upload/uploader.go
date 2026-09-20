@@ -95,9 +95,14 @@ type Uploader struct {
 	transfers  map[string]context.CancelFunc
 	listings   listingMemo
 	// doneFiles and doneBytes count the rows this process finished, ever:
-	// the console's batch progress is the difference between two readings.
+	// batch progress is the difference between two readings.
 	doneFiles atomic.Int64
 	doneBytes atomic.Int64
+	// inflightBytes is the size of the rows registered for transfer right
+	// now, maintained by registerTransfer and its release.
+	inflightBytes atomic.Int64
+	// progress folds the queue readings into one bar; see progress.go.
+	progress *progressTracker
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
@@ -135,7 +140,14 @@ func New(opt Options) (*Uploader, error) {
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
-	return &Uploader{opt: opt, running: map[string]context.CancelFunc{}}, nil
+	u := &Uploader{opt: opt, running: map[string]context.CancelFunc{}}
+	u.progress = newProgressTracker(
+		opt.Journal.Stats,
+		u.Totals,
+		func() int64 { return u.inflightBytes.Load() },
+		opt.Now,
+	)
+	return u, nil
 }
 
 // Start launches worker pools for every remote with queued work and keeps
@@ -158,7 +170,10 @@ func (u *Uploader) Start(ctx context.Context) {
 		t := time.NewTicker(u.opt.PollInterval)
 		defer t.Stop()
 		for {
-			u.syncRemotes(rootCtx)
+			// The supervisor already asks which remotes have queued work, so
+			// the batch reading rides on that answer: with nothing queued and
+			// no batch open it costs no query at all.
+			u.progress.sample(rootCtx, u.syncRemotes(rootCtx))
 			select {
 			case <-rootCtx.Done():
 				return
@@ -168,15 +183,17 @@ func (u *Uploader) Start(ctx context.Context) {
 	}()
 }
 
-func (u *Uploader) syncRemotes(ctx context.Context) {
+// syncRemotes starts a worker pool for every remote with queued work and
+// reports whether any remote had some.
+func (u *Uploader) syncRemotes(ctx context.Context) bool {
 	remotes, err := u.opt.Journal.Remotes(ctx)
 	if err != nil {
-		return
+		return false
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.stopped {
-		return
+		return len(remotes) > 0
 	}
 	for _, r := range remotes {
 		if _, ok := u.running[r]; ok {
@@ -198,6 +215,7 @@ func (u *Uploader) syncRemotes(ctx context.Context) {
 			}(r)
 		}
 	}
+	return len(remotes) > 0
 }
 
 // Stop cancels the supervisor and every worker, then waits for them.
@@ -256,6 +274,12 @@ func (u *Uploader) drainOnce(ctx context.Context, remote string) (int, error) {
 // the values it saw when a batch began and shows the difference.
 func (u *Uploader) Totals() (files, bytes int64) { return u.doneFiles.Load(), u.doneBytes.Load() }
 
+// Progress reports the queue's overall progress as of the supervisor's last
+// tick. It asks the journal nothing, so every surface can read it as often as
+// it likes. An uploader that was never started has never sampled, and reports
+// an empty batch rather than a stale one.
+func (u *Uploader) Progress() Progress { return u.progress.snapshot() }
+
 // RunOne runs a row the caller has already claimed (Journal.ClaimID) to
 // completion, retry or dead letter, on the caller's goroutine. The VFS uses
 // it to create a queued directory when an operation needs its real id now.
@@ -306,7 +330,9 @@ func (u *Uploader) process(ctx context.Context, up journal.Upload) {
 	defer release()
 	if u.opt.Hooks.Authorize != nil {
 		if err := u.opt.Hooks.Authorize(ctx, up); err != nil {
-			u.dead(ctx, up, fmt.Errorf("upload: local account binding rejected this task: %w", err))
+			// The hook's error names the fence that failed; asserting a cause
+			// here on top of it made every rejection read as an account change.
+			u.dead(ctx, up, fmt.Errorf("upload: rejected before sending: %w", err))
 			return
 		}
 	}

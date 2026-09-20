@@ -289,10 +289,12 @@ Agents
 
 Inspection
   ui [--print]              open the dashboard in a browser (needs control.metrics)
-  status [--json]           show cache, upload queue, proxy and remote state
+  status [--json] [--watch] show cache, upload queue, proxy and remote state;
+                            --watch then follows the upload queue until it drains
   doctor [--fix] [--json]   diagnose the environment and the local state
   cache stats | gc | pins   inspect or trim the block cache; list pin rules
-  uploads list | retry | cancel | resume | drop | flush
+  uploads list | watch | retry | cancel | resume | drop | flush
+	                       watch follows the queue to the end and exits non-zero if anything failed
 	                       drop <id> --confirm removes a stopped local version, not remote data
   find [query] [--ext go,md] [--size >1m] [--after 2026-09-01] [--type dir|file] [--sort name|size|mtime|path] [--all]
                             search indexed file names; --all lists the whole tree first
@@ -1296,7 +1298,7 @@ func mcpInstallTo(out, errOut io.Writer, f *flags, allow []string, readOnly bool
 }
 
 func cmdStatus(ctx context.Context, args []string) error {
-	f := parseFlags(args, "json")
+	f := parseFlags(args, "json", "watch")
 	cfg, _, err := loadConfig(f)
 	if err != nil {
 		return err
@@ -1323,43 +1325,66 @@ func cmdStatus(ctx context.Context, args []string) error {
 		st.Durability = cfg.Journal.Durability
 	}
 	if f.bool("json") {
+		if f.bool("watch") {
+			return errors.New("status: --watch draws a progress line and cannot also emit JSON; use `cloudfs uploads watch --json`")
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(st)
 	}
-	printStatus(st)
-	return nil
+	printStatus(os.Stdout, st)
+	if !f.bool("watch") {
+		return nil
+	}
+	if !online {
+		return errUploadsNeedDaemon
+	}
+	// Everything else in this snapshot changes slowly; the upload queue is
+	// the part that is moving while someone is looking at it. Following it
+	// is therefore following the one line that will not be the same in a
+	// second's time.
+	fmt.Println()
+	return watchUploadQueue(ctx, os.Stdout, cfg.Control.Socket, cfg.Control.Metrics, 30*time.Second, false)
 }
 
-func printStatus(st control.Status) {
-	fmt.Printf("cloudfs %s\n\n", st.Version)
-	fmt.Println("Mounts")
+func printStatus(out io.Writer, st control.Status) {
+	fmt.Fprintf(out, "cloudfs %s\n\n", st.Version)
+	fmt.Fprintln(out, "Mounts")
 	for _, m := range st.Mounts {
-		fmt.Printf("  %-10s %-10s %s\n", m.Prefix, m.Remote, m.Mode)
+		fmt.Fprintf(out, "  %-10s %-10s %s\n", m.Prefix, m.Remote, m.Mode)
 	}
-	fmt.Printf("\nCache\n  %s of %s used across %d blocks, %d hydrated files\n",
+	fmt.Fprintf(out, "\nCache\n  %s of %s used across %d blocks, %d hydrated files\n",
 		st.Cache.BytesHuman, humanOrDash(st.Cache.MaxBytes), st.Cache.Blocks, st.Cache.HydratedFiles)
-	fmt.Printf("  hit ratio %.1f%% (%d hits, %d misses, %d evictions)\n",
+	fmt.Fprintf(out, "  hit ratio %.1f%% (%d hits, %d misses, %d evictions)\n",
 		st.Cache.HitRatio*100, st.Cache.Hits, st.Cache.Misses, st.Cache.Evictions)
 
-	fmt.Printf("\nUploads\n  %d pending, %d in flight, %d failed\n",
+	fmt.Fprintf(out, "\nUploads\n  %d pending, %d in flight, %d failed\n",
 		st.Uploads.Pending, st.Uploads.Uploading, st.Uploads.Dead)
+	// The overall bar, the same figures the console draws and `cloudfs
+	// uploads watch` follows. A copy into the mount returns before its bytes
+	// do, and this is where that becomes visible without a browser.
+	if line := uploadBatchSummary(st); line != "" {
+		fmt.Fprintf(out, "  %s\n", line)
+	}
+	if st.Uploads.Blocked > 0 {
+		fmt.Fprintf(out, "  %d blocked behind a directory creation that failed or was cancelled; `cloudfs uploads retry` requeues it\n", st.Uploads.Blocked)
+	}
 	if st.Uploads.Cancelled+st.Uploads.Cancelling > 0 {
-		fmt.Printf("  %d stopping, %d cancelled; local content retained, remote effects not reconciled\n", st.Uploads.Cancelling, st.Uploads.Cancelled)
+		fmt.Fprintf(out, "  %d stopping, %d cancelled; local content retained, remote effects not reconciled\n", st.Uploads.Cancelling, st.Uploads.Cancelled)
 	}
 	if st.Uploads.Purging > 0 {
-		fmt.Printf("  %d cleanup pending; do not retry or infer remote completion\n", st.Uploads.Purging)
+		fmt.Fprintf(out, "  %d cleanup pending; do not retry or infer remote completion\n", st.Uploads.Purging)
 	}
 	if st.Uploads.OldestAge != "" {
-		fmt.Printf("  oldest queued %s\n", st.Uploads.OldestAge)
+		fmt.Fprintf(out, "  oldest queued %s\n", st.Uploads.OldestAge)
 	}
 
-	fmt.Printf("\nMetadata\n  %d entries, %d directories fully listed, %d negative entries\n",
+	fmt.Fprintf(out, "\nMetadata\n  %d entries, %d directories fully listed, %d negative entries\n",
 		st.Meta.Nodes, st.Meta.CompleteDirs, st.Meta.NegativeCache)
 
 	if len(st.Remotes) > 0 {
-		fmt.Println("\nRemotes")
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(out, "\nRemotes")
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(w, "  name\tmeta/s\tdown/s\tup/s\tstate")
 		for _, r := range st.Remotes {
 			state := "ok"
@@ -1371,19 +1396,19 @@ func printStatus(st control.Status) {
 		w.Flush()
 	}
 	if len(st.Proxies) > 0 {
-		fmt.Println("\nProxies")
+		fmt.Fprintln(out, "\nProxies")
 		for _, p := range st.Proxies {
 			state := "healthy"
 			if !p.Healthy {
 				state = "DOWN: " + p.Error
 			}
-			fmt.Printf("  %-12s %s (%dms)\n", p.Name, state, p.LatencyMS)
+			fmt.Fprintf(out, "  %-12s %s (%dms)\n", p.Name, state, p.LatencyMS)
 		}
 	}
 	if len(st.Warnings) > 0 {
-		fmt.Println("\nNeeds attention")
+		fmt.Fprintln(out, "\nNeeds attention")
 		for _, warn := range st.Warnings {
-			fmt.Println("  - " + warn)
+			fmt.Fprintln(out, "  - "+warn)
 		}
 	}
 }

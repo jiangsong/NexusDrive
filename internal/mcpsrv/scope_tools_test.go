@@ -149,6 +149,7 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		"read_text":        {"path": "/gd/x.txt"},
 		"read_range":       {"path": "/gd/x.txt", "offset": 0, "length": 4},
 		"search":           {"query": "x", "path": "/gd"},
+		"warm":             {"path": "/gd"},
 		"cache_status":     {"path": "/gd/x.txt"},
 		"get_download_url": {"path": "/gd/x.txt"},
 		"write_file":       {"path": "/gd/y.txt", "content": "x"},
@@ -180,7 +181,10 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 	pathless := map[string]string{
 		"list_roots": "filters mounts by scope", "flush_uploads": "unrestricted scope only",
 		"list_uploads": "filters by scope", "get_upload": "filters by scope", "retry_upload": "write gate only",
-		"cancel_upload": "write gate only", "resume_upload": "write gate only", "discard_upload": "write gate only",
+		// The queue is the daemon's, not a subtree's: the batch says how far
+		// along the whole of it is and names nothing that a scope could hide.
+		"upload_progress": "whole-queue counters, no paths",
+		"cancel_upload":   "write gate only", "resume_upload": "write gate only", "discard_upload": "write gate only",
 		"list_copy_jobs": "filters by scope", "get_copy_job": "filters by scope", "retry_copy_job": "write gate only",
 		"cancel_copy_job": "write gate only", "forget_copy_job": "write gate only",
 		"list_export_jobs": "job ids only", "get_export_job": "job ids only", "cancel_export_job": "write gate only",

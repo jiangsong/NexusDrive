@@ -42,6 +42,9 @@ func (n *node) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint
 		return 0, syscall.ENOTSUP
 	}
 	n.root.count(opCopyFileRange)
+	// Like Write: this grows the destination, so a cached listing entry for
+	// it now carries the size from before the copy.
+	n.root.forgetIno(dst.handle.Ino)
 	written, err := n.root.opt.FS.WriteFromFD(ctx, dst.handle, fd, int64(offIn), int64(offOut), int64(length))
 	if err != nil {
 		return uint32(written), errno(err)

@@ -134,6 +134,7 @@ const (
 	pHash     = "/1/clouddrive/file/update/hash"
 	pAuth     = "/1/clouddrive/file/upload/auth"
 	pFinish   = "/1/clouddrive/file/upload/finish"
+	pMember   = "/1/clouddrive/member"
 )
 
 // ---------------------------------------------------------------- basic wiring
@@ -727,7 +728,7 @@ func uploadServer(t *testing.T, rec *capture) *httptest.Server {
 		rec.add(r)
 		writeEnvelope(w, map[string]any{
 			"task_id": "T1", "finish": false, "upload_id": "UP1", "obj_key": "oss/obj1",
-			"bucket": "quark-bucket", "upload_url": srv.URL, "auth_info": "AUTHINFO",
+			"bucket": "quark-bucket", "upload_url": "http://pds.quark.cn", "auth_info": "AUTHINFO",
 			"callback": map[string]any{"callbackUrl": "https://callback.quark", "callbackBody": "fid=${x:fid}"},
 		})
 	})
@@ -794,7 +795,7 @@ func TestChunkedUpload(t *testing.T) {
 	rec := &capture{}
 	srv := uploadServer(t, rec)
 	defer srv.Close()
-	q := newTestQuark(t, srv)
+	q, _ := newSpiedQuark(t, srv)
 	ctx := context.Background()
 
 	s, err := q.BeginUpload(ctx, "root", "big.bin", 12, nil)
@@ -874,7 +875,7 @@ func TestUploadSessionSurvivesAJournalRoundTrip(t *testing.T) {
 	rec := &capture{}
 	srv := uploadServer(t, rec)
 	defer srv.Close()
-	q := newTestQuark(t, srv)
+	q, _ := newSpiedQuark(t, srv)
 	ctx := context.Background()
 
 	s, err := q.BeginUpload(ctx, "root", "big.bin", 12, nil)
@@ -1029,5 +1030,184 @@ func TestRiskControlOnAnyEndpointIsCircuitBreakerMaterial(t *testing.T) {
 	}
 	if retry.Classify(err) != retry.ClassRiskControl {
 		t.Fatalf("classified as %v", retry.Classify(err))
+	}
+}
+
+// ---------------------------------------------------------------- quota
+
+func TestQuotaReportsTheAccountCapacity(t *testing.T) {
+	const total, used = int64(6) << 40, int64(1234567890)
+	cap := &capture{}
+	mux := http.NewServeMux()
+	mux.HandleFunc(pMember, func(w http.ResponseWriter, r *http.Request) {
+		cap.add(r)
+		writeEnvelope(w, map[string]any{"total_capacity": total, "use_capacity": used})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	q := newTestQuark(t, srv)
+
+	// Through QuotaOf, because that is the path the pool and the account
+	// detail take: it fails closed when the driver lacks provider.Quotaer.
+	got, ok, err := provider.QuotaOf(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("quark does not implement provider.Quotaer")
+	}
+	if got.Total != total || got.Used != used {
+		t.Fatalf("quota = %+v, want total %d used %d", got, total, used)
+	}
+	req := cap.last(t, pMember)
+	if req.Method != http.MethodGet {
+		t.Fatalf("method = %s, want GET", req.Method)
+	}
+	if req.Query.Get("pr") != "ucpro" || req.Query.Get("fr") != "pc" {
+		t.Fatalf("client params missing: %v", req.Query)
+	}
+	if !strings.Contains(req.Header.Get("Cookie"), "__pus=abc") {
+		t.Fatalf("cookie not sent: %q", req.Header.Get("Cookie"))
+	}
+}
+
+func TestQuotaSurfacesAnExpiredSession(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pMember, func(w http.ResponseWriter, r *http.Request) {
+		writeFailure(w, http.StatusUnauthorized, 31001, "未登录")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	q := newTestQuark(t, srv)
+
+	_, ok, err := provider.QuotaOf(context.Background(), q)
+	if !ok {
+		t.Fatal("quark does not implement provider.Quotaer")
+	}
+	if !errors.Is(err, provider.ErrAuth) {
+		t.Fatalf("err = %v, want ErrAuth", err)
+	}
+}
+
+// ------------------------------------------------------ OSS object addressing
+
+// hostSpy records the address the driver built for every request and then
+// redirects it to a local server. Quark's OSS zone host does not resolve on
+// its own, so the only way to assert the driver aims at the right name is to
+// watch the URL rather than the connection.
+type hostSpy struct {
+	mu   sync.Mutex
+	seen []url.URL
+	to   string
+	base http.RoundTripper
+}
+
+func (s *hostSpy) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	s.seen = append(s.seen, *req.URL)
+	s.mu.Unlock()
+	out := req.Clone(req.Context())
+	out.URL.Scheme, out.URL.Host, out.Host = "http", s.to, ""
+	return s.base.RoundTrip(out)
+}
+
+func (s *hostSpy) forPath(t *testing.T, path string) url.URL {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.seen {
+		if u.Path == path {
+			return u
+		}
+	}
+	t.Fatalf("no request was addressed to %s (saw %v)", path, s.seen)
+	return url.URL{}
+}
+
+// newSpiedQuark points a driver at srv while keeping the addresses it builds
+// visible.
+func newSpiedQuark(t *testing.T, srv *httptest.Server) (*Quark, *hostSpy) {
+	t.Helper()
+	spy := &hostSpy{to: srv.Listener.Addr().String(), base: http.DefaultTransport}
+	q, err := NewWithOptions("q", Options{
+		Client: httpx.New(httpx.Options{
+			Remote: "q", HTTP: &http.Client{Transport: spy},
+			Policy: retry.Policy{Backoff: retry.Backoff{Base: time.Millisecond, Max: 2 * time.Millisecond}, MaxAttempts: 2},
+		}),
+		BaseURL: srv.URL,
+		Cookie:  "__pus=abc; __puus=v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.taskPollInterval = time.Millisecond
+	return q, spy
+}
+
+// ossSession is the shape Quark actually answers file/upload/pre with: a bare
+// zone host that carries neither the bucket nor a TLS scheme.
+func ossSession() provider.UploadSession {
+	return provider.UploadSession{ID: "T1", PartSize: 6, Opaque: map[string]string{
+		OpaqueTaskID: "T1", OpaqueUploadID: "UP1", OpaqueObjKey: "oss/obj1",
+		OpaqueBucket: "quark-bucket", OpaqueUploadURL: "http://pds.quark.cn",
+		OpaqueAuthInfo: "AUTHINFO", OpaqueParentID: "root", OpaqueFileName: "big.bin",
+		OpaqueSize: "12", OpaqueCallbackURL: "https://callback.quark",
+		OpaqueCallbackBody: "fid=${x:fid}",
+	}}
+}
+
+func TestPartUploadAddressesTheBucketSubdomain(t *testing.T) {
+	rec := &capture{}
+	srv := uploadServer(t, rec)
+	defer srv.Close()
+	q, spy := newSpiedQuark(t, srv)
+
+	if _, err := q.UploadPart(context.Background(), ossSession(), 0, strings.NewReader("hello "), 6); err != nil {
+		t.Fatal(err)
+	}
+
+	u := spy.forPath(t, "/oss/obj1")
+	// OSS is virtual-hosted here: pds.quark.cn has no address of its own, so
+	// the bucket must be the leftmost label or the name does not resolve.
+	if u.Host != "quark-bucket.pds.quark.cn" {
+		t.Fatalf("part PUT host = %q, want quark-bucket.pds.quark.cn", u.Host)
+	}
+	if u.Scheme != "https" {
+		t.Fatalf("part PUT scheme = %q; file bytes must not go out in plaintext", u.Scheme)
+	}
+}
+
+func TestCompleteUploadAddressesTheBucketSubdomain(t *testing.T) {
+	rec := &capture{}
+	srv := uploadServer(t, rec)
+	defer srv.Close()
+	q, spy := newSpiedQuark(t, srv)
+
+	parts := []provider.PartToken{{Index: 0, ETag: `"etag-1"`}, {Index: 1, ETag: `"etag-2"`}}
+	if _, err := q.CompleteUpload(context.Background(), ossSession(), parts); err != nil {
+		t.Fatal(err)
+	}
+
+	// The completing POST goes to the same object as the parts did, so it
+	// needs the same virtual-hosted address.
+	u := spy.forPath(t, "/oss/obj1")
+	if u.Host != "quark-bucket.pds.quark.cn" {
+		t.Fatalf("complete POST host = %q, want quark-bucket.pds.quark.cn", u.Host)
+	}
+	if u.Scheme != "https" {
+		t.Fatalf("complete POST scheme = %q, want https", u.Scheme)
+	}
+}
+
+func TestOSSURLDoesNotRepeatTheBucket(t *testing.T) {
+	// Quark hands back the zone alone today, but a future response that
+	// already names the bucket must not be turned into
+	// quark-bucket.quark-bucket.pds.quark.cn.
+	got := ossURL("http://quark-bucket.pds.quark.cn", "quark-bucket", "oss/obj1")
+	if want := "https://quark-bucket.pds.quark.cn/oss/obj1"; got != want {
+		t.Fatalf("ossURL = %q, want %q", got, want)
+	}
+	if got := ossURL("http://pds.quark.cn/", "", "a b/c"); got != "https://pds.quark.cn/a%20b/c" {
+		t.Fatalf("ossURL without a bucket = %q", got)
 	}
 }

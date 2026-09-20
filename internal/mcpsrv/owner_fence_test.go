@@ -78,21 +78,28 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 	}
 	// Read tools that must succeed outright on the warmed tree.
 	readOK := map[string]map[string]any{
-		"list_directory":   {"path": "/work"},
-		"directory_tree":   {"path": "/work"},
-		"history":          {"path": "/work/a.txt"},
-		"pull_events":      {"path": "/work"},
-		"hot_paths":        {"path": "/work"},
-		"stale_docs":       {"path": "/work"},
-		"stat":             {"path": "/work/a.txt"},
-		"stat_many":        {"paths": []string{"/work/a.txt", "/work/b.txt"}},
-		"read_text":        {"path": "/work/a.txt"},
-		"read_range":       {"path": "/work/a.txt", "offset": 0, "length": 2},
-		"search":           {"query": "a", "path": "/work"},
+		"list_directory": {"path": "/work"},
+		"directory_tree": {"path": "/work"},
+		"history":        {"path": "/work/a.txt"},
+		"pull_events":    {"path": "/work"},
+		"hot_paths":      {"path": "/work"},
+		"stale_docs":     {"path": "/work"},
+		"stat":           {"path": "/work/a.txt"},
+		"stat_many":      {"paths": []string{"/work/a.txt", "/work/b.txt"}},
+		"read_text":      {"path": "/work/a.txt"},
+		"read_range":     {"path": "/work/a.txt", "offset": 0, "length": 2},
+		"search":         {"query": "a", "path": "/work"},
+		// warm only refreshes listings, which is what every read tool
+		// already does on a cold directory; it changes no file and is not
+		// fenced.
+		"warm":             {"path": "/work"},
 		"cache_status":     {"path": "/work/a.txt"},
 		"list_roots":       {},
 		"get_download_url": {"path": "/work/a.txt"},
 		"list_uploads":     {},
+		// upload_progress reads the queue's own counters: no path, no
+		// provider call, nothing to fence.
+		"upload_progress":  {},
 		"list_copy_jobs":   {},
 		"list_export_jobs": {},
 		"semantic_search":  {"query": "hello", "path": "/work"},

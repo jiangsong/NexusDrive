@@ -255,17 +255,7 @@ func (f *FS) TruncatePath(ctx context.Context, ino uint64, size int64) error {
 }
 
 // writeHandles snapshots the open write handles for one inode.
-func (f *FS) writeHandles(ino uint64) []*Handle {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []*Handle
-	for _, h := range f.handles {
-		if h.Ino == ino && h.writer != nil {
-			out = append(out, h)
-		}
-	}
-	return out
-}
+func (f *FS) writeHandles(ino uint64) []*Handle { return f.writeHandlesFor(ino) }
 
 func (f *FS) Truncate(ctx context.Context, h *Handle, size int64) error {
 	applied, err := f.truncateHandle(ctx, h, size)
@@ -414,8 +404,15 @@ func (f *FS) commitWrite(ctx context.Context, h *Handle, w *writeState) error {
 	}
 	// By inode, not by name: the file may have been renamed since the
 	// handle was opened, and its name then is not where the data goes.
+	//
+	// barrier publishes as durably as power, not as cheaply as crash. The
+	// journal row is the durable truth and RecoverPublications rebuilds this
+	// from it — but MarkPublished, which closes that door, runs in its own
+	// fsynced transaction afterwards. A publication weaker than the flag that
+	// retires it could leave a power loss with "already published" recorded
+	// and no node to show for it, and recovery would not replay it.
 	update := f.meta.UpdateByIno
-	if f.journal.Durability() == journal.DurabilityPower {
+	if f.journal.Durability() != journal.DurabilityCrash {
 		update = f.meta.PublishByIno
 	}
 	err := update(ctx, node)
@@ -635,7 +632,7 @@ func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, e
 	f.mu.Lock()
 	h.FH = f.nextFH
 	f.nextFH++
-	f.handles[h.FH] = h
+	f.registerHandleLocked(h)
 	f.addWriterLocked(node.Ino)
 	f.mu.Unlock()
 	f.changedEntry(ctx, parent, name, false, KindCreate)
@@ -798,7 +795,7 @@ func (f *FS) mkdirQueued(ctx context.Context, m Mount, parent uint64, name strin
 	node.RemoteID = localRemoteID(u.ID)
 	node.Version = localVersion(u.ID)
 	update := f.meta.UpdateByIno
-	if f.journal.Durability() == journal.DurabilityPower {
+	if f.journal.Durability() != journal.DurabilityCrash {
 		update = f.meta.PublishByIno
 	}
 	if err := update(ctx, node); err != nil {
@@ -1521,7 +1518,7 @@ func (f *FS) UploadHooks() upload.Hooks {
 			// upload puts its own — now superseded — size, id and version back
 			// on the file, which is how two consecutive rewrites could end up
 			// reporting the first one's content.
-			adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() == journal.DurabilityPower)
+			adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() != journal.DurabilityCrash)
 			if err != nil {
 				return err
 			}
@@ -1622,7 +1619,7 @@ func (f *FS) adoptDirectory(ctx context.Context, u journal.Upload, r upload.Resu
 			n.MTime = r.Entry.ModTime
 		}
 		n.Dirty = false
-		adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() == journal.DurabilityPower)
+		adopted, err := f.meta.AdoptByIno(ctx, n, localRemoteID(u.ID), f.journal.Durability() != journal.DurabilityCrash)
 		if err != nil {
 			return err
 		}

@@ -117,7 +117,7 @@ func (f *FS) Open(ctx context.Context, ino uint64, write bool) (*Handle, error) 
 	f.mu.Lock()
 	h.FH = f.nextFH
 	f.nextFH++
-	f.handles[h.FH] = h
+	f.registerHandleLocked(h)
 	if write {
 		f.addWriterLocked(ino)
 	}
@@ -153,7 +153,7 @@ func (f *FS) Release(ctx context.Context, h *Handle) error {
 
 	if remove {
 		f.mu.Lock()
-		delete(f.handles, h.FH)
+		f.retireHandleLocked(h)
 		f.mu.Unlock()
 	}
 
@@ -191,7 +191,7 @@ func (f *FS) Read(ctx context.Context, h *Handle, buf []byte, off int64) (int, e
 		h.mu.Unlock()
 		if remove {
 			f.mu.Lock()
-			delete(f.handles, h.FH)
+			f.retireHandleLocked(h)
 			f.mu.Unlock()
 		}
 	}()
@@ -253,10 +253,6 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 			}
 		}
 	}
-	// A sibling prefetch may already be fetching this very file. Waiting
-	// for it costs nothing and saves the drive a second request for the
-	// same bytes.
-	f.awaitDirReadAhead(ctx, h.Ino)
 	h.mu.Lock()
 	first := !h.dirAheadSeen
 	h.dirAheadSeen = true
@@ -267,6 +263,10 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 	bs := f.cache.BlockSize()
 	total := 0
 	stalled := false
+	// awaited: a read waits for an in-flight prefetch of its own file at
+	// most once, and only when it is about to go to the drive itself. A read
+	// the cache can serve never waits for speculation at all.
+	awaited := false
 	for total < len(buf) {
 		pos := off + int64(total)
 		idx := pos / bs
@@ -275,6 +275,16 @@ func (f *FS) readCached(ctx context.Context, h *Handle, buf []byte, off int64) (
 		// for: materialising the whole block here would make every read pay
 		// the block size.
 		n, ok := f.cache.ReadAt(key, idx, inBlock, buf[total:])
+		if !ok && !awaited {
+			// A sibling prefetch may already be fetching this very file.
+			// Waiting for it saves the drive a second request for the same
+			// bytes, and what it installs is the whole file, so the miss
+			// below is usually a hit by the time it returns.
+			awaited = true
+			if f.awaitDirReadAhead(ctx, h.Ino) {
+				n, ok = f.cache.ReadAt(key, idx, inBlock, buf[total:])
+			}
+		}
 		if !ok {
 			// The reader had to wait for bytes: the window is behind the
 			// reader and may grow. A read served from the cache is proof
@@ -609,7 +619,11 @@ func (f *FS) fillPinned(ctx context.Context, p string) error {
 		return err
 	}
 	if n.IsDir() {
-		kids, err := f.ReadDir(ctx, n.Ino)
+		// readDirRefresh, not ReadDir: filling a pin is background work, and
+		// only the child names are wanted. Going through ReadDir would count
+		// the pin filler as a foreground metadata request against itself, and
+		// build an Attr per entry that nothing here reads.
+		kids, err := f.readDirRefresh(ctx, n.Ino, false)
 		if err != nil {
 			return err
 		}

@@ -198,7 +198,10 @@ func nextFor(hits int, truncated bool, coverage searchCoverage, degraded string,
 	case degraded != "":
 		return "call index_status to see why semantic search degraded; a keyword-only result may miss what you want"
 	case hits == 0 && coverage.Known > coverage.Listed:
-		return fmt.Sprintf("no match, but the index lists only %d of %d known directories: call directory_tree or list_directory on %s, then search again", coverage.Listed, coverage.Known, root)
+		// warm, not directory_tree: the tree tool shows the gap from local
+		// metadata but never fills it, and list_directory fills one level
+		// of it at a time.
+		return fmt.Sprintf("no match, but the index lists only %d of %d known directories: call warm on %s to list the rest, then search again", coverage.Listed, coverage.Known, root)
 	case hits == 0 && contentSkipped > 0:
 		return fmt.Sprintf("no match among cached files; %d were not cached: call pin on %s to search their contents", contentSkipped, root)
 	case truncated:

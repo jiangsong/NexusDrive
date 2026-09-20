@@ -19,6 +19,8 @@ type wholeObject struct {
 	readers    int
 	lastAccess time.Time
 	hot        bool
+	// read is the descriptor kept for readBlock's hydrated path; see readfd.go.
+	read readFD
 }
 
 // WholeFile is a lease on immutable cached content. Call Close, not File.Close,
@@ -66,6 +68,7 @@ func (c *Cache) OpenWhole(k FileKey) (*WholeFile, error) {
 
 func (c *Cache) releaseObjectLocked(o *wholeObject) {
 	if len(o.refs) == 0 && o.readers == 0 {
+		c.retireWholeReadLocked(o)
 		c.wholeBytes -= o.size
 		delete(c.objects, o.id)
 	}
@@ -77,6 +80,10 @@ func (c *Cache) detachWholeLocked(fh string, fs *fileState) {
 		return
 	}
 	o := fs.whole
+	// The name this object was published under is going away — evicted,
+	// forgotten, or replaced by a newly published inode — so the descriptor
+	// kept for it must not be handed to another read.
+	c.retireWholeReadLocked(o)
 	delete(o.refs, fh)
 	fs.whole = nil
 	fs.hydrated = false

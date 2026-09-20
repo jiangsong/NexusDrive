@@ -2,9 +2,9 @@
 // expect: the same operations run against cloudfs and against a plain local
 // directory must produce the same observable results.
 //
-// Anything cloudfs deliberately does differently (no POSIX permissions on the
-// remotes, no hard links, close-to-open visibility) is asserted explicitly
-// rather than left to chance.
+// Anything cloudfs deliberately does differently (permissions kept locally
+// because no remote has anywhere to put them, no hard links, close-to-open
+// visibility) is asserted explicitly rather than left to chance.
 package conformance
 
 import (
@@ -520,8 +520,10 @@ func TestEmptyFileHandling(t *testing.T) {
 
 func TestDeliberateDifferencesAreExplicit(t *testing.T) {
 	p := newPair(t)
-	if err := os.WriteFile(filepath.Join(p.cloud, "f.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, root := range []string{p.cloud, p.local} {
+		if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p.settle(t)
 
@@ -537,14 +539,31 @@ func TestDeliberateDifferencesAreExplicit(t *testing.T) {
 		t.Error("symlinks should be refused")
 	}
 
-	// chmod is accepted but does not persist a permission model, because the
-	// remotes have none. It must not error, so tools that chmod blindly keep
-	// working.
-	if err := os.Chmod(filepath.Join(p.cloud, "f.txt"), 0o600); err != nil {
-		t.Errorf("chmod should be accepted as a no-op, got %v", err)
+	// chmod persists. No remote has anywhere to put a permission bit, so
+	// cloudfs holds it itself — and what ls(1) then reports has to be what
+	// the same call leaves on a plain local directory.
+	for _, root := range []string{p.cloud, p.local} {
+		if err := os.Chmod(filepath.Join(root, "f.txt"), 0o600); err != nil {
+			t.Errorf("chmod under %s: %v", root, err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(p.cloud, "f.txt")); err != nil {
-		t.Errorf("the file should still be there after chmod: %v", err)
+	cinfo, err := os.Stat(filepath.Join(p.cloud, "f.txt"))
+	if err != nil {
+		t.Fatalf("the file should still be there after chmod: %v", err)
+	}
+	linfo, err := os.Stat(filepath.Join(p.local, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cinfo.Mode().Perm() != linfo.Mode().Perm() {
+		t.Errorf("mode after chmod = %#o, the local directory has %#o",
+			cinfo.Mode().Perm(), linfo.Mode().Perm())
+	}
+
+	// Ownership still is not modelled: there is no remote concept to map it
+	// onto, and every node reports the mounting user.
+	if err := os.Chown(filepath.Join(p.cloud, "f.txt"), os.Getuid(), os.Getgid()); err != nil {
+		t.Errorf("chown should be accepted as a no-op, got %v", err)
 	}
 }
 

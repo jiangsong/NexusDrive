@@ -573,10 +573,11 @@ func waitFlushed(t *testing.T, c *Cache) {
 	}
 }
 
-// TestHydrationWaitsForForegroundReads: hydration copies an entire file in one
-// go. Doing that while the kernel waits on a read turns a cache hit into a
-// disk queue, so it asks first and comes back later.
-func TestHydrationWaitsForForegroundReads(t *testing.T) {
+// Hydration used to wait for the whole mount to fall idle. It now waits for
+// the file it is merging to fall idle instead; hydrate_test.go holds that
+// contract, and this is only the end-to-end check that the janitor's own timer
+// still gets a quiet file merged.
+func TestHydrationRunsOnceTheFileIsQuiet(t *testing.T) {
 	c, clk := newTest(t, Options{BlockSize: 16, HydrateAfter: time.Millisecond})
 	t.Cleanup(func() { c.Close() })
 	var busy atomic.Bool
@@ -590,13 +591,8 @@ func TestHydrationWaitsForForegroundReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	clk.advance(time.Second)
-	time.Sleep(50 * time.Millisecond)
-	if _, ok := c.HydratedPath(k); ok {
-		t.Fatal("hydrated while reads were in flight")
-	}
-	busy.Store(false)
 	if _, ok := waitHydrated(t, c, k); !ok {
-		t.Fatal("never hydrated after the reads finished")
+		t.Fatal("a quiet file never hydrated")
 	}
 }
 

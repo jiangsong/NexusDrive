@@ -39,7 +39,14 @@ const (
 	// dirAheadWait is the longest a foreground read waits for a prefetch
 	// of the same file that is already in flight. Waiting beats issuing a
 	// second request for the same bytes; waiting forever does not.
-	dirAheadWait = 30 * time.Second
+	//
+	// Only a small file is ever prefetched whole (SmallFileThreshold, 4 MiB
+	// by default), so a prefetch that has not landed in this long is on a
+	// link slow enough that the reader would rather pay for the bytes twice
+	// than keep waiting. It used to be thirty seconds, which is a read the
+	// kernel is blocked on held for half a minute by speculation — the
+	// opposite of what a prefetcher is for.
+	dirAheadWait = 2 * time.Second
 )
 
 // dirAheadState is what one directory remembers between reads: how far the
@@ -221,18 +228,27 @@ func (f *FS) prefetchWholeFile(ctx context.Context, n meta.Node, mount Mount) {
 	_ = f.cache.PutWhole(key, io.LimitReader(rc, n.Size), n.Size)
 }
 
-// awaitDirReadAhead makes a foreground read wait for a prefetch of the same
-// file that is already in flight, rather than asking the drive for the same
-// bytes a second time. A prefetch that is slow enough to be worth giving up
-// on stops being worth waiting for.
-func (f *FS) awaitDirReadAhead(ctx context.Context, ino uint64) {
+// awaitDirReadAhead makes a foreground read that is about to fetch wait for
+// a prefetch of the same file that is already in flight, rather than asking
+// the drive for the same bytes a second time. A prefetch that is slow enough
+// to be worth giving up on stops being worth waiting for.
+//
+// It reports whether it waited, so the caller knows to look in the cache
+// again: the common outcome is that the prefetch landed the whole file and
+// the read it was about to make has become a hit. The same map holds the
+// whole-file fetches a foreground read starts (blockfetch.go's
+// fetchWholeSmallFile), so a second reader of one small file waits here for
+// the first rather than duplicating it, and a reader that gives up finds the
+// flight taken and falls back to per-block fetches instead of starting a
+// competing whole-file one.
+func (f *FS) awaitDirReadAhead(ctx context.Context, ino uint64) bool {
 	v, ok := f.dirAheadFlight.Load(ino)
 	if !ok {
-		return
+		return false
 	}
 	done, _ := v.(chan struct{})
 	if done == nil {
-		return
+		return false
 	}
 	t := time.NewTimer(dirAheadWait)
 	defer t.Stop()
@@ -241,6 +257,7 @@ func (f *FS) awaitDirReadAhead(ctx context.Context, ino uint64) {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+	return true
 }
 
 // forgetDirReadAhead drops a directory's read order when its listing

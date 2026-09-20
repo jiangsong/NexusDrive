@@ -699,7 +699,7 @@ func Default() Config {
 			SubBlockSize: 16 << 10,
 			MaxAge:       30 * 24 * time.Hour,
 		},
-		Journal: Journal{Durability: "power"},
+		Journal: Journal{Durability: "barrier"},
 		Control: Control{Socket: DefaultRoot + "/control.sock", UI: true},
 		WebDAV:  WebDAV{Prefix: "/dav", Root: "/", Strategy: "proxy"},
 		Export:  DefaultExport(),
@@ -770,9 +770,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: secrets.backend must be auto, keyring, or file")
 	}
 	switch c.Journal.Durability {
-	case "", "power", "crash":
+	case "", "barrier", "power", "crash":
 	default:
-		return fmt.Errorf("config: journal.durability must be power or crash, got %q", c.Journal.Durability)
+		return fmt.Errorf("config: journal.durability must be barrier, power or crash, got %q", c.Journal.Durability)
 	}
 	if c.Cache.SubBlockSize > 0 && (c.Cache.SubBlockSize%(4<<10) != 0 || c.Cache.BlockSize%c.Cache.SubBlockSize != 0) {
 		return fmt.Errorf("config: cache.sub_block_size must be a multiple of 4KiB that divides block_size, got %s", c.Cache.SubBlockSize)

@@ -40,6 +40,33 @@ func TestDurableTransactionUsesFullAndRestoresConnection(t *testing.T) {
 	}
 }
 
+// TestDurablePublicationsAreCountedOnTheirOwn: a publication's cost is the
+// synchronous=FULL flush, and its three pragmas run outside prep, so neither
+// the query counter nor the plain write-transaction counter distinguishes it.
+// Anything measuring how many full flushes a write path pays needs its own.
+func TestDurablePublicationsAreCountedOnTheirOwn(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "meta.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	n, err := s.Insert(ctx, Node{ParentIno: RootIno, Name: "file", Remote: "ali", Kind: provider.KindFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DurableTxStats(); got != 0 {
+		t.Fatalf("an ordinary insert counted %d durable transactions, want 0", got)
+	}
+	n.Size, n.RemoteID, n.Version, n.Dirty = 10, "cloudfs-local:upload", "local-version", true
+	if err := s.PublishByIno(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DurableTxStats(); got != 1 {
+		t.Fatalf("publication counted %d durable transactions, want 1", got)
+	}
+}
+
 func TestPublishByInoIsDurableAndKeepsIdentity(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "meta.db")

@@ -318,7 +318,7 @@ func (l *DirListing) PublishedStale() bool {
 
 func (l *DirListing) mergeStaged(ctx context.Context, tx *sql.Tx, now time.Time, childTTL time.Duration, protect func(Node) bool) error {
 	after := ""
-	update, err := tx.PrepareContext(ctx, `UPDATE nodes SET kind=?,size=?,mtime_ns=?,mode=?,remote=?,remote_id=?,version=?,remote_version=?,hash_type=?,hash=?,fetched_at=?,ttl_s=?,dirty=0 WHERE ino=?`)
+	update, err := tx.PrepareContext(ctx, `UPDATE nodes SET kind=?,size=?,mtime_ns=?,mode=CASE WHEN mode_set=1 THEN mode ELSE ? END,remote=?,remote_id=?,version=?,remote_version=?,hash_type=?,hash=?,fetched_at=?,ttl_s=?,dirty=0 WHERE ino=?`)
 	if err != nil {
 		return err
 	}

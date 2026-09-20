@@ -110,7 +110,8 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?` | 文本读。非 UTF-8 会被拒绝并提示改用 `read_range`。截断时返回 `next_offset`；`tail` 落在多字节字符中间时自动前移到字符边界 |
 | `read_range` | `path`, `offset`, `length` | 任意字节范围，base64 返回。用于二进制或大文件分页 |
 | `search` | `query?`, `path?`, `glob?`, `ext?`, `min_size?`, `max_size?`, `modified_after?`, `kind?`, `sort?`, `content?`, `max_results?` | 本地文件名索引搜索（Everything 式语法，见下文），权限与子树过滤在限量前执行；给了任一过滤参数时 `query` 可为空。每个命中带 `kind/size/mtime/cached`，响应带 `coverage{listed, known}`。`content` 只检查完整缓存文件的有界前缀，限制见下文 |
-| `cache_status` | `path` | 该路径的缓存比例、整体命中率、待上传数量 |
+| `warm` | `path`, `depth?` | 把子树里的每个目录列进本地元数据，之后对它的 `list_directory` / `stat` / `search` 零远端调用，`search` 的 `coverage` 缺口也随之补上。**不下载文件内容**——那是 `pin`。代价是每访问一个目录一次远端 List，所以给能覆盖需求的最窄路径。`depth` 省略即 -1（整棵子树），0 只列 `path` 自己，上限 1024，与 `cloudfs warm <path> [depth]` 同义；出错时按"已列了多少个目录"报，再调一次从那里继续 |
+| `cache_status` | `path` | 该路径的缓存比例、整体命中率、待上传数量，外加当前批次的 `upload_files_done`/`upload_files_total`/`upload_percent`——排队数量本身没有尺度，这三个字段让它可读 |
 | `list_roots` | 无 | 当前可见的挂载点与是否可写 |
 | `get_download_url` | `path` | 直链 + 过期时间 + 必需 headers。大文件让 agent 自己拉，不经过本服务 |
 | `list_copy_jobs` | `cursor?`, `limit?` | 列出源和目标均获授权的复制准备任务；可能返回空页和续页游标，见下文 |
@@ -145,6 +146,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `resume_upload` | `id`, `confirm` | 必须 confirm=true；校验当前本地版本并按当前数据库/挂载/授权代次重新绑定后开始全新尝试，接受远端重放风险 |
 | `discard_upload` | `id`, `confirm` | 仅无 `--allow` 限制的服务；永久清理已停止的当前本地版本，不撤销远端结果 |
 | `flush_uploads` | 无 | 仅无 `--allow` 限制的服务；等待整个当前队列快照，不跳过死信、取消或清理记录 |
+| `upload_progress` | 无 | 上传队列的整体进度：当前批次的百分比 / 文件数 / 字节数、实时速率与预计剩余时间，以及 queued / in_flight / blocked / failed 的行数。写工具返回时数据只是本地持久化，这个工具回答"网盘那边追上了没有"。只读，无路径参数（队列属于守护进程，不属于某棵子树），任何 scope 都可调用。批次数字来自 uploader 自己的采样（零查询），行数是当次读队列；`batch` 变了说明队列空过又重新装满，前后数字不连续；`resumed: true` 表示这批在守护进程启动前就已排队，完成数从重启起计。队列是共享的：批次覆盖当下所有上传，不只是本会话写的 |
 
 ### 会话
 
@@ -503,6 +505,16 @@ list|deliveries|show|test|retry`，控制面 `GET /triggers`、`GET /triggers/de
 
 ## Agent 使用建议
 
+**顺序读一个目录几乎免费，跳着读一棵树每个文件都要下载一次。** 这与直觉相反，所以值得单列：`internal/vfs/read_dir_ahead.go` 的兄弟预取在**同一个目录里按文件名递增读满三次**之后打开窗口，把后面的小文件（`cache.policy.small_file_threshold` 以内）整份拉进缓存，`test/perf/dirahead_test.go` 的 `TestDirectoryReadaheadMakesSiblingReadsFree` 断言这之后的兄弟读**零次 `ReadRange`**；同一批文件乱序读则是十个文件十次请求。shell 的 glob 本来就是排好序的，所以 `wc -l somedir/*` 走的是快路径，而跨目录跳的 `git diff` 永远打不开这个窗口。
+
+**对一棵要反复读、或要交给 shell 命令读的子树，先 `pin`。** `pin` 把整棵子树下载到本地并**豁免缓存淘汰**（`internal/vfs/pin.go`、`internal/cache/blockcache.go`），重启后由 `StartPins` / `RefreshPins` 续跑。在网盘上跑 `git status`、构建、`grep -r` 这类命令之前先 pin 仓库目录，否则它们那种无序的读法每个文件都是一次远端请求：
+
+```sh
+cloudfs pin /work/repo --timeout 30m   # 或 MCP 的 pin 工具、控制台的"固定"
+```
+
+`unpin` 只移除规则，不删内容。内容搜索（`search` 的 `content`）与 `index.pinned` 也都只看已完整缓存的文件，所以 pin 同时是它们的前置条件。
+
 **搜索只覆盖已列举过的目录，响应里的 `coverage` 说明覆盖了多少。** `coverage.listed` 是索引已列举的目录数，`coverage.known` 是索引知道存在的目录数（含根）；两者相等才说明整棵树都可搜。差距来自从未被打开过的目录：delta 事件只把它们的父目录标 stale，不会补进子节点。缩小差距有两条路：配置 `search.crawl.enabled: true` 让守护进程在前台空闲时后台列举（`idle_after` 之后开始、`rescan` 周期补列被 delta 标 stale 的目录，`Caps.Tier=unofficial` 的网盘遇风控休眠 15 分钟），或一次性 `cloudfs warm --all` / 界面"索引整棵树"。空结果先看 `coverage`，再决定是提示用户 `warm` 还是断定文件不存在。
 
 **`query` 是 Everything 式语法：空白分隔的词做 AND，引号包住才是含空格的字面量。** 这与旧版"整串子串匹配"不同——`my report` 现在要求名字同时含 `my` 与 `report`，要找带空格的名字写 `"my report"`。匹配忽略大小写，权限路径仍区分大小写。
@@ -537,7 +549,7 @@ list|deliveries|show|test|retry`，控制面 `GET /triggers`、`GET /triggers/de
 
 **大文件用 `read_range` 分页。** `read_text` 默认上限 256 KiB，`read_range` 上限 4 MiB。真正的大文件用 `get_download_url` 拿直链自己下载。
 
-**`write_file` 返回后数据就安全了。** `state: "local"` 不代表有风险，它只是说上传还在队列里；数据已经 fsync 到本地日志，进程崩溃也不会丢。要确认上传落地就看 `cache_status` 的 `pending_uploads`。
+**`write_file` 返回后数据就安全了。** `state: "local"` 不代表有风险，它只是说上传还在队列里；数据已经 fsync 到本地日志，进程崩溃也不会丢。要确认上传落地就看 `upload_progress`（或 `cache_status` 的 `pending_uploads`）：写入返回和字节离开这台机器是两回事，3434 个文件的拷贝前台 37 秒、后台约 20 分钟。
 
 ## 与挂载并存
 

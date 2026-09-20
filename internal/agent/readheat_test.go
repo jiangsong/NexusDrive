@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -101,6 +102,90 @@ func TestReadObserverDebouncesAndFlushes(t *testing.T) {
 	<-done
 	if hot, _ := s.HotPaths(context.Background(), "/work/late.md", 7, 10); len(hot) != 1 {
 		t.Fatal("Run did not flush on cancel")
+	}
+}
+
+// TestObserveInoResolvesPathsOnlyAtTheFlush: the form the VFS read
+// observer uses names no file — resolving an inode is a recursive walk
+// of the metadata tree, and a read must not pay for one. The walk
+// happens once per observed inode, at the flush, which is also what
+// decides how a rename or a delete in between is counted.
+func TestObserveInoResolvesPathsOnlyAtTheFlush(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	o := NewReadObserver(s)
+	// No resolver: the observer cannot name what it hears, so it keeps
+	// nothing rather than growing a map nothing will ever drain.
+	o.ObserveIno(7, ReadByKernel)
+	if o.Pending() != 0 {
+		t.Fatalf("pending without a resolver = %d", o.Pending())
+	}
+	tree := map[uint64]string{7: "/work/big.bin", 8: "/work/note.md", 9: "/work/doomed.md"}
+	resolved := 0
+	o.SetPathResolver(func(_ context.Context, ino uint64) (string, error) {
+		resolved++
+		p, ok := tree[ino]
+		if !ok {
+			return "", errors.New("no such inode")
+		}
+		return p, nil
+	})
+	for i := 0; i < 100; i++ {
+		o.ObserveIno(7, ReadByKernel) // one sequential read, many blocks
+	}
+	o.ObserveIno(7, ReadByAgent)
+	o.ObserveIno(8, ReadByAgent)
+	o.ObserveIno(9, ReadByAgent)
+	o.ObserveIno(0, ReadByAgent)
+	o.ObserveIno(8, "")
+	if resolved != 0 {
+		t.Fatalf("%d paths resolved while observing, want 0", resolved)
+	}
+	if o.Pending() != 4 {
+		t.Fatalf("pending = %d, want 4", o.Pending())
+	}
+	// Between the reads and the flush one file is renamed and one is
+	// deleted. The renamed file is counted under the name it has now;
+	// the deleted one is counted nowhere.
+	tree[8] = "/work/renamed.md"
+	delete(tree, 9)
+	if err := o.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 4 {
+		t.Fatalf("the flush resolved %d inodes, want one per observed (ino, kind) pair: 4", resolved)
+	}
+	hot, err := s.HotPaths(context.Background(), "/", 7, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := map[string]int64{}
+	for _, h := range hot {
+		reads[h.Path] = h.Reads
+	}
+	if len(hot) != 2 || reads["/work/big.bin"] != 2 || reads["/work/renamed.md"] != 1 {
+		t.Fatalf("%+v", hot)
+	}
+	if _, ok := reads["/work/note.md"]; ok {
+		t.Fatal("the read was counted under the name the file no longer has")
+	}
+	if _, ok := reads["/work/doomed.md"]; ok {
+		t.Fatal("a deleted file was counted")
+	}
+	// The debounce is unchanged, only keyed by inode now.
+	o.ObserveIno(7, ReadByKernel)
+	if o.Pending() != 0 {
+		t.Fatal("a read inside the debounce window was counted")
+	}
+	now = now.Add(11 * time.Minute)
+	o.ObserveIno(7, ReadByKernel)
+	if o.Pending() != 1 {
+		t.Fatal("a read past the debounce window was not counted")
 	}
 }
 

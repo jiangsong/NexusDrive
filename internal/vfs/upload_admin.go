@@ -8,6 +8,7 @@ import (
 	"cloudfs/internal/config"
 	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
+	"cloudfs/internal/upload"
 )
 
 // UploadInfo is the non-secret part of an upload record. Path is empty when
@@ -192,4 +193,20 @@ func (f *FS) FlushUploads(ctx context.Context) (journal.Stats, error) {
 		return journal.Stats{}, errors.New("vfs: upload coordinator is unavailable")
 	}
 	return f.uploader.Flush(ctx)
+}
+
+// UploadProgress reports the upload queue's overall progress: how far along
+// the burst of work the queue is currently getting through is. It is the
+// uploader's own last sample, so it makes no provider or database call and
+// may be read as often as a caller likes.
+//
+// It exists so that an adapter above the VFS — the MCP server, in practice —
+// can answer "how far along is the copy?" by asking the filesystem, rather
+// than by hanging a callback on it. Progress belongs to internal/upload; this
+// is only the way through.
+func (f *FS) UploadProgress() upload.Progress {
+	if f.uploader == nil {
+		return upload.Progress{}
+	}
+	return f.uploader.Progress()
 }

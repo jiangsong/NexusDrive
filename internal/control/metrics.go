@@ -381,6 +381,25 @@ func writeMetrics(w interface{ Write([]byte) (int, error) }, st Status) {
 		{name: "cloudfs_uploads_dead", help: "Uploads that failed permanently and kept their data", typ: "gauge", value: float64(st.Uploads.Dead)},
 		{name: "cloudfs_uploads_queued_bytes", help: "Bytes waiting to be uploaded", typ: "gauge", value: float64(st.Uploads.QueuedBytes)},
 		{name: "cloudfs_uploads_oldest_age_seconds", help: "Age of the oldest queued upload", typ: "gauge", value: time.Duration(st.Uploads.OldestAgeNS).Seconds()},
+		{name: "cloudfs_uploads_blocked", help: "Queued uploads waiting on a directory creation that is dead, cancelled or gone", typ: "gauge", value: float64(st.Uploads.Blocked)},
+		{name: "cloudfs_uploads_in_flight_bytes", help: "Bytes belonging to the uploads being transferred right now", typ: "gauge", value: float64(st.Uploads.InFlightBytes)},
+
+		// The batch gauges describe the burst of work the queue is getting
+		// through now; the two counters below describe the process.
+		{name: "cloudfs_upload_batch_active", help: "Whether the upload queue is working through a batch", typ: "gauge", value: boolGauge(st.Uploads.Batch.Active)},
+		{name: "cloudfs_upload_batch_seq", help: "Number of upload batches this daemon has opened", typ: "gauge", value: float64(st.Uploads.Batch.Seq)},
+		{name: "cloudfs_upload_batch_files_total", help: "Files in the current upload batch", typ: "gauge", value: float64(st.Uploads.Batch.FilesTotal)},
+		{name: "cloudfs_upload_batch_files_done", help: "Files of the current upload batch already sent", typ: "gauge", value: float64(st.Uploads.Batch.FilesDone)},
+		{name: "cloudfs_upload_batch_bytes_total", help: "Bytes in the current upload batch", typ: "gauge", value: float64(st.Uploads.Batch.BytesTotal)},
+		{name: "cloudfs_upload_batch_bytes_done", help: "Bytes of the current upload batch already sent", typ: "gauge", value: float64(st.Uploads.Batch.BytesDone)},
+		{name: "cloudfs_upload_batch_rate_bytes", help: "Upload throughput over roughly the last ten seconds", typ: "gauge", value: st.Uploads.Batch.Rate},
+		{name: "cloudfs_upload_batch_eta_seconds", help: "Estimated seconds left in the current upload batch", typ: "gauge", value: st.Uploads.Batch.ETASeconds},
+
+		// Fed from the daemon's lifetime totals, never from the batch delta:
+		// that delta returns to zero when a batch opens, and a counter that
+		// falls is read as a restart by every scraper there is.
+		{name: "cloudfs_uploads_completed_files_total", help: "Uploads finished since the daemon started", typ: "counter", value: float64(st.Uploads.Batch.FilesDoneTotal)},
+		{name: "cloudfs_uploads_completed_bytes_total", help: "Bytes uploaded since the daemon started", typ: "counter", value: float64(st.Uploads.Batch.BytesDoneTotal)},
 
 		{name: "cloudfs_meta_nodes", help: "Entries in the metadata cache", typ: "gauge", value: float64(st.Meta.Nodes)},
 		{name: "cloudfs_meta_complete_dirs", help: "Directories with a complete cached listing", typ: "gauge", value: float64(st.Meta.CompleteDirs)},

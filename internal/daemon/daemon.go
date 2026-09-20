@@ -446,21 +446,23 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		})
 		go agentStore.RunChangeRetention(retentionCtx, cfg.MCP.Session.Retain, 24*time.Hour)
 		// Read heat: the VFS says which inode was read and under what
-		// request; the path and the kind of reader are resolved here, so
-		// the VFS never queries meta on a read's account more than once
-		// per window. Background reads (index extraction, warming) are
-		// nobody's interest and are not counted.
+		// request; the kind of reader is classified here and now, because
+		// the request context is only valid during the call, while the
+		// path waits for the flush — resolving an inode is a recursive
+		// walk of the metadata tree, and a shell reading two hundred
+		// files would otherwise pay two hundred of them on the read path.
+		// Background reads (index extraction, warming) are nobody's
+		// interest and are not counted.
 		if cfg.MCP.Heat.On() {
 			heat := agent.NewReadObserver(agentStore)
+			heat.SetPathResolver(fsys.Meta().Path)
 			d.ReadHeat = heat
 			fsys.SetReadObserver(func(ctx context.Context, ino uint64) {
 				kind := readerKind(ctx)
 				if kind == "" {
 					return
 				}
-				if p, err := fsys.Meta().Path(ctx, ino); err == nil {
-					heat.Observe(p, kind)
-				}
+				heat.ObserveIno(ino, kind)
 			})
 			go heat.Run(retentionCtx, 0)
 			go agentStore.RunReadHeatRetention(retentionCtx, cfg.MCP.Heat.Retention(), 24*time.Hour)
@@ -639,9 +641,9 @@ func (d *Daemon) Collector() *control.Collector {
 	sort.Strings(remotes)
 	var flush func(context.Context) (journal.Stats, error)
 	var cancelUpload func(context.Context, string) (journal.State, error)
-	var totals func() (int64, int64)
+	var progress func() upload.Progress
 	if d.Uploader != nil {
-		totals = d.Uploader.Totals
+		progress = d.Uploader.Progress
 		flush = d.Uploader.Flush
 		cancelUpload = d.Uploader.Cancel
 	}
@@ -658,14 +660,14 @@ func (d *Daemon) Collector() *control.Collector {
 		ReloadProxy: func(p config.Proxy) error {
 			return d.Proxy.Reload(control.ProxyManagerOptions(p))
 		},
-		CallStats:     d.CallStats,
-		DropCaches:    d.DropCaches,
-		FlushUploads:  flush,
-		UploadTotals:  totals,
-		CancelUpload:  cancelUpload,
-		ResumeUpload:  d.FS.ResumeUpload,
-		DiscardUpload: d.FS.DiscardUpload,
-		FreeSpace:     cache.FreeSpace,
+		CallStats:      d.CallStats,
+		DropCaches:     d.DropCaches,
+		FlushUploads:   flush,
+		UploadProgress: progress,
+		CancelUpload:   cancelUpload,
+		ResumeUpload:   d.FS.ResumeUpload,
+		DiscardUpload:  d.FS.DiscardUpload,
+		FreeSpace:      cache.FreeSpace,
 	}
 	// A nil manager has to stay a nil interface: the export routes answer 503
 	// on the strength of that field alone.
