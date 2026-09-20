@@ -544,6 +544,11 @@ func (j *Journal) migrate() error {
 	if _, err := j.db.Exec(`CREATE INDEX IF NOT EXISTS uploads_by_ino ON uploads(ino)`); err != nil {
 		return fmt.Errorf("journal: migrate inode index: %w", err)
 	}
+	// Rows by the directory they go into, for Stats' walk down queued
+	// directories and RetargetChildren.
+	if _, err := j.db.Exec(`CREATE INDEX IF NOT EXISTS uploads_by_parent ON uploads(remote_parent_id)`); err != nil {
+		return fmt.Errorf("journal: migrate parent index: %w", err)
+	}
 	return nil
 }
 
@@ -1748,14 +1753,21 @@ func (j *Journal) Stats(ctx context.Context) (Stats, error) {
 		return s, err
 	}
 	if s.Pending > 0 {
+		// The parent is looked up by its own id (the primary key) from the
+		// child's local parent id, and children by the parent index, so
+		// this is a walk over the queued directories rather than a join of
+		// the table to itself on a computed key: that join scanned every
+		// row for every row, and a copy of a tree — twenty thousand rows
+		// under queued directories — made each Stats take a minute and a
+		// half, once a second, for the status page.
 		err := j.db.QueryRowContext(ctx, `WITH RECURSIVE blocked(id) AS (
-			SELECT u.id FROM uploads u LEFT JOIN uploads p ON u.remote_parent_id = ? || p.id
+			SELECT u.id FROM uploads u LEFT JOIN uploads p ON p.id = substr(u.remote_parent_id, ?)
 			 WHERE u.state = ? AND substr(u.remote_parent_id, 1, ?) = ?
 			   AND (p.id IS NULL OR p.state NOT IN (?, ?))
 			UNION
-			SELECT u.id FROM uploads u JOIN blocked b ON u.remote_parent_id = ? || b.id WHERE u.state = ?
+			SELECT u.id FROM blocked b JOIN uploads u INDEXED BY uploads_by_parent ON u.remote_parent_id = ? || b.id WHERE u.state = ?
 		) SELECT COUNT(*) FROM blocked`,
-			LocalIDPrefix, string(StatePending), len(LocalIDPrefix), LocalIDPrefix,
+			len(LocalIDPrefix)+1, string(StatePending), len(LocalIDPrefix), LocalIDPrefix,
 			string(StatePending), string(StateUploading), LocalIDPrefix, string(StatePending)).Scan(&s.Blocked)
 		if err != nil {
 			return s, fmt.Errorf("journal: stats: %w", err)

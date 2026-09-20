@@ -130,3 +130,68 @@ func TestClaimWalksBlockedRowsWithoutHoldingTheWriteLock(t *testing.T) {
 		t.Fatalf("a foreground commit waited %v behind the workers' claims", worst)
 	}
 }
+
+// TestStatsStaysCheapWithAQueueUnderQueuedDirectories: the status document
+// asks for Stats every second, and a copy of a tree queues thousands of
+// files under hundreds of directories the backend does not have yet.
+// Counting the rows a dead directory holds back joined the table to itself
+// on a computed key — a full scan per row — and with twenty thousand rows
+// queued one Stats took longer than the second it had, the collector
+// stacked up behind itself and the daemon spent three cores on it.
+func TestStatsStaysCheapWithAQueueUnderQueuedDirectories(t *testing.T) {
+	if testx.RaceEnabled {
+		t.Skip("wall-clock bound; the race detector slows SQLite several times over")
+	}
+	j, err := Open(Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	ctx := context.Background()
+	const dirs, perDir = 400, 40
+	for d := 0; d < dirs; d++ {
+		dir := Upload{ID: NewID(), Kind: KindMkdir, Remote: "r", RemoteParentID: "root", Name: fmt.Sprintf("d%d", d), Ino: uint64(10 + d)}
+		if err := j.Commit(ctx, dir); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < perDir; i++ {
+			f := Upload{ID: NewID(), Remote: "r", RemoteParentID: LocalIDPrefix + dir.ID, Name: fmt.Sprintf("f%d", i), Ino: uint64(100000 + d*perDir + i)}
+			if err := j.Commit(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	start := time.Now()
+	st, err := j.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	took := time.Since(start)
+	t.Logf("stats over %d rows: %v (blocked=%d)", dirs*perDir+dirs, took, st.Blocked)
+	if st.Pending != dirs*perDir+dirs || st.Blocked != 0 {
+		t.Fatalf("stats = %+v", st)
+	}
+	if took > 300*time.Millisecond {
+		t.Fatalf("Stats took %v with %d rows queued", took, dirs*perDir+dirs)
+	}
+	// One directory dead: everything under it is blocked, and the count
+	// is still an index walk, not a scan.
+	rows, err := j.Claim(ctx, "r", 1)
+	if err != nil || len(rows) != 1 || !rows[0].IsMkdir() {
+		t.Fatalf("claim: %+v %v", rows, err)
+	}
+	if err := j.Fail(ctx, rows[0].ID, fmt.Errorf("gone")); err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	st, err = j.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Fatalf("Stats took %v with a dead directory", took)
+	}
+	if st.Blocked != perDir {
+		t.Fatalf("blocked = %d, want %d", st.Blocked, perDir)
+	}
+}

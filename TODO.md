@@ -303,6 +303,11 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
   `INDEXED BY` 显式指定，验收 `TestClaimStaysCheapWithAQueueOfDeletes`、
   `TestClaimWalksBlockedRowsWithoutHoldingTheWriteLock`）；以及 TTL 过期后 rm -rf/cp -r 的
   每个目录都重新 List，见 DESIGN "delta feed 覆盖的列举不看 TTL"。
+- **[x] `Journal.Stats` 在 2 万行队列下一次 90 s（2026-09-20，重启后守护进程 3 核满载、
+  `/status` 无响应）**：Blocked 计数的递归 CTE 用 `u.remote_parent_id = 'cloudfs-local:' || p.id`
+  做自连接，计算列上无索引，每行全表扫；状态页每秒调一次，handler 叠了 10 个。改为
+  `p.id = substr(u.remote_parent_id, ...)` 走主键 + 新索引 `uploads_by_parent` 走子行：
+  16 400 行 40 ms。验收：`TestStatsStaysCheapWithAQueueUnderQueuedDirectories`。
 - **[x] journal WAL 涨到 890 MB（2026-09-20，`~/.cloudfs` 体检时发现）**：20k 行队列 + 8 个
   worker 让 WAL 上几乎任何时刻都有读者，自动 checkpoint 只能回写不能 reset，文件只增不减
   （数据库本身 15 MB）。journal 与 meta 的 DSN 加 `journal_size_limit(64MiB)`；journal 新增
