@@ -738,14 +738,15 @@ func runMount(ctx context.Context, args []string, from entry) error {
 // A daemon that died while the mount was busy — killed under a running cp,
 // or restarted while a shell sat in the mount, which also makes its own
 // unmount fail — leaves the kernel's FUSE mount behind with no one answering
-// it. Touching it fails with ENOTCONN, MkdirAll then tries to create it and
-// reports "file exists", and the person is left to work out that
-// `fusermount -uz` is the fix. The stale mount is detached here instead —
-// lazily, because whatever is still inside it is what kept the plain
-// unmount from working and nothing will serve it again anyway. Anything
-// else the probe reports is still an error of the person's own to see.
+// it. Touching it fails — ENOTCONN on Linux, ENXIO on macOS — MkdirAll then
+// tries to create it and reports "file exists", and the person is left to
+// work out that `fusermount -uz` is the fix. The stale mount is detached
+// here instead — lazily, because whatever is still inside it is what kept
+// the plain unmount from working and nothing will serve it again anyway.
+// Anything else the probe reports is still an error of the person's own to
+// see.
 func prepareMountPoint(mountPath string) error {
-	if err := probeMountPoint(mountPath); err != nil && errors.Is(err, syscall.ENOTCONN) {
+	if service.StaleMount(mountPath) {
 		if uerr := service.DetachStale(mountPath); uerr != nil {
 			return fmt.Errorf("%s holds a mount nobody serves and it could not be detached: %w", mountPath, uerr)
 		}
@@ -755,24 +756,6 @@ func prepareMountPoint(mountPath string) error {
 		return fmt.Errorf("cannot create the mount point %s: %w", mountPath, err)
 	}
 	return nil
-}
-
-// probeMountPoint asks the filesystem behind mountPath whether anyone is
-// serving it. stat alone is not enough: the kernel answers it from the
-// attributes it cached while the last daemon was alive, for as long as
-// their timeout runs, and a restart inside that window found the mount
-// point "fine" and then failed to open it — which is the request that
-// always goes to the server. So the directory is opened, which is what the
-// mount itself is about to do.
-func probeMountPoint(mountPath string) error {
-	if _, err := os.Stat(mountPath); err != nil {
-		return err
-	}
-	d, err := os.Open(mountPath)
-	if err != nil {
-		return err
-	}
-	return d.Close()
 }
 
 func cmdUmount(args []string) error {

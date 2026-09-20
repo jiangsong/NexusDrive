@@ -10,6 +10,9 @@ func currentUID() int { return 0 }
 // build; the platforms that lack service integration also lack the mount.
 func MountpointMounted(string) (bool, error) { return false, nil }
 
+// StaleMount cannot be determined outside Linux and macOS in this build.
+func StaleMount(string) bool { return false }
+
 // DetachStale is unsupported outside Linux and macOS in this build.
 func DetachStale(path string) error { return Unmount(path) }
 

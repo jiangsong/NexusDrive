@@ -623,6 +623,18 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
   字节、最近 10 s 速率、预计剩余、失败数；批完成后保持满条直到下一批。表格只在队列形状
   变化时重取（≤ 1 次/2 s），行按 id 复用节点，不再闪。上传中的行加一条扫动条。
   验收：`TestUploadBatchFollowsOneBurstOfWork`、`_tests/transfer_progress.test.mjs`。
+- **[x] macOS 上 stale 挂载仍然挡住 `restart.sh`（2026-09-20）**：守护进程被 `kill -9` 后，
+  `./restart.sh` 停在 `cloudfs: unmount /Users/nava/CloudFS: exit status 1: Unmount failed for
+  /Users/nava/CloudFS`。两处同一个病根——陈旧挂载的 errno 只按 Linux 认：(1) `prepareMountPoint`
+  只判 `ENOTCONN`，而 macFUSE 的死挂载在 `open` 时返回 `ENXIO`（"device not configured"），
+  于是 macOS 上 `DetachStale` 从来没被触发过；(2) `cloudfs umount` 只跑客气的 `umount`，
+  没人服务的挂载正好拒绝它，而 `restart.sh` 第 3 步把这个失败当致命错误退出。现在
+  `service.StaleMount` 统一做 stat + open 探测并同时认 `ENOTCONN` 和 `ENXIO`，
+  `service.Unmount` 在客气卸载失败且挂载确认陈旧时回落到 `DetachStale`（活挂载只是 busy，
+  不强卸）。`cmd/cloudfs` 的 `probeMountPoint` 随之删除，避免两份 errno 判断再次走偏。
+  验收：`TestStaleMountReadsTheErrnoOfBothKernels`、`TestUnmountForcesTheDetachOnceTheMountIsStale`、
+  `TestUnmountLeavesALiveMountAlone`；真机复现 `kill -9` 后 `./restart.sh` 与直接 `./cloudfs`
+  两条路径都能自愈。
 - **[x] 重启时 stale 挂载没被 detach（2026-09-20）**：`prepareMountPoint` 只 `stat`，而内核在
   attr timeout 内用缓存回答 stat，于是判定挂载点正常，随后 fusefs `open` 才报 ENOTCONN 退出；
   留着一个 cwd 在挂载内的 shell 重启就会撞上（这个会话自己撞了一次）。改为 stat + open 探测。
