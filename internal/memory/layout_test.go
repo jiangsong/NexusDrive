@@ -34,7 +34,8 @@ func TestMemoryV1LayoutUnchanged(t *testing.T) {
 }
 
 // TestMemoryLayoutV2SeparatesOwners: in v2 the key is owner/agent, an
-// unqualified agent is the caller's own, shared stays unowned, two
+// unqualified agent is the caller's own, personal is owner-scoped, shared
+// stays drive-wide, two
 // owners' agents of the same name are different directories, and Agents
 // reports each with its owner.
 func TestMemoryLayoutV2SeparatesOwners(t *testing.T) {
@@ -54,8 +55,17 @@ func TestMemoryLayoutV2SeparatesOwners(t *testing.T) {
 	if k, err := ParseKey(LayoutV2, "shared", "alice"); err != nil || k.String() != "shared" || k.Owner != "" {
 		t.Fatalf("shared: %+v %v", k, err)
 	}
-	if _, err := ParseKey(LayoutV2, "alice/shared", "alice"); err == nil {
-		t.Fatal("shared with an owner accepted")
+	if k, err := ParseKey(LayoutV2, PersonalAgent, "alice"); err != nil || k.String() != "alice/shared" {
+		t.Fatalf("personal: %+v %v", k, err)
+	}
+	if k, err := ParseIdentity(LayoutV2, PersonalAgent, "alice"); err != nil || k.String() != "alice/personal" {
+		t.Fatalf("personal client identity: %+v %v", k, err)
+	}
+	if k, err := ParseIdentity(LayoutV1, PersonalAgent, "alice"); err != nil || k.String() != "personal" {
+		t.Fatalf("v1 personal client identity: %+v %v", k, err)
+	}
+	if k, err := ParseKey(LayoutV2, "alice/shared", "bob"); err != nil || k.String() != "alice/shared" {
+		t.Fatalf("qualified personal: %+v %v", k, err)
 	}
 	if _, err := ParseKey(LayoutV2, "codex", "Not Valid"); err == nil {
 		t.Fatal("bad default owner accepted")

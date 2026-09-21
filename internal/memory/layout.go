@@ -57,14 +57,15 @@ func (s *Store) Layout(ctx context.Context) string {
 func (s *Store) LayoutMarkerPath() string { return path.Join(s.cfg.Root, "memory", layoutMarker) }
 
 // Key names one memory directory: an agent, and in v2 the owner it acts
-// for. Shared is the pseudo-agent every agent may read, owned by nobody.
+// for. Top-level shared is drive-wide; <owner>/shared is personal memory
+// shared by that owner's agents.
 type Key struct {
 	Owner string
 	Agent string
 }
 
-// String is the key as the tools and the console spell it: "agent" in
-// v1 or for shared, "owner/agent" in v2.
+// String is the key as the tools and the console spell it: "agent" in v1,
+// top-level "shared", or "owner/agent" in v2.
 func (k Key) String() string {
 	if k.Owner == "" {
 		return k.Agent
@@ -72,10 +73,32 @@ func (k Key) String() string {
 	return k.Owner + "/" + k.Agent
 }
 
-// ParseKey reads an agent argument: "agent", "owner/agent" or "shared".
+// ParseKey reads an agent argument: "agent", "owner/agent", "personal" or
+// "shared". Personal is the current owner's cross-agent area in v2 and is
+// an alias for shared in the single-owner v1 layout.
 // In v2 an unqualified agent is the caller's own (defaultOwner); in v1 an
 // owner is refused. Names are validated.
 func ParseKey(layout, arg, defaultOwner string) (Key, error) {
+	return parseKey(layout, arg, defaultOwner, true)
+}
+
+// ParseIdentity resolves an agent name derived from the caller rather than an
+// explicit tool argument. "personal" remains a valid client name here; only
+// an explicit agent=personal uses the cross-agent alias.
+func ParseIdentity(layout, arg, defaultOwner string) (Key, error) {
+	return parseKey(layout, arg, defaultOwner, false)
+}
+
+func parseKey(layout, arg, defaultOwner string, personalAlias bool) (Key, error) {
+	if personalAlias && arg == PersonalAgent {
+		if layout == LayoutV2 {
+			if !ValidName(defaultOwner) || defaultOwner == SharedAgent {
+				return Key{}, fmt.Errorf("owner %q: %w", defaultOwner, ErrBadName)
+			}
+			return Key{Owner: defaultOwner, Agent: SharedAgent}, nil
+		}
+		return Key{Agent: SharedAgent}, nil
+	}
 	owner, agent, qualified := strings.Cut(arg, "/")
 	if !qualified {
 		owner, agent = "", arg
@@ -83,10 +106,7 @@ func ParseKey(layout, arg, defaultOwner string) (Key, error) {
 	if !ValidName(agent) {
 		return Key{}, fmt.Errorf("agent %q: %w", agent, ErrBadName)
 	}
-	if agent == SharedAgent {
-		if qualified {
-			return Key{}, fmt.Errorf("agent %q: shared memory has no owner", arg)
-		}
+	if agent == SharedAgent && !qualified {
 		return Key{Agent: SharedAgent}, nil
 	}
 	if layout != LayoutV2 {
@@ -98,7 +118,7 @@ func ParseKey(layout, arg, defaultOwner string) (Key, error) {
 	if !qualified {
 		owner = defaultOwner
 	}
-	if !ValidName(owner) {
+	if !ValidName(owner) || owner == SharedAgent {
 		return Key{}, fmt.Errorf("owner %q: %w", owner, ErrBadName)
 	}
 	return Key{Owner: owner, Agent: agent}, nil

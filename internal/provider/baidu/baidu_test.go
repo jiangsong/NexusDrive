@@ -482,6 +482,36 @@ func TestMkdirExisting(t *testing.T) {
 	_ = x
 }
 
+func TestEnsureRootCreatesMissingSegmentsAndAcceptsExistingParents(t *testing.T) {
+	x, hs := newXpan(t)
+	var paths []string
+	x.on(pathFile, "create", "", func(c call) (int, string) {
+		paths = append(paths, c.Form.Get("path"))
+		if len(paths) == 1 {
+			return http.StatusOK, `{"errno":-8}`
+		}
+		return http.StatusOK, `{"errno":0,"fs_id":445,"path":"/team/cloudfs","isdir":1}`
+	})
+	p := newProvider(t, hs, func(o *Options) { o.RootPath = "/team/cloudfs" })
+	if err := p.EnsureRoot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(paths, ","), "/team,/team/cloudfs"; got != want {
+		t.Fatalf("created paths = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureRootDoesNothingForDriveRoot(t *testing.T) {
+	x, hs := newXpan(t)
+	p := newProvider(t, hs, func(o *Options) { o.RootPath = "/" })
+	if err := p.EnsureRoot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls := x.all(); len(calls) != 0 {
+		t.Fatalf("calls = %d, want none", len(calls))
+	}
+}
+
 func TestRenameMoveDelete(t *testing.T) {
 	x, hs := newXpan(t)
 	x.on(pathFile, "filemanager", "rename", func(c call) (int, string) {
@@ -790,6 +820,11 @@ func TestRefreshesTokenOnAuthErrno(t *testing.T) {
 		o.ClientID = "id"
 		o.ClientSecret = "secret"
 	})
+	var saved map[string]string
+	p.SetTokenPersister(func(fields map[string]string) error {
+		saved = fields
+		return nil
+	})
 	if _, _, err := p.List(context.Background(), "/apps/cloudfs", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -798,6 +833,9 @@ func TestRefreshesTokenOnAuthErrno(t *testing.T) {
 	}
 	if p.AccessToken() != "tok-2" {
 		t.Errorf("access token = %q, want the refreshed one", p.AccessToken())
+	}
+	if saved["access_token"] != "tok-2" || saved["refresh_token"] != "rt-2" {
+		t.Fatalf("saved tokens = %#v, want both refreshed credentials", saved)
 	}
 }
 

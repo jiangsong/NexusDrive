@@ -26,8 +26,9 @@ import (
 // two server behaviours the driver has to work around: a rename that refuses
 // an existing destination, and a remove that refuses a non-empty directory.
 type memShare struct {
-	mu    sync.Mutex
-	nodes map[string]*memNode
+	mu     sync.Mutex
+	nodes  map[string]*memNode
+	fsInfo smb2.FileFsInfo
 
 	opens     int
 	openNames []string
@@ -37,6 +38,13 @@ type memShare struct {
 	// server answers a read larger than its negotiated maximum.
 	readLimit int
 	dirBatch  int
+}
+
+func (s *memShare) Statfs(string) (smb2.FileFsInfo, error) {
+	if s.fsInfo == nil {
+		return nil, provider.ErrUnsupported
+	}
+	return s.fsInfo, nil
 }
 
 type memNode struct {

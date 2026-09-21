@@ -47,7 +47,7 @@ export const zh = {
   'export.pause.unavailable': '来源暂时连不上', 'export.pause.risk_control': '触发风控，已退避',
   'export.pause.auth': '需要重新授权',
   'action.pause': '暂停', 'toast.paused': '已暂停',
-  'nav.connections': '连接', 'nav.transfers': '传输', 'nav.storage': '缓存',
+  'nav.connections': '连接', 'nav.root': '根目录', 'nav.transfers': '传输', 'nav.storage': '缓存',
   'nav.pool': '存储池',
   'pool.eyebrow': '存储池', 'pool.space': '可用空间', 'pool.space.used': '已用', 'pool.space.unknown': '成员未报告容量', 'pool.files': '文件',
   'pool.replicas': '副本数', 'pool.capped': '成员不足', 'pool.health': '副本健康',

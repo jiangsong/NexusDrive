@@ -164,17 +164,21 @@ func TestEveryToolChecksItsPaths(t *testing.T) {
 		// The index tools: a rule or a search below /gd, or the extracted
 		// text of a file there.
 		"semantic_search":     {"query": "x", "path": "/gd"},
+		"context_search":      {"query": "x", "path": "/gd"},
 		"index":               {"path": "/gd"},
 		"unindex":             {"path": "/gd"},
 		"read_extracted_text": {"path": "/gd/x.txt"},
 		// The memory tools: every path is under memory.root, here
 		// /gd/.agent, which the scope does not contain.
-		"memory_list":   {},
-		"memory_get":    {"name": "x"},
-		"memory_put":    {"name": "x", "content": "x"},
-		"memory_delete": {"name": "x", "confirm": true},
-		"memory_search": {"query": "x"},
-		"memory_merge":  {"name": "x"},
+		"memory_list":       {},
+		"memory_get":        {"name": "x"},
+		"memory_put":        {"name": "x", "content": "x"},
+		"memory_delete":     {"name": "x", "confirm": true},
+		"memory_search":     {"query": "x"},
+		"memory_merge":      {"name": "x"},
+		"memory_propose":    {"id": "c-test", "name": "candidate", "content": "x"},
+		"memory_candidates": {},
+		"memory_review":     {"id": "c-test", "decision": "reject", "confirm": true},
 	}
 	// Path-less tools: they take ids or nothing, and filter their results by
 	// scope internally (list_roots, upload/copy/export job listings).

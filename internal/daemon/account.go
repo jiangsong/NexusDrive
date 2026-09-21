@@ -51,15 +51,39 @@ func OpenAccount(cfg *config.Config, name string) (provider.Provider, func() err
 	return p, func() error { defer pm.Stop(); return closeProvider() }, nil
 }
 
-// CheckAccount performs one root listing, not a recursive scan or upload.
-// Rotated tokens are persisted even if a later listing request fails.
+// CheckAccount performs one root listing, not a recursive scan or upload. A
+// backend may opt in to creating its configured root when that listing says it
+// is absent; the new root is listed again before the check succeeds. Rotated
+// tokens are persisted even if a later listing request fails.
 func CheckAccount(ctx context.Context, cfg *config.Config, name string) error {
 	p, closeAccount, err := OpenAccount(cfg, name)
 	if err != nil {
 		return err
 	}
 	defer closeAccount()
-	_, _, err = p.List(ctx, providerRoot(p), "")
+	return checkAccountProvider(ctx, p)
+}
+
+// rootEnsurer is deliberately opt-in: an opaque root id or a path owned by a
+// server must never be treated as a directory CloudFS is free to create.
+type rootEnsurer interface {
+	EnsureRoot(context.Context) error
+}
+
+func checkAccountProvider(ctx context.Context, p provider.Provider) error {
+	root := providerRoot(p)
+	_, _, err := p.List(ctx, root, "")
+	if err == nil || !errors.Is(err, provider.ErrNotFound) {
+		return err
+	}
+	ensurer, ok := provider.Unwrap(p).(rootEnsurer)
+	if !ok {
+		return err
+	}
+	if err := ensurer.EnsureRoot(ctx); err != nil {
+		return err
+	}
+	_, _, err = p.List(ctx, root, "")
 	return err
 }
 

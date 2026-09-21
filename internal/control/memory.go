@@ -197,7 +197,7 @@ func memoryName(w http.ResponseWriter, r *http.Request, what, name string) bool 
 	// An agent key may be owner/agent (layout v2); the store refuses it
 	// in v1 with a pointer at the migration.
 	if what == "agent" {
-		if owner, ag, ok := strings.Cut(name, "/"); ok && memory.ValidName(owner) && memory.ValidName(ag) && ag != memory.SharedAgent {
+		if owner, ag, ok := strings.Cut(name, "/"); ok && memory.ValidName(owner) && memory.ValidName(ag) && owner != memory.SharedAgent {
 			return true
 		}
 	}

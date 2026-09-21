@@ -95,9 +95,9 @@ func TestHybridRRFOrdersByFusedRank(t *testing.T) {
 	seedDoc(t, s, "2", "/w/some.md", some)
 	seedDoc(t, s, "3", "/w/once.md", once)
 	e := newStub("stub", 3)
-	e.vecs[many] = []float32{1, 0, 0}
-	e.vecs[some] = []float32{0, 1, 0}
-	e.vecs[once] = []float32{0, 0, 1}
+	e.vecs[embedText(PendingEmbed{Path: "/w/many.md", Text: many})] = []float32{1, 0, 0}
+	e.vecs[embedText(PendingEmbed{Path: "/w/some.md", Text: some})] = []float32{0, 1, 0}
+	e.vecs[embedText(PendingEmbed{Path: "/w/once.md", Text: once})] = []float32{0, 0, 1}
 	e.vecs["cloudfs"] = []float32{0.1, 0.9, 0.5}
 	embedAll(t, s, e)
 
@@ -213,8 +213,8 @@ func TestShortQueryUsesVectorsWhenPresent(t *testing.T) {
 	seedDoc(t, s, "1", "/w/about.md", about)
 	seedDoc(t, s, "2", "/w/other.md", other)
 	e := newStub("stub", 3)
-	e.vecs[about] = []float32{1, 0, 0}
-	e.vecs[other] = []float32{0, 1, 0}
+	e.vecs[embedText(PendingEmbed{Path: "/w/about.md", Text: about})] = []float32{1, 0, 0}
+	e.vecs[embedText(PendingEmbed{Path: "/w/other.md", Text: other})] = []float32{0, 1, 0}
 	e.vecs["网盘"] = []float32{0.9, 0.1, 0}
 	ctx := context.Background()
 

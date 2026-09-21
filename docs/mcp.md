@@ -2,7 +2,7 @@
 
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
-> **一期已落地**：会话与作用域、访问令牌与 HTTP 接入、交付箱（`begin_session`/`finish_session`/`list_sessions`）、持久审计，见下文"[会话与作用域](#会话与作用域)"；内容索引 phase 1（`semantic_search` 等 5 个索引工具，见"[内容索引](#内容索引)"）。**二期已落地**：会话快照与回滚（`rollback_session`，见"[会话回滚](#会话回滚)"，T-38）、嵌入与 hybrid 检索（`semantic_search.mode`，T-39）、Agent 记忆库（`memory_*` 5 个工具，见"[记忆库](#记忆库)"，T-40）、事件触发器与"发送给 Agent"运行（见"[事件触发器](#事件触发器)"，T-41/T-42）。**仍开放**：stdio MCP 与挂载并存下的 stdio→HTTP 桥（T-43，见"[与挂载并存](#与挂载并存)"）。设计见 [Agent 工作底座路线图](agent-roadmap.md)。工具表只列出已实现的工具。
+> **已落地**：会话与作用域、访问令牌、交付箱与持久审计；内容索引、hybrid 语义检索、统一 `context_search`；九个记忆工具（含候选显式确认）；事件触发器与"发送给 Agent"。设计见 [Agent 工作底座路线图](agent-roadmap.md)，本页工具表只列已实现能力。
 
 ## 注册
 
@@ -107,7 +107,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | `share` | `path`, `confirm`, `expires?`, `force?`, `code?` | 为网盘上的文件创建公开链接（T-55）。`confirm` 必须为 true；只对已上传（`state = synced`）且**完整缓存**的文件——凭据扫描只读缓存，未缓存的拒绝并提示先 `pin`；扫描命中（AWS key、私钥头、`password=` 等）时拒绝并给出规则与行号，`force` 覆盖；成功恰好一次 `CreateShare` 远端调用，响应带 `url` / `code` / `expires_at` 与控制台内链 `console_url`。只有 `Caps.Share` 的驱动可用（见 providers.md） |
 | `stale_docs` | `path?`, `limit? = 50` | 目录下链接到"比自己更新的文件"的 Markdown 文档（T-58，借 `bdrive stale`）：每条带 `newer[]{target, modified}`；只读已缓存的文档，未缓存的计入 `skipped`，零远端调用；只是清单，不下判断 |
 | `hot_paths` | `path?`, `days? = 7`, `limit? = 50` | 窗口内读得最多的路径，按读取者类型（`agent` / `kernel` / `console` / `webdav`）计数，带 `mtime` 与 `stale`（窗口内被读、窗口前就没改过）；`suggestions[]` 只建议 pin / 复核，不做任何事 |
-| `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?` | 文本读。非 UTF-8 会被拒绝并提示改用 `read_range`。截断时返回 `next_offset`；`tail` 落在多字节字符中间时自动前移到字符边界 |
+| `read_text` | `path`, `offset?`, `max_bytes?`, `head?`, `tail?`, `expected_version?` | 文本读。传入检索/`stat` 返回的 `version` 后，文件变化会拒绝读取并要求重搜；非 UTF-8 提示改用 `read_range`。截断时返回 `next_offset` |
 | `read_range` | `path`, `offset`, `length` | 任意字节范围，base64 返回。用于二进制或大文件分页 |
 | `search` | `query?`, `path?`, `glob?`, `ext?`, `min_size?`, `max_size?`, `modified_after?`, `kind?`, `sort?`, `content?`, `max_results?` | 本地文件名索引搜索（Everything 式语法，见下文），权限与子树过滤在限量前执行；给了任一过滤参数时 `query` 可为空。每个命中带 `kind/size/mtime/cached`，响应带 `coverage{listed, known}`。`content` 只检查完整缓存文件的有界前缀，限制见下文 |
 | `warm` | `path`, `depth?` | 把子树里的每个目录列进本地元数据，之后对它的 `list_directory` / `stat` / `search` 零远端调用，`search` 的 `coverage` 缺口也随之补上。**不下载文件内容**——那是 `pin`。代价是每访问一个目录一次远端 List，所以给能覆盖需求的最窄路径。`depth` 省略即 -1（整棵子树），0 只列 `path` 自己，上限 1024，与 `cloudfs warm <path> [depth]` 同义；出错时按"已列了多少个目录"报，再调一次从那里继续 |
@@ -153,7 +153,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `begin_session` | `name?`, `sandbox?` | 在工作区下建一个本会话专属目录（`<workspace>/<client>-<日期>-<sid前8位>/`，永不复用），写入 `manifest.json` 骨架，返回 `session_id`、`workspace`、`uri`。`sandbox=true` 时本会话的写被收窄到该目录，读不变 |
-| `finish_session` | `session_id?`, `summary?`, `share?` | 结束会话（默认当前会话，只能结束自己 principal 的会话）：从审计里取本会话成功写过的路径作为产物，写全 `manifest.json`，返回 `artifacts[]`。`share=true` 只对已同步（`state=synced`）的文件附 `download_url`，仍在本地的不等待、不请求直链 |
+| `finish_session` | `session_id?`, `summary?`, `handoff?`, `share?` | 结束会话（默认当前会话，只能结束自己 principal 的会话）：`handoff` 非空时写入工作区的 `handoff.md` 并列为产物；再从审计取本会话成功写过的路径，写全 `manifest.json`，返回 `artifacts[]`。`share=true` 只对已同步文件附直链 |
 | `list_sessions` | `cursor?`, `limit?`, `state?` | 列本 principal 的会话，最新在前，含工作区与产物（`state` 可为 `rolled_back`） |
 | `rollback_session` | `session_id`, `confirm`, `dry_run?` | 按记录逆序撤销该会话（须是本 principal 的）经写工具做的修改，返回 `{restored[], skipped[], conflict[]}` 三组清单；`dry_run=true` 只算计划、不写任何东西、不需要 `confirm`；执行时须 `confirm=true`。回滚本身是一个新会话（`rollback_session_id`），可以再回滚。带 `DestructiveHint`，见"[会话回滚](#会话回滚)" |
 
@@ -163,13 +163,21 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 
 ### 内容索引
 
+`context_search` 是默认的 Agent 检索入口，即使内容索引关闭也会注册。参数为 `query`、`path?`、
+`sources?`（`knowledge` / `memory` / `handoff`）、`scope?`、`top_k?`、`mode?`、`include_stale?`；它合并
+文件名索引、抽取内容、持久记忆与会话交接，但按 `knowledge[]`、`memories[]`、`handoffs[]` 分组返回，
+避免文档命中挤掉记忆。每条结果带文件 `version`；后续调用 `read_text` 或 `read_extracted_text` 时把它作为
+`expected_version` 传回，文件若在检索后变化就拒绝读取，要求重新搜索。旧版本 chunk 默认隐藏，响应的
+`coverage` 同时说明目录覆盖、已索引/待处理/失败文档数与隐藏的 stale 数。传 `scope` 时返回全局记忆加该
+项目记忆；不传时只返回全局记忆，避免不同项目相互污染。
+
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `semantic_search` | `query`, `path?`, `top_k?`, `mode?`, `max_snippet_bytes?` | 在**已索引文件的抽取文本**里找分块：每个 hit 带 `path`、`heading`（标题路径）、`snippet`、`start_off`/`end_off`、`offset_kind`（`file` / `text`）、`score`、`stale`。只覆盖索引范围（`index.pinned` / `index.rules` / `index` 工具加的规则），不是全盘 grep；响应带 `docs`（可搜文档数）、`pending`（待抽取数）、`truncated`。`mode` 取 `keyword`（FTS bm25，查询词全部要出现）/ `hybrid`（bm25 top-2k 与向量 cosine top-2k 做 RRF k=60，同义与跨语言表达也能命中）/ `vector`（只按 cosine）；省略时配置了嵌入端点就是 `hybrid`，否则 `keyword`。`mode_used` 只报真正跑的模式：没有配置 `index.embedding`、端点不健康 / 熔断中、尚未嵌入任何 chunk、向量是另一个模型嵌的、查询本身嵌入失败——这些情况一律按 `keyword` 执行并在 `degraded` 里说明原因，不报错 |
+| `semantic_search` | `query`, `path?`, `top_k?`, `mode?`, `max_snippet_bytes?` | 在**已索引文件的抽取文本**里找分块：每个 hit 带 `path`、`version`、`heading`、`snippet`、偏移、`score`、`stale`。只覆盖索引范围；响应带 `docs`、`pending`、`truncated`。语义向量的输入包含文件路径/标题、章节标题和正文，因此文件名语义也能参与召回。其余 `mode`/降级语义同下文 |
 | `index_status` | `path?` | 不带 `path`：文档数（正常 / dirty / 失败）、分块数、待抽取队列、最近失败列表（按作用域过滤）、文本占用与 `max_total_text`、本小时下载与 `fetch_budget`、worker 进度（`paused` 为 `busy` / `risk_control` / `budget` / `text_budget` 及 `resume_at`）、`vectors` / `max_chunks` 与 `embedding{provider, model, dim, remote, host, healthy, last_error, breaker_open_until, embedded, pending, chars_this_month, capped}`。带 `path`：`covered`（覆盖它的规则路径）、`rule_source`（`config` / `ui` / `tool`）、`state`（`ok` / `dirty` / `failed` / `pending` / `uncovered`）、`chunks`、`error` |
 | `index` | `path`, `include?`, `max_file_size?` | 加一条运行时规则（来源 `tool`）：文件或目录，`include` 是相对 `path` 的 glob（默认文本、代码与 Office 集合），匹配文件按小时预算下载并后台抽取。只需读权限；返回 `pending` |
 | `unindex` | `path` | 移除 `index` 工具或界面加的规则并丢弃无其它规则覆盖的文本；配置文件里的规则只能改配置（`ErrConfigRule`） |
-| `read_extracted_text` | `path`, `offset?`, `max_bytes?` | 按字节偏移分页读抽取文本，返回 `text`、`next_offset`、`eof`、`kind`。PDF / docx / xlsx / pptx 就是这样变成可读的；纯文本文件的偏移就是文件偏移。未索引返回 `this file is not indexed; call index_status to see coverage` |
+| `read_extracted_text` | `path`, `offset?`, `max_bytes?`, `expected_version?` | 按字节偏移分页读抽取文本。`expected_version` 不等于挂载中的当前版本时拒绝，避免用旧检索结果读到新文件。PDF / Office 就是这样变成可读的；未索引时提示查看 `index_status` |
 
 五个工具只在守护进程 `index.enabled: true` 时注册（`tools/list` 里没有就是索引关着，`index.db` 也不存在）。
 每个入参路径过 `checkPath`，每个返回的 hit 与失败记录都按调用者作用域过滤：`--allow /work` 或
@@ -178,7 +186,7 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 回到当前树）；`stale: true` 表示索引的是旧版本，文件已经在挂载里变了、抽取还没跟上。
 
 **隐私**：`index.embedding.provider` 为 `none`（默认）时没有任何内容离开本机。一旦配置了端点，**每个被索引
-的 chunk 文本与每条 `hybrid` / `vector` 查询都会发送到 `base_url` 所指的主机**；端点不在回环 / RFC1918 / link-local /
+chunk 的文件路径/标题、章节标题、正文与每条 `hybrid` / `vector` 查询都会发送到 `base_url` 所指的主机**；端点不在回环 / RFC1918 / link-local /
 `.local` 时配置必须显式 `allow_remote: true` 才能通过校验，控制台「索引」屏常驻黄色横幅"文件内容会发送到 <host>"
 且不可关闭，`index_status.embedding.remote` 与 `host` 也如实报告。`api_key` 只接受 `keyring:` / `secretfile:` 引用
 （`cloudfs index auth` 写入），任何响应与状态都不会带出 key 值。本机 ollama 是零外发的选项。
@@ -187,22 +195,24 @@ keepalive ping；新版长连接随其 HTTP 请求断开而释放，不需要后
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `memory_list` | `agent?`, `cursor?`, `limit?` | 列出 `<memory.root>/memory/<agent>/facts/*.md`：每条带 `name`、`path`、`size`、`meta{name, description, type, updated_at}`（frontmatter）与 `conflicts[]`（同目录里以该名字开头、又不是合法 fact 文件的兄弟——网盘生成的冲突副本）。`agent` 省略 = 调用方自己（HTTP 令牌名或 stdio 的 client name 规范化为 `[a-z0-9-]`，`cloudfs mcp --agent` 覆盖）；`shared` 是所有 agent 共读的区域 |
+| `memory_list` | `agent?`, `cursor?`, `limit?` | 列出 facts 及 frontmatter。`agent` 省略为当前 agent；v2 中 `personal` 是当前用户所有 agent 共用的 `memory/<owner>/shared`，`shared` 保留为整盘共用区 |
 | `memory_get` | `name`, `agent?` | 读一条：`content`（frontmatter 之下的正文）、`version`（文件字节的内容哈希，不是网盘版本）、`remote_version`（网盘上最后一次看到的版本，本地未上传时为空——T-56）、`conflicts[]` |
-| `memory_put` | `name`, `content`, `agent?`, `mode?`, `expected_version?`, `description?`, `type?` | 写一条：`name` 须匹配 `^[a-z0-9][a-z0-9-]{0,63}$`；`mode` 为 `replace`（默认）或 `append`；带 `expected_version` 时与当前 `version` 不同就拒绝且内容不变（`memory changed elsewhere; re-read`，消息里给当前版本）；单条超过 `memory.max_fact_bytes`（64 KiB，含 frontmatter）或该 agent 超过 `memory.max_agent_bytes`（32 MiB）拒绝并给出当前用量；`description` / `type` 省略时保留文件里的。写 `facts/<name>.md` 后把 `MEMORY.md` 里唯一指向它的行替换、否则追加。返回 `version` 与 `state`（`local` / `synced`） |
+| `memory_put` | `name`, `content`, `agent?`, `mode?`, `expected_version?`, `description?`, `type?`, `scope?`, `source_paths?`, `source_session?`, `replaces?`, `expires_at?` | 写一条已确认记忆。除乐观版本外，frontmatter 可记录项目范围、证据、来源会话、替代的旧 fact 与 RFC 3339 过期时间；`context_search` 自动过滤过期和被替代内容 |
 | `memory_delete` | `name`, `agent?`, `confirm` | 删除 fact 文件与 `MEMORY.md` 里指向它的行，`confirm` 必须为 true；冲突副本不动，由 agent 自己读过后删 |
 | `memory_merge` | `name`, `agent?`, `conflict?`, `ancestor?` | 给出 fact 与其一份冲突副本的合并建议：给了 `ancestor`（你上次 `memory_put` 前读到的正文）就是三方合并，只有一方改过的行照单全收，双方都改的行成为 `<<<<<<<` 冲突块；不给则两方合并，所有差异都是冲突块。**不写任何东西**：把 `merged` 交给 `memory_put`（带返回的 `version` / `remote_version`），再删副本 |
-| `memory_search` | `query`, `agent?`, `include_shared?`, `top_k?`, `mode?` | 限定在 `memory/<agent>`（默认加 `memory/shared`）的 `semantic_search`：每个 hit 多带 `agent` 与 `name`，`mode` / `mode_used` / `degraded` 同上。记忆树由内置索引规则（`index_status` 里 `rule_source: builtin`）自动索引 `**/*.md`，`unindex` 不能删它；`index.enabled: false` 时返回 `memory_search needs the content index, but index.enabled: false` |
+| `memory_search` | `query`, `agent?`, `include_shared?`, `top_k?`, `mode?` | 限定在 `memory/<agent>` 的语义检索；v2 默认再搜 `<owner>/shared` 与顶层 `shared`。每个 hit 多带 `agent` 与 `name`；记忆树由不可删除的内置规则索引，候选目录明确排除；关闭 index 时返回配置说明 |
+| `memory_propose` | `id?`, `name`, `content`, `agent?`, 元数据同 `memory_put` | 把可能有用的信息写入同步的候选收件箱；不会进入 facts，也不会被检索。传稳定 `id` 可安全重试 |
+| `memory_candidates` | `agent?`, `status?`, `cursor?`, `limit?` | 按 token 预算分页列出 `pending`（默认）或 `reviewed` 候选摘要；正文不在列表中回显，审核前用摘要的 `path` 调 `read_text` 分页读取 |
+| `memory_review` | `id`, `agent?`, `decision`, `expected_version?`, `confirm` | 必须 `confirm=true`；`accept` 才写 durable fact，`reject` 只关闭候选。reviewed 记录保留，相同决定可幂等重试 |
 
-五个工具只在配置了 `memory.root`（默认 `mcp.workspace`，再退到第一个 `mcp.allow` 前缀 + `/.agent`）时有意义：
-root 为空或不在调用方作用域内，五个工具都返回同一句配置说明；`--read-only` 或非 owner 的 stdio 进程下 `get` /
-`list` / `search` 可用、`put` / `delete` 拒绝。每个涉及的路径（agent 目录、fact 文件、`MEMORY.md`）都过 `checkPath`
+九个工具只在配置了 `memory.root`（默认 `mcp.workspace`，再退到第一个 `mcp.allow` 前缀 + `/.agent`）时有意义：
+root 为空或不在调用方作用域内都返回同一句配置说明；只读服务可 list/get/search/candidates/merge，写入与 review 拒绝。每个涉及的路径都过 `checkPath`
 并进审计。记忆就是网盘上的普通 Markdown，终端 `cat` / 编辑同一个文件，控制台「Agent」屏记忆标签与
 `cloudfs memory` 也走同一实现；跨设备同步交给网盘，两边同时写时输掉的一方以网盘的冲突副本形式留在同目录，
 `memory_get.conflicts` 把它列出来。`skills/<name>/SKILL.md` 只约定位置，没有工具。
 
 **多人共用一个网盘（记忆布局 v2，T-56）**：`memory.layout: v2`（或网盘上 `memory/.layout` 标记文件）时目录变成
-`memory/<owner>/<agent>/`，`shared/` 不变；`agent` 参数写 `owner/agent`，省略 owner 就是调用方自己的——owner 来自
+`memory/<owner>/<agent>/`，`shared/` 不变；`agent: personal` 映射到 `memory/<owner>/shared`，用于同一用户的多智能体共用；`agent` 参数写 `owner/agent` 仍可明确定位——owner 来自
 principal（`cloudfs mcp token create --owner`，缺省为本机用户名）。`cloudfs memory migrate --confirm`（或控制台记忆标签
 的"迁移到布局 v2"）把 v1 树逐目录移到本机用户名之下，每步幂等、全部完成后才写标记，标记在网盘上，所有设备跟着切。
 v1 下给 `owner/agent` 会被拒绝并指向迁移。`memory_put` 的 `expected_remote_version` 与 `expected_version` 双比对：

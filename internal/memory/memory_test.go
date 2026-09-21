@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,6 +156,18 @@ func TestPutCreatesTheFactAndOneIndexLine(t *testing.T) {
 	index = readAll(t, fsys, "/work/.agent/memory/claude-code/MEMORY.md")
 	if index != "- [repo-layout](facts/repo-layout.md) — where code lives\n" {
 		t.Fatalf("MEMORY.md after delete:\n%q", index)
+	}
+}
+
+func TestPutRejectsFrontmatterBeyondTheReadableHeader(t *testing.T) {
+	s, _, _, _ := newStack(t, config.Memory{})
+	paths := make([]string, 100)
+	for i := range paths {
+		paths[i] = "/work/" + strings.Repeat("x", 50) + fmt.Sprint(i)
+	}
+	_, err := s.Put(context.Background(), "codex", "oversized-meta", "body\n", PutOptions{SourcePaths: paths})
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), "frontmatter") {
+		t.Fatalf("oversized frontmatter: %v", err)
 	}
 }
 

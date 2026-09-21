@@ -52,7 +52,7 @@ func TestInitializeCarriesInstructions(t *testing.T) {
 	}
 
 	withMemory, _, _ := newMemoryEnv(t, Options{}, nil, memoryConfig("/gd/.agent"), nil)
-	if got := withMemory.session.InitializeResult().Instructions; !strings.Contains(got, "memory_get") || !strings.Contains(got, "/gd/.agent") {
+	if got := withMemory.session.InitializeResult().Instructions; !strings.Contains(got, "memory_propose") || !strings.Contains(got, "/gd/.agent") {
 		t.Errorf("memory: %s", got)
 	}
 }

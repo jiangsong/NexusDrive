@@ -1,6 +1,7 @@
 package control
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -28,6 +29,11 @@ const RestartReexec RestartMode = "reexec"
 // is nil in a process that has nothing to restart (an offline management
 // command), and the endpoint reports that plainly.
 type Lifecycle struct {
+	// CheckRestart refuses a restart before the server enters draining state.
+	// The mounted daemon uses it to protect processes whose cwd still belongs
+	// to the current FUSE mount, since remounting the same path cannot repair
+	// those processes' kernel-held directory references.
+	CheckRestart func() error
 	// Restart triggers the graceful restart. It is invoked once, after the
 	// HTTP response has been written and flushed, and must return promptly:
 	// the real work (drain uploads, unmount, close, re-exec) belongs to the
@@ -57,6 +63,12 @@ func (s *Server) daemonRestart(w http.ResponseWriter, r *http.Request) {
 	confirm := r.URL.Query().Get("confirm") == "true"
 	if !confirmed(w, r, confirm, "confirm.restart_daemon") {
 		return
+	}
+	if life.CheckRestart != nil {
+		if err := life.CheckRestart(); err != nil {
+			httpErrorT(w, r, http.StatusConflict, "err.restart_busy_cwd", fmt.Sprint(err))
+			return
+		}
 	}
 	// From here the process is going down. Refuse further mutations so a
 	// second request cannot start changing state a restart is about to drop.

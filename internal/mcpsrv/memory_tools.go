@@ -2,13 +2,16 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
+	"time"
 
 	"cloudfs/internal/agent"
 	"cloudfs/internal/index"
 	"cloudfs/internal/memory"
+	"cloudfs/internal/vfs"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -26,7 +29,7 @@ import (
 // misconfiguration reads the same whichever tool an agent tries first.
 
 type memoryListInput struct {
-	Agent  string `json:"agent,omitempty" jsonschema:"Agent whose memory to list; default your own, derived from your client name. shared is the area every agent may read"`
+	Agent  string `json:"agent,omitempty" jsonschema:"Agent whose memory to list; default your own. personal is shared by your agents; shared is drive-wide"`
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor from a previous truncated listing"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum facts to return; the server caps this"`
 }
@@ -45,14 +48,19 @@ type memoryGetInput struct {
 }
 
 type memoryPutInput struct {
-	Name                  string `json:"name" jsonschema:"Fact name: lower-case letters, digits and dashes, at most 64 characters"`
-	Content               string `json:"content" jsonschema:"The fact's Markdown body; the frontmatter is written for you"`
-	Agent                 string `json:"agent,omitempty" jsonschema:"Agent whose memory to write; default your own. In memory layout v2 owner/agent names another person's agent"`
-	Mode                  string `json:"mode,omitempty" jsonschema:"replace (default) or append"`
-	ExpectedVersion       string `json:"expected_version,omitempty" jsonschema:"Version from memory_get; the put is refused when the fact changed since"`
-	ExpectedRemoteVersion string `json:"expected_remote_version,omitempty" jsonschema:"remote_version from memory_get; the put is refused when another device's write landed on the drive since, and not when only your own write is still uploading"`
-	Description           string `json:"description,omitempty" jsonschema:"One line for MEMORY.md and the frontmatter; kept from the file when omitted"`
-	Type                  string `json:"type,omitempty" jsonschema:"Free-form kind such as preference, project or person; kept from the file when omitted"`
+	Name                  string   `json:"name" jsonschema:"Fact name: lower-case letters, digits and dashes, at most 64 characters"`
+	Content               string   `json:"content" jsonschema:"The fact's Markdown body; the frontmatter is written for you"`
+	Agent                 string   `json:"agent,omitempty" jsonschema:"Agent whose memory to write; default your own. personal shares with your agents; shared is drive-wide"`
+	Mode                  string   `json:"mode,omitempty" jsonschema:"replace (default) or append"`
+	ExpectedVersion       string   `json:"expected_version,omitempty" jsonschema:"Version from memory_get; the put is refused when the fact changed since"`
+	ExpectedRemoteVersion string   `json:"expected_remote_version,omitempty" jsonschema:"remote_version from memory_get; the put is refused when another device's write landed on the drive since, and not when only your own write is still uploading"`
+	Description           string   `json:"description,omitempty" jsonschema:"One line for MEMORY.md and the frontmatter; kept from the file when omitted"`
+	Type                  string   `json:"type,omitempty" jsonschema:"Free-form kind such as preference, project or person; kept from the file when omitted"`
+	Scope                 string   `json:"scope,omitempty" jsonschema:"Project or workspace scope; empty keeps the current scope"`
+	SourcePaths           []string `json:"source_paths,omitempty" jsonschema:"Evidence paths that support this fact"`
+	SourceSession         string   `json:"source_session,omitempty" jsonschema:"Session that produced this fact"`
+	Replaces              []string `json:"replaces,omitempty" jsonschema:"Older fact names in the same memory area that this fact supersedes"`
+	ExpiresAt             string   `json:"expires_at,omitempty" jsonschema:"RFC 3339 expiry time; expired facts are hidden by context_search"`
 }
 
 type memoryPutOutput struct {
@@ -86,9 +94,70 @@ type memoryDeleteOutput struct {
 type memorySearchInput struct {
 	Query         string `json:"query" jsonschema:"Words to find in the facts; all must match"`
 	Agent         string `json:"agent,omitempty" jsonschema:"Agent whose memory to search; default your own"`
-	IncludeShared *bool  `json:"include_shared,omitempty" jsonschema:"Also search memory/shared; default true"`
+	IncludeShared *bool  `json:"include_shared,omitempty" jsonschema:"Also search your personal cross-agent area and drive-wide shared memory; default true"`
 	TopK          int    `json:"top_k,omitempty" jsonschema:"Maximum hits; default 10, the server caps this"`
 	Mode          string `json:"mode,omitempty" jsonschema:"keyword, hybrid or vector, as for semantic_search"`
+}
+
+type memoryProposeInput struct {
+	ID            string   `json:"id,omitempty" jsonschema:"Stable candidate id for idempotent retries; generated when omitted"`
+	Name          string   `json:"name" jsonschema:"Fact name to create if this candidate is accepted"`
+	Content       string   `json:"content" jsonschema:"Proposed Markdown body"`
+	Agent         string   `json:"agent,omitempty" jsonschema:"Target memory; default your own, personal shares with your agents"`
+	Description   string   `json:"description,omitempty"`
+	Type          string   `json:"type,omitempty"`
+	Scope         string   `json:"scope,omitempty"`
+	SourcePaths   []string `json:"source_paths,omitempty"`
+	SourceSession string   `json:"source_session,omitempty"`
+	Replaces      []string `json:"replaces,omitempty"`
+	ExpiresAt     string   `json:"expires_at,omitempty" jsonschema:"RFC 3339 expiry time"`
+}
+
+type memoryCandidatesInput struct {
+	Agent  string `json:"agent,omitempty" jsonschema:"Memory whose candidate inbox to list; default your own"`
+	Status string `json:"status,omitempty" jsonschema:"pending (default) or reviewed"`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor from a previous response"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum candidates to return"`
+}
+
+type memoryCandidatesOutput struct {
+	Agent       string                   `json:"agent"`
+	Candidates  []memoryCandidateSummary `json:"candidates"`
+	NextCursor  string                   `json:"next_cursor,omitempty"`
+	Truncated   bool                     `json:"truncated"`
+	TruncatedBy string                   `json:"truncated_by,omitempty"`
+}
+
+// memoryCandidateSummary keeps list/propose/review results bounded. The full
+// candidate remains an ordinary file at Path and can be paged with read_text.
+type memoryCandidateSummary struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Agent           string     `json:"agent"`
+	Path            string     `json:"path"`
+	Status          string     `json:"status"`
+	Decision        string     `json:"decision,omitempty"`
+	ProposedAt      time.Time  `json:"proposed_at"`
+	ReviewedAt      *time.Time `json:"reviewed_at,omitempty"`
+	FactVersion     string     `json:"fact_version,omitempty"`
+	BaseFactVersion string     `json:"base_fact_version,omitempty"`
+	BaseFactAbsent  bool       `json:"base_fact_absent,omitempty"`
+	ContentBytes    int        `json:"content_bytes"`
+	Version         string     `json:"version"`
+}
+
+func summarizeCandidate(c memory.Candidate) memoryCandidateSummary {
+	return memoryCandidateSummary{ID: c.ID, Name: c.Name, Agent: c.Agent, Path: c.Path, Status: c.Status,
+		Decision: c.Decision, ProposedAt: c.ProposedAt, ReviewedAt: c.ReviewedAt, FactVersion: c.FactVersion,
+		BaseFactVersion: c.BaseFactVersion, BaseFactAbsent: c.BaseFactAbsent, ContentBytes: len(c.Content), Version: c.Version}
+}
+
+type memoryReviewInput struct {
+	ID              string `json:"id" jsonschema:"Candidate id from memory_candidates or memory_propose"`
+	Agent           string `json:"agent,omitempty" jsonschema:"Candidate memory; default your own"`
+	Decision        string `json:"decision" jsonschema:"accept or reject"`
+	ExpectedVersion string `json:"expected_version,omitempty" jsonschema:"Candidate version previously reviewed"`
+	Confirm         bool   `json:"confirm" jsonschema:"Must be true; accepting writes a durable fact and rejecting closes the candidate"`
 }
 
 // memoryRootMessage is the one refusal every memory tool gives when the
@@ -101,6 +170,7 @@ func (s *Server) registerMemoryTools() {
 	}
 	ro := &mcp.ToolAnnotations{ReadOnlyHint: true}
 	rw := &mcp.ToolAnnotations{IdempotentHint: true}
+	propose := &mcp.ToolAnnotations{IdempotentHint: false}
 	destructive := &mcp.ToolAnnotations{DestructiveHint: ptr(true)}
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "memory_list",
@@ -132,6 +202,21 @@ func (s *Server) registerMemoryTools() {
 		Description: "Search the facts of an agent's memory (default your own) and the shared area through the content index; every hit names the agent and fact it belongs to. Needs index.enabled.",
 		Annotations: ro,
 	}, s.memorySearch)
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "memory_propose",
+		Description: "Put a possible memory into the candidate inbox without making it retrievable as a durable fact. Use a stable id for idempotent retries; it must later be explicitly reviewed.",
+		Annotations: propose,
+	}, s.memoryPropose)
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "memory_candidates",
+		Description: "List bounded summaries of pending memory candidates or reviewed audit records. Read a summary's path with read_text before review; candidate files sync but are excluded from retrieval.",
+		Annotations: ro,
+	}, s.memoryCandidates)
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "memory_review",
+		Description: "Accept or reject a memory candidate with confirm=true. Accept writes the durable fact; reject does not. The reviewed record makes retrying the same decision idempotent.",
+		Annotations: rw,
+	}, s.memoryReview)
 }
 
 // memoryAgent decides whose memory a call is about: the explicit agent,
@@ -183,7 +268,7 @@ func (s *Server) memoryAgent(ctx context.Context, req *mcp.CallToolRequest, expl
 			name = memory.NormalizeAgent(info.Name)
 		}
 	}
-	k, err := memory.ParseKey(layout, name, owner)
+	k, err := memory.ParseIdentity(layout, name, owner)
 	if err != nil {
 		return "", err
 	}
@@ -307,8 +392,30 @@ func (s *Server) memoryPut(ctx context.Context, req *mcp.CallToolRequest, in mem
 			return r, memoryPutOutput{}, nil
 		}
 	}
+	for _, source := range in.SourcePaths {
+		if _, err := s.checkPath(ctx, source, false); err != nil {
+			r, _ := fail(fmt.Errorf("source path %s: %w", source, err))
+			return r, memoryPutOutput{}, nil
+		}
+	}
+	var expiresAt *time.Time
+	if in.ExpiresAt != "" {
+		at, parseErr := time.Parse(time.RFC3339, in.ExpiresAt)
+		if parseErr != nil {
+			r, _ := fail(fmt.Errorf("expires_at must be RFC 3339: %w", parseErr))
+			return r, memoryPutOutput{}, nil
+		}
+		expiresAt = &at
+	}
+	for _, replaced := range in.Replaces {
+		if !memory.ValidName(replaced) || replaced == in.Name {
+			r, _ := fail(fmt.Errorf("replacement %q must be another valid fact name", replaced))
+			return r, memoryPutOutput{}, nil
+		}
+	}
 	f, err := s.opt.Memory.Put(ctx, ag, in.Name, in.Content, memory.PutOptions{
 		Mode: in.Mode, ExpectedVersion: in.ExpectedVersion, ExpectedRemoteVersion: in.ExpectedRemoteVersion, Description: in.Description, Type: in.Type,
+		Scope: in.Scope, SourcePaths: in.SourcePaths, SourceSession: in.SourceSession, Replaces: in.Replaces, ExpiresAt: expiresAt,
 	})
 	if err != nil {
 		r, _ := fail(memoryErr(err, p))
@@ -441,4 +548,114 @@ func (s *Server) memorySearch(ctx context.Context, req *mcp.CallToolRequest, in 
 		msg += fmt.Sprintf("; %d files still wait for extraction", res.Pending)
 	}
 	return text("%s", msg), res, nil
+}
+
+func (s *Server) memoryPropose(ctx context.Context, req *mcp.CallToolRequest, in memoryProposeInput) (*mcp.CallToolResult, memoryCandidateSummary, error) {
+	if err := s.requireOwner(ctx); err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	ag, err := s.memoryAgent(ctx, req, in.Agent)
+	if err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	if _, err := s.memoryDir(ctx, ag, true); err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	for _, source := range in.SourcePaths {
+		if _, err := s.checkPath(ctx, source, false); err != nil {
+			r, _ := fail(fmt.Errorf("source path %s: %w", source, err))
+			return r, memoryCandidateSummary{}, nil
+		}
+	}
+	var expiresAt *time.Time
+	if in.ExpiresAt != "" {
+		at, parseErr := time.Parse(time.RFC3339, in.ExpiresAt)
+		if parseErr != nil {
+			r, _ := fail(fmt.Errorf("expires_at must be RFC 3339: %w", parseErr))
+			return r, memoryCandidateSummary{}, nil
+		}
+		expiresAt = &at
+	}
+	c, err := s.opt.Memory.Propose(ctx, ag, in.Name, in.Content, memory.CandidateOptions{
+		ID: in.ID, Description: in.Description, Type: in.Type, Scope: in.Scope,
+		SourcePaths: in.SourcePaths, SourceSession: in.SourceSession, Replaces: in.Replaces, ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		r, _ := fail(memoryErr(err, s.opt.Memory.AgentDir(ag)))
+		return r, memoryCandidateSummary{}, nil
+	}
+	recordCheck(ctx, c.Path, nil)
+	return text("proposed memory candidate %s for %s/%s; read %s before review", c.ID, ag, c.Name, c.Path), summarizeCandidate(c), nil
+}
+
+func (s *Server) memoryCandidates(ctx context.Context, req *mcp.CallToolRequest, in memoryCandidatesInput) (*mcp.CallToolResult, memoryCandidatesOutput, error) {
+	ag, err := s.memoryAgent(ctx, req, in.Agent)
+	if err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidatesOutput{}, nil
+	}
+	if _, err := s.memoryDir(ctx, ag, false); err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidatesOutput{}, nil
+	}
+	limit := in.Limit
+	if limit <= 0 || limit > s.opt.Limits.MaxEntries {
+		limit = s.opt.Limits.MaxEntries
+	}
+	candidates, next, err := s.opt.Memory.Candidates(ctx, ag, in.Status, in.Cursor, limit)
+	if err != nil {
+		r, _ := fail(memoryErr(err, s.opt.Memory.AgentDir(ag)))
+		return r, memoryCandidatesOutput{}, nil
+	}
+	summaries := make([]memoryCandidateSummary, len(candidates))
+	for i, c := range candidates {
+		summaries[i] = summarizeCandidate(c)
+	}
+	out := memoryCandidatesOutput{Agent: ag, Candidates: summaries, NextCursor: next, Truncated: next != ""}
+	if keep, cut := cutItems(len(out.Candidates), s.tokenBudget(), func(i int) int {
+		b, _ := json.Marshal(out.Candidates[i])
+		return agent.EstimateTokensBytes(b)
+	}); cut {
+		out.Candidates = out.Candidates[:keep]
+		out.NextCursor = vfs.DirectoryCursorAfter(path.Base(candidates[keep-1].Path))
+		out.Truncated, out.TruncatedBy = true, truncatedByTokens
+	}
+	return text("%s: %d %s memory candidates", ag, len(out.Candidates), candidateStatus(in.Status)), out, nil
+}
+
+func (s *Server) memoryReview(ctx context.Context, req *mcp.CallToolRequest, in memoryReviewInput) (*mcp.CallToolResult, memoryCandidateSummary, error) {
+	if err := s.requireOwner(ctx); err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	ag, err := s.memoryAgent(ctx, req, in.Agent)
+	if err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	if _, err := s.memoryDir(ctx, ag, true); err != nil {
+		r, _ := fail(err)
+		return r, memoryCandidateSummary{}, nil
+	}
+	if !in.Confirm {
+		r, _ := fail(errors.New("refusing to review memory without confirm=true"))
+		return r, memoryCandidateSummary{}, nil
+	}
+	c, err := s.opt.Memory.Review(ctx, ag, in.ID, in.Decision, in.ExpectedVersion)
+	if err != nil {
+		r, _ := fail(memoryErr(err, s.opt.Memory.AgentDir(ag)))
+		return r, memoryCandidateSummary{}, nil
+	}
+	recordCheck(ctx, c.Path, nil)
+	return text("%sed memory candidate %s for %s/%s", in.Decision, c.ID, ag, c.Name), summarizeCandidate(c), nil
+}
+
+func candidateStatus(status string) string {
+	if status == "" {
+		return "pending"
+	}
+	return status
 }

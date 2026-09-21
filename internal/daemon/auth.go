@@ -267,6 +267,12 @@ func StartOAuthFlow(ctx context.Context, cfg *config.Config, name string, redire
 		// after the authorization already succeeded, blaming a field the
 		// person never supplied.
 		saved := map[string]string{"refresh_token": token.RefreshToken}
+		// Baidu rejects an immediate refresh after the authorization-code
+		// exchange as "Trigger security policy". Keep the access token returned
+		// by that exchange so the account check can use it directly.
+		if r.Type == "baidu" {
+			saved["access_token"] = token.AccessToken
+		}
 		if o.ClientSecret != "" {
 			saved["client_secret"] = o.ClientSecret
 		}

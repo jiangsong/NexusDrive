@@ -92,6 +92,12 @@ func (f *fakeGraph) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	suffix := strings.TrimPrefix(r.URL.Path, base)
 	switch {
+	case r.Method == http.MethodGet && suffix == "":
+		if got := r.URL.Query().Get("$select"); got != "quota" {
+			graphError(w, http.StatusBadRequest, "invalidRequest")
+			return
+		}
+		writeODJSON(w, map[string]any{"quota": map[string]any{"total": int64(5 << 30), "used": int64(2 << 30), "remaining": int64(3 << 30)}})
 	case r.Method == http.MethodGet && suffix == "/root":
 		f.get(w, "root-actual")
 	case r.Method == http.MethodGet && suffix == "/root/children":

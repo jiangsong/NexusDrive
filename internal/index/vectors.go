@@ -30,10 +30,11 @@ import (
 
 // index_meta keys the embedding side records.
 const (
-	metaEmbeddingModel = "embedding_model"
-	metaEmbeddingDim   = "embedding_dim"
-	metaQuantize       = "quantize"
-	metaVectorsGen     = "vectors_gen"
+	metaEmbeddingModel        = "embedding_model"
+	metaEmbeddingDim          = "embedding_dim"
+	metaQuantize              = "quantize"
+	metaEmbeddingInputVersion = "embedding_input_version"
+	metaVectorsGen            = "vectors_gen"
 	// metaEmbedCharsPrefix + "2026-09" counts the characters sent to the
 	// embedder in that month, for the cost estimate.
 	metaEmbedCharsPrefix = "embed_chars_"
@@ -52,6 +53,7 @@ const tombstoneReloadFraction = 4
 // PendingEmbed is one queued chunk with the text to embed.
 type PendingEmbed struct {
 	ChunkID  int64
+	Path     string
 	Heading  string
 	Text     string
 	Attempts int
@@ -495,8 +497,8 @@ func (s *Store) PendingEmbeds(ctx context.Context, limit int, now time.Time) ([]
 	if limit <= 0 {
 		limit = 64
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT p.chunk_id, c.heading, c.text, p.attempts
-		FROM embed_pending p JOIN chunks c ON c.id = p.chunk_id
+	rows, err := s.db.QueryContext(ctx, `SELECT p.chunk_id, d.path, c.heading, c.text, p.attempts
+		FROM embed_pending p JOIN chunks c ON c.id = p.chunk_id JOIN documents d ON d.id = c.doc_id
 		WHERE p.next_at <= ? ORDER BY p.next_at, p.chunk_id LIMIT ?`, now.UnixNano(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("index: %w", err)
@@ -505,7 +507,7 @@ func (s *Store) PendingEmbeds(ctx context.Context, limit int, now time.Time) ([]
 	var out []PendingEmbed
 	for rows.Next() {
 		var p PendingEmbed
-		if err := rows.Scan(&p.ChunkID, &p.Heading, &p.Text, &p.Attempts); err != nil {
+		if err := rows.Scan(&p.ChunkID, &p.Path, &p.Heading, &p.Text, &p.Attempts); err != nil {
 			return nil, fmt.Errorf("index: %w", err)
 		}
 		out = append(out, p)

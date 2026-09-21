@@ -46,7 +46,7 @@ export const en = {
   'export.pause.unavailable': 'the source cannot be reached', 'export.pause.risk_control': 'backing off after a ban signal',
   'export.pause.auth': 'needs authorization again',
   'action.pause': 'Pause', 'toast.paused': 'Paused',
-  'nav.connections': 'Connections', 'nav.transfers': 'Transfers', 'nav.storage': 'Cache',
+  'nav.connections': 'Connections', 'nav.root': 'Root folder', 'nav.transfers': 'Transfers', 'nav.storage': 'Cache',
   'nav.pool': 'Pool',
   'pool.eyebrow': 'Pool', 'pool.space': 'Free space', 'pool.space.used': 'used', 'pool.space.unknown': 'members report no capacity', 'pool.files': 'Files',
   'pool.replicas': 'Replicas', 'pool.capped': 'too few members', 'pool.health': 'Replica health',

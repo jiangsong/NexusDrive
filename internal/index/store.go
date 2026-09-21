@@ -147,6 +147,7 @@ type FailedDoc struct {
 // offsets into the text; NextOffset always sits on a rune boundary.
 type TextPage struct {
 	Path       string `json:"path"`
+	Version    string `json:"version"`
 	Text       string `json:"text"`
 	Offset     int64  `json:"offset"`
 	NextOffset int64  `json:"next_offset"`
@@ -1035,9 +1036,9 @@ func (s *Store) RetryFailed(ctx context.Context, p string) (int64, error) {
 // takes a 64 KiB page. Offsets are bytes into the extracted text, which
 // for text kinds are file offsets too.
 func (s *Store) Text(ctx context.Context, p string, offset int64, max int) (TextPage, error) {
-	var text, kind string
-	err := s.db.QueryRowContext(ctx, `SELECT text, kind FROM documents WHERE path = ?
-		ORDER BY indexed_at DESC, id DESC LIMIT 1`, p).Scan(&text, &kind)
+	var text, kind, version string
+	err := s.db.QueryRowContext(ctx, `SELECT text, kind, version FROM documents WHERE path = ?
+		ORDER BY indexed_at DESC, id DESC LIMIT 1`, p).Scan(&text, &kind, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TextPage{}, ErrNotIndexed
 	}
@@ -1052,7 +1053,7 @@ func (s *Store) Text(ctx context.Context, p string, offset int64, max int) (Text
 	}
 	n := int64(len(text))
 	if offset >= n {
-		return TextPage{Path: p, Offset: offset, NextOffset: n, EOF: true, Kind: kind}, nil
+		return TextPage{Path: p, Version: version, Offset: offset, NextOffset: n, EOF: true, Kind: kind}, nil
 	}
 	start := offset
 	for start < n && !utf8.RuneStart(text[start]) {
@@ -1074,6 +1075,7 @@ func (s *Store) Text(ctx context.Context, p string, offset int64, max int) (Text
 	}
 	return TextPage{
 		Path:       p,
+		Version:    version,
 		Text:       text[start:end],
 		Offset:     offset,
 		NextOffset: end,

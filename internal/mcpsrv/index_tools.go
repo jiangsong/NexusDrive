@@ -59,9 +59,10 @@ type indexRuleOutput struct {
 }
 
 type readExtractedTextInput struct {
-	Path     string `json:"path" jsonschema:"Mount-relative file path"`
-	Offset   int64  `json:"offset,omitempty" jsonschema:"Byte offset into the extracted text to start at"`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"Maximum bytes to return; the server caps this"`
+	Path            string `json:"path" jsonschema:"Mount-relative file path"`
+	Offset          int64  `json:"offset,omitempty" jsonschema:"Byte offset into the extracted text to start at"`
+	MaxBytes        int    `json:"max_bytes,omitempty" jsonschema:"Maximum bytes to return; the server caps this"`
+	ExpectedVersion string `json:"expected_version,omitempty" jsonschema:"Version returned by context_search or stat; refuse if the file changed"`
 }
 
 func (s *Server) registerIndexTools() {
@@ -287,6 +288,17 @@ func (s *Server) readExtractedText(ctx context.Context, _ *mcp.CallToolRequest, 
 		r, _ := fail(err)
 		return r, extractedTextOutput{}, nil
 	}
+	if in.ExpectedVersion != "" {
+		a, statErr := s.opt.FS.StatPath(ctx, p)
+		if statErr != nil {
+			r, _ := fail(mapErr(statErr, p))
+			return r, extractedTextOutput{}, nil
+		}
+		if in.ExpectedVersion != a.Version {
+			r, _ := fail(fmt.Errorf("%s changed since search (expected version %s, current %s); search again before reading", p, in.ExpectedVersion, a.Version))
+			return r, extractedTextOutput{}, nil
+		}
+	}
 	max := in.MaxBytes
 	if max <= 0 || max > s.opt.Limits.MaxBytes {
 		max = s.opt.Limits.MaxBytes
@@ -297,6 +309,10 @@ func (s *Server) readExtractedText(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	if err != nil {
 		r, _ := fail(err)
+		return r, extractedTextOutput{}, nil
+	}
+	if in.ExpectedVersion != "" && in.ExpectedVersion != page.Version {
+		r, _ := fail(fmt.Errorf("%s indexed text is stale (expected version %s, indexed %s); search again after indexing catches up", p, in.ExpectedVersion, page.Version))
 		return r, extractedTextOutput{}, nil
 	}
 	s.observeRead(p)

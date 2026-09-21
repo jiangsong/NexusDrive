@@ -67,6 +67,30 @@ func TestBeginSessionCreatesADirectoryWithASkeletonManifest(t *testing.T) {
 	}
 }
 
+func TestFinishSessionWritesHandoffAsArtifact(t *testing.T) {
+	e, _ := newAgentEnv(t, Options{Workspace: "/work/.agent"}, agent.Scope{Read: []string{"/work"}})
+	b := begin(t, e, map[string]any{"name": "handoff"})
+	var out finishSessionOutput
+	if res := e.call(t, "finish_session", finishSessionInput{Handoff: "Continue with the parser tests.\n- inspect failures"}, &out); res.IsError {
+		t.Fatal(errText(res))
+	}
+	want := path.Join(b.Workspace, "handoff.md")
+	if out.Handoff != want || len(out.Artifacts) != 1 || out.Artifacts[0].Path != want {
+		t.Fatalf("finish output: %+v", out)
+	}
+	var handoff readTextOutput
+	if res := e.call(t, "read_text", readTextInput{Path: want}, &handoff); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if handoff.Content != "# Handoff\n\nContinue with the parser tests.\n- inspect failures\n" {
+		t.Fatalf("handoff: %q", handoff.Content)
+	}
+	m := readManifest(t, e, out.Manifest)
+	if len(m.Artifacts) != 1 || m.Artifacts[0].Path != want {
+		t.Fatalf("manifest artifacts: %+v", m.Artifacts)
+	}
+}
+
 func TestConcurrentSessionsKeepSeparateManifests(t *testing.T) {
 	e1, _ := newAgentEnv(t, Options{Workspace: "/work/.agent"}, agent.Scope{Read: []string{"/work"}})
 	e2 := secondClient(t, e1)

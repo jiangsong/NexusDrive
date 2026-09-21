@@ -23,6 +23,13 @@ type SearchQuery struct {
 	Roots []string
 	// TopK caps the number of hits; 0 takes defaultTopK.
 	TopK int
+	// ScanLimit bounds ranked candidates inspected before Accept. It defaults
+	// to TopK; callers that filter hits can raise it to refill the requested
+	// result count without an unbounded scan.
+	ScanLimit int
+	// Accept filters fully resolved hits before they count toward TopK or the
+	// response byte budget. A nil function accepts every hit.
+	Accept func(Hit) bool
 	// Mode is hybrid, keyword or vector; "" is hybrid when an embedder and
 	// vectors are available and keyword otherwise. hybrid and vector run
 	// as keyword, reporting Degraded, when the embedder is missing or
@@ -41,6 +48,7 @@ type SearchQuery struct {
 // older version than meta holds now (or the file is gone).
 type Hit struct {
 	Path       string  `json:"path"`
+	Version    string  `json:"version,omitempty"`
 	Seq        int     `json:"seq"`
 	StartOff   int64   `json:"start_off"`
 	EndOff     int64   `json:"end_off"`
@@ -126,6 +134,9 @@ func (s *Store) searchWithRowBudget(ctx context.Context, q SearchQuery, current 
 	}
 	if q.TopK <= 0 {
 		q.TopK = defaultTopK
+	}
+	if q.ScanLimit < q.TopK {
+		q.ScanLimit = q.TopK
 	}
 	if q.MaxSnippetBytes <= 0 {
 		q.MaxSnippetBytes = defaultSnippetBytes
@@ -262,7 +273,7 @@ func scanHitRow(rows *sql.Rows, withScore bool) (hitRow, error) {
 func (s *Store) searchFTS(ctx context.Context, q SearchQuery, terms []string, sc scope, current Current, res *SearchResult) error {
 	match := MatchQuery(strings.Join(terms, " "))
 	args := append([]any{match, int(DocOK)}, sc.args...)
-	args = append(args, q.TopK)
+	args = append(args, q.ScanLimit+1)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+hitColumns+`, bm25(chunks_fts) AS score
 		FROM chunks_fts
 		JOIN chunks c ON c.id = chunks_fts.rowid
@@ -274,11 +285,17 @@ func (s *Store) searchFTS(ctx context.Context, q SearchQuery, terms []string, sc
 	}
 	defer rows.Close()
 	var spent int64
+	scanned := 0
 	for rows.Next() {
+		if scanned == q.ScanLimit {
+			res.Truncated = true
+			return nil
+		}
 		r, err := scanHitRow(rows, true)
 		if err != nil {
 			return err
 		}
+		scanned++
 		// bm25 is negative and lower for better matches; expose the
 		// natural "higher is better" form.
 		r.score = -r.score
@@ -356,7 +373,7 @@ func containsAll(text string, terms []string) bool {
 func appendHit(res *SearchResult, r hitRow, terms []string, q SearchQuery, sc scope, current Current, spent *int64) bool {
 	h := Hit{
 		Path: r.path, Seq: r.seq, StartOff: r.startOff, EndOff: r.endOff,
-		Heading: r.heading, Score: r.score, OffsetKind: offsetKind(r.kind),
+		Heading: r.heading, Score: r.score, OffsetKind: offsetKind(r.kind), Version: r.version,
 	}
 	if current != nil {
 		livePath, liveVersion, ok := current(r.remote, r.remoteID)
@@ -372,6 +389,9 @@ func appendHit(res *SearchResult, r hitRow, terms []string, q SearchQuery, sc sc
 		}
 	}
 	h.Snippet = snippet(r.text, terms, q.MaxSnippetBytes)
+	if q.Accept != nil && !q.Accept(h) {
+		return true
+	}
 	if q.MaxBytes > 0 {
 		cost := int64(len(h.Path) + len(h.Heading) + len(h.Snippet) + hitOverhead)
 		if *spent+cost > q.MaxBytes {

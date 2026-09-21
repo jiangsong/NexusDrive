@@ -514,21 +514,34 @@ func shortRead(got, want, off, size int64) error {
 // ReadFileRange is the path-based read used by MCP: it opens, reads a range
 // and closes, without a persistent handle.
 func (f *FS) ReadFileRange(ctx context.Context, p string, off, length int64) ([]byte, error) {
+	data, _, err := f.ReadFileRangeAtVersion(ctx, p, "", off, length)
+	return data, err
+}
+
+// ReadFileRangeAtVersion is ReadFileRange with an optional version fence.
+// The version is checked on the opened handle, so replacing the path between
+// a preceding stat and this call cannot return bytes from the replacement.
+// On a mismatch data is nil and current is the version that was opened.
+func (f *FS) ReadFileRangeAtVersion(ctx context.Context, p, expected string, off, length int64) (data []byte, current string, err error) {
 	n, err := f.resolve(ctx, p)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if n.IsDir() {
-		return nil, ErrIsDir
+		return nil, "", ErrIsDir
 	}
 	h, err := f.Open(ctx, n.Ino, false)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer f.Release(ctx, h)
 	n = h.Node
+	current = n.Version
+	if expected != "" && current != expected {
+		return nil, current, nil
+	}
 	if off >= n.Size {
-		return nil, nil
+		return nil, current, nil
 	}
 	if length <= 0 || off+length > n.Size {
 		length = n.Size - off
@@ -541,14 +554,14 @@ func (f *FS) ReadFileRange(ctx context.Context, p string, off, length int64) ([]
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, current, err
 		}
 		if got == 0 {
 			break
 		}
 		read += got
 	}
-	return buf[:read], nil
+	return buf[:read], current, nil
 }
 
 // ErrNoDownloadURL says the mount's provider serves file bytes only to

@@ -187,7 +187,7 @@ remotes:
 
 **阿里云盘**：下载链接默认 15 分钟过期（最长 4 小时），驱动缓存链接并在临近过期时刷新，CDN 返回 403 时刷新一次。秒传走官方两段式：先用前 1 KiB 的 SHA1 探测，服务端命中后再提交完整 SHA1 与 proof_code。`TooManyRequests` 映射为风控而非普通限流，因为阿里对重试 429 的账号会直接封禁。
 
-**百度网盘**：超过约 20 MB 的下载必须带 `User-Agent: pan.baidu.com`，否则服务端拒绝；该头同时写进 `Caps.LinkHeaders`，MCP 的 `get_download_url` 会一并交给调用方。非 SVIP 账号有速度限制，这是账号侧约束，系统只能降速适配。`Entry.ID` 是 `fs_id:path` 的复合形式，因为管理类接口按路径寻址而元信息与下载链接按 fs_id。
+**百度网盘**：超过约 20 MB 的下载必须带 `User-Agent: pan.baidu.com`，否则服务端拒绝；该头同时写进 `Caps.LinkHeaders`，MCP 的 `get_download_url` 会一并交给调用方。非 SVIP 账号有速度限制，这是账号侧约束，系统只能降速适配。`Entry.ID` 是 `fs_id:path` 的复合形式，因为管理类接口按路径寻址而元信息与下载链接按 fs_id。账号连通性检查发现配置的根路径不存在时，会逐级创建该路径并重新列举确认。
 
 **115**：同一账号同一应用只有两个有效 refresh token，第三次登录会静默作废最早的一个。秒传是两步握手：服务端可能要求客户端对指定字节区间做 SHA1 再提交。因为 `BeginUpload` 只拿到哈希拿不到内容，驱动暴露了一个区间哈希回调；未注入时该挑战会明确失败并降级为分片上传，而不是猜一个签名把文件注册到未经校验的内容上。默认 QPS 设为 1，115 对第三方客户端的风控相当激进。
 
@@ -236,11 +236,15 @@ grep -rn 'UNVERIFIED:' internal/provider/
 | webdav | RFC 4331 quota-available/used-bytes，服务器不支持则未知 | 禁 `\`，255 字节 |
 | aliyun | `getSpaceInfo`（UNVERIFIED） | 禁 `\`（UNVERIFIED） |
 | quark | `/1/clouddrive/member` 的 `total_capacity` / `use_capacity`（UNVERIFIED：端点、字段名与单位都未在真实账号上验证） | Windows 类禁字符集（UNVERIFIED） |
-| baidu / pan115 / pan123 / tianyi | 未实现（放置不按空间优先，可配 `capacity`） | Windows 类禁字符集（UNVERIFIED） |
-| onedrive | 未实现 | 大小写不敏感，禁 `<>:"|?*\`，保留名，不能以点/空格结尾 |
-| smb | 未实现 | 大小写不敏感，Windows 保留名与禁字符 |
+| baidu | `/api/quota` 的 `total` / `used` | Windows 类禁字符集（UNVERIFIED） |
+| pan115 | `/open/user/info` 的 `rt_space_info.all_total` / `all_use` | Windows 类禁字符集（UNVERIFIED） |
+| pan123 | `/api/v1/user/info` 的永久空间 + 临时空间 / 已用空间 | Windows 类禁字符集（UNVERIFIED） |
+| tianyi | `/portal/getUserSizeInfo.action` 的 `cloudCapacityInfo` | Windows 类禁字符集（UNVERIFIED） |
+| onedrive | Drive resource 的 `quota.total` / `quota.used` | 大小写不敏感，禁 `<>:"|?*\`，保留名，不能以点/空格结尾 |
+| smb | `FileFsFullSizeInformation`（调用者可用空间） | 大小写不敏感，Windows 保留名与禁字符 |
 | dropbox | `/2/users/get_space_usage`，individual 配额取 `allocation.allocated`；team 空间形状不同、当前读不了，一律报告为未知（不猜测，UNVERIFIED） | 大小写不敏感，不能以点/空格结尾 |
-| box | 未实现 | 大小写不敏感，不能以点/空格结尾 |
-| sftp / s3 | 未实现 | 255 字节名 / 1024 字节键 |
+| box | `/users/me` 的 `space_amount` / `space_used` | 大小写不敏感，不能以点/空格结尾 |
+| sftp | OpenSSH `statvfs@openssh.com` 扩展；服务器不支持则未知 | 255 字节名 |
+| s3 | 无容量上限，无法报告总容量（可配置 `capacity`） | 1024 字节键 |
 
 驱动没声明的规则，存储池会在成员实际拒绝时学习下来（`member_naming` 表），之后不再往那个成员放同类名字。

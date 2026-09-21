@@ -129,6 +129,31 @@ func TestChangingTheModelReembedsEverything(t *testing.T) {
 	}
 }
 
+func TestChangingEmbeddingInputRebuildsDerivedVectors(t *testing.T) {
+	h := newHarnessOpt(t, embedRules("/work"), withEmbedder(embed.NewFake(8)))
+	ctx := context.Background()
+	seedNotes(t, h, "work", 2)
+	if _, err := h.x.ReconcileNow(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := h.x.EmbedNow(ctx); err != nil || rep.Embedded != 2 {
+		t.Fatalf("initial embed: %+v %v", rep, err)
+	}
+	if err := h.store.SetMeta(ctx, metaEmbeddingInputVersion, "1"); err != nil {
+		t.Fatal(err)
+	}
+	x := h.reopenIndexer(t, withEmbedder(embed.NewFake(8)))
+	if err := x.embedPrepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, h.store.db, "vectors") != 0 || count(t, h.store.db, "embed_pending") != 2 {
+		t.Fatalf("vectors=%d pending=%d", count(t, h.store.db, "vectors"), count(t, h.store.db, "embed_pending"))
+	}
+	if got, _ := h.store.Meta(ctx, metaEmbeddingInputVersion); got != embedInputVersion {
+		t.Fatalf("embedding input version = %q", got)
+	}
+}
+
 func TestEmbedWorkerSleepsWhileTheBreakerIsOpen(t *testing.T) {
 	fake := embed.NewFake(8)
 	h := newHarnessOpt(t, embedRules("/work"), withEmbedder(fake))

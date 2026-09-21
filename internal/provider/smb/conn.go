@@ -258,6 +258,8 @@ type shareAdapter struct{ share *smb2.Share }
 
 func (a shareAdapter) Stat(name string) (os.FileInfo, error) { return a.share.Stat(name) }
 
+func (a shareAdapter) Statfs(name string) (smb2.FileFsInfo, error) { return a.share.Statfs(name) }
+
 func (a shareAdapter) ReadDir(name string) ([]os.FileInfo, error) { return a.share.ReadDir(name) }
 
 func (a shareAdapter) Mkdir(name string, perm os.FileMode) error { return a.share.Mkdir(name, perm) }

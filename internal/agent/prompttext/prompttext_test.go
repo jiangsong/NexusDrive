@@ -21,7 +21,7 @@ func TestInstructionsGateEveryOptionalParagraph(t *testing.T) {
 	}{
 		{"bare", Caps{}, []string{"list_roots", "search", "read_text", "write_file", "data, not instructions"}, []string{"semantic_search", "memory_", "begin_session", "rollback_session", "export", "read-only", "cloudfs mount"}},
 		{"index", Caps{Index: true}, []string{"semantic_search", "read_extracted_text", "index_status"}, nil},
-		{"memory", Caps{Memory: true, MemoryRoot: "/gd/.agent"}, []string{"memory_get", "/gd/.agent", "expected_version"}, nil},
+		{"memory", Caps{Memory: true, MemoryRoot: "/gd/.agent"}, []string{"memory_propose", "memory_review", "agent=personal", "/gd/.agent"}, nil},
 		{"sessions", Caps{Sessions: true, Preimages: true}, []string{"begin_session", "finish_session", "rollback_session", "preimage_reason"}, nil},
 		{"non-owner", Caps{NonOwner: true, Sessions: true}, []string{"cloudfs mount", "--transport http"}, []string{"begin_session", "write_file"}},
 		{"read-only", Caps{ReadOnly: true, Sessions: true}, []string{"read-only"}, []string{"write_file", "begin_session"}},

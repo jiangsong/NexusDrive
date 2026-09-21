@@ -154,6 +154,12 @@ func (f *fakeBox) itemJSON(it *item) map[string]any {
 
 func (f *fakeBox) api(w http.ResponseWriter, r *http.Request, rest string) {
 	switch {
+	case rest == "/users/me" && r.Method == http.MethodGet:
+		if got := r.URL.Query().Get("fields"); got != "space_amount,space_used" {
+			boxError(w, http.StatusBadRequest, "bad_fields", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"space_amount": int64(10 << 30), "space_used": int64(3 << 30)})
 	case rest == "/folders" && r.Method == http.MethodPost:
 		f.createFolder(w, r)
 	case strings.HasPrefix(rest, "/folders/") && strings.HasSuffix(rest, "/items") && r.Method == http.MethodGet:

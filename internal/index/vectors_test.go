@@ -146,7 +146,7 @@ func TestEmbedPendingFollowsTheChunks(t *testing.T) {
 	}
 	ids := chunkIDs(t, s)
 	pend, err := s.PendingEmbeds(ctx, 10, s.now())
-	if err != nil || len(pend) != 1 || pend[0].ChunkID != ids[len(ids)-1] || pend[0].Text != "beta text revised" {
+	if err != nil || len(pend) != 1 || pend[0].ChunkID != ids[len(ids)-1] || pend[0].Path != "/b.md" || pend[0].Text != "beta text revised" {
 		t.Fatalf("%+v %v", pend, err)
 	}
 	// QueueEmbeds fills the gap left by the document indexed before the cap.

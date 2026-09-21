@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"cloudfs/internal/agent"
@@ -34,6 +36,9 @@ const shareLinkTimeout = time.Second
 // record a sha256. Larger files get no checksum rather than a long read.
 const maxHashBytes = 32 << 20
 
+// maxHandoffBytes keeps the task-to-task context concise and cheap to index.
+const maxHandoffBytes = 64 << 10
+
 // errSessionNotYours is the refusal for finishing a session another
 // principal opened.
 var errSessionNotYours = errors.New("session belongs to another principal")
@@ -52,12 +57,14 @@ type beginSessionOutput struct {
 type finishSessionInput struct {
 	SessionID string `json:"session_id,omitempty" jsonschema:"Session to finish; default the current one"`
 	Summary   string `json:"summary,omitempty" jsonschema:"What the session did, kept in the manifest"`
+	Handoff   string `json:"handoff,omitempty" jsonschema:"Markdown context for the next agent; written as handoff.md in the session workspace"`
 	Share     bool   `json:"share,omitempty" jsonschema:"Attach download links for files already uploaded"`
 }
 
 type finishSessionOutput struct {
 	SessionID string           `json:"session_id"`
 	Manifest  string           `json:"manifest,omitempty"`
+	Handoff   string           `json:"handoff,omitempty"`
 	Artifacts []agent.Artifact `json:"artifacts"`
 }
 
@@ -83,7 +90,7 @@ func (s *Server) registerSessionTools() {
 	}, s.beginSession)
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "finish_session",
-		Description: "End a delivery session: records the files it wrote as artifacts in its manifest.json, with a summary. share=true adds download links for files already uploaded.",
+		Description: "End a delivery session: optionally writes handoff.md for the next agent, records files as artifacts in manifest.json, and stores a summary. share=true adds download links for uploaded files.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
 	}, s.finishSession)
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -206,12 +213,37 @@ func (s *Server) finishSession(ctx context.Context, _ *mcp.CallToolRequest, in f
 		r, _ := fail(fmt.Errorf("session %s is already %s", id, sess.State))
 		return r, finishSessionOutput{}, nil
 	}
+	handoff := ""
+	if in.Handoff != "" {
+		if sess.Workspace == "" {
+			r, _ := fail(errors.New("cannot write a handoff for a session without a workspace"))
+			return r, finishSessionOutput{}, nil
+		}
+		body := "# Handoff\n\n" + strings.TrimSpace(in.Handoff) + "\n"
+		if len(body) > maxHandoffBytes {
+			r, _ := fail(fmt.Errorf("handoff is %d bytes; maximum is %d", len(body), maxHandoffBytes))
+			return r, finishSessionOutput{}, nil
+		}
+		handoff = path.Join(sess.Workspace, "handoff.md")
+		if _, err := s.checkPath(ctx, handoff, true); err != nil {
+			r, _ := fail(err)
+			return r, finishSessionOutput{}, nil
+		}
+		if _, err := s.opt.FS.WriteFile(ctx, handoff, []byte(body), false); err != nil {
+			r, _ := fail(mapErr(err, handoff))
+			return r, finishSessionOutput{}, nil
+		}
+	}
 	rows, err := s.opt.Sessions.Store().AuditForSession(ctx, id, artifactAuditRows)
 	if err != nil {
 		r, _ := fail(err)
 		return r, finishSessionOutput{}, nil
 	}
-	arts := s.collectArtifacts(ctx, agent.ArtifactPaths(rows, sess.Workspace), in.Share)
+	paths := agent.ArtifactPaths(rows, sess.Workspace)
+	if handoff != "" {
+		paths = append(paths, handoff)
+	}
+	arts := s.collectArtifacts(ctx, paths, in.Share)
 	// The row is closed first: agent.db is the record the console reads,
 	// and the manifest is its copy on the mount, written with the same
 	// finishing time and summary the row carries.
@@ -220,7 +252,7 @@ func (s *Server) finishSession(ctx context.Context, _ *mcp.CallToolRequest, in f
 		r, _ := fail(err)
 		return r, finishSessionOutput{}, nil
 	}
-	out := finishSessionOutput{SessionID: id, Artifacts: arts}
+	out := finishSessionOutput{SessionID: id, Handoff: handoff, Artifacts: arts}
 	if done.Workspace != "" {
 		if err := s.writeManifest(ctx, done); err != nil {
 			r, _ := fail(fmt.Errorf("session finished but its manifest was not written: %w", mapErr(err, agent.ManifestPath(done.Workspace))))

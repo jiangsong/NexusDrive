@@ -51,5 +51,12 @@ func NextDirectoryCursor(page DirectoryPage) string {
 	if !page.HasMore || len(page.Entries) == 0 {
 		return ""
 	}
-	return "n:" + base64.RawURLEncoding.EncodeToString([]byte(page.Entries[len(page.Entries)-1].Name))
+	return DirectoryCursorAfter(page.Entries[len(page.Entries)-1].Name)
+}
+
+// DirectoryCursorAfter returns the opaque cursor that resumes after name.
+// Callers that apply a response budget after reading a page use it to avoid
+// skipping entries they read but could not return.
+func DirectoryCursorAfter(name string) string {
+	return "n:" + base64.RawURLEncoding.EncodeToString([]byte(name))
 }

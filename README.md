@@ -415,15 +415,15 @@ cloudfs memory search gofmt --agent claude-code
 **语义检索**：配置 `index.embedding` 后，索引 worker 把每个分块发到端点换成向量（int8 存进 `index.db` 的
 `vectors` 表），`semantic_search` / `cloudfs index search` / 界面"语义"模式默认按 `hybrid`（bm25 与向量 cosine 做
 RRF 融合）检索，同义与跨语言表达也能命中。**默认 `provider: none`，什么都不外发**；一旦配了端点，每个被索引的
-分块与每条语义查询都会发到 `base_url` 所指主机——端点不在本机 / 内网时必须 `allow_remote: true`，控制台「索引」屏会
+分块（包含文件路径/标题与章节标题）与每条语义查询都会发到 `base_url` 所指主机——端点不在本机 / 内网时必须 `allow_remote: true`，控制台「索引」屏会
 常驻一条不可关闭的黄色横幅说明"文件内容会发送到 <host>"。本机 ollama 是零外发的选择。端点连续失败会熔断 60 s，
 期间以及尚未嵌入完成、换了模型还没重嵌时，检索自动按关键词执行并在 `degraded` 里说明，不报错；换 `model` 会清空
 向量并把全部分块重新排队（`chunks_fts` 不动）。`cloudfs doctor` 检查端点可达与维度一致。
 
 **记忆库**：Claude Code / Codex 这类 agent 的记忆本来是本机文件，换台机器就没了。CloudFS 把它约定成网盘上的普通
 Markdown：`<memory.root>/memory/<agent>/MEMORY.md` 是索引（每条记忆一行），`facts/<name>.md` 是正文（带
-`name / description / type / updated_at` frontmatter），`memory/shared/` 是所有 agent 共读的区域。MCP 多出
-`memory_list / get / put / delete / search` 五个工具（`put` 带 `expected_version` 做乐观并发，`get` 列出网盘留下的冲突副本
+`name / description / type / scope / source / expires / updated_at` frontmatter），v2 的 `memory/<owner>/shared/` 是本人多 agent 共用区，`memory/shared/` 是整盘共用区。MCP 提供
+`memory_list / get / put / delete / merge / search / propose / candidates / review`（候选必须显式确认才成为 durable fact；`put` 带 `expected_version` 做乐观并发，`get` 列出网盘留下的冲突副本
 `conflicts[]`，`search` 是限定在该 agent 目录下的 `semantic_search`，记忆树由内置索引规则自动覆盖）；控制台「Agent」屏
 的"记忆"标签能看、编辑、删除、合并冲突；`cloudfs memory` 在终端做同样的事；你也可以直接 `cat` / 编辑挂载点上的那个
 文件。跨设备同步就是网盘同步，两边同时写时输掉的一方以冲突副本形式保留在同目录。`memory.root` 必须在 `mcp.allow` 内，

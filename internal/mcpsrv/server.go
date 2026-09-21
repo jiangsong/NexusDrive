@@ -319,6 +319,7 @@ func New(opt Options) (*Server, error) {
 	s.registerRollbackTool()
 	s.registerIndexTools()
 	s.registerMemoryTools()
+	s.registerContextTools()
 	s.registerResources()
 	s.registerPrompts()
 	if opt.Sessions != nil {
@@ -471,11 +472,12 @@ type statManyOutput struct {
 }
 
 type readTextInput struct {
-	Path     string `json:"path" jsonschema:"Mount-relative file path"`
-	Offset   int64  `json:"offset,omitempty" jsonschema:"Byte offset to start at"`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"Maximum bytes to return; the server caps this"`
-	Head     int    `json:"head,omitempty" jsonschema:"Return only the first N lines"`
-	Tail     int    `json:"tail,omitempty" jsonschema:"Return only the last N lines"`
+	Path            string `json:"path" jsonschema:"Mount-relative file path"`
+	Offset          int64  `json:"offset,omitempty" jsonschema:"Byte offset to start at"`
+	MaxBytes        int    `json:"max_bytes,omitempty" jsonschema:"Maximum bytes to return; the server caps this"`
+	Head            int    `json:"head,omitempty" jsonschema:"Return only the first N lines"`
+	Tail            int    `json:"tail,omitempty" jsonschema:"Return only the last N lines"`
+	ExpectedVersion string `json:"expected_version,omitempty" jsonschema:"Version returned by context_search or stat; refuse if the file changed"`
 }
 
 type readTextOutput struct {
@@ -934,6 +936,10 @@ func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTe
 		r, _ := fail(fmt.Errorf("%s is a directory; use list_directory", p))
 		return r, readTextOutput{}, nil
 	}
+	if in.ExpectedVersion != "" && in.ExpectedVersion != a.Version {
+		r, _ := fail(fmt.Errorf("%s changed since search (expected version %s, current %s); search again before reading", p, in.ExpectedVersion, a.Version))
+		return r, readTextOutput{}, nil
+	}
 	max := in.MaxBytes
 	if max <= 0 || max > s.opt.Limits.MaxBytes {
 		max = s.opt.Limits.MaxBytes
@@ -943,9 +949,13 @@ func (s *Server) readText(ctx context.Context, _ *mcp.CallToolRequest, in readTe
 	if in.Tail > 0 && in.Offset == 0 && a.Size > int64(max) {
 		offset = a.Size - int64(max)
 	}
-	data, err := s.opt.FS.ReadFileRange(ctx, p, offset, int64(max)+1)
+	data, currentVersion, err := s.opt.FS.ReadFileRangeAtVersion(ctx, p, in.ExpectedVersion, offset, int64(max)+1)
 	if err != nil {
 		r, _ := fail(mapErr(err, p))
+		return r, readTextOutput{}, nil
+	}
+	if in.ExpectedVersion != "" && currentVersion != in.ExpectedVersion {
+		r, _ := fail(fmt.Errorf("%s changed since search (expected version %s, current %s); search again before reading", p, in.ExpectedVersion, currentVersion))
 		return r, readTextOutput{}, nil
 	}
 	truncated := len(data) > max

@@ -101,13 +101,19 @@ func resolveMode(requested string, semantic bool, why string, short bool) (mode,
 	return mode, "", nil
 }
 
-// embedText is what the worker sends for a chunk: the heading path first,
-// so a chunk under "第二章 > 范围" embeds with its context.
+// embedText is what the worker sends for a chunk: file path and heading first,
+// so a query about a title can find a document even when the title is absent
+// from its body, and a chunk keeps its section context.
 func embedText(p PendingEmbed) string {
-	if p.Heading == "" {
-		return p.Text
+	parts := make([]string, 0, 3)
+	if p.Path != "" {
+		parts = append(parts, "File: "+p.Path)
 	}
-	return p.Heading + "\n" + p.Text
+	if p.Heading != "" {
+		parts = append(parts, p.Heading)
+	}
+	parts = append(parts, p.Text)
+	return strings.Join(parts, "\n")
 }
 
 // embedQuery embeds the query text through e and normalises it. The chars
@@ -237,7 +243,7 @@ func (s *Store) searchSemantic(ctx context.Context, q SearchQuery, terms []strin
 	var order []ranked
 	switch mode {
 	case modeVector:
-		hits, err := s.vectorTopK(ctx, qv, sc, st, q.TopK)
+		hits, err := s.vectorTopK(ctx, qv, sc, st, q.ScanLimit)
 		if err != nil {
 			return fmt.Sprintf("%v; results use keyword matching", err), nil
 		}
@@ -245,7 +251,7 @@ func (s *Store) searchSemantic(ctx context.Context, q SearchQuery, terms []strin
 			order = append(order, ranked{chunkID: int64(h.chunkID), score: float64(h.score)})
 		}
 	case modeHybrid:
-		n := fuseFactor * q.TopK
+		n := fuseFactor * q.ScanLimit
 		vec, err := s.vectorTopK(ctx, qv, sc, st, n)
 		if err != nil {
 			return fmt.Sprintf("%v; results use keyword matching", err), nil
@@ -279,6 +285,9 @@ func (s *Store) searchSemantic(ctx context.Context, q SearchQuery, terms []strin
 		if !appendHit(res, row, terms, q, sc, current, &spent) {
 			break
 		}
+	}
+	if q.Accept != nil && len(res.Hits) < q.TopK && len(order) >= q.ScanLimit {
+		res.Truncated = true
 	}
 	return "", nil
 }

@@ -312,14 +312,14 @@ func TestTextPagesThroughTheExtractedText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p1.Text+p2.Text != body || !p2.EOF || p1.EOF || p1.Kind != "text" || p2.NextOffset != int64(len(body)) {
+	if p1.Text+p2.Text != body || !p2.EOF || p1.EOF || p1.Kind != "text" || p1.Version != "v" || p2.Version != "v" || p2.NextOffset != int64(len(body)) {
 		t.Fatalf("%d %d %v", len(p1.Text), len(p2.Text), p2.EOF)
 	}
 	if _, err := s.Text(ctx, "/missing", 0, 10); !errors.Is(err, ErrNotIndexed) {
 		t.Fatal(err)
 	}
 	tail, err := s.Text(ctx, "/a.txt", int64(len(body))+5, 10)
-	if err != nil || !tail.EOF || tail.Text != "" {
+	if err != nil || !tail.EOF || tail.Text != "" || tail.Version != "v" {
 		t.Fatalf("%+v %v", tail, err)
 	}
 }

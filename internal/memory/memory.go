@@ -76,6 +76,9 @@ type Store struct {
 	layoutMu sync.Mutex
 	layout   string
 	layoutAt time.Time
+	// reviewMu serialises candidate proposal/review transitions. Fact writes
+	// keep using mu, so accepting a candidate never deadlocks with Put.
+	reviewMu sync.Mutex
 }
 
 // The store's errors. Callers match on them to choose a status code or a
@@ -91,8 +94,11 @@ var (
 	ErrBadMode        = errors.New("mode must be replace or append")
 )
 
-// SharedAgent is the pseudo-agent whose facts every agent may search.
+// SharedAgent is the drive-wide pseudo-agent whose facts every agent may
+// search. PersonalAgent is the tool alias for an owner's cross-agent area;
+// in layout v2 it resolves to <owner>/shared and in v1 to SharedAgent.
 const SharedAgent = "shared"
+const PersonalAgent = "personal"
 
 // defaultListLimit is the page size List uses when given none.
 const defaultListLimit = 100
@@ -139,7 +145,7 @@ func (s *Store) IndexPath(agent string) string { return path.Join(s.AgentDir(age
 // under root searchable. Source "builtin" marks it as following the
 // configuration: the index tools and routes refuse to remove it.
 func IndexRule(root string) index.Rule {
-	return index.Rule{Path: path.Join(root, "memory"), Include: []string{"**/*.md"}, Source: index.SourceBuiltin}
+	return index.Rule{Path: path.Join(root, "memory"), Include: []string{"**/*.md"}, Exclude: []string{"**/candidates/**"}, Source: index.SourceBuiltin}
 }
 
 // NormalizeAgent turns a client or principal name into an agent directory
@@ -220,6 +226,9 @@ type PutOptions struct {
 	// ExpectedVersion, when set, must equal the fact's current Version or
 	// the put is refused with ErrVersionChanged.
 	ExpectedVersion string
+	// ExpectedAbsent refuses when a fact exists. Candidate acceptance uses it
+	// to make "proposed before creation" atomic with the eventual write.
+	ExpectedAbsent bool
 	// ExpectedRemoteVersion, when set, must equal the fact's current
 	// RemoteVersion: a change that landed from another device refuses the
 	// put even when the content happens to hash the same, and this
@@ -230,6 +239,14 @@ type PutOptions struct {
 	// what the file already says.
 	Description string
 	Type        string
+	// Scope optionally binds a fact to a project or workspace. SourcePaths
+	// and SourceSession retain its evidence; ExpiresAt lets retrieval ignore
+	// knowledge that is no longer current.
+	Scope         string
+	SourcePaths   []string
+	SourceSession string
+	Replaces      []string
+	ExpiresAt     *time.Time
 }
 
 // SearchOptions tunes Search.
@@ -239,6 +256,10 @@ type SearchOptions struct {
 	// IncludeShared adds memory/shared to the roots.
 	IncludeShared bool
 	TopK          int
+	// ScanLimit bounds ranked candidates considered before Accept. Accept is
+	// applied before a hit counts toward TopK.
+	ScanLimit int
+	Accept    func(SearchHit) bool
 	// Mode is passed to the index: keyword, hybrid or vector.
 	Mode string
 	// MaxSnippetBytes and MaxBytes bound the response like semantic_search.
@@ -283,7 +304,7 @@ func validKey(agent string) bool {
 	if !qualified {
 		return ValidName(agent)
 	}
-	return ValidName(owner) && ValidName(name) && name != SharedAgent && owner != SharedAgent
+	return ValidName(owner) && ValidName(name) && owner != SharedAgent
 }
 
 // Version is the version string of a fact file's bytes.
@@ -528,6 +549,9 @@ func (s *Store) Put(ctx context.Context, agent, name, content string, opt PutOpt
 	if opt.ExpectedRemoteVersion != "" && (!found || cur.RemoteVersion != opt.ExpectedRemoteVersion) {
 		return Fact{}, fmt.Errorf("%w on the drive (remote version %q, expected %q)", ErrVersionChanged, cur.RemoteVersion, opt.ExpectedRemoteVersion)
 	}
+	if opt.ExpectedAbsent && found {
+		return Fact{}, fmt.Errorf("%w: fact %s/%s was created after the write was prepared", ErrVersionChanged, agent, name)
+	}
 	if opt.ExpectedVersion != "" && (!found || cur.Version != opt.ExpectedVersion) {
 		return Fact{}, fmt.Errorf("%w (current version %q)", ErrVersionChanged, cur.Version)
 	}
@@ -539,14 +563,34 @@ func (s *Store) Put(ctx context.Context, agent, name, content string, opt PutOpt
 		}
 		body += content
 	}
-	m := Meta{Name: name, Description: opt.Description, Type: opt.Type, UpdatedAt: s.now()}
+	m := Meta{Name: name, Description: opt.Description, Type: opt.Type, Scope: opt.Scope,
+		SourcePaths: append([]string(nil), opt.SourcePaths...), SourceSession: opt.SourceSession,
+		Replaces: append([]string(nil), opt.Replaces...), ExpiresAt: opt.ExpiresAt, UpdatedAt: s.now()}
 	if m.Description == "" {
 		m.Description = cur.Meta.Description
 	}
 	if m.Type == "" {
 		m.Type = cur.Meta.Type
 	}
+	if m.Scope == "" {
+		m.Scope = cur.Meta.Scope
+	}
+	if len(m.SourcePaths) == 0 {
+		m.SourcePaths = append([]string(nil), cur.Meta.SourcePaths...)
+	}
+	if m.SourceSession == "" {
+		m.SourceSession = cur.Meta.SourceSession
+	}
+	if len(m.Replaces) == 0 {
+		m.Replaces = append([]string(nil), cur.Meta.Replaces...)
+	}
+	if m.ExpiresAt == nil {
+		m.ExpiresAt = cur.Meta.ExpiresAt
+	}
 	file := []byte(render(m, body))
+	if !frontmatterFits(file) {
+		return Fact{}, fmt.Errorf("%w: %s/%s frontmatter exceeds the %d-byte readable header", ErrTooLarge, agent, name, frontmatterHead)
+	}
 	if int64(len(file)) > int64(s.cfg.MaxFactBytes) {
 		return Fact{}, fmt.Errorf("%w: %s/%s would be %d bytes with its frontmatter, over memory.max_fact_bytes (%d)", ErrTooLarge, agent, name, len(file), s.cfg.MaxFactBytes)
 	}
@@ -651,8 +695,9 @@ func (s *Store) mkdirAll(ctx context.Context, p string) error {
 	return nil
 }
 
-// Search runs the index over memory/<agent> (and memory/shared when asked)
-// and names the agent and fact of every hit.
+// Search runs the index over memory/<agent>, the owner's cross-agent memory
+// in v2, and memory/shared when asked, then names the agent and fact of every
+// hit.
 func (s *Store) Search(ctx context.Context, opt SearchOptions) (SearchResult, error) {
 	if err := s.check(opt.Agent, "", false); err != nil {
 		return SearchResult{}, err
@@ -661,13 +706,29 @@ func (s *Store) Search(ctx context.Context, opt SearchOptions) (SearchResult, er
 		return SearchResult{}, ErrNoIndex
 	}
 	roots := []string{s.AgentDir(opt.Agent)}
-	if opt.IncludeShared && opt.Agent != SharedAgent {
-		roots = append(roots, s.AgentDir(SharedAgent))
+	if opt.IncludeShared {
+		owner, _, qualified := strings.Cut(opt.Agent, "/")
+		if qualified {
+			personal := owner + "/" + SharedAgent
+			if opt.Agent != personal {
+				roots = append(roots, s.AgentDir(personal))
+			}
+		}
+		if opt.Agent != SharedAgent {
+			roots = append(roots, s.AgentDir(SharedAgent))
+		}
 	}
-	res, err := s.idx.Search(ctx, index.SearchQuery{
+	query := index.SearchQuery{
 		Query: opt.Query, Roots: roots, TopK: opt.TopK, Mode: opt.Mode,
-		MaxSnippetBytes: opt.MaxSnippetBytes, MaxBytes: opt.MaxBytes,
-	})
+		ScanLimit: opt.ScanLimit, MaxSnippetBytes: opt.MaxSnippetBytes, MaxBytes: opt.MaxBytes,
+	}
+	if opt.Accept != nil {
+		query.Accept = func(h index.Hit) bool {
+			agent, name := s.locate(h.Path)
+			return opt.Accept(SearchHit{Hit: h, Agent: agent, Name: name})
+		}
+	}
+	res, err := s.idx.Search(ctx, query)
 	if err != nil {
 		return SearchResult{}, err
 	}

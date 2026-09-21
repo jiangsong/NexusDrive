@@ -43,6 +43,9 @@ const (
 	// embedBreakerFallback is how long the worker sleeps on ErrBreakerOpen
 	// from an embedder that does not report when it closes.
 	embedBreakerFallback = time.Minute
+	// embedInputVersion changes whenever embedText's payload changes. Stored
+	// vectors from another version are rebuilt rather than silently mixed.
+	embedInputVersion = "2"
 )
 
 // EmbedReport counts what one EmbedNow did.
@@ -149,6 +152,18 @@ func (x *Indexer) embedPrepare(ctx context.Context) error {
 		x.emb.mu.Lock()
 		x.emb.stopped = ""
 		x.emb.mu.Unlock()
+	}
+	recInput, err := x.store.Meta(ctx, metaEmbeddingInputVersion)
+	if err != nil {
+		return err
+	}
+	if recInput != embedInputVersion {
+		if err := x.store.ResetEmbeddings(ctx, model, quant); err != nil {
+			return err
+		}
+		if err := x.store.SetMeta(ctx, metaEmbeddingInputVersion, embedInputVersion); err != nil {
+			return err
+		}
 	}
 	if _, err := x.store.QueueEmbeds(ctx); err != nil {
 		return err

@@ -158,7 +158,7 @@ func TestToolsAreRegistered(t *testing.T) {
 		"list_copy_jobs", "get_copy_job", "retry_copy_job", "cancel_copy_job", "forget_copy_job",
 		"list_uploads", "get_upload", "retry_upload", "cancel_upload", "resume_upload", "discard_upload", "flush_uploads",
 		"upload_progress",
-		"share", "stale_docs",
+		"share", "stale_docs", "context_search",
 	}
 	for _, w := range want {
 		if !got[w] {

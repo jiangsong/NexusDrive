@@ -656,12 +656,35 @@ func runMount(ctx context.Context, args []string, from entry) error {
 			return control.FuseStatus{Ops: st.Ops, ReadBytes: st.ReadBytes, ReadSizes: st.ReadSizes}
 		}
 		col.Doctor = d.Doctor(col.ConfigView, fusefs.Supported)
-		col.Lifecycle = &control.Lifecycle{Restart: func() {
-			select {
-			case restart <- struct{}{}:
-			default:
-			}
-		}}
+		col.Lifecycle = &control.Lifecycle{
+			CheckRestart: func() error {
+				holders, err := service.MountCWDHolders(mountPath)
+				if err != nil || len(holders) == 0 {
+					// lsof is a best-effort guard. A platform without it keeps the
+					// existing restart behaviour rather than making restart unusable.
+					return nil
+				}
+				const shownMax = 5
+				shown := len(holders)
+				if shown > shownMax {
+					shown = shownMax
+				}
+				parts := make([]string, 0, shown+1)
+				for _, h := range holders[:shown] {
+					parts = append(parts, fmt.Sprintf("pid %d %s (%s)", h.PID, h.Command, h.Path))
+				}
+				if len(holders) > shown {
+					parts = append(parts, fmt.Sprintf("and %d more", len(holders)-shown))
+				}
+				return errors.New(strings.Join(parts, "; "))
+			},
+			Restart: func() {
+				select {
+				case restart <- struct{}{}:
+				default:
+				}
+			},
+		}
 		srv := control.NewServer(col)
 		if controlUI {
 			srv.EnableUI()

@@ -15,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-var memoryToolNames = []string{"memory_list", "memory_get", "memory_put", "memory_delete", "memory_search"}
+var memoryToolNames = []string{"memory_list", "memory_get", "memory_put", "memory_delete", "memory_merge", "memory_search", "memory_propose", "memory_candidates", "memory_review"}
 
 func TestMemoryToolsAbsentWithoutAStore(t *testing.T) {
 	names := toolNames(t, newEnv(t, Options{}))
@@ -134,11 +134,15 @@ func TestMemoryDeleteNeedsConfirm(t *testing.T) {
 // memoryCalls is every memory tool with valid arguments, for the tests
 // that expect one answer from all five.
 var memoryCalls = map[string]map[string]any{
-	"memory_list":   {},
-	"memory_get":    {"name": "style"},
-	"memory_put":    {"name": "style", "content": "x"},
-	"memory_delete": {"name": "style", "confirm": true},
-	"memory_search": {"query": "style"},
+	"memory_list":       {},
+	"memory_get":        {"name": "style"},
+	"memory_put":        {"name": "style", "content": "x"},
+	"memory_delete":     {"name": "style", "confirm": true},
+	"memory_search":     {"query": "style"},
+	"memory_merge":      {"name": "style"},
+	"memory_propose":    {"id": "c-test", "name": "candidate", "content": "x"},
+	"memory_candidates": {},
+	"memory_review":     {"id": "c-test", "decision": "reject", "confirm": true},
 }
 
 func TestRootOutsideScopeFailsEveryToolTheSameWay(t *testing.T) {
@@ -179,12 +183,12 @@ func TestReadOnlyAllowsReadsOnly(t *testing.T) {
 	ro, _, _ := newMemoryEnv(t, Options{ReadOnly: true}, nil, memoryConfig("/work/.agent"), &config.Index{Enabled: true})
 	ro.fake.Seed("work/.agent/memory/test/MEMORY.md", []byte("- [style](facts/style.md)\n"))
 	ro.fake.Seed("work/.agent/memory/test/facts/style.md", []byte("---\nname: style\n---\nx\n"))
-	for _, name := range []string{"memory_list", "memory_get", "memory_search"} {
+	for _, name := range []string{"memory_list", "memory_get", "memory_search", "memory_candidates"} {
 		if res := ro.call(t, name, memoryCalls[name], nil); res.IsError {
 			t.Errorf("%s refused on a read-only server: %s", name, errText(res))
 		}
 	}
-	for _, name := range []string{"memory_put", "memory_delete"} {
+	for _, name := range []string{"memory_put", "memory_delete", "memory_propose", "memory_review"} {
 		res := ro.call(t, name, memoryCalls[name], nil)
 		if !res.IsError || !strings.Contains(errText(res), "read-only") {
 			t.Errorf("%s on a read-only server: IsError=%v %q", name, res.IsError, errText(res))
@@ -198,7 +202,7 @@ func TestReadOnlyAllowsReadsOnly(t *testing.T) {
 
 func TestMemoryPutAndDeleteNeedTheOwner(t *testing.T) {
 	e, _, _ := newMemoryEnv(t, Options{NonOwner: true}, nil, memoryConfig("/work/.agent"), nil)
-	for _, name := range []string{"memory_put", "memory_delete"} {
+	for _, name := range []string{"memory_put", "memory_delete", "memory_propose", "memory_review"} {
 		res := e.call(t, name, memoryCalls[name], nil)
 		if !res.IsError || !strings.Contains(errText(res), "requires the storage owner") {
 			t.Errorf("%s on a non-owner: IsError=%v %q", name, res.IsError, errText(res))
@@ -217,6 +221,77 @@ func TestMemorySearchWithoutAnIndexSaysSo(t *testing.T) {
 	res := e.call(t, "memory_search", map[string]any{"query": "x"}, nil)
 	if !res.IsError || !strings.Contains(errText(res), "index.enabled: false") {
 		t.Fatalf("search without an index: %v %s", res.IsError, errText(res))
+	}
+}
+
+func TestMemoryCandidateNeedsExplicitConfirmedReview(t *testing.T) {
+	e, _, _ := newMemoryEnv(t, Options{}, nil, memoryConfig("/work/.agent"), nil)
+	var proposed memory.Candidate
+	wantContent := "Prefer short answers.\n"
+	if res := e.call(t, "memory_propose", memoryProposeInput{ID: "c-style", Name: "style", Content: wantContent, Scope: "cloudfs"}, &proposed); res.IsError {
+		t.Fatal(errText(res))
+	}
+	if proposed.Status != "pending" || proposed.Version == "" {
+		t.Fatalf("proposed: %+v", proposed)
+	}
+	if res := e.call(t, "memory_get", memoryGetInput{Name: "style"}, nil); !res.IsError {
+		t.Fatal("candidate was visible as durable memory")
+	}
+	var list memoryCandidatesOutput
+	if res := e.call(t, "memory_candidates", memoryCandidatesInput{}, &list); res.IsError || len(list.Candidates) != 1 {
+		t.Fatalf("candidates: %+v %s", list, errText(res))
+	}
+	res := e.call(t, "memory_review", memoryReviewInput{ID: proposed.ID, Decision: "accept", ExpectedVersion: proposed.Version}, nil)
+	if !res.IsError || !strings.Contains(errText(res), "confirm=true") {
+		t.Fatalf("unconfirmed review: %v %s", res.IsError, errText(res))
+	}
+	var reviewed memory.Candidate
+	if res := e.call(t, "memory_review", memoryReviewInput{ID: proposed.ID, Decision: "accept", ExpectedVersion: proposed.Version, Confirm: true}, &reviewed); res.IsError {
+		t.Fatal(errText(res))
+	}
+	var fact memory.Fact
+	if res := e.call(t, "memory_get", memoryGetInput{Name: "style"}, &fact); res.IsError || fact.Content != wantContent || fact.Meta.Scope != "cloudfs" {
+		t.Fatalf("fact: %+v %s", fact, errText(res))
+	}
+	var retried memory.Candidate
+	if res := e.call(t, "memory_review", memoryReviewInput{ID: proposed.ID, Decision: "accept", Confirm: true}, &retried); res.IsError || retried.FactVersion != reviewed.FactVersion {
+		t.Fatalf("idempotent review: %+v %s", retried, errText(res))
+	}
+}
+
+func TestMemoryCandidatesReturnBoundedSummariesWithAContinuation(t *testing.T) {
+	e, store, _ := newMemoryEnv(t, Options{Limits: Limits{MaxTokens: 450, MaxEntries: 20}}, nil, memoryConfig("/work/.agent"), nil)
+	ctx := context.Background()
+	for _, suffix := range []string{"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc", "dddddddddddddddd"} {
+		id := "c-" + suffix
+		if _, err := store.Propose(ctx, "test", "fact-"+suffix, strings.Repeat("candidate body ", 200), memory.CandidateOptions{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	cursor := ""
+	sawTokenCut := false
+	for {
+		var out memoryCandidatesOutput
+		if res := e.call(t, "memory_candidates", memoryCandidatesInput{Cursor: cursor, Limit: 20}, &out); res.IsError {
+			t.Fatal(errText(res))
+		}
+		for _, c := range out.Candidates {
+			if c.ContentBytes == 0 || seen[c.ID] {
+				t.Fatalf("candidate summary = %+v, seen=%v", c, seen[c.ID])
+			}
+			seen[c.ID] = true
+		}
+		if out.TruncatedBy == truncatedByTokens {
+			sawTokenCut = true
+		}
+		if out.NextCursor == "" {
+			break
+		}
+		cursor = out.NextCursor
+	}
+	if len(seen) != 4 || !sawTokenCut {
+		t.Fatalf("seen=%d token_cut=%v", len(seen), sawTokenCut)
 	}
 }
 
@@ -412,6 +487,9 @@ func TestMemoryToolsInLayoutV2KeyByOwner(t *testing.T) {
 	}
 	if res := e.call(t, "memory_put", map[string]any{"name": "team", "content": "ours\n", "agent": "shared"}, &put); res.IsError || put.Path != "/work/.agent/memory/shared/facts/team.md" {
 		t.Fatalf("shared in v2: %+v %s", put, errText(res))
+	}
+	if res := e.call(t, "memory_put", map[string]any{"name": "personal-team", "content": "mine across agents\n", "agent": "personal"}, &put); res.IsError || put.Agent != owner+"/shared" || put.Path != "/work/.agent/memory/"+owner+"/shared/facts/personal-team.md" {
+		t.Fatalf("personal in v2: %+v %s", put, errText(res))
 	}
 	if res := e.call(t, "memory_put", map[string]any{"name": "style", "content": "bob's\n", "agent": "bob/codex"}, &put); res.IsError || put.Agent != "bob/codex" {
 		t.Fatalf("another owner's agent: %+v %s", put, errText(res))

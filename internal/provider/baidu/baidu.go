@@ -493,7 +493,14 @@ func (p *Provider) refresh(ctx context.Context) (string, error) {
 	if out.ExpiresIn > 0 {
 		p.expiry = p.now().Add(time.Duration(out.ExpiresIn) * time.Second)
 	}
-	saveErr := p.SaveTokens(map[string]string{"refresh_token": out.RefreshToken})
+	// Persist the access token as well as the rotating refresh token. A newly
+	// opened provider has no in-memory expiry, so it can safely try the saved
+	// access token first and refresh only when Baidu rejects it. Refreshing on
+	// every account check triggers Baidu's "Trigger security policy" guard.
+	saveErr := p.SaveTokens(map[string]string{
+		"access_token":  out.AccessToken,
+		"refresh_token": out.RefreshToken,
+	})
 	p.mu.Unlock()
 	if saveErr != nil {
 		return "", fmt.Errorf("baidu: save refreshed credentials: %w", saveErr)
@@ -1167,6 +1174,24 @@ func (p *Provider) Mkdir(ctx context.Context, parentID, name string) (provider.E
 		e.Name = name
 	}
 	return e, nil
+}
+
+// EnsureRoot creates the configured path one segment at a time. Existing
+// segments are success: another check, or the user, may have created them
+// after the root listing reported it absent.
+func (p *Provider) EnsureRoot(ctx context.Context) error {
+	root := cleanPath(p.root)
+	if root == "/" {
+		return nil
+	}
+	parent := "/"
+	for _, name := range strings.Split(strings.TrimPrefix(root, "/"), "/") {
+		if _, err := p.Mkdir(ctx, parent, name); err != nil && !errors.Is(err, provider.ErrExists) {
+			return fmt.Errorf("baidu: create configured root %q: %w", root, err)
+		}
+		parent = cleanPath(path.Join(parent, name))
+	}
+	return nil
 }
 
 // manageResp is the filemanager envelope. A per-entry errno can be non-zero

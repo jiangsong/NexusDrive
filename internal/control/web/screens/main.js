@@ -251,7 +251,12 @@ export function renderMain(host) {
       markedWith = workspaceRoot();
       fill(rows);
       fill(thead, browseHeader);
-      fill(crumb, iconEl('folder'),
+      fill(crumb, el('a', {
+        href: 'javascript:void 0',
+        style: 'display:inline-flex;align-items:center;color:var(--detail);text-decoration:none',
+        title: t('nav.root'), 'aria-label': t('nav.root'),
+        onclick: () => { cwd = '/'; load(); },
+      }, iconEl('folder')),
         ...cwd.split('/').filter(Boolean).flatMap((seg, i, all) => {
           const p = '/' + all.slice(0, i + 1).join('/');
           return [el('span', { class: 'dim' }, iconEl('chevron')), el('a', { href: 'javascript:void 0', style: 'color:var(--detail);text-decoration:none', onclick: () => { cwd = p; load(); } }, seg)];

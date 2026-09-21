@@ -253,6 +253,28 @@ func TestReadBlocksAndCacheHits(t *testing.T) {
 	}
 }
 
+func TestReadFileRangeAtVersionRefusesDifferentOpenedVersion(t *testing.T) {
+	e := newEnv(t, envOpt{})
+	ctx := context.Background()
+	e.fake.Seed("versioned.txt", []byte("current bytes"))
+
+	a, err := e.fs.StatPath(ctx, "/ali/versioned.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, current, err := e.fs.ReadFileRangeAtVersion(ctx, "/ali/versioned.txt", "different-version", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data != nil || current != a.Version {
+		t.Fatalf("data=%q current=%q, want no data and %q", data, current, a.Version)
+	}
+	data, current, err = e.fs.ReadFileRangeAtVersion(ctx, "/ali/versioned.txt", a.Version, 0, 0)
+	if err != nil || string(data) != "current bytes" || current != a.Version {
+		t.Fatalf("data=%q current=%q err=%v", data, current, err)
+	}
+}
+
 func TestReadAheadFetchesFollowingBlocks(t *testing.T) {
 	e := newEnv(t, envOpt{blockSize: 64, readAheadBlocks: 4})
 	ctx := context.Background()

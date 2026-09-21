@@ -647,7 +647,7 @@ args = ["mcp", "--stdio", "--allow", "/mnt/cloud/work"]
 
 ### 4.13 Agent 记忆库（已实现，2026-09-15）
 
-记忆是约定目录下的纯文件，不是 KV 表：`<memory.root>/memory/<agent>/{MEMORY.md, facts/<name>.md}` 与 `memory/shared/`。跨设备同步交给网盘本身，并发冲突沿用上传冲突副本机制；`memory_get` 把副本暴露为 `conflicts[]`，`memory_put` 带 `expected_version`。`memory_search` 是限定在记忆目录的 `semantic_search`。详见 [agent-roadmap.md](agent-roadmap.md) §3.11，对应 TODO.md T-40。
+记忆是约定目录下的纯文件，不是 KV 表：`<memory.root>/memory/<owner>/<agent>/{MEMORY.md, facts/<name>.md}`；`<owner>/shared` 给本人多智能体共用，顶层 `shared` 保留为整盘共用。候选写入 `candidates/pending`，只有 `memory_review(confirm=true)` 接受后才进入 facts，reviewed 文件保留以便幂等与审计；候选目录不进内容索引。fact frontmatter 带 scope、来源、替代关系与过期时间，`context_search` 合并文件名、正文、记忆和 `handoff.md`，默认过滤 stale/expired/replaced，命中带版本供读工具做一致性校验。跨设备同步与并发冲突仍复用网盘和冲突副本机制。
 
 ### 4.14 会话、审计、回滚、触发器、来源、热度与 hooks（已实现，2026-09-15 / 09-16）
 

@@ -565,12 +565,18 @@ func browserAuthorize(ctx context.Context, cfg *config.Config, name string, r co
 	if err != nil {
 		return nil, err
 	}
-	// Persist the renewable credential. The first check obtains an access
-	// token through the existing refresh-and-persist path. A public client has
-	// no secret to persist, and saveCredentials refuses an empty value — so
-	// including the key unconditionally would fail the save after a perfectly
-	// good authorization, naming a field the person never supplied.
+	// Persist the renewable credential. Most providers let the first check
+	// obtain a new access token through their refresh path; Baidu is handled
+	// below because it rejects a refresh immediately after code exchange. A
+	// public client has no secret to persist, and saveCredentials refuses an
+	// empty value, so do not include that key unconditionally.
 	saved := map[string]string{"refresh_token": tokens.RefreshToken}
+	// Baidu rejects an immediate refresh after a successful code exchange as
+	// "Trigger security policy". Preserve that exchange's access token so the
+	// validation request does not needlessly refresh it.
+	if r.Type == "baidu" {
+		saved["access_token"] = tokens.AccessToken
+	}
 	if secret != "" {
 		saved["client_secret"] = secret
 	}

@@ -118,7 +118,7 @@ var bridgedTools = map[string]bool{
 	"retry_copy_job": true, "cancel_copy_job": true, "forget_copy_job": true,
 	"index": true, "unindex": true,
 	"begin_session": true, "finish_session": true, "list_sessions": true, "rollback_session": true,
-	"memory_put": true, "memory_delete": true,
+	"memory_put": true, "memory_delete": true, "memory_propose": true, "memory_review": true,
 }
 
 // bridgedReadTools are the fenced tools that change nothing, so a

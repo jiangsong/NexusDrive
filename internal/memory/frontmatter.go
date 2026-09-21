@@ -11,10 +11,15 @@ import (
 // Meta is the YAML frontmatter of a fact file. The field order is the
 // order the block is written in.
 type Meta struct {
-	Name        string    `yaml:"name" json:"name"`
-	Description string    `yaml:"description" json:"description,omitempty"`
-	Type        string    `yaml:"type" json:"type,omitempty"`
-	UpdatedAt   time.Time `yaml:"updated_at" json:"updated_at"`
+	Name          string     `yaml:"name" json:"name"`
+	Description   string     `yaml:"description" json:"description,omitempty"`
+	Type          string     `yaml:"type" json:"type,omitempty"`
+	Scope         string     `yaml:"scope,omitempty" json:"scope,omitempty"`
+	SourcePaths   []string   `yaml:"source_paths,omitempty" json:"source_paths,omitempty"`
+	SourceSession string     `yaml:"source_session,omitempty" json:"source_session,omitempty"`
+	Replaces      []string   `yaml:"replaces,omitempty" json:"replaces,omitempty"`
+	ExpiresAt     *time.Time `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
+	UpdatedAt     time.Time  `yaml:"updated_at" json:"updated_at"`
 }
 
 // frontmatterHead bounds how much of a file is scanned for the closing
@@ -23,6 +28,16 @@ type Meta struct {
 const frontmatterHead = 4 << 10
 
 const fence = "---\n"
+
+// frontmatterFits reports whether the closing fence is inside the bounded
+// prefix that every reader, including List, is allowed to inspect.
+func frontmatterFits(file []byte) bool {
+	end := min(len(file), frontmatterHead)
+	if end <= len(fence) || !bytes.HasPrefix(file, []byte(fence)) {
+		return false
+	}
+	return bytes.Contains(file[len(fence):end], []byte("\n---\n"))
+}
 
 // render writes a fact file: the frontmatter block, then the body verbatim.
 func render(m Meta, body string) string {
@@ -34,6 +49,32 @@ func render(m Meta, body string) string {
 	b.WriteString(yamlScalar(m.Description))
 	b.WriteString("\ntype: ")
 	b.WriteString(yamlScalar(m.Type))
+	if m.Scope != "" {
+		b.WriteString("\nscope: ")
+		b.WriteString(yamlScalar(m.Scope))
+	}
+	if len(m.SourcePaths) > 0 {
+		b.WriteString("\nsource_paths:")
+		for _, p := range m.SourcePaths {
+			b.WriteString("\n  - ")
+			b.WriteString(yamlScalar(p))
+		}
+	}
+	if m.SourceSession != "" {
+		b.WriteString("\nsource_session: ")
+		b.WriteString(yamlScalar(m.SourceSession))
+	}
+	if len(m.Replaces) > 0 {
+		b.WriteString("\nreplaces:")
+		for _, name := range m.Replaces {
+			b.WriteString("\n  - ")
+			b.WriteString(yamlScalar(name))
+		}
+	}
+	if m.ExpiresAt != nil {
+		b.WriteString("\nexpires_at: ")
+		b.WriteString(m.ExpiresAt.UTC().Format(time.RFC3339))
+	}
 	b.WriteString("\nupdated_at: ")
 	b.WriteString(m.UpdatedAt.UTC().Format(time.RFC3339))
 	b.WriteString("\n")

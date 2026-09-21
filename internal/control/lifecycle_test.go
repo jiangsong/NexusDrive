@@ -1,12 +1,33 @@
 package control
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestRestartRefusesAWorkingDirectoryInsideTheMount(t *testing.T) {
+	called := false
+	srv := NewServer(&Collector{Version: "restart-test", Lifecycle: &Lifecycle{
+		CheckRestart: func() error { return errors.New("pid 42 codex: /mnt/cloud/project") },
+		Restart:      func() { called = true },
+	}})
+
+	rr := lifecycleRequest(t, srv, http.MethodPost, "/daemon/restart?confirm=true")
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "pid 42 codex") {
+		t.Fatalf("busy-cwd restart = %d %s", rr.Code, rr.Body)
+	}
+	if called {
+		t.Fatal("restart ran despite a cwd holder")
+	}
+	// A refused restart must not leave the control plane draining.
+	if rr := lifecycleRequest(t, srv, http.MethodPost, "/cache/drop"); rr.Code == http.StatusServiceUnavailable {
+		t.Fatal("refused restart left the server draining")
+	}
+}
 
 func lifecycleRequest(t *testing.T, srv *Server, method, target string) *httptest.ResponseRecorder {
 	t.Helper()

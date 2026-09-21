@@ -75,6 +75,8 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"rollback_session":  {"session_id": "x", "confirm": true},
 		"memory_put":        {"name": "style", "content": "x"},
 		"memory_delete":     {"name": "style", "confirm": true},
+		"memory_propose":    {"id": "c-test", "name": "candidate", "content": "x"},
+		"memory_review":     {"id": "c-test", "decision": "reject", "confirm": true},
 	}
 	// Read tools that must succeed outright on the warmed tree.
 	readOK := map[string]map[string]any{
@@ -103,6 +105,7 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"list_copy_jobs":   {},
 		"list_export_jobs": {},
 		"semantic_search":  {"query": "hello", "path": "/work"},
+		"context_search":   {"query": "hello", "path": "/work"},
 		"index_status":     {},
 	}
 	// Read tools whose arguments name something that does not exist: they
@@ -116,6 +119,7 @@ func TestNonOwnerRefusesEveryMutatingToolBeforeTouchingTheFS(t *testing.T) {
 		"memory_get":          {"name": "style"},
 		"memory_search":       {"query": "style"},
 		"memory_merge":        {"name": "style"},
+		"memory_candidates":   {},
 		// share is a remote call from the caller's own provider client,
 		// not a write to the mount; it is not fenced.
 		"share": {"path": "/work/a.txt"},
