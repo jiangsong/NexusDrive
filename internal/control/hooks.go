@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -67,24 +68,45 @@ func mountFor(cfg *config.Config, abs string) (config.Mount, string, bool) {
 	if cfg == nil {
 		return config.Mount{}, "", false
 	}
-	abs = filepath.Clean(abs)
+	abs = canonicalHookPath(abs)
 	best, bestVirtual, found := config.Mount{}, "", false
 	for _, m := range cfg.Mounts {
-		root := filepath.Clean(config.ExpandHome(m.Path))
-		var rel string
-		switch {
-		case abs == root:
-			rel = "/"
-		case strings.HasPrefix(abs, root+string(filepath.Separator)):
-			rel = "/" + filepath.ToSlash(strings.TrimPrefix(abs, root+string(filepath.Separator)))
-		default:
+		root := canonicalHookPath(config.ExpandHome(m.Path))
+		relative, err := filepath.Rel(root, abs)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			continue
 		}
-		if !found || len(root) > len(config.ExpandHome(best.Path)) {
+		rel := "/" + filepath.ToSlash(relative)
+		if !found || len(root) > len(canonicalHookPath(config.ExpandHome(best.Path))) {
 			best, bestVirtual, found = m, path.Clean(rel), true
 		}
 	}
 	return best, bestVirtual, found
+}
+
+// canonicalHookPath resolves aliases before matching mount boundaries.
+func canonicalHookPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(r)
+	}
+	return filepath.Clean(p)
+}
+
+// projectScope never walks above the selected mount, including linked worktrees.
+func projectScope(m config.Mount, cwd, virtual string) string {
+	root := canonicalHookPath(config.ExpandHome(m.Path))
+	for dir := canonicalHookPath(cwd); ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			rel, err := filepath.Rel(root, dir)
+			if err == nil {
+				return path.Clean("/" + filepath.ToSlash(rel))
+			}
+		}
+		if dir == root || filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return virtual
 }
 
 // agentPath renders a virtual path the way the agent sees it from cwd:
@@ -115,7 +137,7 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.collector.ConfigView()
 	resp := hooks.ContextResponse{}
-	if cfg == nil || cfg.Hooks.Context == "off" {
+	if cfg == nil || cfg.Hooks.Context == "off" && !q.Inspect {
 		writeJSON(w, resp)
 		return
 	}
@@ -125,6 +147,23 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Mount = config.ExpandHome(mount.Path)
+	resp.VirtualPath = virtual
+	resp.Scope = projectScope(mount, q.CWD, virtual)
+	resp.Index = "disabled; filename search and explicit memory reads only"
+	if cfg.Index.Enabled {
+		resp.Index = "enabled; coverage is reported by context_search"
+	}
+	resp.Memory = "unavailable"
+	if s.collector.Memory != nil && s.collector.Memory.Root() != "" {
+		resp.Memory = "configured; access depends on MCP authorization"
+	}
+	resp.ReadOnly = cfg.MCP.ReadOnly
+	first := true
+	if st := s.hookStore(); st != nil && q.SessionID != "" {
+		_, known, err := st.HookCursor(r.Context(), q.Client, q.SessionID)
+		first = err != nil || !known
+	}
+
 	// The conversation is a session of the hook:<client> principal: the
 	// console lists it beside the MCP ones, the session-end hook finishes
 	// it, and it idles out like a token's when the client never says so.
@@ -134,17 +173,20 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var parts []string
-	// What a read costs here is the one thing an agent cannot guess, and
-	// the answer is the opposite of the obvious one: the sibling prefetch
-	// (internal/vfs/read_dir_ahead.go) arms after three reads that walk a
-	// directory forward and pulls the small files ahead into the cache, so
-	// a whole directory taken in order is nearly free while the same files
-	// read out of order cost a request each. Pinning is the first step
-	// before a shell command that reads a tree in no particular order.
-	parts = append(parts, fmt.Sprintf("cloudfs: this directory is inside the CloudFS mount at %s (cloud storage mounted locally). Reading a directory's files in name order is nearly free — after three reads in order the small files ahead are fetched for you — while reads scattered across a tree cost one download each; a write is durable locally at once and uploads in the background.", resp.Mount))
-	parts = append(parts, "Before a command that reads a whole tree in no particular order (git status, a build, grep), pin it once — `cloudfs pin <path>`, or the pin tool — and its reads become local.")
-	if len(cfg.MCP.Allow) > 0 {
-		parts = append(parts, fmt.Sprintf("Agents may change files under: %s (mount-relative).", strings.Join(cfg.MCP.Allow, ", ")))
+	parts = append(parts, fmt.Sprintf("cloudfs: virtual_path=%s scope=%s. Use the cloudfs skill; context_search path=%s scope=%s. Directory scope is a retrieval default, not authorization. Index: %s. Memory: %s. Read-only: %t.", virtual, resp.Scope, resp.Scope, resp.Scope, resp.Index, resp.Memory, resp.ReadOnly))
+	if first {
+		// What a read costs here is the one thing an agent cannot guess, and
+		// the answer is the opposite of the obvious one: the sibling prefetch
+		// (internal/vfs/read_dir_ahead.go) arms after three reads that walk a
+		// directory forward and pulls the small files ahead into the cache, so
+		// a whole directory taken in order is nearly free while the same files
+		// read out of order cost a request each. Pinning is the first step
+		// before a shell command that reads a tree in no particular order.
+		parts = append(parts, fmt.Sprintf("cloudfs: this directory is inside the CloudFS mount at %s (cloud storage mounted locally). Reading a directory's files in name order is nearly free — after three reads in order the small files ahead are fetched for you — while reads scattered across a tree cost one download each; a write is durable locally at once and uploads in the background.", resp.Mount))
+		parts = append(parts, "Before a command that reads a whole tree in no particular order (git status, a build, grep), pin it once — `cloudfs pin <path>`, or the pin tool — and its reads become local.")
+		if len(cfg.MCP.Allow) > 0 {
+			parts = append(parts, fmt.Sprintf("Agents may change files under: %s (mount-relative).", strings.Join(cfg.MCP.Allow, ", ")))
+		}
 	}
 	if st := s.hookStore(); st != nil && q.SessionID != "" {
 		changed, more, rescan, virtuals, err := s.hookChangesWithPaths(r.Context(), st, q, mount, virtual)
@@ -175,7 +217,7 @@ func (s *Server) agentHookContext(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if cfg.Hooks.Context == "full" {
+	if first && cfg.Hooks.Context == "full" {
 		// The link formula (docs/agent-first-design.md §8.1): a path the
 		// agent mentions can carry the console's render page beside it.
 		if cfg.Share.ConsoleLinksOn() && cfg.Control.Metrics != "" && cfg.Control.UI {

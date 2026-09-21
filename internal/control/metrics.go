@@ -156,6 +156,7 @@ func (s *Server) routes() []route {
 		{pattern: "/agent/hook-read", handler: s.agentHookRead},
 		{pattern: "/agent/hook-stop", handler: s.agentHookStop},
 		{pattern: "/agent/hooks", handler: s.agentHooks},
+		{pattern: "/agent/integration/", handler: s.agentIntegration, probe: "/agent/integration/install"},
 		{pattern: "/agent/heat", handler: s.agentHeat},
 		{pattern: "/agent/suggestions", handler: s.agentSuggestions},
 		{pattern: "/changes", handler: s.changes},

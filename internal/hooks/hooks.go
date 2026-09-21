@@ -72,12 +72,9 @@ var platforms = map[string]platform{
 		timeout:      10,
 		verified:     true,
 	},
-	// UNVERIFIED: Codex hook event names and the hooks.json shape follow
-	// the experimental hooks feature as of 2026-09; verify against a real
-	// Codex install, and that [features] codex_hooks is the switch. Codex
-	// documents a per-turn Stop; whether it has a SessionEnd is the open
-	// question — an event it never fires costs nothing, a per-turn one
-	// would finish sessions mid-run, so the session-end name is used.
+	// The documented Codex events include UserPromptSubmit and SessionEnd.
+	// The adapter remains UNVERIFIED until a real session exercises injection;
+	// parsing hooks.json alone does not establish event execution or trust.
 	"codex": {
 		configPath:   []string{".codex", "hooks.json"},
 		prompt:       "UserPromptSubmit",
@@ -86,7 +83,7 @@ var platforms = map[string]platform{
 		readMatcher:  "read_file|shell",
 		writeMatcher: "apply_patch",
 		timeout:      10,
-		note:         "enable hooks in ~/.codex/config.toml ([features] codex_hooks = true) and trust the hook when Codex asks",
+		note:         "hooks must be enabled in ~/.codex/config.toml ([features] hooks = true); automatic injection remains unverified until exercised in the real client",
 	},
 	// UNVERIFIED: Gemini CLI event names (BeforeAgent, AfterTool,
 	// SessionEnd) and millisecond timeouts; verify against a real install.
@@ -534,4 +531,9 @@ func writeJSON(path string, root map[string]any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// StartupGroup is installed with the built-in skill integration.
+func StartupGroup(client string) map[string]any {
+	return map[string]any{"hooks": []any{map[string]any{"type": "command", "command": Command("prompt", client), "timeout": 10}}}
 }

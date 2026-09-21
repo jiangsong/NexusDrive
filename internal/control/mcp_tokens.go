@@ -21,6 +21,7 @@ type MCPView interface {
 	Tokens(ctx context.Context) ([]agent.Principal, error)
 	// CreateToken returns the plain token exactly once, with its principal.
 	CreateToken(ctx context.Context, spec agent.TokenSpec) (string, agent.Principal, error)
+	VerifyToken(ctx context.Context, plain string) (agent.Principal, error)
 	RevokeToken(ctx context.Context, id string) (agent.Principal, error)
 }
 
@@ -203,6 +204,10 @@ func (v *storeMCPView) Tokens(ctx context.Context) ([]agent.Principal, error) {
 
 func (v *storeMCPView) CreateToken(ctx context.Context, spec agent.TokenSpec) (string, agent.Principal, error) {
 	return v.st.CreateToken(ctx, spec)
+}
+
+func (v *storeMCPView) VerifyToken(ctx context.Context, plain string) (agent.Principal, error) {
+	return v.st.VerifyToken(ctx, plain)
 }
 
 func (v *storeMCPView) RevokeToken(ctx context.Context, id string) (agent.Principal, error) {

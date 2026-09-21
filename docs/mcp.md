@@ -1,5 +1,9 @@
 # CloudFS MCP 接口
 
+本机 Codex / Claude 的一次性接入在控制台「Agent」页面完成：界面可启用 owner
+监听并重启、安装技能与 MCP/hooks、刷新状态及确认卸载。详见[内置 Agent 接入](agent-integration.md)。
+
+
 CloudFS 通过 Model Context Protocol 把挂载的网盘暴露给 agent。MCP 服务直连 VFS 核心，不经过内核，所以**即使没有挂载也能用**——这在容器里或没有 FUSE 权限时很有用。
 
 > **已落地**：会话与作用域、访问令牌、交付箱与持久审计；内容索引、hybrid 语义检索、统一 `context_search`；九个记忆工具（含候选显式确认）；事件触发器与"发送给 Agent"。设计见 [Agent 工作底座路线图](agent-roadmap.md)，本页工具表只列已实现能力。
@@ -625,15 +629,19 @@ cloudfs hooks uninstall [--client …]
   读热度」标签（`GET /agent/heat`，四象限：热且新 / **热但陈旧** / 温…）读它。内核读在 FUSE `Read` 处理器里打
   `FromKernel` 标并在 splice 零拷贝路径上也上报（2026-09-17 修复：此前真实挂载的内核读一条都没记）。
 
-### 控制面只读路由（2026-09-17，界面 G 项）
+### 控制面 Agent 路由（界面 G 项）
 
-全部只读、同一 `privateRequest` 门禁、零远端调用；没有 agent.db 的进程答 `{"enabled": false}`：
+读取路由经过同一 `privateRequest` 门禁；没有 agent.db 的进程答 `{"enabled": false}`。
+Agent 接入的写操作只由界面上的明确按钮触发，并携带控制请求头：
 
 | 路由 | 用途 |
 |---|---|
 | `GET /changes?path=&cursor=&limit=` | 变更记录，最新在前，游标翻页；检查器"最近修改"行、"历史"浮层与「Agent → 变更」标签读它 |
 | `GET /agent/heat?path=&days=&limit=` | 读热度 × 陈旧度（散点图、热度标签、文件列表热度点、检查器"30 天读取"行） |
 | `GET /agent/suggestions?path=&days=` | 只出草案：pin（常读未缓存）/ index（常读无规则）/ stale（常读 90 天未改）/ unpin（无人读的 pin）；采用走既有 `/cache/pin`、`/cache/unpin`、`/index/add` |
-| `GET /agent/hooks` | 各客户端 hook 安装状态、是否已验证、`hooks.context`、要复制的安装 / 卸载命令；**从不改写用户配置** |
+| `GET /agent/hooks` | 各客户端版本、技能、MCP 认证、hook、记忆和自动注入状态 |
+| `POST /agent/integration/enable-http` | 将回环 MCP 监听安全合并进当前 owner 配置；界面随后调用确认重启 |
+| `POST /agent/integration/install` | 为界面勾选的客户端安装技能、MCP 和 hooks，凭据不经过浏览器响应 |
+| `POST /agent/integration/uninstall` | 经确认后移除未修改的托管内容并撤销对应凭据 |
 | `GET /settings` | 白名单配置视图（mcp.limits / install / session / audit、hooks、memory.root、index 开关）供只读 `#/settings` 屏；不含任何凭据字段 |
 | `GET /mcp/connect` 的 `bridge{state, reason, sessions}` | 桥三态：`n/a`（无并存 stdio）/ `connected`（回环监听已发布密钥，`sessions` 为经桥的活跃会话数）/ `disabled`（`http_off` / `not_loopback` / `no_token`）；`doctor.agent_stdio` 在 `connected` 时报 ok |

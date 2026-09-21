@@ -55,6 +55,7 @@ type beginSessionOutput struct {
 }
 
 type finishSessionInput struct {
+	Scope     string `json:"scope,omitempty" jsonschema:"Virtual project scope from CloudFS directory context; tags the handoff for cross-client retrieval"`
 	SessionID string `json:"session_id,omitempty" jsonschema:"Session to finish; default the current one"`
 	Summary   string `json:"summary,omitempty" jsonschema:"What the session did, kept in the manifest"`
 	Handoff   string `json:"handoff,omitempty" jsonschema:"Markdown context for the next agent; written as handoff.md in the session workspace"`
@@ -214,6 +215,7 @@ func (s *Server) finishSession(ctx context.Context, _ *mcp.CallToolRequest, in f
 		return r, finishSessionOutput{}, nil
 	}
 	handoff := ""
+	handoffScope := ""
 	if in.Handoff != "" {
 		if sess.Workspace == "" {
 			r, _ := fail(errors.New("cannot write a handoff for a session without a workspace"))
@@ -223,6 +225,19 @@ func (s *Server) finishSession(ctx context.Context, _ *mcp.CallToolRequest, in f
 		if len(body) > maxHandoffBytes {
 			r, _ := fail(fmt.Errorf("handoff is %d bytes; maximum is %d", len(body), maxHandoffBytes))
 			return r, finishSessionOutput{}, nil
+		}
+		if in.Scope != "" {
+			scope, err := s.checkPath(ctx, in.Scope, false)
+			if err != nil {
+				r, _ := fail(err)
+				return r, finishSessionOutput{}, nil
+			}
+			handoffScope = scope
+			body = fmt.Sprintf("<!-- cloudfs-project-scope: %q -->\n", scope) + body
+			if len(body) > maxHandoffBytes {
+				r, _ := fail(errors.New("handoff plus scope exceeds size limit"))
+				return r, finishSessionOutput{}, nil
+			}
 		}
 		handoff = path.Join(sess.Workspace, "handoff.md")
 		if _, err := s.checkPath(ctx, handoff, true); err != nil {
@@ -244,6 +259,13 @@ func (s *Server) finishSession(ctx context.Context, _ *mcp.CallToolRequest, in f
 		paths = append(paths, handoff)
 	}
 	arts := s.collectArtifacts(ctx, paths, in.Share)
+	if handoffScope != "" {
+		for i := range arts {
+			if arts[i].Path == handoff {
+				arts[i].ProjectScope = handoffScope
+			}
+		}
+	}
 	// The row is closed first: agent.db is the record the console reads,
 	// and the manifest is its copy on the mount, written with the same
 	// finishing time and summary the row carries.

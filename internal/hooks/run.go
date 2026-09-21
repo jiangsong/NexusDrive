@@ -26,10 +26,11 @@ import (
 // supported client sends session_id and cwd; the tool fields ride on
 // tool events.
 type Event struct {
-	SessionID string          `json:"session_id"`
-	CWD       string          `json:"cwd"`
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
+	SessionID     string          `json:"session_id"`
+	HookEventName string          `json:"hook_event_name"`
+	CWD           string          `json:"cwd"`
+	ToolName      string          `json:"tool_name"`
+	ToolInput     json.RawMessage `json:"tool_input"`
 }
 
 // maxEventBytes bounds what a hook reads from stdin.
@@ -48,6 +49,7 @@ func ParseEvent(r io.Reader) Event {
 
 // ContextRequest is what the prompt hook asks the daemon.
 type ContextRequest struct {
+	Inspect   bool   `json:"inspect,omitempty"`
 	Client    string `json:"client"`
 	SessionID string `json:"session_id"`
 	CWD       string `json:"cwd"`
@@ -56,7 +58,12 @@ type ContextRequest struct {
 // ContextResponse is the daemon's answer: the text to inject and, for
 // the console and tests, its parts.
 type ContextResponse struct {
-	Context string `json:"context"`
+	Context     string `json:"context"`
+	VirtualPath string `json:"virtual_path,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	Index       string `json:"index,omitempty"`
+	Memory      string `json:"memory,omitempty"`
+	ReadOnly    bool   `json:"read_only"`
 	// Mount is the mount the working directory is in; empty means none,
 	// and the hook prints nothing.
 	Mount string `json:"mount,omitempty"`
@@ -196,8 +203,12 @@ func RunPrompt(ctx context.Context, in io.Reader, out io.Writer, client string, 
 	if err != nil || resp.Context == "" {
 		return nil
 	}
+	eventName := promptEvent(client)
+	if ev.HookEventName == "SessionStart" {
+		eventName = "SessionStart"
+	}
 	payload := map[string]any{"hookSpecificOutput": map[string]any{
-		"hookEventName":     promptEvent(client),
+		"hookEventName":     eventName,
 		"additionalContext": resp.Context,
 	}}
 	enc, err := json.Marshal(payload)

@@ -216,6 +216,23 @@ func SaveCredentials(path, name string, fields map[string]string) (fileFallback 
 	return saveCredentials(path, name, fields, nil, true)
 }
 
+// SetMCPHTTP enables the owner listener without rewriting unrelated YAML.
+// Starting the listener still requires a daemon restart.
+func SetMCPHTTP(configPath, addr string) error {
+	if strings.TrimSpace(addr) != addr || addr == "" {
+		return errors.New("config: mcp.http must be a non-empty listen address")
+	}
+	return editConfig(configPath, false, func(root *yaml.Node, _ *Config) error {
+		mcp := mappingValue(root, "mcp")
+		if mcp == nil || mcp.Tag == "!!null" {
+			mcp = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			setNode(root, "mcp", mcp)
+		}
+		setNode(mcp, "http", scalar(addr))
+		return nil
+	})
+}
+
 // SaveCredentialsForRemote refuses to install an authorization if the remote
 // was edited while the user was in the browser. Credential rotations that
 // preserve existing references do not change the account configuration.

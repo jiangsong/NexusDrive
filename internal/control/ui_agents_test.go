@@ -227,17 +227,15 @@ func TestConnectPanelShowsBridgeState(t *testing.T) {
 	}
 }
 
-// TestHooksCardIsReadOnly (ui-plan G7): the connect panel's Hooks card
-// reads /agent/hooks and shows each client's registration, whether its
-// shape is verified, the context mode and the shell lines to copy; it
-// never posts to the hooks route or offers a button that edits a settings
-// file. The row and command decisions live in hooks_view.js under node.
-func TestHooksCardIsReadOnly(t *testing.T) {
+// The connect panel owns the complete integration workflow. Install and
+// uninstall are explicit control-plane mutations; uninstall goes through the
+// shared confirmation dialog before it can revoke a credential.
+func TestHooksCardInstallsRefreshesAndUninstalls(t *testing.T) {
 	view := webSource(t, "web/hooks_view.js")
 	if strings.Contains(view, "import ") {
 		t.Error("hooks_view.js imports; it must run under node with no DOM")
 	}
-	for _, want := range []string{"export function clientRow(c)", "export function commands(r)", "'hooks.state.' + state", "'hooks.verified' : 'hooks.unverified'", "' --client ' + todo.join(',')"} {
+	for _, want := range []string{"export function clientRow(c)", "'hooks.state.' + state", "'hooks.verified' : 'hooks.unverified'"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("hooks_view.js lacks %s", want)
 		}
@@ -246,13 +244,16 @@ func TestHooksCardIsReadOnly(t *testing.T) {
 		t.Fatalf("the node suite for hooks_view.js is missing: %v", err)
 	}
 	panel := webSource(t, "web/connect_panel.js")
-	for _, want := range []string{"import { clientRow, commands } from '/ui/hooks_view.js'", "api.get('/agent/hooks')", "function hooksCard(h)", "'data-hooks'", "'data-hook-client': r.client", "'data-hook-state': r.state", "t(r.stateKey)", "t(r.verifiedKey)", "commands(h).map(", "copyBtn(c.text)", "t('hooks.note')"} {
+	for _, want := range []string{"import { clientRow } from '/ui/hooks_view.js'", "api.get('/agent/hooks')", "function hooksCard(h, reload)", "'data-hooks'", "'data-hook-client': r.client", "'data-hook-state': r.state", "t(r.stateKey)", "t(r.verifiedKey)", "api.post('/agent/integration/' + action", "confirmDelete({", "confirm: action === 'uninstall'", "await reload()", "t('hooks.note')"} {
 		if !strings.Contains(panel, want) {
 			t.Errorf("connect_panel.js lacks %s", want)
 		}
 	}
-	if strings.Contains(panel, "api.post(") || strings.Contains(panel, "html:") {
-		t.Error("the connect panel writes or uses innerHTML")
+	if strings.Contains(panel, "html:") {
+		t.Error("the connect panel uses innerHTML")
+	}
+	if strings.Count(panel, "api.post('/agent/integration/") != 2 || strings.Count(panel, "api.post('/daemon/restart?confirm=true'") != 1 {
+		t.Error("the connect panel must limit mutations to integration actions and the confirmed restart")
 	}
 	if n := strings.Count(panel, "\n"); n >= 800 {
 		t.Errorf("connect_panel.js is %d lines; split it", n)

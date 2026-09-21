@@ -33,7 +33,7 @@ func TestHeatTabIsRoutedAndReadsTheHeatRoute(t *testing.T) {
 		t.Error("the heat tab must only suggest; it has no mutation")
 	}
 	zh := tableKeys(t, webI18nSource(t), "zh")
-	for _, k := range []string{"agents.tab.heat", "heat.quadrant.hot_stale", "heat.quadrant.warm_fresh", "heat.kind.agent", "heat.kind.kernel", "heat.disabled", "audit.result.oversize", "audit.result.forwarded", "rollback.pre.too_many", "rollback.pre.expired", "connect.guidance.title", "connect.install.http"} {
+	for _, k := range []string{"agents.tab.heat", "heat.quadrant.hot_stale", "heat.quadrant.warm_fresh", "heat.kind.agent", "heat.kind.kernel", "heat.disabled", "audit.result.oversize", "audit.result.forwarded", "rollback.pre.too_many", "rollback.pre.expired", "connect.guidance.title", "connect.integration.hint"} {
 		if !zh[k] {
 			t.Errorf("missing %s", k)
 		}
@@ -45,11 +45,11 @@ func TestHeatTabIsRoutedAndReadsTheHeatRoute(t *testing.T) {
 	}
 }
 
-// TestConnectPanelShowsGuidanceAndInstallTransport: the connect panel asks
-// for the instructions text and shows what install will pick.
-func TestConnectPanelShowsGuidanceAndInstallTransport(t *testing.T) {
+// The connect panel shows the instructions and routes setup into its native
+// controls instead of handing the person a registration command.
+func TestConnectPanelShowsGuidanceAndNativeIntegration(t *testing.T) {
 	src := webSource(t, "web/connect_panel.js")
-	for _, want := range []string{"api.get('/agent/prompt?kind=instructions')", "data-guidance", "t('connect.guidance.title', g.tokens", "c.install_transport"} {
+	for _, want := range []string{"api.get('/agent/prompt?kind=instructions')", "data-guidance", "t('connect.guidance.title', g.tokens", "connect.integration.hint", "integration.http.enable"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("connect_panel.js lacks %s", want)
 		}

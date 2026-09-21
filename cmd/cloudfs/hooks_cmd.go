@@ -11,6 +11,7 @@ import (
 
 	"cloudfs/internal/config"
 	"cloudfs/internal/hooks"
+	"cloudfs/internal/integration"
 )
 
 // `cloudfs hooks install|uninstall|status [--client claude,codex,gemini]`
@@ -115,6 +116,13 @@ func writeMountsRegistry(home string, cfg *config.Config) error {
 func cmdAgentHook(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	f := parseFlags(args)
 	client := f.str("client", "claude")
+	if f.str("config", "") == "" {
+		if home, e := os.UserHomeDir(); e == nil {
+			if p := integration.OwnerConfig(home, client); p != "" {
+				f.values["config"] = p
+			}
+		}
+	}
 	cfg, _, err := loadConfig(f)
 	if err != nil {
 		return nil

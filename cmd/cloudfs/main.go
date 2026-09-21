@@ -147,6 +147,8 @@ func main() {
 		err = cmdSTRM(ctx, os.Args[2:])
 	case "mcp":
 		err = cmdMCP(ctx, os.Args[2:])
+	case "agent":
+		err = cmdAgent(ctx, os.Args[2:], os.Stdout)
 	case "hooks":
 		err = cmdHooks(ctx, os.Args[2:], os.Stdout)
 	case "agent-hook":
@@ -237,6 +239,7 @@ Agents
   mcp --stdio [--agent ID]  serve MCP over stdin/stdout (for Claude Code, Codex); --agent names the memory directory
   mcp --http [addr]         serve MCP over Streamable HTTP on a loopback address
   mcp install --client claude|codex [--transport auto|stdio|http] [--with-agents-md] [--with-hooks] [--write <file>]
+  agent install|uninstall|status [--client codex,claude] [--json]
   hooks install|uninstall|status [--client claude,codex,gemini]
                             print or write the client registration snippet
   mcp token create --name N [--read P,..] [--write P,..] [--read-only] [--ttl 720h] [--owner who]
@@ -707,6 +710,7 @@ func runMount(ctx context.Context, args []string, from entry) error {
 			fmt.Printf("  metrics on http://%s/metrics\n", controlTCP)
 			if controlUI {
 				fmt.Printf("  dashboard on http://%s/  (or run: cloudfs ui)\n", controlTCP)
+				fmt.Printf("  Agent integration on http://%s/#/agents?connect=1\n", controlTCP)
 				if opensBrowser(from) && !f.bool("no-open") {
 					_ = openBrowser(ctx, "http://"+controlTCP+"/")
 				}

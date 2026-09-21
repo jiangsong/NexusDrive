@@ -92,6 +92,10 @@ func (s *Server) registerContextTools() {
 }
 
 func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in contextSearchInput) (*mcp.CallToolResult, contextSearchOutput, error) {
+	return s.searchContext(ctx, req, in, false, nil)
+}
+
+func (s *Server) searchContext(ctx context.Context, req *mcp.CallToolRequest, in contextSearchInput, workspaceOnly bool, handoffScopes map[string]string) (*mcp.CallToolResult, contextSearchOutput, error) {
 	if strings.TrimSpace(in.Query) == "" {
 		r, _ := fail(errors.New("query must not be empty"))
 		return r, contextSearchOutput{}, nil
@@ -100,6 +104,13 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 	if err != nil {
 		r, _ := fail(err)
 		return r, contextSearchOutput{}, nil
+	}
+	if !workspaceOnly && want["handoff"] && in.Scope != "" && s.opt.Sessions != nil {
+		handoffScopes, err = s.sessionHandoffScopes(ctx)
+		if err != nil {
+			r, _ := fail(err)
+			return r, contextSearchOutput{}, nil
+		}
 	}
 	root := "/"
 	if in.Path != "" && (want["knowledge"] || want["handoff"]) {
@@ -118,6 +129,10 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 	}
 	candidateLimit := contextCandidateLimit(limit)
 	out := contextSearchOutput{Knowledge: []contextHit{}, Memories: []contextHit{}, Handoffs: []contextHit{}}
+	searchRoots := s.readRoots(ctx, root)
+	if workspaceOnly {
+		searchRoots = scopedHandoffRoots(ctx, s, handoffScopes, in.Scope)
+	}
 
 	// Metadata search is useful before a file has been extracted and gives
 	// exact versions for follow-up reads.
@@ -128,7 +143,7 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 			return r, contextSearchOutput{}, nil
 		}
 		answer, searchErr := s.opt.FS.Search(ctx, meta.SearchQuery{
-			Filter: filter, Roots: s.readRoots(ctx, root), Limit: candidateLimit,
+			Filter: filter, Roots: searchRoots, Limit: candidateLimit,
 		})
 		if searchErr != nil {
 			r, _ := fail(searchErr)
@@ -148,6 +163,9 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 			}
 			h := contextHit{Source: "knowledge", Path: result.Path, Version: result.Version, Kind: "file", Name: result.Name, Snippet: result.Name, Score: .25}
 			if isHandoff(result.Path) {
+				if !handoffScopeMatches(result.Path, in.Scope, workspaceOnly, handoffScopes) {
+					continue
+				}
 				h.Source = "handoff"
 				if want["handoff"] {
 					out.Handoffs = appendContextHit(out.Handoffs, h)
@@ -160,7 +178,7 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 
 	if s.opt.Index != nil && (want["knowledge"] || want["handoff"]) {
 		res, searchErr := s.opt.Index.Search(ctx, index.SearchQuery{
-			Query: in.Query, Roots: s.readRoots(ctx, root), TopK: limit * 3, Mode: in.Mode,
+			Query: in.Query, Roots: searchRoots, TopK: limit * 3, Mode: in.Mode,
 			ScanLimit: candidateLimit, MaxSnippetBytes: 1024, MaxBytes: int64(s.opt.Limits.MaxBytes),
 			Accept: func(hit index.Hit) bool {
 				if !s.visible(ctx, hit.Path) || s.isMemoryPath(hit.Path) {
@@ -171,7 +189,7 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 					return false
 				}
 				if isHandoff(hit.Path) {
-					return want["handoff"]
+					return want["handoff"] && handoffScopeMatches(hit.Path, in.Scope, workspaceOnly, handoffScopes)
 				}
 				return want["knowledge"]
 			},
@@ -207,6 +225,18 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 	if want["memory"] {
 		s.searchContextMemory(ctx, req, in, limit, &out)
 	}
+	// Deliveries can live outside the project subtree. Search the exact handoff
+	// paths recorded for this scope separately, so other projects cannot consume
+	// the candidate budget and filtering never downloads file headers.
+	if !workspaceOnly && want["handoff"] && in.Scope != "" && s.opt.Sessions != nil {
+		result, extra, e := s.searchContext(ctx, req, contextSearchInput{Query: in.Query, Scope: in.Scope, Sources: []string{"handoff"}, TopK: limit, Mode: in.Mode}, true, handoffScopes)
+		if e == nil && result != nil && !result.IsError {
+			for _, hit := range extra.Handoffs {
+				out.Handoffs = appendContextHit(out.Handoffs, hit)
+			}
+			out.Truncated = out.Truncated || extra.Truncated
+		}
+	}
 	sortContextHits(out.Knowledge)
 	sortContextHits(out.Memories)
 	sortContextHits(out.Handoffs)
@@ -214,6 +244,53 @@ func (s *Server) contextSearch(ctx context.Context, req *mcp.CallToolRequest, in
 	trimContextTokens(&out, s.tokenBudget())
 	msg := fmt.Sprintf("%d knowledge, %d memory and %d handoff results for %q", len(out.Knowledge), len(out.Memories), len(out.Handoffs), in.Query)
 	return text("%s", msg), out, nil
+}
+
+// handoffScopeMatches uses the session database, not the handoff body, so a
+// search never has to download candidates merely to reject them.
+func handoffScopeMatches(file, scope string, workspaceOnly bool, scopes map[string]string) bool {
+	if scope == "" {
+		return !workspaceOnly
+	}
+	fileScope, tagged := scopes[path.Clean(file)]
+	if tagged {
+		return fileScope == path.Clean(scope)
+	}
+	return !workspaceOnly
+}
+
+func (s *Server) sessionHandoffScopes(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	cursor := ""
+	for {
+		sessions, next, err := s.opt.Sessions.List(ctx, agent.ListQuery{Cursor: cursor, Limit: 200})
+		if err != nil {
+			return nil, err
+		}
+		for _, session := range sessions {
+			for _, artifact := range session.Artifacts {
+				if artifact.ProjectScope != "" && isHandoff(artifact.Path) {
+					out[path.Clean(artifact.Path)] = path.Clean(artifact.ProjectScope)
+				}
+			}
+		}
+		if next == "" {
+			return out, nil
+		}
+		cursor = next
+	}
+}
+
+func scopedHandoffRoots(ctx context.Context, s *Server, scopes map[string]string, scope string) []string {
+	want := path.Clean(scope)
+	roots := []string{}
+	for file, fileScope := range scopes {
+		if fileScope == want && s.visible(ctx, file) {
+			roots = append(roots, file)
+		}
+	}
+	sort.Strings(roots)
+	return roots
 }
 
 func (s *Server) searchContextMemory(ctx context.Context, req *mcp.CallToolRequest, in contextSearchInput, limit int, out *contextSearchOutput) {

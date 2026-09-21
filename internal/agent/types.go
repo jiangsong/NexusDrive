@@ -67,13 +67,14 @@ type Session struct {
 
 // Artifact is a file a session declared as one of its deliverables.
 type Artifact struct {
-	Path        string    `json:"path"`
-	URI         string    `json:"uri"`
-	Size        int64     `json:"size"`
-	SHA256      string    `json:"sha256,omitempty"`
-	State       string    `json:"state"` // synced | local
-	DownloadURL string    `json:"download_url,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitzero"`
+	Path         string    `json:"path"`
+	ProjectScope string    `json:"project_scope,omitempty"`
+	URI          string    `json:"uri"`
+	Size         int64     `json:"size"`
+	SHA256       string    `json:"sha256,omitempty"`
+	State        string    `json:"state"` // synced | local
+	DownloadURL  string    `json:"download_url,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at,omitzero"`
 	// ConsoleURL is the console's render page for the file
 	// (http://<control>/#/fs/<path>): a link that outlives any signed
 	// download URL and never carries a credential, so it may be handed on.

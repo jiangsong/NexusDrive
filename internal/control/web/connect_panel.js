@@ -1,8 +1,8 @@
 import { api } from '/ui/api.js';
-import { el, fill, copyBtn } from '/ui/ui.js';
+import { el, fill, copyBtn, confirmDelete, toast } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { stdioWarning, bridgeBanner } from '/ui/connect_view.js';
-import { clientRow, commands } from '/ui/hooks_view.js';
+import { clientRow } from '/ui/hooks_view.js';
 
 // The connect panel sits at the top of the agents screen and answers the
 // first question a person has there: how does an agent reach this mount? It
@@ -18,13 +18,29 @@ import { clientRow, commands } from '/ui/hooks_view.js';
 // reports a stdio server running beside the mount, a warning banner that
 // links to the diagnostics item, because that server is a separate view of
 // the files and nothing done through it shows up here.
-const CONFIG_HINT = 'mcp:\n  http: 127.0.0.1:8765';
-
 function stateLine(c) {
   const dot = c.http_listening ? 'ok' : 'warn';
   return el('span', { style: 'display:inline-flex;align-items:center;gap:8px' },
     el('span', { class: 'dot ' + dot }),
     c.http_listening ? t('connect.http.on', c.http_addr || '') : t('connect.http.off'));
+}
+
+async function enableHTTP(button) {
+  const ok = await confirmDelete({
+    title: t('integration.http.title'), body: t('integration.http.body'),
+    confirmToken: 'restart', confirmLabel: t('integration.http.enable'), danger: false,
+  });
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    await api.post('/agent/integration/enable-http', {});
+    await api.post('/daemon/restart?confirm=true', {});
+    toast(t('integration.http.restarting'));
+    setTimeout(() => location.reload(), 2500);
+  } catch (e) {
+    toast(e.message, 'bad');
+    button.disabled = false;
+  }
 }
 
 function body(c) {
@@ -48,21 +64,12 @@ function body(c) {
   }
   if (!c.http_listening) {
     parts.push(el('p', { class: 'detail', style: 'margin:12px 0 6px' }, t('connect.http.hint')));
-    parts.push(el('pre', { class: 'detail snippet' }, CONFIG_HINT));
-    parts.push(el('div', { class: 'row', style: 'margin-top:6px' }, copyBtn(CONFIG_HINT)));
+    const enable = el('button', { class: 'primary' }, t('integration.http.enable'));
+    enable.onclick = () => enableHTTP(enable);
+    parts.push(el('div', { class: 'row', style: 'margin-top:6px' }, enable));
     return parts;
   }
-  // What `cloudfs mcp install` will pick with no --transport: http while
-  // the listener is up, stdio otherwise (which beside a running mount
-  // cannot write without the bridge).
-  parts.push(el('div', { class: 'detail', style: 'margin-top:8px' }, t('connect.install.' + (c.install_transport === 'http' ? 'http' : 'stdio'))));
-  const add = (c.add_commands || {}).claude;
-  if (add) {
-    parts.push(el('div', { class: 'eyebrow', style: 'margin:14px 0 6px' }, t('connect.add.claude')));
-    parts.push(el('pre', { class: 'detail snippet' }, add));
-    parts.push(el('div', { class: 'row', style: 'margin-top:6px' }, copyBtn(add)));
-  }
-  parts.push(el('p', { class: 'detail', style: 'margin:12px 0 0' }, t('connect.token.hint')));
+  parts.push(el('p', { class: 'detail', style: 'margin:12px 0 0' }, t('connect.integration.hint')));
   return parts;
 }
 
@@ -80,15 +87,67 @@ function guidanceCard(g) {
       el('span', { class: 'dim' }, t('connect.guidance.prompts', names.join(', ')))));
 }
 
-// hooksCard is the Hooks card (ui-plan G7-1): each agent client's
-// registration under this machine's home, the context mode in force, and
-// the shell lines that would install or remove the hooks — to copy, never
-// to run from here, since the browser must not define what runs on this
-// machine. Rows and commands are decided in hooks_view.js.
-function hooksCard(h) {
+async function changeIntegration(action, selected, button, reload) {
+  const clients = selected().filter((c) => c.checked).map((c) => c.value);
+  if (!clients.length) { toast(t('integration.select'), 'bad'); return; }
+  if (action === 'uninstall') {
+    const ok = await confirmDelete({
+      title: t('integration.uninstall.title'), body: t('integration.uninstall.body', clients.join(', ')),
+      confirmToken: 'uninstall', confirmLabel: t('integration.uninstall'), danger: true,
+    });
+    if (!ok) return;
+  }
+  button.disabled = true;
+  try {
+    await api.post('/agent/integration/' + action, { clients, confirm: action === 'uninstall' });
+    toast(t('integration.' + action + '.done', clients.join(', ')));
+    await reload();
+  } catch (e) {
+    toast(e.message, 'bad');
+    button.disabled = false;
+  }
+}
+
+// hooksCard owns the full local integration workflow: selection, install,
+// status refresh and confirmed uninstall all happen without leaving the UI.
+function hooksCard(h, reload) {
   const rows = (h.clients || []).map(clientRow);
+  const checks = [];
+  const integrationRows = (h.integration || []).map((c) => {
+    const check = el('input', { type: 'checkbox', value: c.client });
+    check.checked = c.present || c.skill_installed || c.mcp_configured || c.hooks_installed;
+    checks.push(check);
+    const parts = [
+      t(c.skill_installed ? 'integration.skill.ready' : 'integration.skill.missing'),
+      t(c.mcp_configured ? 'integration.mcp.ready' : 'integration.mcp.missing'),
+      t(c.hooks_installed ? 'integration.hooks.ready' : 'integration.hooks.missing'),
+      t('integration.connection.short', c.mcp_connection || 'unavailable'),
+      t('integration.auto.short', c.auto_injection || 'unverified'),
+    ];
+    return el('tr', { 'data-integration-client': c.client },
+      el('td', {}, check), el('td', {}, c.client),
+      el('td', { class: 'dim' }, c.client_version || t(c.present ? 'integration.detected' : 'integration.notfound')),
+      el('td', {}, parts.join(' · ')),
+      el('td', { class: c.problem ? 'detail' : 'dim' }, c.problem || c.memory || ''));
+  });
+  const install = el('button', { class: 'primary' }, t('integration.install'));
+  const uninstall = el('button', { class: 'danger' }, t('integration.uninstall'));
+  const refresh = el('button', {}, t('integration.refresh'));
+  install.onclick = () => changeIntegration('install', () => checks, install, reload);
+  uninstall.onclick = () => changeIntegration('uninstall', () => checks, uninstall, reload);
+  refresh.onclick = async () => { refresh.disabled = true; await reload(); };
   return el('div', { class: 'guidance', 'data-hooks': '', style: 'margin-top:14px' },
     el('div', { class: 'eyebrow', style: 'margin:0 0 6px' }, t('hooks.title', t('hooks.context.' + (h.context || 'minimal')))),
+    el('div', { 'data-agent-integration': '' },
+      el('p', {}, t('integration.title')),
+      el('table', { style: 'font-size:13px' },
+        el('thead', {}, el('tr', {}, el('th', {}), el('th', {}, t('hooks.col.client')), el('th', {}, t('integration.version')), el('th', {}, t('integration.state')), el('th', {}, t('integration.detail')))),
+        el('tbody', {}, integrationRows)),
+      el('div', { class: 'row', style: 'margin-top:8px;gap:8px' }, install, refresh, uninstall),
+      el('p', { class: 'dim' }, t('integration.connection', h.mcp_connection || 'unverified')),
+      el('p', { class: 'dim' }, t('integration.directory', h.directory || 'unavailable')),
+      el('p', { class: 'dim' }, t('integration.memory', h.memory || 'unavailable'))),
+
     el('table', { style: 'font-size:13px' },
       el('thead', {}, el('tr', {}, el('th', {}, t('hooks.col.client')), el('th', {}, t('hooks.col.state')), el('th', {}, t('hooks.col.verified')), el('th', {}, t('hooks.col.path')))),
       el('tbody', {}, rows.map((r) => el('tr', { 'data-hook-client': r.client, 'data-hook-state': r.state },
@@ -98,8 +157,6 @@ function hooksCard(h) {
         el('td', { class: r.verified ? '' : 'dim' }, t(r.verifiedKey)),
         el('td', { class: 'dim', style: 'word-break:break-all' }, r.path, r.note ? el('div', { style: 'font-size:11px' }, r.note) : null))))),
     el('div', { class: 'dim', style: 'margin:8px 0 6px;font-size:12px' }, t('hooks.registry', h.mounts_registry || '', h.mounts || 0)),
-    ...commands(h).map((c) => el('div', { class: 'row', style: 'margin-top:6px;gap:8px;align-items:center;flex-wrap:wrap' },
-      el('span', { class: 'dim' }, t(c.key)), el('code', { class: 'detail' }, c.text), copyBtn(c.text))),
     el('p', { class: 'dim', style: 'margin:8px 0 0;font-size:12px' }, t('hooks.note')));
 }
 
@@ -142,7 +199,7 @@ export function renderConnectPanel(host, { open = false } = {}) {
     try {
       const h = await api.get('/agent/hooks');
       if (disposed) return;
-      fill(hooks, hooksCard(h));
+      fill(hooks, hooksCard(h, load));
     } catch (e) {
       if (disposed) return;
       fill(hooks);

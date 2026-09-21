@@ -1,7 +1,9 @@
 package mcpsrv
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -277,5 +279,96 @@ func TestContextTokenBudgetIsGlobalAcrossGroups(t *testing.T) {
 	}
 	if total > one*2 || len(out.Knowledge)+len(out.Memories)+len(out.Handoffs) != 2 || !out.Truncated || out.TruncatedBy != truncatedByTokens {
 		t.Fatalf("tokens=%d budget=%d groups=%d/%d/%d truncated=%v by=%q", total, one*2, len(out.Knowledge), len(out.Memories), len(out.Handoffs), out.Truncated, out.TruncatedBy)
+	}
+}
+
+func TestContextSearchScopedHandoffOutsideProject(t *testing.T) {
+	e, _, x := newIndexAgentEnv(t, Options{Workspace: "/work/.agent"}, agent.Scope{Read: []string{"/work"}}, rulesOn("/work"))
+	var begun beginSessionOutput
+	if r := e.call(t, "begin_session", beginSessionInput{Name: "handoff-project"}, &begun); r.IsError {
+		t.Fatal(errText(r))
+	}
+	var finished finishSessionOutput
+	if r := e.call(t, "finish_session", finishSessionInput{Scope: "/work/project-a", Handoff: "handoffneedle evidence /work/project-a/source.md; pending review"}, &finished); r.IsError {
+		t.Fatal(errText(r))
+	}
+	e.drain(t)
+	// Fill the shared workspace with more other-project matches than the
+	// candidate budget. Scoped retrieval must query the recorded handoff path
+	// directly instead of filtering this capped result set afterward.
+	dirs := []string{"/work/.agent"}
+	for i := 0; i < contextCandidateLimit(1); i++ {
+		dir := fmt.Sprintf("work/.agent/aaa-other-%03d", i)
+		e.fake.Seed(dir+"/handoff.md", []byte("<!-- cloudfs-project-scope: \"/work/project-b\" -->\n# Handoff\n\nhandoffneedle unrelated\n"))
+		dirs = append(dirs, "/"+dir)
+	}
+	if _, err := e.fs.DropCaches(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.listDirs(t, "/work")
+	e.listDirs(t, dirs...)
+	reconcile(t, x)
+	if _, err := e.fs.DropCaches(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reads := e.fake.Calls("ReadRange")
+	scopes, err := e.server.sessionHandoffScopes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scopes[finished.Handoff] != "/work/project-a" {
+		t.Fatalf("handoff scope metadata: %v", scopes)
+	}
+	var out contextSearchOutput
+	if r := e.call(t, "context_search", contextSearchInput{Query: "handoffneedle", Path: "/work/project-a", Scope: "/work/project-a", Sources: []string{"handoff"}, TopK: 1}, &out); r.IsError {
+		t.Fatal(errText(r))
+	}
+	if len(out.Handoffs) != 1 || out.Handoffs[0].Path != finished.Handoff {
+		t.Fatalf("lost handoff: %+v", out)
+	}
+	if got := e.fake.Calls("ReadRange"); got != reads {
+		t.Fatalf("scope filtering downloaded handoffs: reads %d -> %d", reads, got)
+	}
+	if r := e.call(t, "context_search", contextSearchInput{Query: "handoffneedle", Path: "/work/project-b", Scope: "/work/project-b", Sources: []string{"handoff"}, TopK: 1}, &out); r.IsError {
+		t.Fatal(errText(r))
+	}
+	if len(out.Handoffs) != 0 {
+		t.Fatalf("cross-project handoff: %+v", out)
+	}
+	if got := e.fake.Calls("ReadRange"); got != reads {
+		t.Fatalf("cross-project filtering downloaded handoffs: reads %d -> %d", reads, got)
+	}
+}
+
+func TestVersionedReadColdAndHotDownloadBudget(t *testing.T) {
+	e := newEnv(t, Options{})
+	e.fake.Seed("work/cache-proof.md", []byte("cache-proof content\n"))
+	e.listDirs(t, "/work")
+	var found contextSearchOutput
+	if r := e.call(t, "context_search", contextSearchInput{Query: "cache-proof", Path: "/work", Sources: []string{"knowledge"}}, &found); r.IsError {
+		t.Fatal(errText(r))
+	}
+	if len(found.Knowledge) != 1 {
+		t.Fatalf("%+v", found)
+	}
+	input := readTextInput{Path: found.Knowledge[0].Path, ExpectedVersion: found.Knowledge[0].Version}
+	before := e.fake.Calls("ReadRange")
+	for _, phase := range []string{"cold", "hot"} {
+		start := time.Now()
+		r := e.call(t, "read_text", input, nil)
+		elapsed := time.Since(start)
+		if r.IsError {
+			t.Fatal(errText(r))
+		}
+		b, _ := json.Marshal(r)
+		reads := e.fake.Calls("ReadRange")
+		t.Logf("%s: duration=%s output_bytes=%d estimated_output_tokens=%d remote_reads=%d", phase, elapsed, len(b), agent.EstimateTokens(string(b)), reads-before)
+		if phase == "cold" && reads <= before {
+			t.Fatal("cold read did not exercise provider")
+		}
+		if phase == "hot" && reads != before {
+			t.Fatal("hot read downloaded content")
+		}
+		before = reads
 	}
 }
