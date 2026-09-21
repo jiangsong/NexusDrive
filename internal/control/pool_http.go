@@ -39,6 +39,13 @@ type PoolMemberView struct {
 	PendingOps   int      `json:"pending_ops"`
 	NamingDenied int      `json:"naming_denied_count"`
 	Class        []string `json:"class"`
+	// WriteMSPerFile is what one file's upload costs on this member and
+	// WriteSamples how many finished files that average rests on. Placement
+	// ranks by free space, so without these the page shows only the half of
+	// the trade-off that argues for the roomiest drive. Both are omitted
+	// until a file lands: a zero would read as "infinitely fast".
+	WriteMSPerFile float64 `json:"write_ms_per_file,omitempty"`
+	WriteSamples   int     `json:"write_samples,omitempty"`
 	// PendingRestart is "add" or "remove" when the saved configuration and
 	// the running pool intentionally differ until the next daemon restart.
 	PendingRestart string `json:"pending_restart,omitempty"`
@@ -282,7 +289,7 @@ func (s *Server) poolByName(w http.ResponseWriter, name string) (*pool.Pool, boo
 	return p, true
 }
 
-func poolView(ctx context.Context, name string, p *pool.Pool) (PoolView, error) {
+func poolView(ctx context.Context, name string, p *pool.Pool, stats map[string]*provider.Stats) (PoolView, error) {
 	r, err := p.StatusReport(ctx)
 	if err != nil {
 		return PoolView{}, err
@@ -301,6 +308,9 @@ func poolView(ctx context.Context, name string, p *pool.Pool) (PoolView, error) 
 	v.Members = []PoolMemberView{}
 	for _, m := range r.Members {
 		mv := PoolMemberView{Remote: m.Name, Root: m.Root, State: string(m.State), LastError: m.LastError, LatencyMS: m.LatencyMS, Weight: m.Weight, Files: m.Files, PendingOps: m.PendingOps, NamingDenied: m.NamingDenied}
+		if calls, nanos, _ := stats[m.Name].Report(); calls != nil {
+			mv.WriteMSPerFile, mv.WriteSamples = writeCostMS(calls, nanos)
+		}
 		if !m.LastOK.IsZero() {
 			mv.LastOK = m.LastOK.Format(time.RFC3339)
 		}
@@ -384,7 +394,7 @@ func (s *Server) poolStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		v, err := poolView(r.Context(), name, s.collector.Pools[name])
+		v, err := poolView(r.Context(), name, s.collector.Pools[name], s.collector.CallStats)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
