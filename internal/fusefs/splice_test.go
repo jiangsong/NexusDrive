@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"cloudfs/internal/journal"
 	"cloudfs/internal/vfs"
 )
 
@@ -224,5 +225,54 @@ func TestKernelReadIsObservedAsFromKernel(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ino != b.Ino || !got[0].kernel {
 		t.Fatalf("plain kernel read observed as %+v", got)
+	}
+}
+
+func TestSpliceLeaseYieldsToOpenWriter(t *testing.T) {
+	e := newBackingFixture(t)
+	ctx := context.Background()
+	j, err := journal.Open(journal.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	e.root.opt.FS.SetWriteBackend(j, nil)
+	a, err := e.root.opt.FS.StatPath(ctx, "/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.root.opt.FS.Open(ctx, a.Ino, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &file{root: e.root, handle: h}
+	defer f.Release(ctx)
+	first, errno := f.Read(ctx, make([]byte, 7), 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, ok := first.(seekable); !ok {
+		t.Fatal("expected initial cache lease")
+	}
+	first.Done()
+	w, err := e.root.opt.FS.Open(ctx, a.Ino, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.root.opt.FS.Release(ctx, w)
+	if _, err := e.root.opt.FS.Write(ctx, w, []byte("updated"), 0); err != nil {
+		t.Fatal(err)
+	}
+	res, errno := f.Read(ctx, make([]byte, 7), 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	defer res.Done()
+	if _, ok := res.(seekable); ok {
+		t.Fatal("reused immutable lease while writer is active")
+	}
+	got, status := res.Bytes(make([]byte, 7))
+	if status != 0 || string(got) != "updated" {
+		t.Fatalf("read %q, %v; want staged content", got, status)
 	}
 }

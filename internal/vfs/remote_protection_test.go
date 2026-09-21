@@ -83,8 +83,8 @@ func TestRemoteProtectionSurvivesClosePublicationGap(t *testing.T) {
 	called := false
 	e.fs.commitFault = func() error {
 		called = true
-		if _, registered := e.fs.HandleByFH(h.FH); registered {
-			t.Fatal("fixture did not reach the close publication gap")
+		if _, registered := e.fs.HandleByFH(h.FH); !registered {
+			t.Fatal("writer retired before close publication completed")
 		}
 		r := NewRefresher(e.fs, time.Minute)
 		applied, err := r.apply(ctx, e.mount(), provider.Change{Op: provider.ChangeDelete, ID: n.RemoteID})

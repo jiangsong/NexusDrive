@@ -957,7 +957,7 @@ sshfs 与本地磁盘上，数字见 `docs/perf-report.html`。这一轮测试�
 |---|---|---|
 | 单元 | 各 `internal/*` 包的 `_test.go` | MetaStore TTL / 负缓存 / 索引、块缓存位图与淘汰、日志状态机、限流 AIMD、代理规则匹配、错误分类 |
 | 驱动 | `internal/provider/*/` | 每个驱动用 `httptest` 回放真实响应形状，断言请求路径、必需 header、分页、秒传、分片、错误码映射 |
-| 语义 | `test/conformance` | 同一组操作分别跑在 cloudfs 挂载与本地目录上并逐项比对：创建 / 读写 / seek / append / truncate / rename / readdir / ENOENT / 空文件 / 大文件；硬链接、符号链接、chown 的差异被显式断言，chmod 则正向比对权限位与本地目录一致 |
+| 语义 | `test/conformance` | 同一组操作分别跑在 cloudfs 挂载与本地目录上并逐项比对：创建 / 读写 / seek / append / truncate / rename / readdir / ENOENT / 空文件 / 大文件 / 符号链接；硬链接、chown 的差异被显式断言，chmod 则正向比对权限位与本地目录一致。符号链接的远端编码见 [symlinks.md](symlinks.md) |
 | 可靠性 | `test/chaos` | 设计文档第 5 节矩阵：断网重试、kill -9 恢复、429 降速、风控熔断、缓存满降级、冲突副本、死信与重排、链接过期、并发写、只读拒绝 |
 | 性能 | `test/perf` | 上表的调用次数基线，外加两个 benchmark |
 | 端到端 | `test/e2e` | 配置文件 → 守护进程 → 真实 FUSE 挂载 + 真实 MCP 会话：终端与 agent 互相看得见对方的写入、崩溃恢复、只读双向拒绝、status 与 metrics 反映真实工作、`grep -r` 零远端调用 |

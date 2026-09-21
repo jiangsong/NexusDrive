@@ -285,7 +285,8 @@ func (r *Refresher) applyEvent(ctx context.Context, m Mount, e provider.Change, 
 		return false, nil
 	}
 	// Unchanged version: nothing to do, and importantly no cache churn.
-	if e.Entry.Version != "" && e.Entry.Version == local.RemoteVersion && e.Entry.Kind == local.Kind && e.Entry.ID == local.RemoteID {
+	remoteNode := nodeFromEntry(m.Remote, *e.Entry, r.fs.opt.AttrTTL)
+	if e.Entry.Version != "" && e.Entry.Version == local.RemoteVersion && remoteNode.Kind == local.Kind && e.Entry.ID == local.RemoteID {
 		return false, nil
 	}
 	// A pending local write wins locally until it uploads; the upload's own
@@ -294,7 +295,7 @@ func (r *Refresher) applyEvent(ctx context.Context, m Mount, e provider.Change, 
 		return false, nil
 	}
 
-	updated := nodeFromEntry(m.Remote, *e.Entry, r.fs.opt.AttrTTL)
+	updated := remoteNode
 	updated.Ino = local.Ino
 	updated.ParentIno = local.ParentIno
 	updated.Name = local.Name // a rename arrives as a listing change, not here

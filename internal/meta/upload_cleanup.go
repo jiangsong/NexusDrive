@@ -38,7 +38,7 @@ func (s *Store) RemoveLocalVersion(ctx context.Context, request LocalVersionClea
 	}
 	expected := make(map[uint64]Node, len(request.Nodes))
 	for _, n := range request.Nodes {
-		if n.Ino == 0 || n.Ino == RootIno || n.Kind != provider.KindFile || !n.Dirty ||
+		if n.Ino == 0 || n.Ino == RootIno || (n.Kind != provider.KindFile && n.Kind != provider.KindSymlink) || !n.Dirty ||
 			n.Remote != request.Remote || n.RemoteID != request.RemoteID || n.Version != request.Version || n.Size != request.Size {
 			return ErrLocalVersionChanged
 		}

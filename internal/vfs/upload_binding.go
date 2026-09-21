@@ -44,7 +44,7 @@ func (f *FS) uploadBinding(ctx context.Context, m Mount) (journal.UploadBinding,
 // carrying the identity the queue published: a file with the row's name and
 // size, or for a directory creation the directory itself.
 func uploadNodeMatches(n meta.Node, u journal.Upload) bool {
-	if n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) || n.Version != localVersion(u.ID) || n.Name != u.Name {
+	if n.Remote != u.Remote || n.RemoteID != localRemoteID(u.ID) || n.Version != localVersion(u.ID) || remoteName(n.Name, n.Kind) != u.Name {
 		return false
 	}
 	if u.IsMkdir() {

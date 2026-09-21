@@ -33,13 +33,15 @@ const (
 	opStatfs
 	opCopyFileRange
 	opLseek
+	opSymlink
+	opReadlink
 	nOps
 )
 
 var opNames = [nOps]string{
 	"lookup", "getattr", "setattr", "opendir", "readdir", "dir_lookup", "entry_cache", "open", "create",
 	"mkdir", "unlink", "rmdir", "rename", "read", "write", "flush", "fsync", "release",
-	"getxattr", "statfs", "copy_file_range", "lseek",
+	"getxattr", "statfs", "copy_file_range", "lseek", "symlink", "readlink",
 }
 
 // readBucketEdges are the upper bounds of the READ size histogram, in bytes.

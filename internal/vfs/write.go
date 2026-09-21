@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 
 // writeState is the staging file behind an open write handle.
 type writeState struct {
+	// mu serializes staging IO with commit, which closes and replaces its file.
+	mu      sync.Mutex
 	staging *journal.Staging
 	// parentRemoteID is where the file will be created.
 	parentRemoteID string
@@ -201,6 +204,8 @@ func (f *FS) Write(ctx context.Context, h *Handle, p []byte, off int64) (int, er
 	if w == nil {
 		return 0, ErrReadOnly
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.mode == config.ModeReadonly {
 		return 0, ErrReadOnly
 	}
@@ -279,6 +284,8 @@ func (f *FS) truncateHandle(ctx context.Context, h *Handle, size int64) (bool, e
 	if w == nil || closed {
 		return false, nil
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	// Truncating to nothing does not need the old content, and this is the
 	// path every rewrite takes: the kernel turns O_TRUNC into a truncate,
 	// and seeding the staging file first would download a file that is
@@ -334,7 +341,7 @@ func (f *FS) commitWrite(ctx context.Context, h *Handle, w *writeState) error {
 			StagingID:       w.staging.ID,
 			Remote:          h.Mount.Remote,
 			RemoteParentID:  w.parentRemoteID,
-			Name:            w.name,
+			Name:            remoteName(w.name, h.Node.Kind),
 			BlobPath:        blob,
 			Size:            size,
 			Hashes:          hashes,
@@ -499,7 +506,12 @@ func (f *FS) Sync(ctx context.Context, h *Handle) error {
 	w := h.writer
 	closed := h.closed
 	h.mu.Unlock()
-	if w == nil || closed || !w.dirty {
+	if w == nil || closed {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.dirty {
 		return nil
 	}
 	// Commit the current contents, then continue writing into a fresh staging
@@ -573,6 +585,13 @@ func (f *FS) ensureStagingSeeded(ctx context.Context, h *Handle, w *writeState, 
 
 // Create makes a new empty file and returns an open write handle.
 func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, error) {
+	return f.create(ctx, parent, name, provider.KindFile)
+}
+
+func (f *FS) create(ctx context.Context, parent uint64, name string, kind provider.Kind) (*Handle, error) {
+	if err := checkLinkName(name); err != nil {
+		return nil, err
+	}
 	m, parentPath, err := f.MountForIno(ctx, parent)
 	if err != nil {
 		return nil, err
@@ -606,8 +625,11 @@ func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, e
 		return nil, ErrNotDir
 	}
 	node := meta.Node{
-		ParentIno: parent, Name: name, Kind: provider.KindFile, Mode: 0o644,
+		ParentIno: parent, Name: name, Kind: kind, Mode: 0o644,
 		MTime: f.now(), Remote: m.Remote, TTL: f.opt.AttrTTL, Dirty: true,
+	}
+	if kind == provider.KindSymlink {
+		node.Mode = 0o777
 	}
 	// Upsert clears the name's own negative-cache entry; the rest of the
 	// parent's entries stay valid.
@@ -633,8 +655,9 @@ func (f *FS) Create(ctx context.Context, parent uint64, name string) (*Handle, e
 	h.FH = f.nextFH
 	f.nextFH++
 	f.registerHandleLocked(h)
-	f.addWriterLocked(node.Ino)
+	readers := f.addWriterLocked(node.Ino, false)
 	f.mu.Unlock()
+	markReadersFollowing(readers)
 	f.changedEntry(ctx, parent, name, false, KindCreate)
 	return h, nil
 }
@@ -704,6 +727,9 @@ func (f *FS) WriteFile(ctx context.Context, p string, data []byte, appendMode bo
 // points them at the real one. A strict mount creates the directory on the
 // backend before returning, as it does for file content.
 func (f *FS) Mkdir(ctx context.Context, parent uint64, name string) (Attr, error) {
+	if err := checkLinkName(name); err != nil {
+		return Attr{}, err
+	}
 	m, _, err := f.MountForIno(ctx, parent)
 	if err != nil {
 		return Attr{}, err
@@ -933,7 +959,7 @@ func (f *FS) Remove(ctx context.Context, parent uint64, name string, recursive b
 	if f.queuesDeletes(m) {
 		f.copyPublishMu.Lock()
 		defer f.copyPublishMu.Unlock()
-		return f.remove(ctx, m, parent, name, recursive, removeQueued, n.Ino)
+		return f.remove(ctx, m, parent, name, recursive, removeQueued, n.Ino, "")
 	}
 	if !IsLocalOnly(n.RemoteID) && n.RemoteID != "" {
 		if err := m.Provider.Delete(ctx, n.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
@@ -942,7 +968,7 @@ func (f *FS) Remove(ctx context.Context, parent uint64, name string, recursive b
 	}
 	f.copyPublishMu.Lock()
 	defer f.copyPublishMu.Unlock()
-	return f.remove(ctx, m, parent, name, recursive, removeDone, n.Ino)
+	return f.remove(ctx, m, parent, name, recursive, removeDone, n.Ino, "")
 }
 
 // removeMode says what remove does about the backend's copy.
@@ -967,7 +993,7 @@ const (
 // when set, is the node the caller looked up before taking the gate: a
 // different node under the name now means the name moved on in between,
 // and it is left alone.
-func (f *FS) remove(ctx context.Context, m Mount, parent uint64, name string, recursive bool, mode removeMode, ino uint64) error {
+func (f *FS) remove(ctx context.Context, m Mount, parent uint64, name string, recursive bool, mode removeMode, ino uint64, deleteOrderName string) error {
 	n, err := f.lookupNode(ctx, parent, name)
 	if err != nil {
 		return err
@@ -1013,7 +1039,7 @@ func (f *FS) remove(ctx context.Context, m Mount, parent uint64, name string, re
 		if parentID == "" {
 			parentID = m.RootID
 		}
-		if err := f.queueDelete(ctx, m, n, parentID); err != nil {
+		if err := f.queueDelete(ctx, m, n, parentID, deleteOrderName); err != nil {
 			return err
 		}
 	}
@@ -1138,6 +1164,9 @@ func (f *FS) Rename(ctx context.Context, oldParent uint64, oldName string, newPa
 }
 
 func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newParent uint64, newName string) error {
+	if err := checkLinkName(newName); err != nil {
+		return err
+	}
 	srcMount, _, err := f.MountForIno(ctx, oldParent)
 	if err != nil {
 		return err
@@ -1158,6 +1187,9 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 	n, err := f.lookupNode(ctx, oldParent, oldName)
 	if err != nil {
 		return err
+	}
+	if n.Kind == provider.KindSymlink && len(remoteName(newName, n.Kind)) > 255 {
+		return syscall.ENAMETOOLONG
 	}
 	// A file that has not been uploaded yet exists only as a queued write.
 	// Retarget that write instead of asking the provider about an id it has
@@ -1212,7 +1244,7 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 			}
 		}
 		f.copyPublishMu.Lock()
-		err := f.remove(ctx, dstMount, newParent, newName, true, removeDone, victim.Ino)
+		err := f.remove(ctx, dstMount, newParent, newName, true, removeDone, victim.Ino, "")
 		f.copyPublishMu.Unlock()
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
@@ -1262,7 +1294,7 @@ func (f *FS) rename(ctx context.Context, oldParent uint64, oldName string, newPa
 			if !caps.ServerRename {
 				return provider.ErrUnsupported
 			}
-			renamed, err := srcMount.Provider.Rename(ctx, movedID, newName)
+			renamed, err := srcMount.Provider.Rename(ctx, movedID, remoteName(newName, n.Kind))
 			if err != nil {
 				return mapProviderErr(err)
 			}
@@ -1346,7 +1378,7 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 		return "", err
 	}
 	for _, u := range pending {
-		err := f.journal.Retarget(ctx, u.ID, targetParentID, newName)
+		err := f.journal.Retarget(ctx, u.ID, targetParentID, remoteName(newName, n.Kind))
 		if err == nil {
 			f.retargetIfParentLanded(ctx, u.ID, newParent, targetParentID)
 			continue
@@ -1369,7 +1401,12 @@ func (f *FS) renameLocalOnly(ctx context.Context, n meta.Node, dst Mount, newPar
 		if f.queuesDeletes(dst) {
 			mode = removeQueued
 		}
-		if err := f.remove(ctx, dst, newParent, newName, true, mode, victim.Ino); err != nil && !errors.Is(err, ErrNotFound) {
+		// Delete rows order later writes by Name. A file and a symlink with the
+		// same virtual name have different wire names, so use the incoming row's
+		// wire name as the ordering key while deletion itself still addresses the
+		// victim by RemoteID.
+		orderName := remoteName(newName, n.Kind)
+		if err := f.remove(ctx, dst, newParent, newName, true, mode, victim.Ino, orderName); err != nil && !errors.Is(err, ErrNotFound) {
 			return "", err
 		}
 	} else if err != nil && !errors.Is(err, meta.ErrNotFound) {

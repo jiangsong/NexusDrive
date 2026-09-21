@@ -9,8 +9,10 @@ import (
 // not just its virtual name. Type transitions also require a fresh inode:
 // kernel adapters cannot change an existing inode's stable file type.
 func directoryReplacement(old, next Node) bool {
-	return (old.IsDir() || next.IsDir()) &&
-		(old.Kind != next.Kind || old.Remote != next.Remote || old.RemoteID != next.RemoteID)
+	if old.Kind != next.Kind {
+		return true
+	}
+	return old.IsDir() && (old.Remote != next.Remote || old.RemoteID != next.RemoteID)
 }
 
 // prepareDirectoryReplacementTx retains the entire old object when one of

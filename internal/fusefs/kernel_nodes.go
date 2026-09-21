@@ -3,6 +3,7 @@ package fusefs
 import (
 	"context"
 	"sync"
+	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 )
@@ -92,8 +93,11 @@ func (k *kernelNodes) live(ino uint64) []*node {
 
 // newInode builds the kernel node for a VFS inode under parent and tracks
 // it; every path that hands the kernel a new inode goes through here.
-func (n *node) newInode(ctx context.Context, ino uint64, isDir bool) *fs.Inode {
+func (n *node) newInode(ctx context.Context, ino uint64, isDir, isSymlink bool) *fs.Inode {
 	child, stable := n.root.newNode(ino, isDir)
+	if isSymlink {
+		stable.Mode = syscall.S_IFLNK
+	}
 	inode := n.NewInode(ctx, child, stable)
 	n.root.kernel.track(child)
 	return inode

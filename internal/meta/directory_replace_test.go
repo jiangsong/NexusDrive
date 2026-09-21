@@ -40,15 +40,17 @@ func replaceListingTest(t *testing.T, s *Store, staged bool, n Node, protect fun
 
 func TestDirectoryReplacementDropsOldTreeAndUsesFreshInode(t *testing.T) {
 	for _, staged := range []bool{false, true} {
-		for _, mode := range []string{"to-file", "directory-id", "remote", "from-file"} {
+		for _, mode := range []string{"to-file", "directory-id", "remote", "from-file", "to-symlink", "from-symlink"} {
 			t.Run(fmt.Sprintf("staged=%v/%s", staged, mode), func(t *testing.T) {
 				s, _ := openTest(t)
 				ctx := context.Background()
 				n := dir(RootIno, "entry")
 				n.Remote = "r"
 				n.RemoteID = "old"
-				if mode == "from-file" {
+				if mode == "from-file" || mode == "to-symlink" {
 					n.Kind = provider.KindFile
+				} else if mode == "from-symlink" {
+					n.Kind = provider.KindSymlink
 				}
 				old, err := s.Upsert(ctx, n)
 				if err != nil {
@@ -73,6 +75,10 @@ func TestDirectoryReplacementDropsOldTreeAndUsesFreshInode(t *testing.T) {
 					next.Remote = "other"
 				case "from-file":
 					next.Kind = provider.KindDir
+				case "to-symlink":
+					next.Kind = provider.KindSymlink
+				case "from-symlink":
+					next.Kind = provider.KindFile
 				}
 				change := replaceListingTest(t, s, staged, next, nil)
 				current, err := s.Lookup(ctx, RootIno, "entry")

@@ -295,6 +295,9 @@ cloudfs uploads watch                      # 跟踪队列直到排空；有死�
 cloudfs status --watch                     # 先打完整状态，再跟踪上传队列
 ```
 
+挂载目录支持符号链接，npm 的 `.bin` 和 workspace 链接可以原地创建、执行；远端以
+`.rclonelink` 普通文件保存链接目标。该后缀为保留名称，详见[符号链接说明](docs/symlinks.md)。
+
 **往挂载点里拷贝是两段的**：`cp` 返回时数据只是本地持久化（已 fsync 进日志），上传在后台继续。
 实测 3434 个文件前台 37 秒、后台约 20 分钟。前台那 37 秒也不是白花的：`journal.durability=power`
 下每个文件都要一次 `F_FULLFSYNC`（本机实测 4.07 ms，普通 `fsync(2)` 只要 74 µs），串行拷贝小文件

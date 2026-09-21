@@ -9,12 +9,31 @@ import (
 
 // addWriterLocked requires f.mu. Every successful write Open/Create owns one
 // reference until Release finishes its commit, including the publication gap
-// after the handle has been removed from the public FH map.
-func (f *FS) addWriterLocked(ino uint64) {
+// after the handle has been removed from the public FH map. It returns readers
+// that predate this writer; the caller marks them after dropping f.mu so the
+// handle lock order stays acyclic.
+func (f *FS) addWriterLocked(ino uint64, existingReaders bool) []*Handle {
 	if f.writers == nil {
 		f.writers = make(map[uint64]int)
 	}
+	readers := make([]*Handle, 0)
+	if existingReaders {
+		for _, h := range f.handles {
+			if h.Ino == ino && h.writer == nil {
+				readers = append(readers, h)
+			}
+		}
+	}
 	f.writers[ino]++
+	return readers
+}
+
+func markReadersFollowing(readers []*Handle) {
+	for _, h := range readers {
+		h.mu.Lock()
+		h.followWrites = true
+		h.mu.Unlock()
+	}
 }
 
 func (f *FS) removeWriter(ino uint64) {

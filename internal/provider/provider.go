@@ -18,6 +18,8 @@ type Kind int
 const (
 	KindFile Kind = iota
 	KindDir
+	// KindSymlink is a virtual link whose remote representation is a file.
+	KindSymlink
 )
 
 // HashType names a content hash algorithm a backend can compute or verify.

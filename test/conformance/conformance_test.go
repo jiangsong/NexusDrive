@@ -533,10 +533,22 @@ func TestDeliberateDifferencesAreExplicit(t *testing.T) {
 		t.Error("hard links should be refused; the remotes have no equivalent")
 	}
 
-	// Symlinks are likewise unsupported.
-	err = os.Symlink("f.txt", filepath.Join(p.cloud, "soft.txt"))
-	if err == nil {
-		t.Error("symlinks should be refused")
+	// Symbolic links are represented by ordinary remote objects, but expose
+	// the same local semantics as a native filesystem.
+	for _, root := range []string{p.cloud, p.local} {
+		link := filepath.Join(root, "soft.txt")
+		if err := os.Symlink("f.txt", link); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.Readlink(link); err != nil || got != "f.txt" {
+			t.Fatalf("readlink: %q %v", got, err)
+		}
+		if got, err := os.ReadFile(link); err != nil || string(got) != "x" {
+			t.Fatalf("read through link: %q %v", got, err)
+		}
+		if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("lstat: %v %v", info, err)
+		}
 	}
 
 	// chmod persists. No remote has anywhere to put a permission bit, so

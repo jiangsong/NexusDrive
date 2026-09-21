@@ -107,7 +107,7 @@ func (f *FS) beginCopyJob(ctx context.Context, src, dst string, h *Handle, dm Mo
 	}
 	defer finish()
 	if c.Job().State == journal.CopyPreparing {
-		read := func(p []byte, off int64) (int, error) { return f.Read(ctx, h, p, off) }
+		read := func(p []byte, off int64) (int, error) { return f.read(ctx, h, p, off, false) }
 		if whole != nil {
 			read = whole.ReadAt
 		}

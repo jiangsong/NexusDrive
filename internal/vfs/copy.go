@@ -44,6 +44,13 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 	if !parent.IsDir() {
 		return Attr{}, ErrNotDir
 	}
+	if n.Kind == provider.KindSymlink {
+		target, err := f.Readlink(ctx, n.Ino)
+		if err != nil {
+			return Attr{}, err
+		}
+		return f.Symlink(ctx, parent.Ino, path.Base(dst), string(target))
+	}
 	dm, _, err := f.MountForIno(ctx, parent.Ino)
 	if err != nil {
 		return Attr{}, err
@@ -64,6 +71,9 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 		return Attr{}, err
 	}
 	name := path.Base(dst)
+	if err := checkLinkName(name); err != nil {
+		return Attr{}, err
+	}
 	if _, err := f.lookupNode(ctx, parent.Ino, name); err == nil {
 		return Attr{}, ErrExists
 	} else if !errors.Is(err, ErrNotFound) {

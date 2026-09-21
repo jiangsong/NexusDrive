@@ -510,14 +510,15 @@ func (f *FS) isMountRoot(p string) bool {
 
 // Attr is the stat result handed to adapters.
 type Attr struct {
-	Ino     uint64
-	Name    string
-	IsDir   bool
-	Size    int64
-	MTime   time.Time
-	Mode    uint32
-	Remote  string
-	Version string
+	Ino       uint64
+	Name      string
+	IsDir     bool
+	IsSymlink bool
+	Size      int64
+	MTime     time.Time
+	Mode      uint32
+	Remote    string
+	Version   string
 	// Cached is the fraction of the file present in the block cache, 0..1.
 	Cached float64
 	// Pinned reports whether the path is covered by a pin.
@@ -540,7 +541,8 @@ func (f *FS) attrOf(ctx context.Context, n meta.Node) Attr {
 func (f *FS) attrAt(ctx context.Context, n meta.Node, p string) Attr {
 	a := Attr{
 		Ino: n.Ino, Name: n.Name, IsDir: n.IsDir(), Size: n.Size,
-		MTime: n.MTime, Mode: n.Mode, Remote: n.Remote, Version: n.Version,
+		IsSymlink: n.Kind == provider.KindSymlink,
+		MTime:     n.MTime, Mode: n.Mode, Remote: n.Remote, Version: n.Version,
 		LocalOnly: IsLocalOnly(n.RemoteID),
 	}
 	if !n.IsDir() && n.RemoteID != "" {
@@ -639,11 +641,15 @@ func (f *FS) pendingSize(ino uint64) (int64, bool) {
 		h.mu.Lock()
 		w := h.writer
 		closed := h.closed
+		var staging *journal.Staging
+		if w != nil {
+			staging = w.staging
+		}
 		h.mu.Unlock()
-		if w == nil || closed || w.staging == nil {
+		if closed || staging == nil {
 			continue
 		}
-		if s := w.staging.Size(); s > size || !found {
+		if s := staging.Size(); s > size || !found {
 			size = s
 			found = true
 		}
@@ -1137,10 +1143,14 @@ func localOnlyNode(n meta.Node) bool {
 	if IsLocalOnly(n.RemoteID) {
 		return true
 	}
-	return n.Kind == provider.KindFile && (n.RemoteID == "" || n.Dirty)
+	return !n.IsDir() && (n.RemoteID == "" || n.Dirty)
 }
 
 func nodeFromEntry(remote string, e provider.Entry, ttl time.Duration) meta.Node {
+	if e.Kind == provider.KindFile && strings.HasSuffix(e.Name, symlinkSuffix) {
+		e.Name = strings.TrimSuffix(e.Name, symlinkSuffix)
+		e.Kind = provider.KindSymlink
+	}
 	n := meta.Node{
 		Name: e.Name, Kind: e.Kind, Size: e.Size, MTime: e.ModTime,
 		Remote: remote, RemoteID: e.ID, Version: e.Version,
@@ -1151,6 +1161,8 @@ func nodeFromEntry(remote string, e provider.Entry, ttl time.Duration) meta.Node
 	}
 	if e.Kind == provider.KindDir {
 		n.Mode = 0o755
+	} else if e.Kind == provider.KindSymlink {
+		n.Mode = 0o777
 	} else {
 		n.Mode = 0o644
 	}

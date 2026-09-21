@@ -213,6 +213,10 @@ func errno(err error) syscall.Errno {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return syscall.EINTR
 	default:
+		var code syscall.Errno
+		if errors.As(err, &code) {
+			return code
+		}
 		if debugErrno {
 			log.Printf("fusefs: unmapped error reported as EIO: %v", err)
 		}
@@ -235,6 +239,9 @@ func (r *Root) fillAttr(a *fuse.Attr, at vfs.Attr) {
 	if at.IsDir {
 		a.Mode = syscall.S_IFDIR | mode
 		a.Nlink = 2
+	} else if at.IsSymlink {
+		a.Mode = syscall.S_IFLNK | 0o777
+		a.Nlink = 1
 	} else {
 		a.Mode = syscall.S_IFREG | mode
 		a.Nlink = 1
@@ -283,7 +290,7 @@ func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 
 // replyEntry hands the kernel the inode for an entry and its attributes.
 func (n *node) replyEntry(ctx context.Context, at vfs.Attr, out *fuse.EntryOut) *fs.Inode {
-	inode := n.newInode(ctx, at.Ino, at.IsDir)
+	inode := n.newInode(ctx, at.Ino, at.IsDir, at.IsSymlink)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)
@@ -345,6 +352,9 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func entryMode(e vfs.Attr) uint32 {
+	if e.IsSymlink {
+		return syscall.S_IFLNK
+	}
 	if e.IsDir {
 		return syscall.S_IFDIR
 	}
@@ -514,7 +524,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	}
 	at := n.root.opt.FS.HandleAttr(ctx, h)
 	n.root.applyBirthMode(ctx, at.Ino, mode, &at)
-	inode := n.newInode(ctx, at.Ino, false)
+	inode := n.newInode(ctx, at.Ino, false, false)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)
@@ -531,7 +541,7 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 		return nil, errno(err)
 	}
 	n.root.applyBirthMode(ctx, at.Ino, mode, &at)
-	inode := n.newInode(ctx, at.Ino, true)
+	inode := n.newInode(ctx, at.Ino, true, false)
 	n.root.fillAttr(&out.Attr, at)
 	out.SetEntryTimeout(n.root.opt.EntryTimeout)
 	out.SetAttrTimeout(n.root.opt.AttrTimeout)

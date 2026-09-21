@@ -42,6 +42,9 @@ type Handle struct {
 	readAheadCancel context.CancelFunc
 	// writer is non-nil for handles opened for writing.
 	writer *writeState
+	// followWrites keeps a reader on the committed identity after staging disappears.
+	followWrites bool
+	liveReadMu   sync.Mutex
 	// parentRemoteID is the provider id of the parent directory, resolved
 	// once per handle: every flush re-stages the file and needs it.
 	parentRemoteID string
@@ -85,6 +88,9 @@ func (f *FS) Open(ctx context.Context, ino uint64, write bool) (*Handle, error) 
 	if n.IsDir() {
 		return nil, ErrIsDir
 	}
+	if write && n.Kind == provider.KindSymlink {
+		return nil, syscall.ELOOP
+	}
 	if write {
 		if pending, err := f.copyAwaitingSubmit(ctx, n); err != nil {
 			return nil, err
@@ -115,13 +121,16 @@ func (f *FS) Open(ctx context.Context, ino uint64, write bool) (*Handle, error) 
 		h.writer = ws
 	}
 	f.mu.Lock()
+	h.followWrites = !write && f.writers[ino] > 0
 	h.FH = f.nextFH
 	f.nextFH++
 	f.registerHandleLocked(h)
+	var readers []*Handle
 	if write {
-		f.addWriterLocked(ino)
+		readers = f.addWriterLocked(ino, true)
 	}
 	f.mu.Unlock()
+	markReadersFollowing(readers)
 	return h, nil
 }
 
@@ -136,6 +145,11 @@ func (f *FS) HandleByFH(fh uint64) (*Handle, bool) {
 // Release closes a handle. For write handles it commits the staged data to
 // the journal (or, in strict mode, waits for the upload).
 func (f *FS) Release(ctx context.Context, h *Handle) error {
+	// Keep the writer discoverable until its final commit is visible to readers.
+	if h.writer != nil {
+		h.writer.mu.Lock()
+		defer h.writer.mu.Unlock()
+	}
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -152,9 +166,11 @@ func (f *FS) Release(ctx context.Context, h *Handle) error {
 	}
 
 	if remove {
-		f.mu.Lock()
-		f.retireHandleLocked(h)
-		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			f.retireHandleLocked(h)
+			f.mu.Unlock()
+		}()
 	}
 
 	if w != nil {
@@ -172,6 +188,11 @@ func (h *Handle) fileKey() cache.FileKey {
 // read-ahead on sequential access. It returns the number of bytes read; a
 // short read means end of file.
 func (f *FS) Read(ctx context.Context, h *Handle, buf []byte, off int64) (int, error) {
+	return f.read(ctx, h, buf, off, true)
+}
+
+// read can retain the committed snapshot for durable background copies.
+func (f *FS) read(ctx context.Context, h *Handle, buf []byte, off int64, live bool) (int, error) {
 	// Background listing work stands aside while a read is outstanding:
 	// warming a tree is never worth adding latency to the data path.
 	f.fgIO.Add(1)
@@ -199,11 +220,46 @@ func (f *FS) Read(ctx context.Context, h *Handle, buf []byte, off int64) (int, e
 		f.readStartedFault()
 	}
 	f.noteRead(ctx, h.Ino)
-	if w != nil && w.staging != nil {
-		// A write handle reads through its staging file so the reader sees
-		// its own writes. Once committed and not written since, the data is
-		// in the cache under the handle's node like any other file.
-		return w.readAt(buf, off)
+	if w != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.staging != nil {
+			return w.readAt(buf, off)
+		}
+	} else if live {
+		// Git index-pack opens extra readers before closing the pack writer.
+		// They must see staging, including a final partial page absent from the
+		// kernel cache. Serialize reads on this handle as its identity can move.
+		h.liveReadMu.Lock()
+		defer h.liveReadMu.Unlock()
+		for _, writer := range f.writeHandlesFor(h.Ino) {
+			ww := writer.writer
+			ww.mu.Lock()
+			writer.mu.Lock()
+			closed := writer.closed
+			writer.mu.Unlock()
+			if !closed && ww.staging != nil && ww.pending == nil {
+				h.mu.Lock()
+				h.followWrites = true
+				h.mu.Unlock()
+				n, err := ww.readAt(buf, off)
+				ww.mu.Unlock()
+				return n, err
+			}
+			ww.mu.Unlock()
+		}
+		h.mu.Lock()
+		follow := h.followWrites
+		h.mu.Unlock()
+		if follow {
+			fresh, err := f.meta.Get(ctx, h.Ino)
+			if err != nil {
+				return 0, err
+			}
+			h.mu.Lock()
+			h.Node = fresh
+			h.mu.Unlock()
+		}
 	}
 	return f.readCached(ctx, h, buf, off)
 }
@@ -549,7 +605,7 @@ func (f *FS) ReadFileRangeAtVersion(ctx context.Context, p, expected string, off
 	buf := make([]byte, length)
 	read := 0
 	for read < len(buf) {
-		got, err := f.Read(ctx, h, buf[read:], off+int64(read))
+		got, err := f.read(ctx, h, buf[read:], off+int64(read), expected == "")
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -825,12 +881,23 @@ func (p *prefetcher) stop() {
 // pathJoin joins a directory path and a child name inside the mount.
 func pathJoin(dir, name string) string { return path.Join(dir, name) }
 
+// LocalReadAllowed excludes mutable files from immutable cache leases.
+func (f *FS) LocalReadAllowed(h *Handle) bool {
+	h.mu.Lock()
+	allowed := h.writer == nil && !h.closed && !h.followWrites && !IsLocalOnly(h.Node.RemoteID) && !h.Node.IsDir()
+	h.mu.Unlock()
+	return allowed && !f.hasWriter(h.Ino)
+}
+
 // LocalPath returns the path of a fully cached copy of the file behind h, when
 // one exists and nothing makes it unsafe to read directly: the handle is not
 // writing, and the file's content is not a pending local write that the
 // cache holds as its only copy. The FUSE layer hands this file to the kernel
 // for passthrough reads.
 func (f *FS) LocalPath(h *Handle) (string, bool) {
+	if !f.LocalReadAllowed(h) {
+		return "", false
+	}
 	h.mu.Lock()
 	writing := h.writer != nil
 	h.mu.Unlock()
@@ -843,6 +910,9 @@ func (f *FS) LocalPath(h *Handle) (string, bool) {
 // OpenLocal leases the immutable complete cache entry for passthrough. The
 // lease keeps GC from claiming its space while the kernel still owns the fd.
 func (f *FS) OpenLocal(h *Handle) (*cache.WholeFile, error) {
+	if !f.LocalReadAllowed(h) {
+		return nil, ErrNotFound
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.writer != nil || h.closed || IsLocalOnly(h.Node.RemoteID) || h.Node.IsDir() {

@@ -31,6 +31,9 @@ func (f *file) leaseFd() (int, bool) {
 // leaseFdLocked is leaseFd's body, for callers that already hold f.passMu
 // (PassthroughFd holds it itself to add its own gate ahead of this).
 func (f *file) leaseFdLocked() (int, bool) {
+	if !f.root.opt.FS.LocalReadAllowed(f.handle) {
+		return 0, false
+	}
 	if f.pass != nil {
 		return f.root.backings.fd(f.pass)
 	}

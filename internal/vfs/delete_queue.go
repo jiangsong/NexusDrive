@@ -88,14 +88,17 @@ func (f *FS) queuesDeletes(m Mount) bool {
 // records it in the index — in that order's opposite: the index first, so
 // that a listing running between the two cannot bring the entry back, then
 // the row. A row the journal refused is taken out of the index again.
-func (f *FS) queueDelete(ctx context.Context, m Mount, n meta.Node, parentRemoteID string) error {
+func (f *FS) queueDelete(ctx context.Context, m Mount, n meta.Node, parentRemoteID, orderName string) error {
 	kind := journal.KindDelete
 	if n.IsDir() {
 		kind = journal.KindRmdir
 	}
+	if orderName == "" {
+		orderName = remoteName(n.Name, n.Kind)
+	}
 	row := journal.Upload{
 		ID: journal.NewID(), Kind: kind, Remote: m.Remote,
-		RemoteParentID: parentRemoteID, Name: n.Name, RemoteID: n.RemoteID,
+		RemoteParentID: parentRemoteID, Name: orderName, RemoteID: n.RemoteID,
 	}
 	binding, err := f.uploadBinding(ctx, m)
 	if err != nil {
@@ -135,7 +138,7 @@ func (f *FS) queueDeletesBelow(ctx context.Context, m Mount, dir meta.Node) erro
 				return err
 			}
 		case k.RemoteID != "":
-			if err := f.queueDelete(ctx, m, k, parentID); err != nil {
+			if err := f.queueDelete(ctx, m, k, parentID, ""); err != nil {
 				return err
 			}
 		}

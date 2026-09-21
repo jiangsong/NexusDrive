@@ -149,7 +149,7 @@ func (f *FS) uploadCleanupNodes(ctx context.Context, u journal.Upload, identity 
 	}
 	foundOriginal := false
 	for _, n := range nodes {
-		if n.IsDir() || !n.Dirty || n.Version != localVersion(u.ID) || n.Size != u.Size || n.Name != u.Name {
+		if n.IsDir() || !n.Dirty || n.Version != localVersion(u.ID) || n.Size != u.Size || remoteName(n.Name, n.Kind) != u.Name {
 			return nil, ErrUploadCleanupTarget
 		}
 		p, err := f.meta.Path(ctx, n.Ino)

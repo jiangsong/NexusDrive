@@ -46,9 +46,10 @@ const (
 	// no blob; Size is 0.
 	KindMkdir Kind = "mkdir"
 	// KindDelete removes the file RemoteID from the backend. Name and
-	// RemoteParentID say where it was, which is what orders it before a
-	// later write of the same name. It has no node: the tree forgot the
-	// file when the row was queued, so Ino is 0.
+	// RemoteParentID are its queue-ordering key; Name may be the incoming
+	// replacement's wire name when two wire names map to one virtual name.
+	// It has no node: the tree forgot the file when the row was queued, so
+	// Ino is 0.
 	KindDelete Kind = "delete"
 	// KindRmdir removes the directory RemoteID. It waits for the deletes
 	// queued under it, and the backend is asked to confirm the directory is

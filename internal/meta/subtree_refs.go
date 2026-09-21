@@ -24,16 +24,16 @@ type RemoteRef struct {
 // that runs on every rename.
 func (s *Store) SubtreeRefs(ctx context.Context, ino uint64, recursive bool, visit func(RemoteRef) error) error {
 	s.queries.Add(1)
-	query := `SELECT remote, remote_id, version FROM nodes WHERE ino=? AND kind=? AND remote_id!=''`
-	args := []any{ino, int(provider.KindFile)}
+	query := `SELECT remote, remote_id, version FROM nodes WHERE ino=? AND kind!=? AND remote_id!=''`
+	args := []any{ino, int(provider.KindDir)}
 	if recursive {
 		// The root is its own parent, so the walk has to refuse to step back
 		// into it or it never terminates.
 		query = `WITH RECURSIVE subtree(ino) AS (
   VALUES(?) UNION SELECT n.ino FROM nodes n JOIN subtree p ON n.parent_ino=p.ino WHERE n.ino!=?
 )
-SELECT remote, remote_id, version FROM nodes WHERE ino IN (SELECT ino FROM subtree) AND kind=? AND remote_id!=''`
-		args = []any{ino, RootIno, int(provider.KindFile)}
+SELECT remote, remote_id, version FROM nodes WHERE ino IN (SELECT ino FROM subtree) AND kind!=? AND remote_id!=''`
+		args = []any{ino, RootIno, int(provider.KindDir)}
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
