@@ -7,6 +7,7 @@ import { api } from '/ui/api.js';
 import { el, fill, bytes, toast, confirmDelete, promptText, openForm, showPanel } from '/ui/ui.js';
 import { t } from '/ui/i18n.js';
 import { openAddDrive } from '/ui/add_drive.js';
+import { writePreferenceState, writePreferencePayload, writeCostLabel } from '/ui/screens/write_preference.js';
 
 export function renderPool(host) {
   const body = el('div');
@@ -25,6 +26,15 @@ export function renderPool(host) {
     const pct = total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0;
     return el('div', { style: 'height:6px;border-radius:3px;background:#16283d;overflow:hidden;margin-top:6px' },
       el('div', { style: `height:100%;width:${pct}%;background:${pct > 90 ? 'var(--bad)' : 'var(--accent-text)'}` }));
+  }
+
+  // What one file's upload costs on this member. It is the other half of the
+  // placement trade-off the space column shows: placement ranks by free space,
+  // so without this the page only ever argues for the roomiest drive.
+  function writeCost(m) {
+    const label = writeCostLabel(m.write_ms_per_file || 0, m.write_samples || 0);
+    if (!label) return el('span', { class: 'dim' }, '—');
+    return el('span', { title: t('pool.write.samples', m.write_samples) }, t(label.key, ...label.args));
   }
 
   function card(label, value, sub) {
@@ -115,6 +125,7 @@ export function renderPool(host) {
         el('span', { class: 'dim', style: 'font-size:11px' }, m.root && m.root !== '/' ? m.root : ''))),
       el('td', {}, el('div', {}, pendingKey ? t(pendingKey) : t('health.' + (m.state || 'up'))), m.last_error ? el('div', { class: 'dim', style: 'font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, m.last_error) : null),
       el('td', {}, el('div', {}, space), m.total ? bar(m.used, m.total) : null),
+      el('td', { style: 'text-align:right' }, writeCost(m)),
       el('td', { style: 'text-align:right' }, String(m.files)),
       el('td', { style: 'text-align:right' }, m.pending_ops ? String(m.pending_ops) : '—'),
       el('td', {}, actions));
@@ -168,27 +179,61 @@ export function renderPool(host) {
     classes.value = (p.members || []).map((m) => `${m.remote}=${(m.class || []).join(',')}`).join('\n');
     const rules = el('textarea', { rows: '6', spellcheck: 'false' });
     rules.value = (cfg.rules || []).map((r) => [r.prefix, r.replicas || 0, (r.prefer || []).join(','), (r.avoid || []).join(','), (r.require || []).join(',')].join('|')).join('\n');
+    // The write preference is a class and a rule underneath, but a person
+    // choosing where files land first should not have to write either. The
+    // radio is offered only while it can represent what is saved; a rule set
+    // it cannot show stays with the textareas, which can express all of it.
+    const pref = writePreferenceState(p.members, cfg.rules);
+    const radios = [];
+    const placementRows = [];
+    if (pref.simple) {
+      const group = el('div', { style: 'display:flex;flex-direction:column;gap:6px' });
+      const choice = (value, label, sub) => {
+        const input = el('input', { type: 'radio', name: 'pool-primary' });
+        input.value = value;
+        input.checked = value === (pref.primary || '');
+        radios.push(input);
+        group.append(el('label', { style: 'display:flex;align-items:center;gap:8px;font-size:13px' },
+          input, el('span', {}, label),
+          sub ? el('span', { class: 'dim', style: 'font-size:11.5px' }, sub) : null));
+      };
+      choice('', t('pool.write.none'));
+      for (const m of p.members) {
+        const cost = writeCostLabel(m.write_ms_per_file || 0, m.write_samples || 0);
+        choice(m.remote, m.remote, cost ? t(cost.key, ...cost.args) : '—');
+      }
+      placementRows.push([t('pool.write.primary'), group]);
+    } else {
+      placementRows.push([t('pool.config.classes'), classes], [t('pool.config.rules'), rules]);
+    }
     const ok = await openForm({
       title: t('pool.config.title'), width: 760,
       rows: [[t('pool.replicas'), replicas], [t('pool.config.minimum'), minimum], [t('pool.config.domain'), domain],
         [t('pool.config.mode'), mode], [t('pool.config.timeout'), timeout], [t('pool.config.outafter'), outAfter],
         [t('pool.config.repair'), repair], [t('pool.config.skew'), skew], [t('pool.config.backfill'), backfill],
-        [t('pool.config.rate'), maxRate], [t('pool.config.pause'), pause], [t('pool.config.classes'), classes], [t('pool.config.rules'), rules]],
-      note: el('div', { class: 'dim', style: 'font-size:11.5px' }, t('pool.config.note')),
+        [t('pool.config.rate'), maxRate], [t('pool.config.pause'), pause], ...placementRows],
+      note: el('div', { class: 'dim', style: 'font-size:11.5px' },
+        pref.simple ? t('pool.write.note') : t('pool.write.custom'), ' ', t('pool.config.note')),
       confirmLabel: t('pool.config.save'),
       validate: () => Number(minimum.value) > Number(replicas.value) ? t('pool.config.badminimum') : '',
     });
     if (!ok) return;
     const split = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
-    const memberClasses = {};
-    for (const line of classes.value.split('\n')) {
-      const [remote, values = ''] = line.split('=', 2);
-      if (remote.trim()) memberClasses[remote.trim()] = split(values);
+    let memberClasses = {};
+    let parsedRules = [];
+    if (pref.simple) {
+      const chosen = (radios.find((r) => r.checked) || {}).value || null;
+      ({ member_classes: memberClasses, rules: parsedRules } = writePreferencePayload(p.members, chosen));
+    } else {
+      for (const line of classes.value.split('\n')) {
+        const [remote, values = ''] = line.split('=', 2);
+        if (remote.trim()) memberClasses[remote.trim()] = split(values);
+      }
+      parsedRules = rules.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [prefix, count, prefer = '', avoid = '', require = ''] = line.split('|');
+        return { prefix: prefix.trim(), replicas: Number(count) || 0, prefer: split(prefer), avoid: split(avoid), require: split(require) };
+      });
     }
-    const parsedRules = rules.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
-      const [prefix, count, prefer = '', avoid = '', require = ''] = line.split('|');
-      return { prefix: prefix.trim(), replicas: Number(count) || 0, prefer: split(prefer), avoid: split(avoid), require: split(require) };
-    });
     try {
       const result = await api.post('/pool/config', {
         pool: p.name, replicas: Number(replicas.value), min_replicas: Number(minimum.value),
@@ -243,7 +288,8 @@ export function renderPool(host) {
     const asyncNote = el('div', { class: 'detail', style: 'padding:10px 20px 0' }, t('pool.protect.async', p.replicas - 1));
     const notices = (p.notices || []).map((n) => el('div', { class: 'detail', style: 'padding:8px 12px;border:1px solid var(--warn);border-radius:8px;margin:0 20px 10px' }, n));
     const table = el('div', { class: 'panel', style: 'overflow:auto' }, el('table', {}, el('thead', {}, el('tr', {},
-      el('th', {}, t('pool.col.member')), el('th', {}, t('pool.col.state')), el('th', {}, t('pool.col.space')), el('th', { style: 'text-align:right' }, t('pool.col.files')),
+      el('th', {}, t('pool.col.member')), el('th', {}, t('pool.col.state')), el('th', {}, t('pool.col.space')),
+      el('th', { style: 'text-align:right' }, t('pool.col.write')), el('th', { style: 'text-align:right' }, t('pool.col.files')),
       el('th', { style: 'text-align:right' }, t('pool.col.ops')), el('th', {}, ''))),
       el('tbody', {}, ...p.members.map((m) => memberRow(p, m)))));
     const addRow = el('div', { class: 'row', style: 'margin-top:10px;gap:8px;align-items:center' });
