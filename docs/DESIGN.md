@@ -348,6 +348,7 @@ CREATE VIRTUAL TABLE name_index USING fts5(name, path UNINDEXED, ino UNINDEXED, 
 | 机制 | 细节 |
 |---|---|
 | 布局 | `cache/blocks/aa/bb/<remote>-<remote_id>-<version>-<idx>`；块 4 MiB（可按 Provider 调整）；索引表 `blocks(key, size, crc32, last_access, pinned)`；`file_blocks(file_key, bitmap BLOB)` |
+| 重启 | 内存索引由 reload 走一遍 `blocks/` 与 `hydrated/` 重建；文件身份（hash → FileKey）记在缓存根的单个 append-only JSON 行文件 `keys`（忘记文件写 tombstone，reload 与死行过多时重写），不放 per-file sidecar——sidecar 曾让每个缓存过的文件占一个 `aa/bb/` 目录，冷的机械盘上一个目录一次寻道，reload 要几分钟；reload 同时 rmdir 淘汰后留下的空叶子目录 |
 | hydrate | 位图全满 → 合并为 `cache/hydrated/<file_key>`；有 hash 的 Provider 校验整文件 hash；Linux 6.9+ 且具备 `CAP_SYS_ADMIN` 时 open 返回 `FUSE_PASSTHROUGH` |
 | readahead | 连续块访问触发，窗口 1→2→4→…→16 块（64 MiB 上限）；预取优先级低于按需读；随机小读异步补全整块；每文件默认 4 并行流 |
 | 淘汰 | 2Q（新块先进试用队列，二次命中才进主队列），约束：字节上限、inode 上限、最长年龄、磁盘最低剩余；pin 免疫 |

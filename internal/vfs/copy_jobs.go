@@ -107,7 +107,11 @@ func (f *FS) beginCopyJob(ctx context.Context, src, dst string, h *Handle, dm Mo
 	}
 	defer finish()
 	if c.Job().State == journal.CopyPreparing {
-		read := func(p []byte, off int64) (int, error) { return f.read(ctx, h, p, off, false) }
+		// The committed version, deliberately: Copy's contract is a
+		// snapshot of what the tree last committed, so it reads the cache
+		// directly rather than through Read, which would show it the bytes
+		// an open write handle has staged but not yet closed.
+		read := func(p []byte, off int64) (int, error) { return f.readCommitted(ctx, h, p, off) }
 		if whole != nil {
 			read = whole.ReadAt
 		}

@@ -105,6 +105,10 @@ type Daemon struct {
 	closers []func() error
 }
 
+// ErrOwned is returned by Open with RequireOwner when another process holds
+// the storage: a running daemon, or one still starting up.
+var ErrOwned = errors.New("daemon: storage is owned by another process; use its control endpoint")
+
 // Options configures Open.
 type Options struct {
 	Config  *config.Config
@@ -114,8 +118,11 @@ type Options struct {
 	MountIndex int
 	// SkipWrite builds a read-only stack without a journal or uploader.
 	SkipWrite bool
-	// RequireOwner rejects offline cache management while another process owns
-	// the storage, before constructing providers or opening the cache.
+	// RequireOwner takes ownership of the storage before anything else is
+	// opened and fails with ErrOwned if another process holds it. Offline
+	// cache management needs it, and so does a mounting daemon: without it a
+	// second daemon started while the first was still loading its cache
+	// would open the same metadata and cache directories underneath it.
 	RequireOwner bool
 	// NoBackground is for a one-shot offline management command.
 	NoBackground bool
@@ -159,7 +166,7 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		}
 		if !j.Owner() {
 			j.Close()
-			return nil, errors.New("daemon: storage is owned by another process; use its control endpoint")
+			return nil, ErrOwned
 		}
 		d.Journal = j
 		d.closers = append(d.closers, j.Close)
@@ -247,6 +254,14 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 	d.Meta = store
 	d.closers = append(d.closers, store.Close)
 
+	// Reload walks the cache directory. It is one sequential file plus the
+	// directories that hold blocks, but a cold disk can still make it the
+	// slowest step of start-up, and a daemon that prints nothing for that
+	// long looks hung; say so while it happens.
+	cacheStart := time.Now()
+	slowCache := time.AfterFunc(5*time.Second, func() {
+		slog.Info("daemon: still loading the block cache index; a cold disk with many cached files takes a while", "dir", blockCacheDir)
+	})
 	ca, err := cache.New(cache.Options{
 		Dir:          filepath.Join(blockCacheDir, "blocks"),
 		BlockSize:    int64(cfg.Cache.BlockSize),
@@ -256,9 +271,14 @@ func Open(ctx context.Context, opt Options) (*Daemon, error) {
 		MinFree:      int64(cfg.Cache.MinFree),
 		MaxAge:       cfg.Cache.MaxAge,
 	})
+	slowCache.Stop()
 	if err != nil {
 		d.Close()
 		return nil, err
+	}
+	if took := time.Since(cacheStart); took > 2*time.Second {
+		st := ca.Stats()
+		slog.Info("daemon: block cache index loaded", "took", took.Round(time.Millisecond), "blocks", st.Blocks, "hydrated", st.HydratedFiles)
 	}
 	d.Cache = ca
 

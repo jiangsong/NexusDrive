@@ -23,6 +23,13 @@ type backingPeer interface {
 type backingLease struct {
 	file *cache.WholeFile
 	id   int32
+	// inflight counts the splice results handed to go-fuse that still name
+	// file's descriptor. go-fuse splices a ReadResultFd after the Read
+	// handler has returned, so a release that arrives while one is
+	// outstanding — another read on the handle noticing a sibling writer —
+	// must wait: dropped records it, and the last Done completes it.
+	inflight int
+	dropped  bool
 }
 
 type backingRegistry struct {
@@ -61,15 +68,45 @@ func (b *backingRegistry) fd(l *backingLease) (int, bool) {
 	return int(l.file.Fd()), true
 }
 
-// releaseOffer releases only a descriptor which the kernel never registered.
-func (b *backingRegistry) releaseOffer(l *backingLease) {
+// acquire hands out the lease's descriptor for one splice result and keeps
+// the file open until the matching release.
+func (b *backingRegistry) acquire(l *backingLease) (int, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if l.file != nil && l.id == 0 {
-		delete(b.offers, int32(l.file.Fd()))
+	if b.closed || l.file == nil {
+		return 0, false
+	}
+	l.inflight++
+	return int(l.file.Fd()), true
+}
+
+// release is the end of one splice result's use of the descriptor.
+func (b *backingRegistry) release(l *backingLease) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	l.inflight--
+	if l.inflight == 0 && l.dropped && l.file != nil && l.id == 0 {
 		l.file.Close()
 		l.file = nil
 	}
+}
+
+// releaseOffer releases only a descriptor which the kernel never registered.
+// The offer is withdrawn at once; the descriptor closes once no splice
+// result names it any more.
+func (b *backingRegistry) releaseOffer(l *backingLease) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if l.file == nil || l.id != 0 {
+		return
+	}
+	delete(b.offers, int32(l.file.Fd()))
+	if l.inflight > 0 {
+		l.dropped = true
+		return
+	}
+	l.file.Close()
+	l.file = nil
 }
 
 func (b *backingRegistry) RegisterBackingFd(m *fuse.BackingMap) (int32, syscall.Errno) {

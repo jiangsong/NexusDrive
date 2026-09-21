@@ -623,6 +623,56 @@ agent 目录，已改为 `cfg.StateDir()`。手工冒烟两条都走通：全新
   字节、最近 10 s 速率、预计剩余、失败数；批完成后保持满条直到下一批。表格只在队列形状
   变化时重取（≤ 1 次/2 s），行按 id 复用节点，不再闪。上传中的行加一条扫动条。
   验收：`TestUploadBatchFollowsOneBurstOfWork`、`_tests/transfer_progress.test.mjs`。
+- **[x] 冷盘上守护进程要几分钟才挂上，`restart.sh` 30 s 超时后再跑一次会起第二个 daemon（2026-09-21）**：
+  `restart.sh: daemon was not ready after 30s (pid 2835396 still running; is the config usable?)`，
+  SIGQUIT 栈显示主 goroutine停在 `cache.reload` 里逐个 `os.ReadFile` `.key`。病根是缓存的
+  身份 sidecar 布局：每个缓存过的文件在 `blocks/aa/bb/` 里放一个 `<hash>.key`，整文件
+  （`hydrated/`）也不例外，于是 25k 个文件对应 44k 个目录（其中 ~19k 是块被淘汰后留下的空叶子），
+  reload 的 WalkDir 在冷的机械盘上每个目录一次寻道——热页缓存下 0.9 s，冷盘实测 3 分钟以上。
+  第二个病根：`cloudfs`/`cloudfs mount` 在 reload **之后**才拿 journal 所有权，而 `restart.sh`
+  只靠 control socket 认 daemon，socket 还没出现就当"没在跑"，起第二个进程打开同一份
+  meta.db 与缓存目录。修法：(1) 身份改记在缓存根的单个 append-only JSON 行文件 `keys`（忘记
+  文件追加 tombstone；reload 与运行中超过 `keysCompactSlack` 条死行时重写），旧 `.key` 在下一次
+  reload 一次性迁入并删除；reload 顺手 rmdir 没有内容的叶子目录，之后 `blocks/` 里只剩真有块的
+  目录（本机从 44029 个目录降到 37 个）；tombstone 与整文件的记录都在 `admitMu` 下追加，保证索引
+  看到的先后与缓存一致。(2) `runMount` 以 `RequireOwner` 打开 daemon，所有权是第一步，第二个进程
+  立即报 `another cloudfs daemon owns …`（`daemon.ErrOwned`）；reload 超过 5 s 时 slog 提示正在
+  加载。(3) `restart.sh` 同时按 `journal/journal.lock` 的持有者认 daemon（只认无子命令或 `mount`
+  的进程，离线的 `cloudfs cache/copy` 不动），超时信息不再暗示配置有问题。验收：
+  `TestReloadNeedsNoDirectoryPerCachedFile`、`TestReloadMigratesLegacyKeyFiles`、
+  `TestReloadPrunesLeafDirectoriesLeftByEviction`、`TestKeysIndexDropsForgottenFilesOnReload`、
+  `TestKeysIndexStaysBoundedUnderChurn`、`TestSecondOwnerIsRefusedBeforeItOpensAnything`；
+  真机 `./restart.sh` 两次（迁移一次、之后一次）都在 15 s 内 `up`。
+- **[x] 挂载里 `git pull` 慢链路下必死：`premature end of pack file, 1219 bytes missing`（2026-09-21）**：
+  GitHub 以 3 KiB/s 送来 328 KiB 的包，`index-pack` 边收边写 `tmp_pack_*`，收完后开线程按**路径**
+  重新以只读打开它来解 delta。病根有两个，都是"同一 inode 上另一个描述符看不到写入"：
+  (1) 内核的 dentry/attr 30 s 过期后，重新解析路径走 `LOOKUP`，`FS.Lookup`/`ReadDir`/`StatPath`
+  只回 meta 里的 size——首次写入的文件在提交前是 0——内核照单把 i_size 改成 0 并截掉页缓存，
+  之后所有 `pread` 直接在内核返回 0，根本不到守护进程；只有 `Stat` 叠加过 `pendingSize`。
+  快传（<30 s）看不到，所以本地 bare 仓库怎么拉都过。(2) 即使 size 对，只读句柄 `Read` 只查
+  块缓存（提交前的版本），看不到写句柄 staging 里的字节；写句柄关闭提交后，早开的只读句柄仍
+  拿着旧 node 快照，提交把旧 key 从缓存 Forget 后会去远端重拉旧版本。修法：所有带属性的回复
+  （`Lookup`/`StatPath`/`ReadDir`/`ReadDirPath`）统一走 `overlayPendingSize`，列表版一次持锁、
+  只看有写句柄的条目；`Read` 在自己没有 staging 时从同 inode 最大的 staging（`stagedWriter`，
+  与 `Stat` 报的 size 同源）读，撞上提交（`fs.ErrClosed`）就刷新 node 回退到缓存；新增按 inode 的
+  全句柄索引 `handleIndex`，`commitWrite` 用 `adoptCommittedNode` 把兄弟句柄换到新 node（Copy 的
+  快照句柄 `snapshot` 除外，它承诺的是开始时的版本，改为直接 `readCommitted`）；splice 快路径
+  加 `LocalCurrent` 门：租约的 key 变了或有 staging 就放弃零拷贝、释放 offer。验收：
+  `TestReadHandleSeesASiblingWritersStagedBytes`、`TestReadHandleFollowsASiblingWritersCommit`、
+  `TestLookupAndListingReportStagedSize`、`TestSpliceReadStopsWhenASiblingWriterHasBytes`；真机
+  用 ssh 替身限速 3 KiB/s 拉 3.5 分钟的包通过，`~/CloudFS/fs` 里 `git pull` 到 `99bc14c`。
+  顺带看到的既有红：`TestCreateModeZeroReachesTheFile`（HEAD 上就红，mode 0 创建回 0644）与
+  `-race` 下 `TestRemoteDirectoryChangeProtectsOpenWriter`、
+  `TestDirectoryReplacementRefreshClearsOldPathsAndProtectsLocalFiles` 两例：测试的假时钟
+  `clock` 无锁，被 write-behind 的 `scheduleHydrate` 并发读（在干净的 `99bc14c` 上复现，与本条无关）。
+  提交前审核补的四处：(a) `read` 的 `stagedWriter` 分支只在 live 读走，`ReadFileRangeAtVersion`
+  这类版本化读仍读已提交版本（`TestVersionedReadIgnoresUncommittedWriter`）；(b) splice 结果
+  的描述符在 go-fuse 消费完（`Done`）前不关闭——`backingLease` 记 in-flight 计数，`dropOffer`
+  只撤回 offer，最后一个 `Done` 才关（`TestSpliceResultOutlivesADropOfItsLease`），
+  `CopyFileRange` 同样先 pin 再用；(c) `Copy` 在 open 时就置 `snapshot`，而不是等首次读，
+  否则 `beginCopyJob` 记完 size 后节点还可能被兄弟提交换掉；(d) keys 索引 compaction 失败后
+  退避一个 `keysCompactSlack` 再试，不再每次 append 都在 `admitMu` 下重写一遍
+  （`TestKeysIndexBacksOffWhenCompactionFails`）。
 - **[x] macOS 上 stale 挂载仍然挡住 `restart.sh`（2026-09-20）**：守护进程被 `kill -9` 后，
   `./restart.sh` 停在 `cloudfs: unmount /Users/nava/CloudFS: exit status 1: Unmount failed for
   /Users/nava/CloudFS`。两处同一个病根——陈旧挂载的 errno 只按 Linux 认：(1) `prepareMountPoint`

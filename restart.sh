@@ -22,6 +22,9 @@ cd "$ROOT"
 CONFIG="${CLOUDFS_CONFIG:-$HOME/.cloudfs/config.yaml}"
 CONFIG="${CONFIG/#\~/$HOME}"
 SOCK="$(dirname "$CONFIG")/control.sock"
+# The daemon takes this lock before it opens anything else, so it names the
+# daemon from its first moment, long before the control socket exists.
+OWNER_LOCK="$(dirname "$CONFIG")/journal/journal.lock"
 LOG="${CLOUDFS_LOG:-/tmp/cloudfs-run.log}"
 STOP_TIMEOUT="${STOP_TIMEOUT:-30}"
 START_TIMEOUT="${START_TIMEOUT:-30}"
@@ -36,6 +39,31 @@ die() { printf 'restart.sh: %s\n' "$*" >&2; exit 1; }
 
 # Pids holding the control socket: the daemon, plus any short-lived CLI client.
 socket_pids() { lsof -t -- "$SOCK" 2>/dev/null || true; }
+
+# The pid that owns the storage, if it is a mounting daemon. A daemon that is
+# still starting — loading a large cache from a cold disk can take minutes —
+# has no socket yet but does hold this lock; treating it as "no daemon" once
+# started a second daemon under the first. An offline command (`cloudfs cache
+# drop`, `cloudfs copy`) holds the same lock and is left alone: it is not the
+# daemon and it finishes on its own.
+#
+# The binary dispatches on its first argument alone: none, or one starting
+# with "-", is the front door that mounts; "mount" is the service entry;
+# anything else is a subcommand.
+owner_daemon_pid() {
+  local pid args
+  for pid in $(lsof -t -- "$OWNER_LOCK" 2>/dev/null); do
+    args="$(ps -o args= -p "$pid" 2>/dev/null)" || continue
+    set -- $args
+    case "${2:-}" in
+      ""|-*|mount) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+# Every pid to stop: whoever answers on the socket, and the owner if it is a
+# daemon that has not got that far yet.
+daemon_pids() { { socket_pids; owner_daemon_pid; } | sort -un; }
 
 # Read the mount this no-argument daemon will use from the same validated
 # config parser as the daemon. A missing starter config has no mount yet.
@@ -170,7 +198,7 @@ refuse_busy_cwds
 mv -f "$NEW_BINARY" cloudfs
 
 # 3. Stop the old daemon.
-pids="$(socket_pids)"
+pids="$(daemon_pids)"
 if [ -n "$pids" ]; then
   log "stopping daemon (pid $(echo $pids))"
   for pid in $pids; do
@@ -225,7 +253,7 @@ until started; do
   fi
   if [ "$i" -ge "$ticks" ]; then
     new_log >&2
-    die "daemon was not ready after ${START_TIMEOUT}s (pid $new_pid still running; is the config usable?)"
+    die "daemon was not ready after ${START_TIMEOUT}s; pid $new_pid is still starting. Watch $LOG (a cold cache index can take a while); running this script again stops it cleanly. START_TIMEOUT=120 ./restart.sh waits longer"
   fi
   sleep 0.1
   i=$((i + 1))

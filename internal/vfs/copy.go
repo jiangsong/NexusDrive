@@ -107,5 +107,11 @@ func (f *FS) Copy(ctx context.Context, src, dst string) (Attr, error) {
 		return Attr{}, err
 	}
 	defer f.Release(context.Background(), h)
+	// Pin the handle to this version before the job records its size: a
+	// writer committing between here and the first read must not move the
+	// node under a job that has already promised the version it started on.
+	h.mu.Lock()
+	h.snapshot = true
+	h.mu.Unlock()
 	return f.beginCopyJob(ctx, src, dst, h, dm, parent)
 }

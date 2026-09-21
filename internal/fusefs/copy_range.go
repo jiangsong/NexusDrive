@@ -37,10 +37,17 @@ func (n *node) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint
 	if !dst.handle.IsWriteHandle() {
 		return 0, syscall.ENOTSUP
 	}
-	fd, ok := src.leaseFd()
+	l, ok := src.lease()
 	if !ok {
 		return 0, syscall.ENOTSUP
 	}
+	// Pinned for the copy: a concurrent read on src may withdraw the lease
+	// once a writer appears, and must not close the descriptor under us.
+	fd, ok := n.root.backings.acquire(l)
+	if !ok {
+		return 0, syscall.ENOTSUP
+	}
+	defer n.root.backings.release(l)
 	n.root.count(opCopyFileRange)
 	// Like Write: this grows the destination, so a cached listing entry for
 	// it now carries the size from before the copy.

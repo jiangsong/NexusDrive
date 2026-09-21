@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"io"
 	"path"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"cloudfs/internal/cache"
+	"cloudfs/internal/journal"
 	"cloudfs/internal/meta"
 	"cloudfs/internal/provider"
 )
@@ -51,6 +53,13 @@ type Handle struct {
 	closed         bool
 	activeReads    int
 	openedKey      cache.FileKey // immutable admission identity, even after Node changes
+	// localKey is the identity OpenLocal leased a cache entry under; see
+	// LocalCurrent.
+	localKey cache.FileKey
+	// snapshot pins the handle to the version it was opened against: a
+	// commit on the inode does not move it to the new node (see
+	// adoptCommittedNode). Copy reads through such a handle.
+	snapshot bool
 	// subMiss counts sub-block fetches per block on this handle. Enough of
 	// them in one block means the reads have locality, and the rest of the
 	// block is worth fetching in one go.
@@ -261,7 +270,66 @@ func (f *FS) read(ctx context.Context, h *Handle, buf []byte, off int64, live bo
 			h.mu.Unlock()
 		}
 	}
+	if !live {
+		// A versioned read wants what the tree last committed, never the
+		// bytes a sibling descriptor is still staging.
+		return f.readCached(ctx, h, buf, off)
+	}
+	if st, ok := f.stagedWriter(h.Ino); ok {
+		// Another handle on this inode holds bytes it has not committed
+		// yet. They are the file's content as far as every descriptor is
+		// concerned — the size Stat reports comes from the same staging
+		// file — so the read is served from there rather than from the
+		// cache, which still holds the version before the write began.
+		n, err := readStaged(st, buf, off)
+		if !errors.Is(err, fs.ErrClosed) {
+			return n, err
+		}
+		// The writer committed between the lookup and the read. Its bytes
+		// are in the cache now, under the identity the commit gave the
+		// node; the snapshot this handle took at open predates it.
+		f.refreshNode(ctx, h)
+	}
 	return f.readCached(ctx, h, buf, off)
+}
+
+// readCommitted reads the last committed content of the file behind h,
+// ignoring bytes any open write handle has staged: a read handle used to
+// snapshot a version, not to observe a file being written.
+func (f *FS) readCommitted(ctx context.Context, h *Handle, buf []byte, off int64) (int, error) {
+	h.mu.Lock()
+	h.snapshot = true
+	h.mu.Unlock()
+	f.fgIO.Add(1)
+	defer f.fgIO.Add(-1)
+	f.noteRead(ctx, h.Ino)
+	return f.readCached(ctx, h, buf, off)
+}
+
+// readStaged reads from a staging file with read(2) semantics: a short read
+// at the end is a count, and only a read starting at or past the end is EOF.
+func readStaged(st *journal.Staging, buf []byte, off int64) (int, error) {
+	n, err := st.ReadAt(buf, off)
+	if errors.Is(err, io.EOF) && n > 0 {
+		return n, nil
+	}
+	return n, err
+}
+
+// refreshNode replaces the handle's snapshot of its node with the tree's
+// current row. A handle opened for reading keeps the node as it was at
+// open, which is right until a writer on the same inode commits: from then
+// on the cache holds the content under the new identity and the old key is
+// forgotten, so reading through the snapshot would fetch the old version
+// again.
+func (f *FS) refreshNode(ctx context.Context, h *Handle) {
+	fresh, err := f.meta.Get(ctx, h.Ino)
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	h.Node = fresh
+	h.mu.Unlock()
 }
 
 // errLocalOnlyGone marks a read of a file that exists only as a committed
@@ -918,7 +986,32 @@ func (f *FS) OpenLocal(h *Handle) (*cache.WholeFile, error) {
 	if h.writer != nil || h.closed || IsLocalOnly(h.Node.RemoteID) || h.Node.IsDir() {
 		return nil, ErrNotFound
 	}
-	return f.cache.OpenWhole(h.fileKey())
+	key := h.fileKey()
+	wf, err := f.cache.OpenWhole(key)
+	if err != nil {
+		return nil, err
+	}
+	h.localKey = key
+	return wf, nil
+}
+
+// LocalCurrent reports whether the copy OpenLocal leased for h is still the
+// file's content. The lease is a descriptor on the immutable entry for one
+// version; it stops being the file the moment another handle stages bytes
+// into it, and for good once that handle's close commits them under a new
+// identity. Both are cases where the file is being rewritten out from under
+// a reader, and both are what a local disk shows the reader immediately, so
+// the caller falls back to Read, which serves the staged bytes (write.go)
+// or the committed version.
+func (f *FS) LocalCurrent(h *Handle) bool {
+	h.mu.Lock()
+	current := !h.closed && h.fileKey() == h.localKey
+	h.mu.Unlock()
+	if !current {
+		return false
+	}
+	_, staged := f.stagedWriter(h.Ino)
+	return !staged
 }
 
 // ShareTarget is what the share tool needs to know about a file before

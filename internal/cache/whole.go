@@ -142,11 +142,7 @@ func (c *Cache) evictObjectLocked(o *wholeObject) bool {
 // The excess is fully accounted and blocks new cache admission until reclaimed.
 // A cross-filesystem copy still needs the normal budget and free-space checks.
 func (c *Cache) LinkPinnedFile(k FileKey, src string, size int64) error {
-	err := c.installWhole(k, src, size, false, true)
-	if err == nil {
-		c.rememberKey(k)
-	}
-	return err
+	return c.installWhole(k, src, size, false, true)
 }
 
 func (c *Cache) installWhole(k FileKey, src string, size int64, adopt, pinned bool) error {
@@ -217,13 +213,17 @@ func (c *Cache) installWhole(k FileKey, src string, size int64, adopt, pinned bo
 	if info.Size() != size {
 		return errors.New("cache: source changed size during import")
 	}
-	if err := c.installTemp(k, name, size, pinned); err != nil {
+	remember, err := c.installTemp(k, name, size, pinned)
+	if err != nil {
 		return err
 	}
 	if adopt && src != c.hydratedPath(fh) {
 		if err := os.Remove(src); err != nil {
 			return fmt.Errorf("cache: installed copy but could not remove source: %w", err)
 		}
+	}
+	if remember {
+		c.rememberKey(k)
 	}
 	return nil
 }
@@ -240,19 +240,24 @@ func (c *Cache) installWhole(k FileKey, src string, size int64, adopt, pinned bo
 // so that a concurrent Put/installWhole/Hydrate for the same key cannot
 // interleave with publication; installTemp itself takes c.mu only for the
 // bookkeeping below.
-func (c *Cache) installTemp(k FileKey, tmpPath string, size int64, pinned bool) error {
+//
+// It reports whether the file's identity still has to be recorded in the key
+// index. The caller appends it while it still holds admitMu, after the state
+// it describes is published: Forget appends its tombstone under the same
+// lock, so the index sees records in the order the cache did.
+func (c *Cache) installTemp(k FileKey, tmpPath string, size int64, pinned bool) (remember bool, err error) {
 	info, err := os.Stat(tmpPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !info.Mode().IsRegular() || info.Size() != size {
-		return errors.New("cache: install source has wrong type or size")
+		return false, errors.New("cache: install source has wrong type or size")
 	}
 	fh := k.hash()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := os.Rename(tmpPath, c.hydratedPath(fh)); err != nil {
-		return err
+		return false, err
 	}
 	fs := c.files[fh]
 	if fs == nil {
@@ -260,12 +265,14 @@ func (c *Cache) installTemp(k FileKey, tmpPath string, size int64, pinned bool) 
 		c.files[fh] = fs
 	}
 	fs.key = k
+	remember = !fs.keyWritten
+	fs.keyWritten = true
 	fs.pinned = fs.pinned || pinned
 	c.attachWholeLocked(fh, fs, info)
 	fs.whole.lastAccess = c.opt.Now()
 	fs.generation++
 	c.removeFileBlocksLocked(fh, fs)
-	return nil
+	return remember, nil
 }
 
 // ErrInstallSuperseded is returned by PutWhole when the key it was
@@ -374,7 +381,8 @@ func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 	if stale {
 		return ErrInstallSuperseded
 	}
-	if err := c.installTemp(k, name, size, false); err != nil {
+	remember, err := c.installTemp(k, name, size, false)
+	if err != nil {
 		return err
 	}
 	// Consume the reservation atomically with publication, before another
@@ -387,7 +395,9 @@ func (c *Cache) PutWhole(k FileKey, r io.Reader, size int64) error {
 	c.reservedEntries--
 	c.mu.Unlock()
 	reservationHeld = false
-	c.rememberKey(k)
+	if remember {
+		c.rememberKey(k)
+	}
 	return nil
 }
 

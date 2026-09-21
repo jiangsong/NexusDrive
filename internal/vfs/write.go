@@ -304,11 +304,7 @@ func (f *FS) truncateHandle(ctx context.Context, h *Handle, size int64) (bool, e
 }
 
 func (w *writeState) readAt(buf []byte, off int64) (int, error) {
-	n, err := w.staging.ReadAt(buf, off)
-	if errors.Is(err, io.EOF) && n > 0 {
-		return n, nil
-	}
-	return n, err
+	return readStaged(w.staging, buf, off)
 }
 
 // commitWrite is the durability point: fsync the staging file, move it under
@@ -439,6 +435,7 @@ func (f *FS) commitWrite(ctx context.Context, h *Handle, w *writeState) error {
 		return err
 	}
 	w.committed = &node
+	f.adoptCommittedNode(node, h)
 	f.changedNode(ctx, h.Ino, false, KindWrite)
 	if err := f.journal.MarkPublished(ctx, p.upload.ID); err != nil {
 		return err

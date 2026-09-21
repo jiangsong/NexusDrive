@@ -581,7 +581,13 @@ func runMount(ctx context.Context, args []string, from entry) error {
 		return err
 	}
 	printConfigWarnings(os.Stderr, cfg)
-	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version})
+	// Ownership first. The cache reload that follows can take a while on a
+	// cold disk, and a second daemon started in that window used to get as
+	// far as opening the same metadata and cache underneath the first one.
+	d, err := daemon.Open(ctx, daemon.Options{Config: cfg, Version: version, RequireOwner: true})
+	if errors.Is(err, daemon.ErrOwned) {
+		return fmt.Errorf("another cloudfs daemon owns %s (running, or still starting up); stop it first (or restart it from the dashboard)", cfg.StateDir())
+	}
 	if err != nil {
 		return err
 	}

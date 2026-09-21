@@ -223,6 +223,8 @@ type Cache struct {
 	hydrateWG            sync.WaitGroup
 	orphanTemps          map[string]int64
 	orphanBytes          int64
+	// keys is the on-disk index of file identities; see keys.go.
+	keys keysIndex
 }
 
 type fileState struct {
@@ -308,12 +310,31 @@ func (c *Cache) SetBudget(maxBytes, minFree int64) {
 func (c *Cache) StagingDir() string { return filepath.Join(c.opt.Dir, "staging") }
 
 // reload rebuilds the in-memory index by walking the blocks directory, so a
-// restart keeps the cache instead of refetching everything.
+// restart keeps the cache instead of refetching everything. File identities
+// come from the key index (keys.go); a sidecar left by an earlier build is
+// adopted into it and removed, so the walk is only ever paid for once.
 func (c *Cache) reload() error {
+	known, lines, err := c.loadKeys()
+	if err != nil {
+		return keysError("read", err)
+	}
+	var legacy []string
+	// Leaf directories and what they hold, other than sidecars. Eviction
+	// unlinks blocks but not the directory around them, and every one of
+	// those left behind is a seek on the next cold reload; the empty ones
+	// are pruned once the walk is over.
+	var leaves []string
+	content := map[string]int{}
 	blocksDir := filepath.Join(c.opt.Dir, "blocks")
-	err := filepath.WalkDir(blocksDir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	err = filepath.WalkDir(blocksDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			if p != blocksDir && filepath.Dir(filepath.Dir(p)) == blocksDir {
+				leaves = append(leaves, p)
+			}
+			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -323,25 +344,26 @@ func (c *Cache) reload() error {
 			return nil
 		}
 		if cacheTempName(d.Name()) {
+			content[filepath.Dir(p)]++
 			c.orphanTemps[p] = info.Size()
 			c.orphanBytes += info.Size()
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".part") {
+			content[filepath.Dir(p)]++
 			return nil // handled with its block below
 		}
 		if strings.HasSuffix(d.Name(), ".key") {
-			if k, ok := readKey(p); ok && strings.TrimSuffix(d.Name(), ".key") == k.hash() {
-				fh := strings.TrimSuffix(d.Name(), ".key")
-				fs, ok := c.files[fh]
-				if !ok {
-					fs = &fileState{present: map[int64]bool{}}
-					c.files[fh] = fs
+			legacy = append(legacy, p)
+			fh := strings.TrimSuffix(d.Name(), ".key")
+			if _, ok := known[fh]; !ok {
+				if k, ok := readLegacyKey(p); ok {
+					known[fh] = k
 				}
-				fs.key = k
 			}
 			return nil
 		}
+		content[filepath.Dir(p)]++
 		fileHash, idx, ok := parseBlockName(d.Name())
 		if !ok {
 			return nil
@@ -406,6 +428,28 @@ func (c *Cache) reload() error {
 		c.attachWholeLocked(e.Name(), fs, info)
 	}
 	c.reloadParts(hydratedDir, entries)
+	// Every recorded identity keeps its record, blocks or not: a file whose
+	// blocks were all evicted, or one pinned before anything was read, is
+	// still known, exactly as its sidecar kept it known before.
+	for fh, k := range known {
+		fs, ok := c.files[fh]
+		if !ok {
+			fs = &fileState{present: map[int64]bool{}}
+			c.files[fh] = fs
+		}
+		fs.key = k
+		fs.keyWritten = true
+	}
+	c.keys.lines = lines
+	// Compact when the file carries dead lines or the identities came from
+	// sidecars; an index that already says exactly this is left untouched.
+	if len(legacy) > 0 || lines != len(known) {
+		if err := c.writeKeys(c.liveKeysLocked()); err != nil {
+			return keysError("write", err)
+		}
+		retireLegacyKeys(legacy)
+	}
+	pruneEmptyLeaves(leaves, content)
 	return nil
 }
 
@@ -421,48 +465,13 @@ func parseBlockName(name string) (string, int64, bool) {
 	return name[:i], idx, true
 }
 
+// fileDir is the leaf directory holding a file's blocks.
+func (c *Cache) fileDir(fileHash string) string {
+	return filepath.Join(c.opt.Dir, "blocks", fileHash[:2], fileHash[2:4])
+}
+
 func (c *Cache) blockPath(fileHash string, idx int64) string {
-	return filepath.Join(c.opt.Dir, "blocks", fileHash[:2], fileHash[2:4], fmt.Sprintf("%s-%d", fileHash, idx))
-}
-
-// keyPath is where a file's identity is recorded next to its blocks. A
-// restart can hash a key into a directory name but not a directory name back
-// into a key, and without the key the cache cannot say which file a block
-// belongs to — so `cloudfs bench --cold` would drop nothing and measure a
-// warm cache, and `cache drop` would report files it did not touch.
-func (c *Cache) keyPath(fileHash string) string {
-	return filepath.Join(c.opt.Dir, "blocks", fileHash[:2], fileHash[2:4], fileHash+".key")
-}
-
-// rememberKey records a file's identity beside its blocks. Callers decide
-// under the lock whether it is needed and call this after releasing it.
-func (c *Cache) rememberKey(k FileKey) {
-	fh := k.hash()
-	p := c.keyPath(fh)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return
-	}
-	tmp := p + ".tmp"
-	body := strings.Join([]string{k.Remote, k.RemoteID, k.Version}, "\n")
-	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
-	}
-}
-
-// readKey restores a file's identity written by rememberKey.
-func readKey(path string) (FileKey, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return FileKey{}, false
-	}
-	parts := strings.Split(string(b), "\n")
-	if len(parts) != 3 || parts[1] == "" {
-		return FileKey{}, false
-	}
-	return FileKey{Remote: parts[0], RemoteID: parts[1], Version: parts[2]}, true
+	return filepath.Join(c.fileDir(fileHash), fmt.Sprintf("%s-%d", fileHash, idx))
 }
 
 func (c *Cache) hydratedPath(fileHash string) string {
@@ -1136,11 +1145,7 @@ func (c *Cache) HydratedPath(k FileKey) (string, bool) {
 // moving it into the cache. The upload path uses it so a file that was just
 // written is readable without downloading it back.
 func (c *Cache) AdoptFile(k FileKey, localPath string, size int64) error {
-	err := c.installWhole(k, localPath, size, true, false)
-	if err == nil {
-		c.rememberKey(k)
-	}
-	return err
+	return c.installWhole(k, localPath, size, true, false)
 }
 
 // LinkFile installs localPath as the hydrated cache entry for k while leaving
@@ -1148,11 +1153,7 @@ func (c *Cache) AdoptFile(k FileKey, localPath string, size int64) error {
 // write path uses it so a just-written file is readable from the cache while
 // the upload queue still needs the blob.
 func (c *Cache) LinkFile(k FileKey, localPath string, size int64) error {
-	err := c.installWhole(k, localPath, size, false, false)
-	if err == nil {
-		c.rememberKey(k)
-	}
-	return err
+	return c.installWhole(k, localPath, size, false, false)
 }
 
 func copyFile(src, dst string) error {
@@ -1254,11 +1255,25 @@ func (c *Cache) ForgetChecked(k FileKey) error {
 func (c *Cache) forgetFile(k FileKey, durable bool) error {
 	c.admitMu.Lock()
 	defer c.admitMu.Unlock()
+	recorded, err := c.forgetFileLocked(k, durable)
+	if recorded && err == nil {
+		// Still under admitMu, so the tombstone lands after any record an
+		// admission wrote for this key, and before any it writes next; after
+		// c.mu, because the index takes c.mu itself when it compacts.
+		c.forgetKey(k)
+	}
+	return err
+}
+
+// forgetFileLocked does the removal under c.mu and reports whether the index
+// held a record for the file, which the caller then cancels.
+func (c *Cache) forgetFileLocked(k FileKey, durable bool) (recorded bool, err error) {
 	fh := k.hash()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cancelHydrateLocked(fh)
 	fs := c.files[fh]
+	recorded = fs != nil && fs.keyWritten
 	remove := func(p string) error {
 		if info, err := os.Lstat(p); err == nil && info.IsDir() {
 			return fmt.Errorf("cache: cleanup target is a directory")
@@ -1276,10 +1291,10 @@ func (c *Cache) forgetFile(k FileKey, durable bool) error {
 				continue
 			}
 			if err := remove(c.blockPath(fh, id.index)); err != nil {
-				return err
+				return recorded, err
 			}
 			if err := remove(c.sidecarPath(fh, id.index)); err != nil {
-				return err
+				return recorded, err
 			}
 			c.bytes -= m.size
 			c.dropBlockLocked(id)
@@ -1287,44 +1302,44 @@ func (c *Cache) forgetFile(k FileKey, durable bool) error {
 		}
 	}
 	if err := remove(c.hydratedPath(fh)); err != nil {
-		return err
+		return recorded, err
 	}
 	if fs != nil && fs.part != nil {
 		if err := remove(c.partPath(fh)); err != nil {
-			return err
+			return recorded, err
 		}
 		if err := remove(c.partBitmapPath(fh)); err != nil {
-			return err
+			return recorded, err
 		}
 		c.forgetPartLocked(fs, fs.part, true)
 	}
 	if fs != nil {
 		c.detachWholeLocked(fh, fs)
 	}
-	if err := remove(c.keyPath(fh)); err != nil {
-		return err
+	if err := remove(c.legacyKeyPath(fh)); err != nil {
+		return recorded, err
 	}
 	if durable {
-		for _, dir := range []string{filepath.Dir(c.hydratedPath(fh)), filepath.Dir(c.keyPath(fh))} {
+		for _, dir := range []string{filepath.Dir(c.hydratedPath(fh)), c.fileDir(fh)} {
 			d, err := os.Open(dir)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			if err != nil {
-				return err
+				return recorded, err
 			}
 			err = d.Sync()
 			closeErr := d.Close()
 			if err != nil {
-				return err
+				return recorded, err
 			}
 			if closeErr != nil {
-				return closeErr
+				return recorded, closeErr
 			}
 		}
 	}
 	delete(c.files, fh)
-	return nil
+	return recorded, nil
 }
 
 // makeRoom evicts until admitting need bytes respects every cap.
@@ -1676,14 +1691,11 @@ func (c *Cache) Known(k FileKey) bool {
 func (c *Cache) Keys() []FileKey {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]FileKey, 0, len(c.files))
-	for _, fs := range c.files {
-		if fs.key.RemoteID != "" {
-			out = append(out, fs.key)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
-	return out
+	return c.liveKeysLocked()
+}
+
+func sortKeys(keys []FileKey) {
+	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 }
 
 // claimLagsLocked reports whether the block holds more sub-blocks than its

@@ -144,6 +144,7 @@ func TestSpliceAndPassthroughShareOneLease(t *testing.T) {
 	if _, ok := res.(seekable); !ok {
 		t.Fatalf("expected splice to lease and read via fd, got %T", res)
 	}
+	res.Done() // the server has spliced it; the lease is no longer pinned
 	if e.cache.Stats().LeasedBytes != 7 {
 		t.Fatalf("expected a single 7-byte lease after splice, got %+v", e.cache.Stats())
 	}
@@ -228,8 +229,15 @@ func TestKernelReadIsObservedAsFromKernel(t *testing.T) {
 	}
 }
 
-func TestSpliceLeaseYieldsToOpenWriter(t *testing.T) {
-	e := newBackingFixture(t)
+// TestSpliceReadStopsWhenASiblingWriterHasBytes: the splice lease is a
+// descriptor on the immutable cache entry for the version the read handle
+// was opened against. Once another descriptor writes to the file, that
+// entry is no longer the file's content — neither while the bytes sit in
+// the writer's staging file nor after its close commits them under a new
+// identity — so a read that kept splicing from it would hand the kernel
+// the version before the rewrite.
+func TestSpliceReadStopsWhenASiblingWriterHasBytes(t *testing.T) {
+	e := newBackingFixture(t) // "f" == "content" (7 bytes), fully hydrated
 	ctx := context.Background()
 	j, err := journal.Open(journal.Options{Dir: t.TempDir()})
 	if err != nil {
@@ -247,32 +255,98 @@ func TestSpliceLeaseYieldsToOpenWriter(t *testing.T) {
 	}
 	f := &file{root: e.root, handle: h}
 	defer f.Release(ctx)
-	first, errno := f.Read(ctx, make([]byte, 7), 0)
-	if errno != 0 {
-		t.Fatal(errno)
+
+	read := func(want string, splice bool) {
+		t.Helper()
+		dest := make([]byte, 16)
+		res, errno := f.Read(ctx, dest, 0)
+		if errno != 0 {
+			t.Fatalf("Read errno: %v", errno)
+		}
+		if _, ok := res.(seekable); ok != splice {
+			t.Fatalf("spliced=%v, want %v (read %q)", ok, splice, want)
+		}
+		got, status := res.Bytes(dest)
+		if status != 0 || string(got) != want {
+			t.Fatalf("read = %q (%v), want %q", got, status, want)
+		}
+		res.Done()
 	}
-	if _, ok := first.(seekable); !ok {
-		t.Fatal("expected initial cache lease")
-	}
-	first.Done()
+	read("content", true)
+
 	w, err := e.root.opt.FS.Open(ctx, a.Ino, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer e.root.opt.FS.Release(ctx, w)
-	if _, err := e.root.opt.FS.Write(ctx, w, []byte("updated"), 0); err != nil {
+	if _, err := e.root.opt.FS.Write(ctx, w, []byte("CHANGED!"), 0); err != nil {
 		t.Fatal(err)
 	}
-	res, errno := f.Read(ctx, make([]byte, 7), 0)
+	read("CHANGED!", false)
+	if err := e.root.opt.FS.Release(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	read("CHANGED!", false)
+}
+
+// TestSpliceResultOutlivesADropOfItsLease: go-fuse splices a ReadResultFd
+// after the Read handler has returned, and it dispatches requests
+// concurrently. A second read on the same handle that finds the lease
+// superseded withdraws it (dropOffer); it must not close the descriptor
+// the first read's result still names. The descriptor closes once that
+// result is Done.
+func TestSpliceResultOutlivesADropOfItsLease(t *testing.T) {
+	e := newBackingFixture(t) // "f" == "content" (7 bytes), fully hydrated
+	ctx := context.Background()
+	a, err := e.root.opt.FS.StatPath(ctx, "/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.root.opt.FS.Open(ctx, a.Ino, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &file{root: e.root, handle: h}
+	defer f.Release(ctx)
+
+	first, errno := f.Read(ctx, make([]byte, 7), 0)
 	if errno != 0 {
-		t.Fatal(errno)
+		t.Fatalf("Read errno: %v", errno)
 	}
-	defer res.Done()
-	if _, ok := res.(seekable); ok {
-		t.Fatal("reused immutable lease while writer is active")
+	if _, ok := first.(seekable); !ok {
+		t.Fatalf("first read did not splice, got %T", first)
 	}
-	got, status := res.Bytes(make([]byte, 7))
-	if status != 0 || string(got) != "updated" {
-		t.Fatalf("read %q, %v; want staged content", got, status)
+	f.passMu.Lock()
+	lease := f.pass
+	f.passMu.Unlock()
+	if lease == nil {
+		t.Fatal("no lease after a spliced read")
+	}
+
+	// What a concurrent read does on finding the lease superseded, before
+	// the server has consumed the first result.
+	f.dropOffer()
+	f.passMu.Lock()
+	dropped := f.pass == nil
+	f.passMu.Unlock()
+	if !dropped {
+		t.Fatal("dropOffer left the lease on the handle")
+	}
+	if _, ok := e.root.backings.fd(lease); !ok {
+		t.Fatal("lease descriptor closed while the first result was in flight")
+	}
+	if e.cache.Stats().LeasedBytes != 7 {
+		t.Fatalf("lease released while in flight: %+v", e.cache.Stats())
+	}
+	// The consumer splices now, after both handlers have returned.
+	got, status := first.Bytes(make([]byte, 7))
+	if status != 0 || string(got) != "content" {
+		t.Fatalf("in-flight result read %q (%v), want %q", got, status, "content")
+	}
+	first.Done()
+	if _, ok := e.root.backings.fd(lease); ok {
+		t.Fatal("lease descriptor still open after its last result was done")
+	}
+	if e.cache.Stats().LeasedBytes != 0 {
+		t.Fatalf("lease not released after Done: %+v", e.cache.Stats())
 	}
 }

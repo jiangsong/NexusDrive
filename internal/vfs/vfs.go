@@ -185,7 +185,12 @@ type FS struct {
 	// every answer is no; finding that out by walking the process's whole
 	// handle table made one lstat cost the table.
 	writeHandleIndex map[uint64]map[uint64]*Handle
-	nextFH           uint64
+	// handleIndex is every open handle by inode, so a commit can tell the
+	// other handles on the same file that its content moved: their node
+	// snapshots name the version from before the write, whose cache entry
+	// the commit forgets.
+	handleIndex map[uint64]map[uint64]*Handle
+	nextFH      uint64
 	// Remote publication cannot race a writer's initial node lookup and
 	// registration. Never hold this gate during provider directory IO.
 	remotePublishMu sync.RWMutex
@@ -615,46 +620,100 @@ func (f *FS) Stat(ctx context.Context, ino uint64) (Attr, error) {
 		return Attr{}, err
 	}
 	a := f.attrOf(ctx, n)
-	// A file being written has a size the metadata does not know yet. The
-	// caller, and through it the kernel, must see what has actually been
-	// written, otherwise a program that writes and then reads back through the
-	// same handle reads past a stale end of file.
-	if size, ok := f.pendingSize(ino); ok && size != a.Size {
+	f.overlayPendingSize(&a)
+	return a, nil
+}
+
+// overlayPendingSize replaces the size in a with what an open write handle
+// has staged, when there is one. A file being written has a size the
+// metadata does not know yet. The caller, and through it the kernel, must
+// see what has actually been written, otherwise a program that writes and
+// then reads back through the same handle reads past a stale end of file.
+//
+// Every reply that carries attributes needs this, not only Stat: the kernel
+// takes the size in a LOOKUP or readdir reply as the truth just the same,
+// and a file being written for the first time is size 0 in the tree until
+// its handle commits. Once the entry timeout expired, the next path
+// resolution told the kernel the file was empty; it dropped the page cache
+// and answered every read past offset 0 with nothing, without asking. A git
+// fetch over a slow link takes longer than the timeout and its index-pack
+// reopens the pack by path to resolve deltas: "premature end of pack file".
+func (f *FS) overlayPendingSize(a *Attr) {
+	if a.IsDir {
+		return
+	}
+	if size, ok := f.pendingSize(a.Ino); ok && size != a.Size {
 		a.Size = size
 	}
-	return a, nil
+}
+
+// overlayPendingSizes is overlayPendingSize for a listing. It takes the
+// handle lock once for the whole listing and looks at only the entries
+// with a write handle open, so a directory with nothing being written in
+// it costs one lock and one length check.
+func (f *FS) overlayPendingSizes(attrs []Attr) {
+	f.mu.Lock()
+	if len(f.writeHandleIndex) == 0 {
+		f.mu.Unlock()
+		return
+	}
+	var writing []int
+	for i := range attrs {
+		if _, ok := f.writeHandleIndex[attrs[i].Ino]; ok {
+			writing = append(writing, i)
+		}
+	}
+	f.mu.Unlock()
+	for _, i := range writing {
+		f.overlayPendingSize(&attrs[i])
+	}
 }
 
 // pendingSize returns the largest staged size among open write handles for an
 // inode, and whether any exist. An inode with no write handle open costs the
 // index lookup and nothing else: this runs on every stat.
 func (f *FS) pendingSize(ino uint64) (int64, bool) {
+	st, ok := f.stagedWriter(ino)
+	if !ok {
+		return 0, false
+	}
+	return st.Size(), true
+}
+
+// stagedWriter returns the staging file holding the most bytes among the
+// open write handles of an inode, when any handle has one. It is the file
+// the inode's size is reported from, so it is also the file a read through
+// any other handle of the inode must be answered from: a program that
+// writes through one descriptor and reads back through another (git's
+// index-pack streams a pack in, then opens it read-only to resolve deltas)
+// sees the bytes it wrote, as it would on a local disk, not the version the
+// tree last committed.
+func (f *FS) stagedWriter(ino uint64) (*journal.Staging, bool) {
 	handles := f.writeHandlesFor(ino)
 	if len(handles) == 0 {
-		return 0, false
+		return nil, false
 	}
 	f.pendingSizeScans.Add(int64(len(handles)))
 
+	var best *journal.Staging
 	var size int64
-	var found bool
 	for _, h := range handles {
 		h.mu.Lock()
 		w := h.writer
 		closed := h.closed
-		var staging *journal.Staging
+		var st *journal.Staging
 		if w != nil {
-			staging = w.staging
+			st = w.staging
 		}
 		h.mu.Unlock()
-		if closed || staging == nil {
+		if w == nil || closed || st == nil {
 			continue
 		}
-		if s := staging.Size(); s > size || !found {
-			size = s
-			found = true
+		if s := st.Size(); best == nil || s > size {
+			best, size = st, s
 		}
 	}
-	return size, found
+	return best, best != nil
 }
 
 // registerHandleLocked publishes an open handle. Requires f.mu. A write
@@ -664,38 +723,61 @@ func (f *FS) pendingSize(ino uint64) (int64, bool) {
 // changes after this.
 func (f *FS) registerHandleLocked(h *Handle) {
 	f.handles[h.FH] = h
+	if f.handleIndex == nil {
+		f.handleIndex = map[uint64]map[uint64]*Handle{}
+	}
+	indexHandle(f.handleIndex, h)
 	if h.writer == nil {
 		return
 	}
 	if f.writeHandleIndex == nil {
 		f.writeHandleIndex = map[uint64]map[uint64]*Handle{}
 	}
-	byFH := f.writeHandleIndex[h.Ino]
+	indexHandle(f.writeHandleIndex, h)
+}
+
+func indexHandle(index map[uint64]map[uint64]*Handle, h *Handle) {
+	byFH := index[h.Ino]
 	if byFH == nil {
 		byFH = map[uint64]*Handle{}
-		f.writeHandleIndex[h.Ino] = byFH
+		index[h.Ino] = byFH
 	}
 	byFH[h.FH] = h
 }
 
-// retireHandleLocked takes a handle back out of both maps. Requires f.mu.
-func (f *FS) retireHandleLocked(h *Handle) {
-	delete(f.handles, h.FH)
-	byFH, ok := f.writeHandleIndex[h.Ino]
+func unindexHandle(index map[uint64]map[uint64]*Handle, h *Handle) {
+	byFH, ok := index[h.Ino]
 	if !ok {
 		return
 	}
 	delete(byFH, h.FH)
 	if len(byFH) == 0 {
-		delete(f.writeHandleIndex, h.Ino)
+		delete(index, h.Ino)
 	}
+}
+
+// retireHandleLocked takes a handle back out of every map. Requires f.mu.
+func (f *FS) retireHandleLocked(h *Handle) {
+	delete(f.handles, h.FH)
+	unindexHandle(f.handleIndex, h)
+	unindexHandle(f.writeHandleIndex, h)
 }
 
 // writeHandlesFor snapshots the open write handles of one inode.
 func (f *FS) writeHandlesFor(ino uint64) []*Handle {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	byFH := f.writeHandleIndex[ino]
+	return snapshotHandles(f.writeHandleIndex[ino])
+}
+
+// handlesFor snapshots every open handle of one inode.
+func (f *FS) handlesFor(ino uint64) []*Handle {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return snapshotHandles(f.handleIndex[ino])
+}
+
+func snapshotHandles(byFH map[uint64]*Handle) []*Handle {
 	if len(byFH) == 0 {
 		return nil
 	}
@@ -704,6 +786,28 @@ func (f *FS) writeHandlesFor(ino uint64) []*Handle {
 		out = append(out, h)
 	}
 	return out
+}
+
+// adoptCommittedNode moves the other open handles of an inode onto the node
+// a commit just published. Each handle snapshots its node at open, and a
+// read handle never refreshes it on its own: after the writer closes, its
+// reads would still go to the version before the rewrite — forgotten from
+// the cache by the commit, so fetched again from the drive — where a local
+// disk shows every descriptor the new content. The committing handle is
+// left alone: Sync adopts the node itself, and Release has closed it. So is
+// a handle that asked for a snapshot: Copy promises the version it started
+// from, not a file that changes identity halfway through.
+func (f *FS) adoptCommittedNode(node meta.Node, committer *Handle) {
+	for _, h := range f.handlesFor(node.Ino) {
+		if h == committer {
+			continue
+		}
+		h.mu.Lock()
+		if !h.closed && !h.snapshot {
+			h.Node = node
+		}
+		h.mu.Unlock()
+	}
 }
 
 // StatPath resolves a path and returns its attributes, listing parents as
@@ -715,7 +819,9 @@ func (f *FS) StatPath(ctx context.Context, p string) (Attr, error) {
 	if err != nil {
 		return Attr{}, err
 	}
-	return f.attrAt(ctx, n, path.Clean("/"+p)), nil
+	a := f.attrAt(ctx, n, path.Clean("/"+p))
+	f.overlayPendingSize(&a)
+	return a, nil
 }
 
 // RemoteVersionOf is the version the provider last reported for a path
@@ -760,7 +866,9 @@ func (f *FS) Lookup(ctx context.Context, parent uint64, name string) (Attr, erro
 	if err != nil {
 		return Attr{}, err
 	}
-	return f.attrOf(ctx, n), nil
+	a := f.attrOf(ctx, n)
+	f.overlayPendingSize(&a)
+	return a, nil
 }
 
 func (f *FS) lookupNode(ctx context.Context, parent uint64, name string) (meta.Node, error) {
@@ -815,6 +923,7 @@ func (f *FS) ReadDir(ctx context.Context, ino uint64) ([]Attr, error) {
 		}
 		out = append(out, f.attrAt(ctx, n, path.Join(dir, n.Name)))
 	}
+	f.overlayPendingSizes(out)
 	return out, nil
 }
 
@@ -838,6 +947,7 @@ func (f *FS) ReadDirPath(ctx context.Context, p string) ([]Attr, error) {
 	for _, child := range nodes {
 		out = append(out, f.attrAt(ctx, child, path.Join(dir, child.Name)))
 	}
+	f.overlayPendingSizes(out)
 	return out, nil
 }
 
